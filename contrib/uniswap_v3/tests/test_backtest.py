@@ -470,9 +470,13 @@ def test_a_replay_counts_the_bars_it_decided_with_no_rating_on_some_token(store,
     ]:  # fmt: skip
         store.insert_verdict(record(symbol, day, rating))
 
+    # Day 4 is suspect: skipped, so nothing was decided on it, rated or not.
+    _put(store, 4, twap_tick=BTC_TICK + 600)
+
     summary = _backtest(store, config=_verdict_config())
 
     assert summary.unrated == (_day(1), _day(2), _day(3))
+    assert summary.skipped == (_day(4),)
     # Decided earlier: not this call's, so not counted again.
     assert _backtest(store, config=_verdict_config()).unrated == ()
 

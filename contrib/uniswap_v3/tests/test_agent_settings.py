@@ -62,6 +62,7 @@ def test_the_fundamentals_analyst_is_refused_as_stock_only():
         ({"max_tokens": 0}, "max_tokens must be a positive integer"),
         ({"max_tokens": True}, "max_tokens must be a positive integer"),
         ({"max_tokens": "8192"}, "max_tokens must be a positive integer"),
+        ({"ask_within_seconds": 0}, "ask_within_seconds must be a positive integer"),
     ],
 )
 def test_settings_that_cannot_be_used_are_refused(changes, match):

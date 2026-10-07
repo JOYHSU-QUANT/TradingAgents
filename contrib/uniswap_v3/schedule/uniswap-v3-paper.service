@@ -16,3 +16,6 @@ ExecStart=/home/trader/uniswap-paper/contrib/uniswap_v3/schedule/paper-visit.sh
 # The two tokens' verdicts take 20 to 25 minutes; a visit is stopped before
 # the next is due.
 TimeoutStartSec=55min
+# Short of memory, the kernel takes the visit (which the next one redoes),
+# not the Hyperliquid paper daemon beside it.
+OOMScoreAdjust=500

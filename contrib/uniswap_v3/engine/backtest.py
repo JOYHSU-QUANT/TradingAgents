@@ -55,7 +55,7 @@ from ..domain.bars import Finality
 from ..domain.ledger import Ledger
 from ..domain.records import Decision, Outcome, RejectionCode
 from ..domain.types import Bar, MarketView, RunMode
-from ..domain.verdicts import Verdict
+from ..domain.verdicts import Verdict, usable_rating
 from ..ports import Executor, Wallet
 from ..store.bar_source import StoredBar, load_bar
 from ..store.repository import Store
@@ -91,7 +91,8 @@ class BacktestSummary:
     decided earlier on other verdicts than the store holds for them now (a
     verdict recorded after the bar was decided, most often), and ``unrated``
     were decided by this call, by a run that reads verdicts, with no rating
-    on some traded token: no verdict at the bar, or a ``REVIEW``.
+    on some traded token: no verdict at the bar, or a ``REVIEW``. A bar
+    skipped as suspect is not among them: nothing was decided on it.
     """
 
     start: int
@@ -153,10 +154,8 @@ def _judged_differently(decision: Decision, said: Mapping[str, Verdict]) -> bool
 
 
 def _unrated(config: UniswapConfig, said: Mapping[str, Verdict]) -> bool:
-    """Whether some traded token has no rating in ``said``: no verdict, or a ``REVIEW``."""
-    return any(
-        symbol not in said or said[symbol].rating.is_review for symbol in config.traded_symbols
-    )
+    """Whether some traded token has no rating in ``said``, by the strategies' own rule."""
+    return any(usable_rating(said.get(symbol)) is None for symbol in config.traded_symbols)
 
 
 def run_backtest(
@@ -299,7 +298,7 @@ def replay(
                 ) from exc
             decision = engine.step(view, seen=loaded.seen, suspicion=loaded.suspicion).decision
             decided += 1
-            if source is not None and _unrated(config, said):
+            if source is not None and not loaded.bar.suspect and _unrated(config, said):
                 unrated.append(time)
             # A suspect bar is skipped whatever its finality: nothing was decided on it.
             on_pending += loaded.finality is Finality.PENDING and not loaded.bar.suspect

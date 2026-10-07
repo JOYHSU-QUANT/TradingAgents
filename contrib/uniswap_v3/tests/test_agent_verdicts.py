@@ -260,8 +260,10 @@ def test_the_record_types_hold_their_invariants():
     with pytest.raises(ValueError, match="a superseded answer is not the verdict"):
         Asked(symbol="WETH", ticker="ETH-USD", record=held, asked_now=True, superseded=True)
     found = Asked(symbol="WETH", ticker="ETH-USD", record=held, asked_now=False)
-    with pytest.raises(ValueError, match="a suspect bar has no verdicts"):
+    with pytest.raises(ValueError, match="a suspect or late bar has no verdicts"):
         AskSummary(time=_DAY2, source=SOURCE, verdicts=(found,), suspect=True)
+    with pytest.raises(ValueError, match="a suspect or late bar has no verdicts"):
+        AskSummary(time=_DAY2, source=SOURCE, verdicts=(found,), late=True)
 
 
 def test_the_trade_date_is_the_boundarys_utc_date():

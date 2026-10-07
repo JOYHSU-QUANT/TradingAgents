@@ -29,6 +29,8 @@
 
 hl-paper 的部署（push `deploy/paper` 會 restart `hl-paper`）碰不到這個目錄；這裡的安裝腳本也不碰 hl-paper 的
 checkout、venv、service 與 store。兩邊各有自己的 `.env`，OpenRouter 的 key 可以是同一把。
+**不要對這個 checkout `git clean -fdx` 或重 clone**：`.env`、兩份 `*.local.yaml`、`paper-visit.local.sh` 與 `.venv` 都在裡面（gitignored），
+store 與 log 則在 repo 外、不受影響。
 
 ### 0.1 安裝與升級：`lightsail-install.sh`
 
@@ -46,19 +48,25 @@ ssh -i ~/.ssh/<key> ubuntu@<host> sudo sh /tmp/lightsail-install.sh <commit>
 ```
 
 之後的升級直接用 checkout 裡的那份：`sudo sh ~trader/uniswap-paper/contrib/uniswap_v3/schedule/lightsail-install.sh <commit>`。
-`<commit>` 是要跑的版本（develop 上的 merge commit），**寫 commit、不要寫分支名**。
+`<commit>` 是要跑的版本（develop 上的 merge commit），**寫 commit、不要寫分支名**。從 checkout 裡跑是安全的：整支腳本先讀完才執行，
+升級改寫這個檔不影響正在跑的那次。clone 的來源預設是 hyperliquid checkout 的 origin；要指定就 `REPO_URL=<url> sudo sh ...`。
 
 它做的事（可重複執行；第二次就是升級）：
 
-1. 停掉 timer。正在跑的 visit 會先跑完：腳本看到 service 還 active 就把 timer 開回去、結束碼 3，等它跑完再來一次。
-   升級避開 visit 的時段（00:10–03:05 UTC）就不會撞到。
+1. 記下 timer 原本有沒有在跑，然後停掉它。正在跑的 visit 會先跑完：腳本看到 service 還 active 就把 timer 開回去（原本在跑的話）、
+   結束碼 3，等它跑完再來一次。升級避開 visit 的時段（00:10–03:05 UTC）就不會撞到。
 2. 以 `trader` 身分：沒有 checkout 就從 hyperliquid checkout 的 origin（伺服器上唯一有 deploy key 的遠端）clone 一份；
-   fetch、`git checkout --detach <commit>`；沒有 `.venv` 就建；`pip install -e ".[dev]" -r contrib/uniswap_v3/requirements.txt`；
-   建 `/home/trader/data/uniswap`；`.env` 與 `paper-visit.local.sh` 不在就寫空白範本（§1.4、§3.1）；
-   最後跑 `pytest -q -m "not smoke" contrib/uniswap_v3/tests`。**測試不綠就停在這裡**：checkout 已在 `<commit>`、timer 是停的，
-   回到上一版＝用上一個 commit 再跑一次這條。
-3. 以 root 身分：把 checkout 裡 `contrib/uniswap_v3/schedule/` 的兩個 unit 複製到 `/etc/systemd/system/`、`daemon-reload`、
-   `enable` timer；`/home/trader/data/uniswap/paper.db` 在就 `start` timer 並印下一次 visit 的時間，不在就提示先做 §1.3 與 §2。
+   fetch、`git checkout --detach <commit>`（印出原本在哪個 commit，回退用）；沒有 `.venv` 就建；
+   `pip install -e ".[dev]" -r contrib/uniswap_v3/requirements.txt`；建 `/home/trader/data/uniswap`；`.env` 與 `paper-visit.local.sh`
+   不在就寫空白範本（§1.4、§3.1），`.env` 裡 key 還是空的每次都會警告；最後跑 `pytest -q -m "not smoke" contrib/uniswap_v3/tests`。
+   **這一半任何一步失敗（fetch、pip、測試）就停在那裡**：checkout 可能已在 `<commit>`、timer 是停的（stderr 會說），
+   回到上一版＝用印出來的那個 commit 再跑一次這條。
+3. 以 root 身分：把 checkout 裡 `contrib/uniswap_v3/schedule/` 的兩個 unit 複製到 `/etc/systemd/system/`、`daemon-reload`，
+   然後把 timer **還原成原本的狀態**：原本在跑就 enable＋start 並印下一次 visit 的時間；原本停著（暫停中、§7 修 reorg 中、
+   或第一次安裝）就留著不開、印出 `sudo systemctl enable --now uniswap-v3-paper.timer`。升級不決定 visit 跑不跑。
+
+要改 unit（例如把 timer 挪開 hl-paper 問 LLM 的時段）用 drop-in：`sudo systemctl edit uniswap-v3-paper.timer`，`[Timer]` 下先寫一行空的
+`OnCalendar=` 清掉原本的再列新的時間；直接改 `/etc/systemd/system/` 裡的檔會被下一次升級蓋掉。
 
 升級後看一下 log（§4）：若是 `failed: the run '...' was started under another config`，新版改了設定預設值，照 §6 開新 run。
 
@@ -143,7 +151,7 @@ ETH_RPC_URL=https://...
 OPENROUTER_API_KEY=sk-or-...
 ```
 
-然後以 `trader` 身分（`sudo -u trader -H bash`、`cd ~/uniswap-paper`）跑 §1.1 的兩條 smoke 測試，Python 換成 `.venv/bin/python`：
+安裝腳本每次跑都會對空的 key 警告一次。然後以 `trader` 身分（`sudo -u trader -H bash`、`cd ~/uniswap-paper`）跑 §1.1 的兩條 smoke 測試，Python 換成 `.venv/bin/python`：
 
 ```bash
 .venv/bin/python -m dotenv run -- .venv/bin/python -m pytest -q -m smoke contrib/uniswap_v3/tests/test_chain_smoke.py
@@ -157,7 +165,8 @@ OPENROUTER_API_KEY=sk-or-...
 ## 2. 開兩個 run（手動，一次）
 
 排程的 visit 不帶起始餘額，所以 run 要先手動開；兩個 run 同一天、同一根 bar、同一筆起始資金開，之後才比得起來。
-以 `trader` 身分、在 `~/uniswap-paper`，**在 00:10 UTC 之後**（judge 用伺服器的日期當 trade date，伺服器是 UTC）：
+以 `trader` 身分、在 `~/uniswap-paper`，**在 00:10–04:00 UTC 之間**（judge 用伺服器的日期當 trade date，伺服器是 UTC；邊界過了
+超過 `agent.ask_within_seconds`＝4 小時 `verdict` 就不問、那根沒判斷，§2.5）：
 
 ```bash
 P=.venv/bin/python; C=contrib/uniswap_v3/configs; DB=/home/trader/data/uniswap/paper.db
@@ -167,7 +176,7 @@ $P -m dotenv run -- $P -m contrib.uniswap_v3 paper --config $C/paper-trend.local
 $P -m dotenv run -- $P -m contrib.uniswap_v3 paper --config $C/paper-ai.local.yaml    --db $DB --run-id paper-ai-1    --balance USDC=10000 --gas-eth 1
 $P -m contrib.uniswap_v3 status --config $C/paper-trend.local.yaml --db $DB --run-id paper-trend-1
 $P -m contrib.uniswap_v3 status --config $C/paper-ai.local.yaml    --db $DB --run-id paper-ai-1
-sudo systemctl start uniswap-v3-paper.timer          # 安裝腳本沒看到 store 時沒開的那個
+sudo systemctl enable --now uniswap-v3-paper.timer   # 第一次安裝時腳本只裝 unit、不開 timer
 systemctl list-timers uniswap-v3-paper.timer         # 下一次 visit 的時間
 ```
 
@@ -199,6 +208,10 @@ systemctl list-timers uniswap-v3-paper.timer         # 下一次 visit 的時間
   `backfill --from <今天的邊界>`（只讀最新那根、不決策；它不在 §1.3「不要在跑著的 run 後面回補」的範圍，因為 run 還沒走到這根）
   → `verdict` → `paper`。bar 不在就 `verdict` 結束碼 3、稍後再跑。排程的 visit 把這三步（與對照 run 的 `paper`）串起來，
   前一條結束碼不是 0 就不跑下一條（§3）。
+- **誠實視窗**：judge 讀的新聞與價格到被問的那一刻為止，而 AI run 的成交價是邊界後 25 塊（≈00:05 UTC）的，問得越晚 judge 比成交
+  多看越多、對照 run 沒有這個優勢。所以邊界過了超過 `agent.ask_within_seconds`（預設 14400＝4 小時，蓋過三次 visit 的時段）`verdict`
+  就不問：stderr `warning: the boundary ... passed N s ago, more than agent.ask_within_seconds`、結束碼 0、不寫列，那根照「沒判斷」走。
+  正常 visit（00:10–00:35）的 5–30 分鐘後見之明是已知取捨。`--fake-rating` 不受視窗限制。
 - 上游用**本機日期**當 trade date：伺服器是 UTC 沒事；在台灣的本機於 UTC 16:00 之後手動跑，上游會把「今天」算成明天、
   把這次當回測、即時資料源留白。要在本機手動跑就在台北時間 08:10–23:59 之間跑。
 - 每個代幣約 15–20 次 completion；實測（2026-10-06，sonnet-4-6 經 OpenRouter）一個代幣約 11 分鐘，兩個代幣一次 visit 抓 20–25 分鐘。
@@ -233,8 +246,10 @@ visit 的結束碼＝第一個不是 0 的：
   一天最多試三次，三次都失敗的那根，隔天的 visit 會補決策（成交區塊照舊，與準時的一樣；AI run 補的那根沒有判斷，走「沒判斷」政策）。
 - 每次最多跑 **55 分鐘**（`TimeoutStartSec`）：兩個代幣的問答約 20–25 分鐘，超時多半是節點或閘道卡住，下一次 visit 會重來。
   還在跑的 visit 不會被下一次 timer 再開一次；`Persistent=true` 補跑主機關機時錯過的那次。
-- 這台機器 2 GB 記憶體：judge 的 graph 與 hl-paper 的引擎各是一個 Python 行程，visit 時段兩者可能同時在跑，
-  `journalctl` 看到 `oom-kill` 就把 timer 挪開 hl-paper 問 LLM 的時段。
+- `RUN_TREND`／`RUN_AI` 留空就跳過該段、log 寫一行；兩個都空是設定錯：log 一行、結束碼 1。
+- 這台機器 2 GB 記憶體：judge 的 graph 與 hl-paper 的引擎各是一個 Python 行程，visit 時段兩者可能同時在跑。service 設了
+  `OOMScoreAdjust=500`：記憶體不夠時 kernel 先殺 visit（下一次重來、已答的代幣保留），不是 hl-paper。`journalctl` 看到
+  `oom-kill` 就用 §0.1 的 drop-in 把 timer 挪開 hl-paper 問 LLM 的時段。
 
 ### 3.1 visit 的設定
 
@@ -264,7 +279,7 @@ PYTHON="/home/trader/uniswap-paper/.venv/bin/python"
 
 ```bash
 systemctl list-timers uniswap-v3-paper.timer                 # 下一次／上一次 visit
-systemctl status uniswap-v3-paper.service --no-pager         # 上一次 visit 的結束碼（status=0/SUCCESS、status=3/n/a、result 'timeout'）
+systemctl status uniswap-v3-paper.service --no-pager         # 上一次 visit 的結束碼（status=0/SUCCESS、status=3、result 'timeout'）
 journalctl -u uniswap-v3-paper.service -n 30 --no-pager      # systemd 看到的（visit 自己的輸出在 log 檔，§4）
 sudo systemctl start uniswap-v3-paper.service                # 現在立刻跑一次 visit（不等 timer）
 sudo systemctl stop uniswap-v3-paper.timer                   # 暫停排程（正在跑的 visit 不會被停）
@@ -309,11 +324,13 @@ cd ~/uniswap-paper
   每筆決策另附 `verdicts: WBTC=none, WETH=Buy`：每個交易代幣當時 view 帶的判斷。`none`＝那根 bar 這個代幣沒有判斷，
   `REVIEW`＝判斷沒給出評等；兩者 `ai_gated_weights` 都走「沒判斷」的政策（覆蓋率行把 `REVIEW` 算成有判斷）。
   `changed`＝store 裡現在的判斷與決策看到的不同（事後補進、改了或刪了，與 §5 的 `now have other verdicts` warning 同一件事）。
-  評等照 run 自己的設定快照查，所以 `status --run-id` 要給該 run 自己的設定檔。
+  評等照 run 自己的設定快照查；`--config` 給別的 run 的設定時，上面的覆蓋率行查的是那份設定的 source（給對照 run 的設定就整行不印），
+  所以 `status --run-id` 要給該 run 自己的設定檔。
   `ai_gated_weights` 的 band 沿用規則的：判斷把目標砍到持倉 band 以內（例如 4% 的持倉收到 Sell）要等別的代幣漂出 band
   才一起賣，`status` 會看到 `WETH=Sell` 旁邊還有持倉，是設計。對照 run 不印這些。
 - `report` 對 AI run 多印一行 `verdicts from <source>: N decided bar(s) saw one on every traded token, M on some, K on none`
-  （`REVIEW` 算看到）：K 與 M 只會從漏跑的日子、`REVIEW` 與 suspect bar 累加；成績單（記錄滿 30 根後比較兩個 run 的 `report`）看這行知道 AI 實際有判斷可用的根數。
+  （`REVIEW` 算看到，不進 M 與 K；它在 §5 的 `saw no rating` warning 與 `status` 的 `verdicts:` 裡看得到）：K 與 M 只會從漏跑的日子、
+  過了誠實視窗的日子與 suspect bar 累加；成績單（記錄滿 30 根後比較兩個 run 的 `report`）看這行知道 AI 實際有判斷可用的根數。
 - `status` 與 `report` 不讀鏈，隨時可以跑；要避開的只有 §9 那種對同一個 store 寫入的事。
 
 ---
@@ -328,13 +345,15 @@ cd ~/uniswap-paper
 | `warning: the chain had no answer at the boundary` | 池子在那個邊界讀不到 TWAP | 下一次 visit 會再問；run 走過去之後就永遠不決策它 |
 | `warning: ... no longer on the final chain` | 先前存的讀數被 reorg | 見 §7 |
 | `warning: ... now have other verdicts in the store than their decisions saw` | 某些已決策的 bar，store 裡的判斷後來變了（多半是決策時沒判斷、事後才補進） | 決策不改、照常跑；要讓判斷生效就開新的 run 重放 |
-| `warning: N bar(s) decided now, ... saw no rating on some traded token` | AI run 這次決策的 bar 裡有代幣沒評等：judge 回了 `REVIEW`、補決策漏跑的日子（那些 bar 沒問過）、或 bar 是 suspect（`verdict` 不問、`paper` 也不交易）；策略對那個代幣不加新風險 | 沒事；`status --run-id` 看是哪根哪個代幣。排程下正常只會是這三種；每天都出現就看 `verdict` 那步 |
+| `warning: N bar(s) decided now, ... saw no rating (no verdict, or a REVIEW) on some traded token` | AI run 這次決策的 bar 裡有代幣沒評等：judge 回了 `REVIEW`、補決策漏跑的日子（那些 bar 沒問過）、或那天 `verdict` 過了誠實視窗沒問；`ai_gated_weights` 對那個代幣不加新風險（suspect 而 skip 的 bar 不算在內） | 沒事；`status --run-id` 看是哪根哪個代幣。每天都出現就看 `verdict` 那步 |
 | `try again later: ...` 接 `==== exit 3` | 節點落後、成交區塊還沒出現、或節點回錯誤 | 當天後面的 visit 會重試；**一整天三次都是 3** 就查節點（額度、URL、服務狀態） |
 | `try again later: the store ... (database is locked)` 接 `==== exit 3` | 有別的程式開著同一個 store：同時在跑回測、用 DB 工具開著，或前一次 visit 被 systemd 停掉、它啟動的 python 還沒結束 | 關掉它（`pgrep -af contrib.uniswap_v3`）；當天後面的 visit 會重試 |
 | `failed: there is no run 'paper-ai-1', and a new run needs opening balances` | run id 或 `DB` 打錯，或 run 還沒開 | 對照 §2、§3.1 |
 | `failed: the run 'paper-ai-1' was started under another config` | 設定檔改了，或新版程式改了預設值 | run 只能在開它的設定下接續：見 §6 開新 run |
 | `failed: ... the clock is behind` | 這台機器的時鐘早於 run 已走到的邊界 | 校時 |
 | `failed: the strategy refused the bar at ... (ai_gated_weights reads verdicts, and the view carries none ...)` | 策略讀判斷，設定檔卻沒有 `verdicts` 區塊 | 設定補上 `verdicts`，用新的 run id 開 run（原 run 已開在沒有判斷的設定下） |
+| `verdict`：`warning: the boundary ... passed N s ago, more than agent.ask_within_seconds (14400 s)` 接 `exit 0` | 邊界過了超過 4 小時才跑到 `verdict`（整天的 visit 都失敗後的開機補跑、手動下午跑）；judge 沒問、那根沒判斷 | 沒事，是設計（§2.5）；排程時段內就出現的話，看前面幾步為什麼拖那麼久 |
+| `==== RUN_TREND and RUN_AI are both empty` 接 `==== exit 1` | `paper-visit.local.sh` 把兩個 run id 都留空 | 填回去（§3.1） |
 | `verdict`：`try again later: the store has no bar at ...` 接 `exit 3` | 當天的 bar 還沒進 store（前一步的 `backfill` 沒讀到，多半是節點落後） | 當天後面的重試會補；順序見 §2.5 |
 | `verdict`：`try again later: the judge did not answer on ETH-USD (...)` 接 `exit 3` | 原因可能會過：閘道回 402（額度）、408、429、5xx，連線／逾時類錯誤，或分析師的資料源被限流／掛了（括號裡是 `VendorRateLimitError`／`VendorUnavailableError` 之類）；已答的代幣已寫進 store | 當天後面的重試只問剩下的；**一整天都是 3** 就看括號裡的例外：閘道的就查 OpenRouter 額度與服務狀態，資料源的就查該資料源 |
 | `verdict`：`failed: the judge cannot be built (ValueError: API key for provider 'openrouter' is not set. Please set ...)` | `.env` 沒有供應商的 key | 補 key（§1.4） |
@@ -423,7 +442,7 @@ fork run 用 store 裡的 bar（同回測），但每根要交易的 bar 都在�
 ### 10.1 跑一個 fork run
 
 1. 裝好 Foundry（§10.3 第 1 條），`anvil --version` 確認。
-2. store 裡要有那段 bar（§1.3 的 `backfill`；在跑著 paper 的 store 上跑 fork 也可以，但建議用複本，§9 第一條的寫法）。
+2. store 裡要有那段 bar（§1.3 的 `backfill`；在跑著 paper 的 store 上跑 fork 也可以，但建議用複本，§1.3 的 PowerShell `backup` 寫法）。
 3. 另開一個視窗起 anvil，分叉在哪一塊都可以（每根要交易的 bar 會自己重設到它的成交區塊；節點要 archive）：
 
    ```powershell
@@ -534,12 +553,22 @@ Start-ScheduledTask -TaskName 'uniswap-v3-paper'
 ```
 
 **不要刪這個 worktree 或對它 `git clean -fdx`**：`data\` 裡是 store 與 log，而它是 gitignored——
-`git worktree remove` **不會問、直接連它一起刪掉**。真的要移掉這個 worktree，先用 §9 第一條的寫法把
+`git worktree remove` **不會問、直接連它一起刪掉**。真的要移掉這個 worktree，先用 §1.3 的 PowerShell `backup` 寫法把
 `paper.db` 備份到 worktree 外面（log 直接複製）。
+
+升級後看一下 log：若是 `failed: the run '...' was started under another config`，新版改了設定預設值，照 §6 開新 run。
 
 ### B.2 開 run 與掛排程
 
-設定檔照 §1.2 做一份 `paper.local.yaml`（本機只跑一個 run），store 照 §1.3 回補到 `contrib\uniswap_v3\data\paper.db`，
+設定檔一份（本機只跑一個 run）、store 回補到 `contrib\uniswap_v3\data\`（或照 §1.3 用 `backup` 複製一份現成的）：
+
+```powershell
+Copy-Item contrib/uniswap_v3/configs/uniswap_v3.example.yaml contrib/uniswap_v3/configs/paper.local.yaml
+New-Item -ItemType Directory -Force contrib/uniswap_v3/data
+python -m dotenv run -- python -m contrib.uniswap_v3 backfill --config contrib/uniswap_v3/configs/paper.local.yaml --db contrib/uniswap_v3/data/paper.db --from 2022-01-01
+```
+
+`paper.local.yaml` 的 `strategy` 換成 `trend_vol_weights`（example 的 `fixed_weights` 是佔位策略）。
 run 照 §2 的 `paper ... --balance USDC=10000 --gas-eth 1` 開（Python 換成本機的、路徑換成 `contrib\uniswap_v3\data\`）。
 記下這個 Python 的完整路徑（`(Get-Command python).Source`）：排程用的要是同一個 `python.exe`，repo 的 `.venv` 不一定裝了 web3。
 
@@ -560,7 +589,8 @@ set "RUN_ID=paper-1"
 | `LOG` | `contrib\uniswap_v3\data\paper-visits.log` | 通常不用 |
 | `PYTHON` | `python`（排程用你的 PATH） | 建議改成完整路徑；要是 `python.exe`，不能是 `.cmd`／`.bat` |
 
-這個檔**只放 `set` 行**：`setlocal` 會讓設定失效，`exit` 會讓 visit 不跑、也不留 log。註冊：
+相對路徑以 repo 根目錄為準（visit 在那裡跑）。這個檔**只放 `set` 行**：`setlocal` 會讓設定失效，`exit` 會讓 visit 不跑、也不留 log。
+log 每次 visit 的第一行會印出用的 `DB` 與 `PYTHON`。註冊：
 
 ```powershell
 $here = [System.Security.SecurityElement]::Escape((Get-Location).Path)
@@ -578,7 +608,7 @@ Get-Content contrib\uniswap_v3\data\paper-visits.log -Tail 20
 | `0` | 跑完了 |
 | `1` | 要修，看 log（§5） |
 | `3` | 稍後再試，當天後面的 visit 會重試 |
-| `4` | visit 腳本進不了 repo 目錄、寫不了 log，或 `PYTHON` 的路徑不存在，visit **沒有跑** |
+| `4` | visit 腳本進不了 repo 目錄、寫不了 log，或 `PYTHON` 的路徑不存在，visit **沒有跑**：`PYTHON` 打錯改 `paper-visit.local.cmd`；log 寫不了就檢查 `data\` 與 log 檔的權限（唯讀、被別的程式鎖住、目錄建不了） |
 | `9009` | 找不到 `PYTHON`（`'python' is not recognized ...`，中文 Windows 是「不是內部或外部命令」）：改成完整路徑 |
 | `267009` | 還在跑，等一下再查 |
 | `267014` | 跑超過 25 分鐘被排程停掉了（log 有 `==== ... visit of` 卻沒有 `==== exit`） |
@@ -588,5 +618,6 @@ Get-Content contrib\uniswap_v3\data\paper-visits.log -Tail 20
   把它改成「不論使用者登入與否均執行」。
 - 停用／恢復／移除：`Disable-ScheduledTask`、`Enable-ScheduledTask`、
   `Unregister-ScheduledTask -TaskName 'uniswap-v3-paper' -Confirm:$false`。
-- 日常檢查、log 的意思、重設與資料缺漏都同 §4–§7，把路徑換成 `contrib\uniswap_v3\data\`、`systemctl stop` 換成
-  `Disable-ScheduledTask`、`pgrep` 換成工作管理員裡找 `python.exe`；`status` 的「過了 01:35 還是 behind」才要看 log。
+- 日常檢查、log 的意思、重設、資料缺漏與 §9 的驗證都同 §4–§9，把路徑換成 `contrib\uniswap_v3\data\`、`systemctl stop` 換成
+  `Disable-ScheduledTask`、`pgrep` 換成工作管理員裡找 `python.exe`、`paper-visit.local.sh` 換成 `.local.cmd`、`RUN_TREND`／`RUN_AI`
+  換成 `RUN_ID`；visit 時段是 00:10–01:35 UTC，`status` 的「過了 01:35 還是 behind」才要看 log。

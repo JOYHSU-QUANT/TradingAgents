@@ -29,8 +29,9 @@
   wallet holds, and exits 1. The fork is started separately (RUNBOOK.md).
 - ``report`` prints a run's return, drawdown, turnover and costs, beside
   what leaving the opening balances untouched, or in the quote token, would
-  have come to. It reads the store alone, and takes the run's config from
-  the run.
+  have come to, and, for a run that reads verdicts, how many decided bars
+  saw a verdict on every traded token, on some and on none. It reads the
+  store alone, and takes the run's config from the run.
 - ``verdict`` asks the judge, the TradingAgents graph, for a verdict on
   every traded token at the latest bar whose boundary has passed, and
   writes each into the store's ``verdicts`` table under the config's
@@ -72,8 +73,9 @@ A ``paper`` visit exits 0 once the latest bar is decided, by this visit or
 an earlier one and whatever the decision, and also when the chain had no
 answer at the bar's boundary. It warns on stderr, still exiting 0, of a
 boundary without an answer, of a rebalance that was rejected, of a bar
-skipped as suspect, and of stored readings a check found to be off the
-final chain. It exits 3, having decided nothing of the latest bar, when
+skipped as suspect, of stored readings a check found to be off the
+final chain and, for a run that reads verdicts, of bars decided with no
+rating on some traded token. It exits 3, having decided nothing of the latest bar, when
 the node's chain has not yet reached the boundary or the bar's fill block,
 and when a quote reverted without a reason of a pool's: whoever schedules
 the visit runs it again later. It exits 1 when its clock is behind the run.
@@ -776,8 +778,9 @@ def _replayed(
     """Print what a replay did, and warn on stderr of what a reader should know of it.
 
     A paper visit, ``paper``, is watched by its exit code and stderr alone, and so is
-    warned of a rebalance the executor rejected and of a bar skipped as suspect, which
-    in a backtest are counted and no more. It is not warned of bars decided on readings
+    warned of a rebalance the executor rejected, of a bar skipped as suspect and, for
+    a run that reads verdicts, of a bar decided with no rating on some traded token,
+    which in a backtest are counted and no more. It is not warned of bars decided on readings
     that were not final: a visit made on time always decides its latest bar on one.
     A run whose swaps are signed, ``signs``, is warned of rejected rebalances as well,
     and of those left partial, which hold a wallet half rebalanced.
@@ -824,8 +827,8 @@ def _replayed(
     if summary.unrated and paper:
         warnings.append(
             f"{len(summary.unrated)} bar(s) decided now, from {_iso(summary.unrated[0])} to "
-            f"{_iso(summary.unrated[-1])}, saw no rating on some traded token; a strategy that "
-            f"reads verdicts takes no new risk on such a token, and status --run-id shows which"
+            f"{_iso(summary.unrated[-1])}, saw no rating (no verdict, or a REVIEW) on some "
+            f"traded token; status --run-id shows which"
         )
     if summary.gas_rejected:
         warnings.append(
@@ -1079,8 +1082,17 @@ def _verdict(args: argparse.Namespace, out: Callable[[str], None], now: Callable
         summary = ask_verdicts(
             store, config, judge, time=at, home=home, now=present, report=recorded
         )
-    if summary.suspect:
-        out(f"the bar at {_iso(at)} is suspect, which no run decides; no judge was asked")
+    if summary.suspect or summary.late:
+        if summary.late:
+            print(
+                f"warning: the boundary {_iso(at)} passed {present - at} s ago, more than "
+                f"agent.ask_within_seconds ({config.agent.ask_within_seconds} s); the judge "
+                f"would see that long past the fill, so it is not asked, and the bar is left "
+                f"unrated",
+                file=sys.stderr,
+            )
+        why = "suspect, which no run decides" if summary.suspect else "past the judge's window"
+        out(f"the bar at {_iso(at)} is {why}; no judge was asked")
         return EXIT_OK
     out(f"{len(summary.asked)} asked, {len(summary.already_stored)} already stored")
     return EXIT_OK

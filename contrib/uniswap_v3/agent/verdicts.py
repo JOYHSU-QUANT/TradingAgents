@@ -79,17 +79,20 @@ class Asked:
 class AskSummary:
     """What a visit did at the bar ``time``, in symbol order.
 
-    ``suspect`` says the bar is suspect, so nothing was asked and ``verdicts`` is empty.
+    ``suspect`` says the bar is suspect, so nothing was asked and ``verdicts``
+    is empty; ``late`` says the boundary passed longer ago than the judge's
+    ``ask_within_seconds``, so nothing was asked either.
     """
 
     time: int
     source: str
     verdicts: tuple[Asked, ...] = ()
     suspect: bool = False
+    late: bool = False
 
     def __post_init__(self) -> None:
-        if self.suspect and self.verdicts:
-            raise ValueError("a suspect bar has no verdicts asked or found")
+        if (self.suspect or self.late) and self.verdicts:
+            raise ValueError("a suspect or late bar has no verdicts asked or found")
 
     @property
     def asked(self) -> tuple[Asked, ...]:
@@ -184,6 +187,10 @@ def ask_verdicts(
             f"since its data runs to the day it is asked on, and an older bar takes "
             f"--fake-rating"
         )
+    if not judge.point_in_time and now - time > config.agent.ask_within_seconds:
+        # The judge reads through the moment it is asked: this late it would see
+        # hours past the fill the run trades at.
+        return AskSummary(time=time, source=source, late=True)
     stored = load_bar(store, config, time)
     if stored is None:
         raise BarNotStored(

@@ -96,6 +96,8 @@ def test_a_visit_that_cannot_reach_the_repository_or_its_log_exits_4_and_runs_no
     cd, header, paper = _at("cd /d "), _at('>>"%LOG%" echo ==== %DATE%'), _at('"%PYTHON%" -m')
     assert lines[cd].endswith("|| exit /b 4") and lines[header].endswith("|| exit /b 4")
     assert cd < header < paper
+    # The log is checked again right before the visit: it may have stopped taking writes.
+    assert lines[paper - 1] == '>>"%LOG%" (call ) || exit /b 4'
 
 
 def test_a_visit_takes_its_settings_from_a_local_file_and_prints_unbuffered():
@@ -172,6 +174,8 @@ def test_the_service_is_stopped_before_the_next_visit_is_due_and_runs_the_script
     assert service["Type"] == ["oneshot"]
     assert service["User"] == ["trader"]
     assert service["WorkingDirectory"] == ["/home/trader/uniswap-paper"]
+    # Short of memory, the kernel takes the visit, not the paper daemon beside it.
+    assert service["OOMScoreAdjust"] == ["500"]
     assert service["ExecStart"] == [
         "/home/trader/uniswap-paper/contrib/uniswap_v3/schedule/paper-visit.sh"
     ]
@@ -180,7 +184,8 @@ def test_the_service_is_stopped_before_the_next_visit_is_due_and_runs_the_script
 def test_the_linux_visit_takes_its_settings_from_a_local_file_before_using_them():
     names = ("RUN_TREND", "RUN_AI", "CONFIG_TREND", "CONFIG_AI", "DB", "LOG", "PYTHON")
     defaults = [_at(f"{name}=", _VISIT_SH) for name in names]
-    local = _at('if [ -f "$here/paper-visit.local.sh" ]; then . "$here/paper-visit.local.sh"', _VISIT_SH)  # fmt: skip
+    reads = 'if [ -f "$here/paper-visit.local.sh" ]; then . "$here/paper-visit.local.sh"'
+    local = _at(reads, _VISIT_SH)
     root = _at('cd "$here/../../.."', _VISIT_SH)
     assert max(defaults) < local < root
     lines = _visit_lines(_VISIT_SH)
@@ -195,8 +200,18 @@ def test_the_installer_waits_for_a_running_visit_by_its_state_not_by_is_active()
     state = next(index for index, line in enumerate(lines) if "ActiveState" in line)
     assert lines[state].startswith('case "$(systemctl show -p ActiveState --value')
     assert lines[state + 1] == "active | activating)"
-    assert "exit 3" in lines[state + 1 : state + 6]
-    assert not any("is-active" in line for line in lines if not line.startswith("#"))
+    assert "return 3" in lines[state + 1 : state + 6]
+    # The timer's state is read with is-active (it is no oneshot); the service's never is.
+    service = [line for line in lines if "is-active" in line and "$UNIT.service" in line]
+    assert service == []
+
+
+def test_the_installer_is_parsed_whole_before_it_runs():
+    # The upgrade rewrites the checkout, the installer with it: the whole run is one
+    # function call at the very end, read before any of it executes.
+    lines = [line.strip() for line in _visit_lines(_INSTALL_SH) if line.strip()]
+    assert lines[-2:] == ['main "$@"', "exit"]
+    assert lines.index("main() {") > lines.index("as_trader() {")
 
 
 def test_the_shell_scripts_parse():
@@ -213,20 +228,20 @@ printf '%s\\n' "$*" >>"$STUB_LOG"
 case "$*" in
     *" contrib.uniswap_v3 paper "*) exit "${EXIT_PAPER:-0}" ;;
     *" contrib.uniswap_v3 backfill "*) exit "${EXIT_BACKFILL:-0}" ;;
-    *" contrib.uniswap_v3 verdict"*) exit "${EXIT_VERDICT:-0}" ;;
+    *" contrib.uniswap_v3 verdict "*) exit "${EXIT_VERDICT:-0}" ;;
 esac
 exit 0
 """
 
 
 def _visit(
-    tmp_path: Path, monkeypatch, settings: str | None = None, **exits: int
+    tmp_path: Path, monkeypatch, python: str | None = None, extra: str = "", **exits: int
 ) -> tuple[int, list[list[str]], list[str]]:
     """Run a copy of the Linux visit script, laid out as in the repository, with a stub python.
 
-    ``settings`` is the local settings file; by default the stub's python,
-    the log and a store. Returns the exit code, the words of each call the
-    stub was asked in order, and the log's lines.
+    The local settings name ``python`` (the stub, by default), the log and a
+    store, and then ``extra``, more lines of the file. Returns the exit code,
+    the words of each call the stub was asked in order, and the log's lines.
     """
     if _SH is None:
         pytest.skip("no sh on this machine")
@@ -237,16 +252,18 @@ def _visit(
     stub = tmp_path / "python"
     stub.write_text(_STUB, encoding="ascii")
     stub.chmod(0o755)
-    if settings is None:
-        # Quoted, as a value with a space in it has to be: the file is sourced.
-        settings = f'PYTHON="{stub.as_posix()}"\nLOG=visits.log\nDB=store.db\n'
+    # Quoted, as a value with a space in it has to be: the file is sourced.
+    settings = f'PYTHON="{stub.as_posix() if python is None else python}"\n'
+    settings += "LOG=visits.log\nDB=store.db\n" + extra
     (schedule / "paper-visit.local.sh").write_text(settings, encoding="ascii")
     asked = tmp_path / "asked.txt"
     monkeypatch.setenv("STUB_LOG", asked.as_posix())
     for name, code in exits.items():
         monkeypatch.setenv(name, str(code))
     done = subprocess.run([_SH, str(script)], check=False)
-    calls = [line.split() for line in asked.read_text(encoding="ascii").splitlines()] if asked.is_file() else []  # fmt: skip
+    calls = []
+    if asked.is_file():
+        calls = [line.split() for line in asked.read_text(encoding="ascii").splitlines()]
     log = (tmp_path / "visits.log").read_text(encoding="ascii").splitlines()
     return done.returncode, calls, log
 
@@ -294,12 +311,27 @@ def test_a_linux_visit_stops_at_the_first_step_that_fails_and_exits_as_it_did(
     assert log[-1] == f"==== exit {code}"
 
 
+@pytest.mark.parametrize(
+    ("extra", "code", "commands", "said"),
+    [
+        ('RUN_TREND=""\n', 0, ["backfill", "verdict", "paper"], "RUN_TREND is empty: the control run is left out"),
+        ('RUN_AI=""\n', 0, ["paper"], "RUN_AI is empty: backfill, verdict and the AI run are left out"),
+        ('RUN_TREND=""\nRUN_AI=""\n', 1, [], "RUN_TREND and RUN_AI are both empty: nothing to visit; fix paper-visit.local.sh"),
+    ],
+)  # fmt: skip
+def test_a_linux_visit_leaves_out_the_steps_of_an_empty_run_id_and_says_so(
+    tmp_path, monkeypatch, extra, code, commands, said
+):
+    exited, calls, log = _visit(tmp_path, monkeypatch, extra=extra)
+    assert exited == code
+    assert _commands(calls) == commands
+    assert f"==== {said}" in log and log[-1] == f"==== exit {code}"
+
+
 def test_a_linux_visit_whose_python_path_is_not_there_exits_4_before_running(
     tmp_path, monkeypatch
 ):
-    code, calls, log = _visit(
-        tmp_path, monkeypatch, settings="PYTHON=/nowhere/python\nLOG=visits.log\n"
-    )
+    code, calls, log = _visit(tmp_path, monkeypatch, python="/nowhere/python")
     assert code == 4 and calls == []
     assert log[1] == '==== there is no "/nowhere/python": fix PYTHON in paper-visit.local.sh'
     assert log[2] == "==== exit 4"

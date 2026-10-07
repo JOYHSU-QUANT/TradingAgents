@@ -124,6 +124,32 @@ def test_a_judge_is_asked_about_the_latest_bar_alone(config, db, monkeypatch, ca
     assert _verdict(config, db, "--at", "2024-01-03")[0] == cli.EXIT_OK
 
 
+def test_a_bar_whose_boundary_passed_longer_ago_than_the_window_is_left_unrated(
+    config, db, capsys, monkeypatch
+):
+    judge = ScriptedJudge()
+    _judging(monkeypatch, judge)
+    # The default window is four hours; the boundary passed four hours and a minute ago.
+    late = _DAY2 + 4 * 3_600 + 60
+    code, lines = _verdict(config, db, now=late)
+    assert code == cli.EXIT_OK and judge.asked == []
+    assert lines == [
+        "verdicts of judge-v1 at 2024-01-03T00:00:00Z (trade date 2024-01-03):",
+        "the bar at 2024-01-03T00:00:00Z is past the judge's window; no judge was asked",
+    ]
+    assert (
+        "warning: the boundary 2024-01-03T00:00:00Z passed 14460 s ago, more than "
+        "agent.ask_within_seconds (14400 s); the judge would see that long past the fill, so it "
+        "is not asked, and the bar is left unrated"
+    ) in capsys.readouterr().err
+    with open_store(db, create=False) as store:
+        assert store.verdicts_at("judge-v1", _DAY2) == []
+    # A fake rating is a rehearsal, not a judge reading the day: not bound by the window.
+    assert _verdict(config, db, "--fake-rating", "Buy", now=late)[0] == cli.EXIT_OK
+    with open_store(db, create=False) as store:
+        assert len(store.verdicts_at("judge-v1", _DAY2)) == 2
+
+
 def test_a_bar_the_store_lacks_is_try_again_later(config, db, capsys):
     code, lines = _verdict(config, db, "--fake-rating", "Buy", now=FIRST_DAY + 3 * DAY + 600)
     assert code == cli.EXIT_RETRY

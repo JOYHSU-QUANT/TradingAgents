@@ -543,15 +543,15 @@ def test_status_of_a_paper_run_says_when_the_clock_is_behind_it(node, tmp_path):
 # A run that reads verdicts: what a visit warns of, and what the report counts.
 
 _NO_RATING = (
-    "saw no rating on some traded token; a strategy that reads verdicts takes no new risk "
-    "on such a token, and status --run-id shows which"
+    "saw no rating (no verdict, or a REVIEW) on some traded token; status --run-id shows which"
 )
 
 
 def _rated(node: FakeNode, config: Path, db: Path, rating: str, *, now: int) -> None:
     """Record a fake ``rating`` on every traded token at the latest bar, backfilling it first."""
-    assert _run(node, "backfill", "--config", str(config), "--db", str(db), "--from", "2024-01-02", now=now)[0] == 0  # fmt: skip
-    assert _run(node, "verdict", "--config", str(config), "--db", str(db), "--fake-rating", rating, now=now)[0] == 0  # fmt: skip
+    on = ("--config", str(config), "--db", str(db))
+    assert _run(node, "backfill", *on, "--from", "2024-01-02", now=now)[0] == cli.EXIT_OK
+    assert _run(node, "verdict", *on, "--fake-rating", rating, now=now)[0] == cli.EXIT_OK
 
 
 def test_paper_warns_of_a_bar_decided_with_no_rating_on_a_traded_token(node, tmp_path, capsys):
@@ -594,7 +594,9 @@ def test_paper_warns_once_of_the_bars_it_caught_up_on_without_a_rating(node, tmp
     assert err.count("saw no rating") == 1
 
 
-def test_paper_of_a_run_that_reads_no_verdicts_warns_of_no_rating(node, tmp_path, capsys):
+def test_paper_of_a_run_that_reads_no_verdicts_does_not_warn_of_no_rating(
+    node, tmp_path, capsys
+):
     db = tmp_path / "store.db"
     assert _paper(node, db, *_OPENING)[0] == cli.EXIT_OK
     assert "saw no rating" not in capsys.readouterr().err
@@ -621,8 +623,9 @@ def test_report_counts_the_bars_that_saw_a_verdict_on_every_traded_token(node, t
     )
 
 
-def test_report_of_a_run_that_reads_no_verdicts_counts_none(node, tmp_path):
+def test_report_of_a_run_that_reads_no_verdicts_prints_no_verdicts_line(node, tmp_path):
     db = tmp_path / "store.db"
-    _paper(node, db, *_OPENING)
-    _, lines = cli_report(db, "p")
+    assert _paper(node, db, *_OPENING)[0] == cli.EXIT_OK
+    code, lines = cli_report(db, "p")
+    assert code == cli.EXIT_OK
     assert not any(line.startswith("verdicts from") for line in lines)

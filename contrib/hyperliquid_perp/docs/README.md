@@ -119,7 +119,8 @@ TradingAgents/
 ├── examples/
 └── contrib/
     ├── autoresearch/                    # 研究雷達：自己的 store／評估器／ledger，只唯讀借用 hyperliquid_perp（見其 README）
-    ├── replay/                          # 離線考試：成績單（`score`）把 paper 的每個決策對事後價格，考古題（`replay`）把當時的題目重問別的模型、答案存自有的 replay.sqlite；唯一同時借用兩邊的套件，兩邊都不得 import 它（見其 README）
+    ├── replay/                          # 離線考試：成績單（`score`）把 paper 的每個決策對事後價格，考古題（`replay`）把當時的題目重問別的模型、答案存自有的 replay.sqlite；同時借用兩邊的套件，兩邊都不得 import 它（見其 README）
+    ├── carry/                           # carry 協調者：Hyperliquid 空 perp 對 Uniswap 多現貨，一條 funding z-score 規則、一份交接檔；借 hyperliquid_perp（funding 型別／z-score／instants）與 autoresearch（funding 回補與 research store），對 uniswap_v3 只唯讀其 SQLite；contrib/ 下沒有任何套件可 import 它（見其 README）
     └── hyperliquid_perp/
         ├── exchanges/
         ├── domains/

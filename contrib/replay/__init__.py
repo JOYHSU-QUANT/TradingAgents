@@ -23,7 +23,8 @@ The guardrail report (:mod:`~contrib.replay.guardrail`) reads the same
 recorded decisions against the side a fixed rule held at each one, and says
 what a guardrail built on that rule would have done. It scores nothing.
 
-It is the one package under ``contrib/`` that imports BOTH neighbours —
+It was the first package under ``contrib/`` to import BOTH neighbours
+(``contrib.carry`` follows the same funnel) —
 ``contrib.hyperliquid_perp`` for the decision vocabulary, the store, the
 paper cost parameters and (for the past papers) the parse seam, the gate,
 the payload digest and the prompt assembly, ``contrib.autoresearch`` for the

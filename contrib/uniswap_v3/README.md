@@ -15,8 +15,9 @@ Uniswap v3 現貨的執行架構：策略只回答「目標比例是多少」，
   再平衡才一起賣。設定檔要有 `verdicts` 區塊，沒有的話第一根就 `failed: the strategy refused the bar at …`。
   政策與參數的定義在 `strategies/ai_gated_weights.py` 的 docstring。
 
-它與 `contrib/hyperliquid_perp`、`contrib/autoresearch`、`contrib/replay` 完全隔離：
-互不 import（`tests/test_isolation.py` 釘住），store 是自己的 SQLite 檔，也不碰
+它與 `contrib/hyperliquid_perp`、`contrib/autoresearch`、`contrib/replay`、`contrib/carry` 完全隔離：
+互不 import（`tests/test_isolation.py` 釘住；`contrib/carry` 只用 `sqlite3` 唯讀這裡的 store 取 run 的 equity，
+不 import 任何模組），store 是自己的 SQLite 檔，也不碰
 `deploy/paper` 的部署。上游的 `tradingagents` 引擎只有 `agent/` 這一層會 import（測試除外；同一個測試釘住），
 而且是用到時才載入：`verdict` 以外的指令都不等它的相依。
 

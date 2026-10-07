@@ -1,6 +1,6 @@
 """What this package borrows from its two neighbours — in one place, read-only.
 
-``contrib.replay`` is the one package under ``contrib/`` that imports both
+``contrib.replay`` was the first package under ``contrib/`` to import both
 ``contrib.hyperliquid_perp`` and ``contrib.autoresearch`` (replay plan §3-1).
 The alternative — a ``score`` subcommand inside the perp package's
 ``cli/offline.py`` — would have copied the research package's cost constants

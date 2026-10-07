@@ -201,19 +201,21 @@ def test_an_error_of_the_engines_own_or_a_refusal_spelled_code_is_for_good(
         judge.ask("ETH-USD", "2024-01-03", "context")
 
 
-class _CurlError(Exception):
-    """Shaped like curl_cffi's errors: an int ``code`` that is a curl error number, not a status."""
+class _CodedError(Exception):
+    """An error with an int ``code`` that is not an HTTP status."""
 
     def __init__(self, code):
-        super().__init__("curl failed")
+        super().__init__("failed")
         self.code = code
 
 
-# Named as curl_cffi names its errors, without shadowing the builtin in this module;
-# every one of curl_cffi's derives from ``CurlError``, and its timeout is ``Timeout``.
-CurlError = _CurlError
+# Named as curl_cffi names its errors, without shadowing the builtin in this module:
+# every one of curl_cffi's derives from ``CurlError`` and carries a curl error number
+# as ``code``; its timeout is ``Timeout``.
+CurlError = type("CurlError", (_CodedError,), {})
 _CurlConnectionError = type("ConnectionError", (CurlError,), {})
 _CurlTimeout = type("Timeout", (CurlError,), {})
+_CurlProxyError = type("ProxyError", (CurlError,), {})
 
 
 class VendorRateLimitError(Exception):
@@ -236,6 +238,7 @@ class _WithResponse(Exception):
         _CurlConnectionError(7),
         _CurlTimeout(28),
         _CurlTimeout(100),
+        _CurlProxyError(5),
         _VendorThrottled("throttled"),
         _WithResponse(503),
     ],
@@ -248,7 +251,7 @@ def test_a_curl_error_a_vendor_error_or_a_status_on_the_response_may_pass(tmp_pa
 
 
 def test_a_non_http_code_or_a_refusal_on_the_response_is_for_good(tmp_path, stub):
-    for error in (_CurlError(7), _WithResponse(404)):
+    for error in (_CodedError(7), _WithResponse(404)):
         stub.answer_error = error
         judge = TradingAgentsJudge(AgentSettings(), tmp_path, graph_class=stub)
         with pytest.raises(AgentError, match="for good"):

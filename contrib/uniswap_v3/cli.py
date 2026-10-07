@@ -86,7 +86,7 @@ decides, so no judge is asked. It warns on stderr of a verdict that holds no
 rating (``REVIEW``) as it is given. It exits 3, keeping the verdicts given so far, when the
 store has no bar at the boundary yet, and when the judge did not answer for
 a reason that may pass (the provider's rate limit, timeout, server error or
-empty balance, a network error, a data vendor down): whoever schedules it
+empty balance, a network error, a data vendor throttled or down): whoever schedules it
 runs it again later. It exits 1, keeping the verdicts given so far as well,
 when the config reads no verdicts, when a traded token has no ticker, when
 the judge cannot be set up or built (the engine is not installed, its

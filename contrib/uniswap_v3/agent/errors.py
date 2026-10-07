@@ -14,7 +14,7 @@ class AgentError(Exception):
 
 
 class JudgeUnavailable(AgentError):
-    """The judge was asked and did not answer, for a reason that may pass: the gateway, the network, a quota, a data vendor down.
+    """The judge was asked and did not answer, for a reason that may pass: the gateway, the network, a quota, a data vendor throttled or down.
 
     Nothing of that answer is recorded; a later visit asks again.
     """

@@ -1,5 +1,4 @@
-"""The package's decimal helpers: a sum under the one context, whatever the ambient one. The shared estimators and the text formats live here too.
-"""
+"""The package's decimal helpers: the one context, the shared estimators, the text formats."""
 
 from __future__ import annotations
 
@@ -7,7 +6,12 @@ from decimal import ROUND_DOWN, Decimal, localcontext
 
 import pytest
 
-from contrib.uniswap_v3.domain.decimal_context import decimal_sum
+from contrib.uniswap_v3.domain.decimal_context import (
+    decimal_sum,
+    log_returns,
+    mean,
+    sample_volatility,
+)
 
 # 1e27 + 1 + 0.4 has 29 significant digits; the package's context rounds the last off.
 WIDE = [Decimal("1e27"), Decimal(1), Decimal("0.4")]
@@ -37,8 +41,6 @@ def test_decimal_sum_ignores_the_ambient_context(prec):
 
 
 def test_the_estimators_refuse_too_few_values():
-    from contrib.uniswap_v3.domain.decimal_context import log_returns, mean, sample_volatility
-
     with pytest.raises(ValueError, match="at least one value"):
         mean([])
     with pytest.raises(ValueError, match="at least two returns, got 1"):

@@ -125,7 +125,7 @@ contrib/uniswap_v3/
                         分叉防線與開發帳戶（fork.py）、簽名送出（transactions.py）、ChainExecutor（swaps.py）、
                         fork run 的錢包（wallet.py）
   store/                SQLite schema（含版本號與 migration）與讀寫；bar 與判斷（verdict）的載入
-  agent/                問 TradingAgents 要判斷的那一層（程式碼裡唯一 import 上游引擎的地方）：設定（agent 區塊）、
+  agent/                問 TradingAgents 要判斷的那一層（唯一 import 上游引擎的地方，測試除外）：設定（agent 區塊）、
                         代幣→ticker、現貨脈絡、judge（上游 graph 的包裝＋不打模型的 fake）、sidecar 與列的寫入、
                         一次 visit 的問法
   backfill.py           把一段 bar 從 archive 節點讀進 store

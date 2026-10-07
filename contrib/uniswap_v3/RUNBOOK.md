@@ -145,7 +145,7 @@ python -m dotenv run -- python -m contrib.uniswap_v3 verdict --config contrib/un
 - 上游用**本機日期**當 trade date：伺服器是 UTC 沒事；本機（台灣）在 UTC 16:00 之後手動跑，上游會把「今天」算成明天、
   把這次當回測、即時資料源留白。要手動跑就在台北時間 08:10–23:59 之間跑。
 - 每個代幣約 15–20 次 completion；實測（2026-10-06，sonnet-4-6 經 OpenRouter）一個代幣約 11 分鐘，兩個代幣一次 visit 抓 20–25 分鐘。問過的（source、代幣、bar）**永不改寫**、
-  重跑直接印 `already stored`；judge 中途沒答（閘道、額度、網路）結束碼 3、已答的代幣保留、下次只問剩下的。
+  重跑直接印 `already stored`；judge 中途沒答（閘道、額度、網路、分析師的資料源被限流或掛了）結束碼 3、已答的代幣保留、下次只問剩下的。
 - 印出每個代幣：評等、模型、耗時、原文存在哪：`WETH (ETH-USD): Buy, model anthropic/claude-sonnet-4-6, 662 s, words in verdicts/tradingagents-rating-v1/WETH-20261006T000000Z.json`。
   sidecar 放在 **store 檔的同目錄**（`contrib/uniswap_v3/data/verdicts/<source>/`），裡面有最終決策全文、各分析師與辯論報告、
   給它看的現貨脈絡（最近收盤、1／7／30 根變動、20 根波動率）；上游引擎自己的 log 與 cache 在 `data/tradingagents/`。

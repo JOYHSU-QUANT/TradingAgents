@@ -75,9 +75,8 @@ Breaking changes within the 0.x line are called out explicitly.
   (`REVIEW`). The shipped replay variant `current-sonnet.yaml` now names
   `max_tokens: 8192` itself, the cap paper-BTC-6 and -7 were asked under.
   The Uniswap judge's engine config sets `structured_output: False`, as the
-  perp's does: the rating is read from the decision's text by the engine's
-  signal processor, which the free-text path serves as well, and the
-  structured binding forces a `tool_choice` the Claude 5.5 models refuse
+  perp's does: the rating is read from the decision's text, which the
+  free-text path gives as well, and the structured binding forces a `tool_choice` the Claude 5.5 models refuse
   with a 400 from each manager before the same free-text fallback (#338).
   With the free-text path the only one, the rating is no longer taken
   from the engine's signal, whose reader falls back to the first rating
@@ -86,14 +85,23 @@ Breaking changes within the 0.x line are called out explicitly.
   decision to end with a `Rating: <rating>` line (`PROMPT_VERSION`
   `spot-context-v3`), and `agent/graph.py` reads the last such line,
   recording `REVIEW` with a warning that names the cause when there is
-  none or its word is not a rating.
+  none, its word is not a rating, or more than the word follows it; the
+  engine's signal, which `_answer` used to refuse when it was not a rating,
+  is no longer read at all. The closing sentence sits in the instrument
+  context every agent reads, so the analysts' reports may end with such a
+  line too; only the decision's is read.
   SETUP.md, RUNBOOK.md (perp §5), INTEGRATION.md, README.md, `.env.example`,
   the replay README and the Uniswap RUNBOOK (§1.2, §2.5, appendix A, with
   the switch dated) quote the new number and model. Checked before the
   switch with one real question on each side (a perp one-shot and a Uniswap
-  `verdict` on a scratch store): both parsed, neither truncated. The paper
-  hosts' own `local.yaml` files are not in the repo; the servers switch
-  with their next run (paper-BTC-8).
+  `verdict` on a scratch store): both parsed, neither truncated; asked
+  again under `spot-context-v3`, the decision ended with `Rating: Hold`.
+  The paper hosts' own `local.yaml` files are not in the repo: the perp
+  host's cap follows its `local.yaml` (set there, or this default on its
+  next restart), and the model switch is made there with run paper-BTC-8.
+  A replay variant file of your own that names no `max_tokens` now hashes
+  with 16384, a new `sha`: register it under a new name, or pin the old cap
+  in the file.
 
 - **The autoresearch CLI builds its parser one command at a time, and the
   store's timestamp helper has a public name** (refactor plan v2, T7 — PR 18

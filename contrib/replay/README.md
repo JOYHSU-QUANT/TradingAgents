@@ -146,7 +146,7 @@ variant 是資料不是程式，一個 YAML（範例：`variants/current-sonnet.
 | `model.provider`／`model.id` | 是 | 走 `tradingagents` 的 `create_llm_client`，不自己接 SDK |
 | `system_prompt_path` | 是 | 相對於 YAML 檔 |
 | `temperature` | 否 | 沒給＝provider 預設（跟 graph 一樣只在有設時才送） |
-| `max_tokens` | 否 | 預設 16384＝paper daemon 的 completion cap（2026-10-07 起；重放 run 6／7 的 `current-sonnet` 自己釘 8192＝當時的 cap）；Gemini 自動換成 `max_output_tokens` |
+| `max_tokens` | 否 | 預設 16384＝paper daemon 的 completion cap（2026-10-07 起；重放 run 6／7 的 `current-sonnet` 自己釘 8192＝當時的 cap。**沒寫這個鍵的自訂 variant 在那天之後 sha 會變**：換新名字註冊，或把舊 cap 寫進檔裡）；Gemini 自動換成 `max_output_tokens` |
 | `extra_context` | 否 | 見上 |
 | `model_cutoff` | 否 | 模型訓練截止日（YYYY-MM-DD），給 plan §6 用 |
 

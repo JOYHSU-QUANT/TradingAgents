@@ -85,13 +85,14 @@ REPORT_KEYS: Final = (
 _DECISION_KEY: Final = "final_trade_decision"
 #: The ``Rating: <rating>`` line the spot context asks the decision to end with,
 #: as markdown may dress it (``**Rating**: Hold``, ``**Final rating: Hold**``,
-#: ```Rating: Hold```), with one word and nothing but dressing after it (so
-#: ``Rating: Buy/Hold`` is not read as Buy); the last such line is the rating.
-#: The engine's own signal is not read: its free-text reader falls back to the
-#: first rating word anywhere in the text, which reads a decision cut short, or
-#: written otherwise, as a direction.
+#: ```Rating: Hold```, a fullwidth colon), with one word and nothing but
+#: dressing after it (so neither ``Rating: Buy/Hold`` nor ``Rating: Buy (weak)``
+#: is read as Buy); the last such line is the rating. The engine's own signal
+#: is not read: its free-text reader falls back to the first rating word
+#: anywhere in the text, which reads a decision cut short, or written
+#: otherwise, as a direction.
 _RATING_LINE: Final = re.compile(
-    r"^[\s*_#>`-]*(?:final\s+)?rating[\s*_`]*[:\-][\s*_`]*([A-Za-z]+)[\s*_`.]*$",
+    r"^[\s*_#>`-]*(?:final\s+)?rating[\s*_`]*[:\-：][\s*_`]*([A-Za-z]+)[\s*_`.]*$",
     re.IGNORECASE | re.MULTILINE,
 )
 

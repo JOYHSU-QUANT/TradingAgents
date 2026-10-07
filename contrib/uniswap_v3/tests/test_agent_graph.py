@@ -58,8 +58,10 @@ def test_the_answer_is_read_from_the_final_state_and_its_rating_line():
         ("> **Rating** - Overweight", Rating.OVERWEIGHT),
         ("`Rating: Sell`", Rating.SELL),
         ("Rating: **Hold**.", Rating.HOLD),
-        # Two words on the line: not one rating.
+        # More than the word on the line: not one rating.
         ("Rating: Buy/Hold", Rating.REVIEW),
+        ("Rating: Buy (moderate conviction)", Rating.REVIEW),
+        ("Rating：Overweight", Rating.OVERWEIGHT),
         # Cut short before the line: the first rating word in the prose is not read.
         ("The Buy case rests on flows; the Sell case on", Rating.REVIEW),
         # A word that is not a rating; a rating named mid-sentence is not the line.

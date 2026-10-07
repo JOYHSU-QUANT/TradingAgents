@@ -5,10 +5,10 @@ A variant is a YAML file, not code::
     name: current-sonnet
     model:
       provider: openrouter
-      id: anthropic/claude-sonnet-5.5
+      id: anthropic/claude-sonnet-4-6
     system_prompt_path: current_system.md   # relative to this file
     temperature: 0.2                        # optional; absent = the provider's own default
-    max_tokens: 16384                       # optional; the perp daemon's completion cap
+    max_tokens: 8192                        # optional; absent = the perp daemon's cap (DEFAULT_MAX_TOKENS)
     extra_context: |                        # optional; one more section after the market
       A lesson learned ...                  #   context, before the format block
     model_cutoff: 2025-03-31                # optional; the model's training cutoff (plan §6)

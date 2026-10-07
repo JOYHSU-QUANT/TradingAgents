@@ -227,7 +227,8 @@ systemctl list-timers uniswap-v3-paper.timer         # 下一次 visit 的時間
   給它看的現貨脈絡（最近收盤、1／7／30 根變動、20 根波動率）、模型與 judge 的設定、耗時；上游引擎自己的 log 與 cache 在同目錄的 `tradingagents/`。
   備份 store 時一起帶走。
 - 評等只從決策全文**結尾的 `Rating: <評等>` 行**讀（脈絡的尾句要求這一行；不用上游「文中第一個評等字」的退路，
-  那會把被截斷或沒照格式的答案讀成方向錯的評等）。沒有這一行、或那行的字不是五個評等之一，就記 `REVIEW`
+  那會把被截斷或沒照格式的答案讀成方向錯的評等）。沒有這一行、那行的字不是五個評等之一、或評等後面還帶字
+  （`Rating: Buy (weak)`、`Rating: Buy/Hold` 都不算；markdown 與反引號的包裝、全形冒號可以），就記 `REVIEW`
   （答了但讀不出評等）照樣寫、stderr 警告一行、不再問；`ai_gated_weights` 把它當沒判斷。
 - **演練**：`--fake-rating Buy` 不打模型、直接寫該評等（`model=fake`、沒有 sidecar）。它**只准用在沒有真判斷的 store**：
   store 裡該 source 已有非 fake 的列就結束碼 1——fake 列會永久擋掉那根 bar 真的判斷。排程演練請用另一個 db 與
@@ -519,7 +520,8 @@ fork run 用 store 裡的 bar（同回測），但每根要交易的 bar 都在�
    答案被截斷而讀不出評等（看起來是 `REVIEW` 變多、sidecar 的 `decision` 斷在半句）。預設 16384 是照 Sonnet 5.5 定的；
    換成想得更多的模型就再調高。目前沒有偵測「上限綁住」的機制，換完頭幾天看 sidecar。
 3. **temperature**：這類模型對非預設的 `temperature` 回 400。上游的 `TRADINGAGENTS_*` 環境變數（temperature、辯論回合等）
-   會覆蓋設定而且**不在 sidecar 裡**（重現性缺口），伺服器的 `.env` 不要設它們。
+   會覆蓋設定而且**不在 sidecar 裡**（重現性缺口），伺服器的 `.env` 不要設它們（`TRADINGAGENTS_OUTPUT_LANGUAGE` 也是：
+   非英文的結尾行讀不出評等，整天都是 `REVIEW`）。
 4. **先在 scratch store 上真問一次**：複製一份 store（§9 第一條）、設定檔 `verdicts.source` 換個名字（例如 `tradingagents-rating-v1-try`），
    跑 `verdict` 看評等讀不讀得出來、耗時多少（`--fake-rating` 不打模型，驗不到這些）。
 5. 只有 `paper-ai.local.yaml` 的 `agent` 要改（`verdict` 只讀它）；對照 run 不受影響。範例檔的 `agent` 帶的是明確值，
@@ -530,7 +532,8 @@ fork run 用 store 裡的 bar（同回測），但每根要交易的 bar 都在�
 - 2026-10-07：預設從 `anthropic/claude-sonnet-4-6`／`max_tokens` 8192 換成 `anthropic/claude-sonnet-5.5`／16384（與 hyperliquid
   開 run 8 同日）；伺服器上的 run 是這天才開的，所以沒有 4-6 的段。翻之前照上面第 4 條在 scratch store 真問一次：
   WETH＝Hold、868 秒、`decision` 完整；同時抓到 5.5 拒絕強制 tool_choice（兩個 manager 各 400 一次再退回純文字），
-  所以 judge 的引擎設定從這天起 `structured_output: false`（與 perp 相同；評等本來就從純文字讀）。
+  所以 judge 的引擎設定從這天起 `structured_output: false`（與 perp 相同；評等本來就從純文字讀），脈絡也從這天起要求結尾的
+  `Rating:` 行（`spot-context-v3`；再真問一次：Hold、628 秒、最後一行正是 `Rating: Hold`）。
 
 ---
 

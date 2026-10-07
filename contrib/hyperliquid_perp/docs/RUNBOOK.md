@@ -438,7 +438,7 @@ completion 上限（`engine.max_completion_tokens`，預設 16384）綁到時供
 `invalid_output`（fail-closed、計入 30 輪、不重問），但 `ai_outputs.risk_reason` 記
 `truncated_output` 而不是 `invalid_output`，log 同時有一行 ERROR
 `the decision completion was truncated: N output tokens against a cap of C`——處置是調大
-`engine.max_completion_tokens`（換 thinking 模型尤其會踩到，上限含 reasoning tokens），
+`engine.max_completion_tokens`（換成想得更多的模型尤其會踩到，上限含 reasoning tokens），
 **不是**去稽核 prompt 契約。JSON 區塊倖存、只有後面的說明被砍時照常接受，只留一行 WARNING。
 決策 completion 綁到上限、但引擎**隨後**才失敗（例如尾端的 `process_signal` 呼叫逾時、
 回傳形狀壞掉）時沒有 parse 可判，那條走 §3.1 ladder 記成 `api_failed`：log 有一行 ERROR

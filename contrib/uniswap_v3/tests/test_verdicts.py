@@ -29,7 +29,8 @@ def test_a_usable_rating_is_one_a_strategy_can_act_on():
 
 def test_the_ratings_are_the_five_tiers_the_graph_answers_in_and_review():
     # The strings are the TradingAgents graph's own (tradingagents/agents/utils/rating.py),
-    # which the agent layer reads them from; a drift would show there, not here.
+    # the words the graph answers in and the agent layer reads off the decision's Rating:
+    # line; a drift would show there, not here.
     assert [rating.value for rating in RATINGS] == [
         "Buy",
         "Overweight",

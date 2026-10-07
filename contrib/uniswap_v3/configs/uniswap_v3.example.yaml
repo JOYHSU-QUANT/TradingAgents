@@ -76,10 +76,10 @@ rpc:
 # reads news and prices through the moment it is asked, so a later question
 # would see hours past the fill the run trades at, and the bar is left unrated
 # instead (a fake rating is not bound by it). These are the defaults, the
-# Hyperliquid paper run's judge, so that
-# the two scorecards compare; the whole section may be left out. It is not part
-# of the config's snapshot: the verdicts a run reads name the model that gave
-# each one. Only the verdict command reads it.
+# Hyperliquid paper run's judge, so that the two scorecards compare; the
+# whole section may be left out. It is not part of the config's snapshot: the
+# verdicts a run reads name the model that gave each one. Only the verdict
+# command reads it.
 agent:
   llm_provider: openrouter
   deep_think_llm: "anthropic/claude-sonnet-4-6"

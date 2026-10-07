@@ -39,7 +39,9 @@
   store. A verdict the store already holds is not asked for again. It
   reads no chain: the bar must be in the store already. The judge reads
   its data through the day it is asked on, so only the latest bar gets an
-  honest verdict; ``--at`` names an older boundary only together with
+  honest verdict, and only within ``agent.ask_within_seconds`` of its
+  boundary: later than that the bar is left unrated, with a warning and
+  exit 0; ``--at`` names an older boundary only together with
   ``--fake-rating``, which records that rating without asking any judge,
   for a rehearsal on a store that holds no real verdicts.
 

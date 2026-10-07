@@ -9,7 +9,8 @@
 # the way it found it: running if it was running, and otherwise left for
 # `systemctl enable --now` once the store and the runs are there. As trader
 # (which the root half runs it as, with --as-trader) it clones the checkout
-# from the Hyperliquid checkout's origin, or REPO_URL when set, or fetches
+# from the Hyperliquid checkout's origin, or REPO_URL when set (sudo drops
+# the caller's variables, so `sudo REPO_URL=<url> sh ...`), or fetches
 # it, detaches it at <commit>, makes or updates its own venv, writes a
 # template of .env and of the visit's settings when they are not there, and
 # runs the package's tests: a checkout whose tests fail is left at <commit>
@@ -29,11 +30,15 @@ SCHEDULE=contrib/uniswap_v3/schedule
 SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 
 as_trader() {
-    if [ ! -d "$CHECKOUT/.git" ]; then
-        git clone --quiet --no-checkout "${REPO_URL:-$(git -C "$SOURCE" remote get-url origin)}" "$CHECKOUT"
+    before=
+    if [ -d "$CHECKOUT/.git" ]; then
+        before=$(git -C "$CHECKOUT" rev-parse --short HEAD)
+    else
+        url=${REPO_URL:-$(git -C "$SOURCE" remote get-url origin)}
+        echo "cloning $url"
+        git clone --quiet --no-checkout "$url" "$CHECKOUT"
     fi
     cd "$CHECKOUT"
-    before=$(git rev-parse --short HEAD 2>/dev/null || true)
     git fetch --quiet origin
     git checkout --quiet --detach "$1"
     echo "checkout at $(git rev-parse --short HEAD): $(git log -1 --format=%s)${before:+ (was at $before)}"
@@ -46,9 +51,12 @@ as_trader() {
         (umask 077 && printf 'ETH_RPC_URL=\nOPENROUTER_API_KEY=\n' >.env)
         echo "wrote $CHECKOUT/.env"
     fi
-    if grep -qE '^(ETH_RPC_URL|OPENROUTER_API_KEY)=[[:space:]]*$' .env; then
-        echo "warning: $CHECKOUT/.env has an empty ETH_RPC_URL or OPENROUTER_API_KEY: the visits need both"
-    fi
+    for key in ETH_RPC_URL OPENROUTER_API_KEY; do
+        # A line with a value: not missing, not empty, not an empty pair of quotes.
+        if ! grep -qE "^$key=[^[:space:]\"']" .env; then
+            echo "warning: $CHECKOUT/.env has no $key with a value: the visits need it"
+        fi
+    done
     if [ ! -f "$SCHEDULE/paper-visit.local.sh" ]; then
         printf 'DB="%s/paper.db"\nLOG="%s/paper-visits.log"\nPYTHON="%s/.venv/bin/python"\n' \
             "$DATA" "$DATA" "$CHECKOUT" >"$SCHEDULE/paper-visit.local.sh"
@@ -88,7 +96,8 @@ main() {
         ;;
     esac
     cd /
-    sudo -u "$OWNER" -H sh "$SELF" --as-trader "$1"
+    # sudo resets the environment: REPO_URL is handed on by name.
+    sudo -u "$OWNER" -H env "REPO_URL=${REPO_URL:-}" sh "$SELF" --as-trader "$1"
     install -m 644 "$CHECKOUT/$SCHEDULE/$UNIT.service" "$CHECKOUT/$SCHEDULE/$UNIT.timer" /etc/systemd/system/
     systemctl daemon-reload
     if [ "$was" = active ]; then

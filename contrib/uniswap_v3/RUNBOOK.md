@@ -49,7 +49,8 @@ ssh -i ~/.ssh/<key> ubuntu@<host> sudo sh /tmp/lightsail-install.sh <commit>
 
 之後的升級直接用 checkout 裡的那份：`sudo sh ~trader/uniswap-paper/contrib/uniswap_v3/schedule/lightsail-install.sh <commit>`。
 `<commit>` 是要跑的版本（develop 上的 merge commit），**寫 commit、不要寫分支名**。從 checkout 裡跑是安全的：整支腳本先讀完才執行，
-升級改寫這個檔不影響正在跑的那次。clone 的來源預設是 hyperliquid checkout 的 origin；要指定就 `REPO_URL=<url> sudo sh ...`。
+升級改寫這個檔不影響正在跑的那次。clone 的來源預設是 hyperliquid checkout 的 origin；要指定就 `sudo REPO_URL=<url> sh ...`
+（寫在 `sudo` 後面：sudo 會丟掉呼叫者的環境變數），腳本會印出它 clone 的 URL。
 
 它做的事（可重複執行；第二次就是升級）：
 
@@ -58,12 +59,13 @@ ssh -i ~/.ssh/<key> ubuntu@<host> sudo sh /tmp/lightsail-install.sh <commit>
 2. 以 `trader` 身分：沒有 checkout 就從 hyperliquid checkout 的 origin（伺服器上唯一有 deploy key 的遠端）clone 一份；
    fetch、`git checkout --detach <commit>`（印出原本在哪個 commit，回退用）；沒有 `.venv` 就建；
    `pip install -e ".[dev]" -r contrib/uniswap_v3/requirements.txt`；建 `/home/trader/data/uniswap`；`.env` 與 `paper-visit.local.sh`
-   不在就寫空白範本（§1.4、§3.1），`.env` 裡 key 還是空的每次都會警告；最後跑 `pytest -q -m "not smoke" contrib/uniswap_v3/tests`。
+   不在就寫空白範本（§1.4、§3.1），`.env` 裡哪個 key 不在或沒有值每次都會警告；最後跑 `pytest -q -m "not smoke" contrib/uniswap_v3/tests`。
    **這一半任何一步失敗（fetch、pip、測試）就停在那裡**：checkout 可能已在 `<commit>`、timer 是停的（stderr 會說），
    回到上一版＝用印出來的那個 commit 再跑一次這條。
 3. 以 root 身分：把 checkout 裡 `contrib/uniswap_v3/schedule/` 的兩個 unit 複製到 `/etc/systemd/system/`、`daemon-reload`，
    然後把 timer **還原成原本的狀態**：原本在跑就 enable＋start 並印下一次 visit 的時間；原本停著（暫停中、§7 修 reorg 中、
-   或第一次安裝）就留著不開、印出 `sudo systemctl enable --now uniswap-v3-paper.timer`。升級不決定 visit 跑不跑。
+   第一次安裝，或上一次升級中途失敗把它留停了）就留著不開、印出 `sudo systemctl enable --now uniswap-v3-paper.timer`。
+   升級不決定 visit 跑不跑：上一次失敗後重跑或回退，timer 要自己開回去。
 
 要改 unit（例如把 timer 挪開 hl-paper 問 LLM 的時段）用 drop-in：`sudo systemctl edit uniswap-v3-paper.timer`，`[Timer]` 下先寫一行空的
 `OnCalendar=` 清掉原本的再列新的時間；直接改 `/etc/systemd/system/` 裡的檔會被下一次升級蓋掉。
@@ -367,7 +369,8 @@ cd ~/uniswap-paper
 | `python3: not found` 接 `==== exit 127` | `PYTHON` 不是路徑而且 PATH 上沒有 | 改 §3.1 的 `PYTHON` 成 `.venv/bin/python` 的完整路徑 |
 | `Error: Invalid value: Invalid value for '-f' ".../.env" does not exist.` 接 `==== exit 2` | checkout 根目錄沒有 `.env` | 補上 `.env`（§1.4） |
 | 其他 `usage: ...` 接 `==== exit 2` | visit 的指令被改壞 | 對照 git 版的 `paper-visit.sh`；設定只放在 `paper-visit.local.sh` |
-| 有 `==== ... visit of` 卻沒有 `==== exit` | visit 跑超過 55 分鐘被 systemd 停掉（`systemctl status` 是 `result 'timeout'`）；印到一半的輸出還在 | 多半是節點或閘道卡住；下一次 visit 會重來 |
+| 有 `==== ... visit of` 卻沒有 `==== exit`，`systemctl status` 是 `result 'timeout'` | visit 跑超過 55 分鐘被 systemd 停掉；印到一半的輸出還在 | 多半是節點或閘道卡住；下一次 visit 會重來 |
+| 有 `==== ... visit of` 與前幾步的輸出、沒有 `==== exit`，`systemctl status` 是 `status=4` | log 在 visit 中途變成寫不了（磁碟滿、權限被改）；寫得了的那幾步已經跑過，後面的沒跑 | 檢查磁碟與 `/home/trader/data/uniswap` 的權限；下一次 visit 會補 |
 | 這次 visit 完全沒有留下任何一行，`systemctl status` 是 `status=4` | visit 腳本進不了 checkout 目錄，或 log 寫不了（目錄不是 trader 的、建不了） | 檢查 `/home/trader/data/uniswap` 的擁有者與權限；visit 沒有跑 |
 
 ---

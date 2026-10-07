@@ -15,7 +15,10 @@ the run never decides. A suspect bar is not decided either, so no judge is
 asked about it. A judge that is not point in time
 (:attr:`~.graph.Judge.point_in_time`) is asked about the latest bar whose
 boundary has passed and no other: a bar judged later would be judged on
-what came after it.
+what came after it. Nor is it asked later than its ``ask_within_seconds``
+after that boundary: the bar is left unrated, since the judge reads through
+the moment it is asked and would see that long past the fill a run trades
+at.
 
 The judge's words are kept for every token it is asked about, whatever
 the rating, ``REVIEW`` included: that the judge was asked and gave no
@@ -166,7 +169,10 @@ def ask_verdicts(
     (:func:`~.tickers.tickers_for`). A rehearsal judge is refused when the
     store already holds a verdict of the source from any model but the
     fake: a fake verdict blocks the real one at its bar for good, so a
-    rehearsal is for a store that holds no real verdicts.
+    rehearsal is for a store that holds no real verdicts. A judge that is
+    not point in time is asked only within the config's
+    ``agent.ask_within_seconds`` of the boundary; later, the summary says
+    ``late`` and nothing is asked or written.
     """
     source = verdict_source(config)
     tickers = tickers_for(config.traded_symbols)

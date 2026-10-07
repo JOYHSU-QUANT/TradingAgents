@@ -25,8 +25,9 @@ long after a bar's boundary the judge may still be asked about it: it
 reads news and prices through the moment it is asked, so a late question
 sees hours past the fill the run trades at, which the control run never
 does. Past the window the bar is left unrated (the default, four hours,
-covers the scheduled visit and its two retries); a fake rating is not
-bound by it.
+covers the scheduled visit and its two retries; the least is 600 seconds,
+the first visit's slot, so a typo cannot leave every bar unrated); a fake
+rating is not bound by it.
 
 None of this enters a run's config snapshot: the verdicts a run reads are
 data in the store, which record the model that gave each one, and which
@@ -86,4 +87,4 @@ class AgentSettings:
             raise ValueError(f"selected_analysts names an analyst twice: {list(analysts)}")
         object.__setattr__(self, "selected_analysts", analysts)
         require_count(self.max_tokens, "max_tokens", at_least=1)
-        require_count(self.ask_within_seconds, "ask_within_seconds", at_least=1)
+        require_count(self.ask_within_seconds, "ask_within_seconds", at_least=600)

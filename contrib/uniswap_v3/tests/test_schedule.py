@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import xml.etree.ElementTree as ElementTree
@@ -207,11 +208,18 @@ def test_the_installer_waits_for_a_running_visit_by_its_state_not_by_is_active()
 
 
 def test_the_installer_is_parsed_whole_before_it_runs():
-    # The upgrade rewrites the checkout, the installer with it: the whole run is one
-    # function call at the very end, read before any of it executes.
-    lines = [line.strip() for line in _visit_lines(_INSTALL_SH) if line.strip()]
-    assert lines[-2:] == ['main "$@"', "exit"]
-    assert lines.index("main() {") > lines.index("as_trader() {")
+    # The upgrade rewrites the checkout, the installer with it: everything before the
+    # one call at the very end only defines things, so the whole run is read first.
+    lines = _visit_lines(_INSTALL_SH)
+    top = [
+        line
+        for line in lines[: lines.index('main "$@"')]
+        if line and not line[0].isspace() and not line.startswith("#")
+    ]
+    for line in top:
+        defines = line in ("set -eu", "}") or line.endswith("() {") or re.match(r"[A-Z_]+=", line)
+        assert defines, line
+    assert [line for line in lines if line.strip()][-2:] == ['main "$@"', "exit"]
 
 
 def test_the_shell_scripts_parse():
@@ -222,9 +230,11 @@ def test_the_shell_scripts_parse():
 
 
 # A python that records what it is asked, one line per call, and exits as told
-# for the command (the word after contrib.uniswap_v3).
+# for the command (the word after contrib.uniswap_v3). Told LOCK_LOG, it takes
+# the write bit off that file, as a log that stops taking writes mid-visit.
 _STUB = """#!/bin/sh
 printf '%s\\n' "$*" >>"$STUB_LOG"
+if [ -n "${LOCK_LOG:-}" ]; then chmod a-w "$LOCK_LOG"; fi
 case "$*" in
     *" contrib.uniswap_v3 paper "*) exit "${EXIT_PAPER:-0}" ;;
     *" contrib.uniswap_v3 backfill "*) exit "${EXIT_BACKFILL:-0}" ;;
@@ -311,21 +321,42 @@ def test_a_linux_visit_stops_at_the_first_step_that_fails_and_exits_as_it_did(
     assert log[-1] == f"==== exit {code}"
 
 
+_TREND_LEFT_OUT = "RUN_TREND is empty: the control run is left out"
+_AI_LEFT_OUT = "RUN_AI is empty: backfill, verdict and the AI run are left out"
+_BOTH_EMPTY = "RUN_TREND and RUN_AI are both empty: nothing to visit; fix paper-visit.local.sh"
+
+
 @pytest.mark.parametrize(
     ("extra", "code", "commands", "said"),
     [
-        ('RUN_TREND=""\n', 0, ["backfill", "verdict", "paper"], "RUN_TREND is empty: the control run is left out"),
-        ('RUN_AI=""\n', 0, ["paper"], "RUN_AI is empty: backfill, verdict and the AI run are left out"),
-        ('RUN_TREND=""\nRUN_AI=""\n', 1, [], "RUN_TREND and RUN_AI are both empty: nothing to visit; fix paper-visit.local.sh"),
+        ('RUN_TREND=""\n', 0, ["backfill", "verdict", "paper"], _TREND_LEFT_OUT),
+        ('RUN_AI=""\n', 0, ["paper"], _AI_LEFT_OUT),
+        ('RUN_TREND=""\nRUN_AI=""\n', 1, [], _BOTH_EMPTY),
     ],
-)  # fmt: skip
-def test_a_linux_visit_leaves_out_the_steps_of_an_empty_run_id_and_says_so(
+)
+def test_a_linux_visit_with_an_empty_run_id_says_so_and_with_both_empty_exits_1(
     tmp_path, monkeypatch, extra, code, commands, said
 ):
     exited, calls, log = _visit(tmp_path, monkeypatch, extra=extra)
     assert exited == code
     assert _commands(calls) == commands
     assert f"==== {said}" in log and log[-1] == f"==== exit {code}"
+
+
+def test_a_linux_visit_whose_log_stops_taking_writes_exits_4_and_runs_no_further_step(
+    tmp_path, monkeypatch
+):
+    log = tmp_path / "visits.log"
+    monkeypatch.setenv("LOCK_LOG", log.as_posix())
+    try:
+        code, calls, lines = _visit(tmp_path, monkeypatch)
+    finally:
+        if log.exists():
+            log.chmod(0o644)
+    # The first step ran and took the write bit off; the second was not started.
+    assert code == 4
+    assert _commands(calls) == ["paper"]
+    assert lines[0].startswith("==== ") and not any(line.startswith("==== exit") for line in lines)
 
 
 def test_a_linux_visit_whose_python_path_is_not_there_exits_4_before_running(

@@ -145,7 +145,9 @@ def replay(
     if until_ms is not None:
         last = min(last, floor_day(until_ms))
     position = OUT
-    reach = (params.window_days + 1) * MS_PER_DAY
+    # Reach back far enough that a reading as old as the age limit allows still
+    # has its full window behind it, as the live fetch does.
+    reach = (params.window_days + -(-max_reading_age_hours // 24) + 1) * MS_PER_DAY
     boundary = first
     while boundary <= last:
         lo = bisect_left(times, boundary - reach)

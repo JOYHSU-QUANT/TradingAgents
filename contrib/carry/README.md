@@ -69,7 +69,7 @@ python -m contrib.carry signal --coin ETH --out <handoff.json> --research-db <au
 對著幾天沒更新的 store 做決定比不做更糟；回補沒走到視窗盡頭（不論原因：請求上限、venue 沒資料、走不動）；venue 失敗（不退回 store 裡的舊資料，
 由 PR 4 的 23:55 重試補；重試不是同邊界重跑，是正常決定）；現有的交接檔讀不懂、是別的幣的、或邊界比它晚
 （讀不懂不會當成 out 再進一次；每個幣要有自己的 `--out`）；`--out` 的目錄不存在；`--no-fetch` 或 `history` 指到不存在的
-research store（不會偷偷建一個空的）；`--as-of` 不是 UTC 午夜、沒有時區、或遠到視窗還在未來（接受 `2026-10-08`、
+research store（不會偷偷建一個空的）；`--as-of` 不是 UTC 午夜、沒有時區、或遠到視窗還在未來（後者只在會 fetch 時查；接受 `2026-10-08`、
 `2026-10-08T00:00:00Z`、`...+00:00` 三種寫法）；只給 `--perp-db` 沒給 `--perp-run-id`（反之亦然）；現貨 run 的計價幣不是
 美元穩定幣（USDC／USDT／DAI，否則 equity 單位對不上 perp）；`--perp-run-id`／`--spot-run-id` 在 store 裡沒有 equity 列
 （打錯 run id 跟剛開的 run 長得一樣，不能靜默退回等額；真的剛開、還沒有快照的 run，那一次把該腿的兩個 store 旗標

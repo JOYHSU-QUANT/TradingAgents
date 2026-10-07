@@ -84,12 +84,16 @@ A ``verdict`` exits 0 once every traded token has a verdict at the bar, by
 this visit or an earlier one, and also when the bar is suspect, which no run
 decides, so no judge is asked. It warns on stderr of a verdict that holds no
 rating (``REVIEW``). It exits 3, keeping the verdicts given so far, when the
-store has no bar at the boundary yet, and when the judge did not answer:
-whoever schedules it runs it again later. It exits 1 when the config reads
-no verdicts, when a traded token has no ticker, when the judge cannot be
-built (its provider's key is not in the environment) or its provider
-refuses the question for good (a model it does not serve), when ``--at``
-names an older bar than the latest without ``--fake-rating``, and when
+store has no bar at the boundary yet, and when the judge did not answer for
+a reason that may pass (the provider's rate limit, timeout, server error or
+empty balance, a network error, a data vendor down): whoever schedules it
+runs it again later. It exits 1, keeping the verdicts given so far as well,
+when the config reads no verdicts, when a traded token has no ticker, when
+the judge cannot be set up or built (the engine is not installed, its
+provider's key is not in the environment) or failed for good (any other
+refusal of the provider's, such as a model it does not serve, or an error
+inside the engine), when the sidecar cannot be written, when ``--at`` names
+an older bar than the latest without ``--fake-rating``, and when
 ``--fake-rating`` meets a store that holds real verdicts of the source.
 """
 
@@ -1170,6 +1174,7 @@ def main(
         OSError,
         StoreError,
     ) as exc:
-        # OSError: a sidecar that could not be written beside the store.
+        # OSError: a local file that could not be written or read, the sidecar
+        # beside the store first of all; the chain reader wraps its own.
         print(f"failed: {_one_ascii_line(exc)}", file=sys.stderr)
         return EXIT_FAILED

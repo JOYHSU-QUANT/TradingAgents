@@ -201,6 +201,69 @@ def test_an_error_of_the_engines_own_or_a_refusal_spelled_code_is_for_good(
         judge.ask("ETH-USD", "2024-01-03", "context")
 
 
+class _CurlError(Exception):
+    """Shaped like curl_cffi's errors: an int ``code`` that is a curl error number, not a status."""
+
+    def __init__(self, code):
+        super().__init__("curl failed")
+        self.code = code
+
+
+# Named as curl_cffi names its error, without shadowing the builtin in this module.
+_CurlConnectionError = type("ConnectionError", (_CurlError,), {})
+
+
+class VendorRateLimitError(Exception):
+    """Named as the engine's data-vendor throttling error."""
+
+
+class _VendorThrottled(VendorRateLimitError):
+    """A vendor's own subclass, as the engine derives them."""
+
+
+class _WithResponse(Exception):
+    def __init__(self, status):
+        super().__init__("http error")
+        self.response = type("Response", (), {"status_code": status})()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        _CurlConnectionError(7),
+        _CurlConnectionError(28),
+        _VendorThrottled("throttled"),
+        _WithResponse(503),
+    ],
+)
+def test_a_curl_error_a_vendor_error_or_a_status_on_the_response_may_pass(tmp_path, stub, error):
+    stub.answer_error = error
+    judge = TradingAgentsJudge(AgentSettings(), tmp_path, graph_class=stub)
+    with pytest.raises(JudgeUnavailable):
+        judge.ask("ETH-USD", "2024-01-03", "context")
+
+
+def test_a_non_http_code_or_a_refusal_on_the_response_is_for_good(tmp_path, stub):
+    for error in (_CurlError(7), _WithResponse(404)):
+        stub.answer_error = error
+        judge = TradingAgentsJudge(AgentSettings(), tmp_path, graph_class=stub)
+        with pytest.raises(AgentError, match="for good"):
+            judge.ask("ETH-USD", "2024-01-03", "context")
+
+
+def test_a_suppressed_context_is_not_followed(tmp_path, stub):
+    try:
+        try:
+            raise ConnectionResetError("reset")
+        except ConnectionResetError:
+            raise KeyError("market_report") from None
+    except KeyError as permanent:
+        stub.answer_error = permanent
+    judge = TradingAgentsJudge(AgentSettings(), tmp_path, graph_class=stub)
+    with pytest.raises(AgentError, match="for good"):
+        judge.ask("ETH-USD", "2024-01-03", "context")
+
+
 def test_the_provider_status_is_read_through_the_exception_chain(tmp_path, stub):
     try:
         try:

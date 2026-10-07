@@ -33,3 +33,21 @@ def test_decimal_sum_ignores_the_ambient_context(prec):
         ambient.rounding = ROUND_DOWN
         assert sum(WIDE, Decimal(0)) != WIDE_SUM  # the ambient context would say otherwise
         assert decimal_sum(WIDE) == WIDE_SUM
+
+
+def test_the_estimators_refuse_too_few_values():
+    from decimal import Decimal
+
+    import pytest
+
+    from contrib.uniswap_v3.domain.decimal_context import log_returns, mean, sample_volatility
+
+    with pytest.raises(ValueError, match="at least one value"):
+        mean([])
+    with pytest.raises(ValueError, match="at least two returns, got 1"):
+        sample_volatility([Decimal("0.1")], Decimal(1))
+    assert log_returns([Decimal("100")]) == []
+    assert mean([Decimal("1"), Decimal("3")]) == Decimal("2")
+    # Two equal returns: no deviation, whatever the annualiser.
+    assert sample_volatility([Decimal("0.1"), Decimal("0.1")], Decimal(19)) == Decimal("0")
+

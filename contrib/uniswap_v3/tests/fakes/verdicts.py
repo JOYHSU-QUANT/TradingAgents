@@ -92,8 +92,7 @@ class ScriptedJudge:
         decision = (
             f"The scripted judge on {ticker} as of {trade_date} came to no rating."
             if rating is Rating.REVIEW
-            else f"**Rating**: {rating.value}" + chr(10) * 2
-            + f"The scripted judge on {ticker} as of {trade_date}."
+            else f"**Rating**: {rating.value}\n\nThe scripted judge on {ticker} as of {trade_date}."
         )
         reports: dict[str, object] = {"selected_analysts": ["market"]}
         reports.update(dict.fromkeys(REPORT_KEYS))

@@ -266,7 +266,7 @@ python -m contrib.uniswap_v3 report --db contrib/uniswap_v3/data/paper.db --run-
 | `failed: the run 'paper-1' was started under another config` | 設定檔改了，或新版程式改了預設值 | run 只能在開它的設定下接續：見 §6 開新 run |
 | `failed: ... the clock is behind` | 這台機器的時鐘早於 run 已走到的邊界 | 校時 |
 | `failed: the strategy refused the bar at ... (ai_gated_weights reads verdicts, and the view carries none ...)` | 策略讀判斷，設定檔卻沒有 `verdicts` 區塊 | 設定補上 `verdicts`，用新的 run id 開 run（原 run 已開在沒有判斷的設定下） |
-| `verdict`：`try again later: the store has no bar at ...` 接 `exit 3` | 當天的 bar 還沒進 store（`verdict` 跑在 backfill／paper 之前，或節點落後） | 當天後面的重試會補；順序見 §2.5 |
+| `verdict`：`try again later: the store has no bar at ...` 接 `exit 3` | 當天的 bar 還沒進 store（前一步的 `backfill` 沒跑或沒讀到，多半是節點落後） | 當天後面的重試會補；順序見 §2.5 |
 | `verdict`：`try again later: the judge did not answer on ETH-USD (...)` 接 `exit 3` | 原因可能會過：閘道回 402（額度）、408、429、5xx，或連線／逾時類錯誤；已答的代幣已寫進 store | 當天後面的重試只問剩下的；**一整天都是 3** 就查 OpenRouter 額度與服務狀態 |
 | `verdict`：`failed: the judge cannot be built (ValueError: API key for provider 'openrouter' is not set. Please set ...)` | `.env`（或環境）沒有供應商的 key | 補 key |
 | `verdict`：`failed: the judge failed on ... for good (...)` | 供應商回其他 4xx（模型名打錯、key 無效、請求格式不對）或引擎自己出錯（KeyError 之類），重試也一樣、還會先花掉分析師的呼叫 | 對照 `agent` 區塊的模型名與 key；是引擎的錯就看括號裡的例外 |
@@ -443,5 +443,6 @@ WantedBy=timers.target
 
 跑 `ai_gated_weights` 時 `ExecStart` 是 §2.5 的三步：先把今天的 bar 讀進來、再問判斷、最後 visit，前一步成功才跑下一步，
 失敗就把它的結束碼當這次 visit 的
-（`sh -c 'D="$(date -u +%F)"; python -m dotenv run -- python -m contrib.uniswap_v3 backfill --config ... --db ... --from "$D" && python -m dotenv run -- python -m contrib.uniswap_v3 verdict --config ... --db ... && python -m dotenv run -- python -m contrib.uniswap_v3 paper --config ... --db ... --run-id ...'`），
+（`ExecStart=/bin/sh -c 'D="$$(date -u +%%F)"; python -m dotenv run -- python -m contrib.uniswap_v3 backfill --config ... --db ... --from "$$D" && python -m dotenv run -- python -m contrib.uniswap_v3 verdict --config ... --db ... && python -m dotenv run -- python -m contrib.uniswap_v3 paper --config ... --db ... --run-id ... >> contrib/uniswap_v3/data/paper-visits.log 2>&1'`；
+unit 檔裡 `%` 要寫成 `%%`、`$` 要寫成 `$$`，systemd 才不會自己展開），
 `TimeoutStartSec` 也要把兩個代幣各約 11 分鐘的問答算進去（例如 60min）。正式的 unit 與 Lightsail 部署步驟是下一張 PR 的事。

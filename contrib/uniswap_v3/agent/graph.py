@@ -83,9 +83,11 @@ _DECISION_KEY: Final = "final_trade_decision"
 _ASSET_TYPE: Final = "crypto"
 # Provider statuses that say "later": an empty balance, a timeout, a rate limit.
 _PASSING_STATUSES: Final = frozenset({402, 408, 429})
-# Error classes of the network and the provider SDKs that say "later", by name:
-# the SDKs are not imported here, and the names are shared by openai, httpx,
-# requests and urllib3.
+# Error classes that say "later", by name, matched anywhere in an error's class
+# hierarchy: the network's and the provider SDKs' transport errors (the SDKs
+# are not imported here, and the names are shared by openai, httpx, requests,
+# urllib3 and curl_cffi), and the engine's own "vendor down" and "vendor
+# throttled" errors, which every data vendor's error derives from.
 _PASSING_ERRORS: Final = frozenset(
     {
         "APIConnectionError",
@@ -93,7 +95,6 @@ _PASSING_ERRORS: Final = frozenset(
         "ConnectError",
         "ConnectTimeout",
         "ConnectionError",
-        "ConnectionResetError",
         "MaxRetryError",
         "NewConnectionError",
         "PoolTimeout",
@@ -104,6 +105,8 @@ _PASSING_ERRORS: Final = frozenset(
         "TimeoutError",
         "TimeoutException",
         "TransportError",
+        "VendorRateLimitError",
+        "VendorUnavailableError",
         "WriteError",
         "WriteTimeout",
     }
@@ -281,11 +284,18 @@ class TradingAgentsJudge:
 
 
 def _status_of(exc: BaseException) -> int | None:
-    """The HTTP status an error carries, as the provider SDKs spell it (``status_code``, or ``code``)."""
-    for name in ("status_code", "code"):
-        status = getattr(exc, name, None)
-        if isinstance(status, int) and not isinstance(status, bool):
-            return status
+    """The HTTP status an error carries, when it carries one.
+
+    The provider SDKs spell it ``status_code`` or ``code`` on the error;
+    ``requests`` and ``httpx`` keep it on the error's ``response``. A number
+    outside the HTTP range is not a status: curl's error numbers ride on a
+    ``code`` too.
+    """
+    for owner in (exc, getattr(exc, "response", None)):
+        for name in ("status_code", "code"):
+            status = getattr(owner, name, None)
+            if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
+                return status
     return None
 
 
@@ -295,9 +305,12 @@ def _may_pass(exc: BaseException) -> bool:
     A provider's status is read first: a server error, a rate limit, a
     timeout or an empty balance may pass, and any other 4xx (a model it
     does not serve, a key it does not accept, a request it cannot read)
-    will not. Without a status, an error of the network's or the SDK's
-    transport, known by its class name, may pass; anything else is taken
-    to be the engine's own, and permanent.
+    will not. Without a status, an error of the network's, the SDK's
+    transport or a data vendor's, known by a class name in its hierarchy,
+    may pass; anything else is taken to be the engine's own, and
+    permanent. The chain is followed through causes, and through the
+    context of an error only where that context was not suppressed
+    (``raise ... from None``).
     """
     seen: set[int] = set()
     current: BaseException | None = exc
@@ -306,12 +319,11 @@ def _may_pass(exc: BaseException) -> bool:
         status = _status_of(current)
         if status is not None:
             return status >= 500 or status in _PASSING_STATUSES
-        if (
-            isinstance(current, ConnectionError | TimeoutError)
-            or type(current).__name__ in _PASSING_ERRORS
-        ):
+        if any(cls.__name__ in _PASSING_ERRORS for cls in type(current).__mro__):
             return True
-        current = current.__cause__ or current.__context__
+        current = current.__cause__ or (
+            None if current.__suppress_context__ else current.__context__
+        )
     return False
 
 

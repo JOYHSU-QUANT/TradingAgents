@@ -41,6 +41,9 @@ if not "%PYTHON:\=%"=="%PYTHON%" if not exist "%PYTHON%" (
 rem No --balance or --gas-eth: the run is started by hand once (RUNBOOK.md).
 rem A visit to a run that is not there then fails with exit 1 instead of
 rem quietly starting a new run under a mistyped --db or --run-id.
+rem A log that stopped taking writes since the header (read-only, locked by
+rem another program) would fail the redirect below with a code that is not 4.
+>>"%LOG%" (call ) || exit /b 4
 "%PYTHON%" -m dotenv run -- "%PYTHON%" -m contrib.uniswap_v3 paper --config "%CONFIG%" --db "%DB%" --run-id "%RUN_ID%" >>"%LOG%" 2>&1
 set "CODE=%ERRORLEVEL%"
 >>"%LOG%" echo ==== exit %CODE%

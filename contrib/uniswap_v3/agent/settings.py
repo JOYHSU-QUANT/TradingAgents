@@ -8,6 +8,7 @@
       quick_think_llm: "deepseek/deepseek-chat"
       selected_analysts: [market, social, news]
       max_tokens: 8192
+      ask_within_seconds: 14400
 
 The defaults are the models the Hyperliquid paper run is judged by, so
 that the two scorecards compare. ``llm_provider`` is a provider the
@@ -19,7 +20,16 @@ any of ``market``, ``social`` and ``news``; the engine's fourth, the
 fundamentals analyst, reads a company's statements and has no crypto
 branch, so it is refused here, where every ticker is a crypto asset.
 ``max_tokens`` caps every completion: a gateway asked for no cap may
-refuse every call, so a cap is always sent.
+refuse every call, so a cap is always sent. ``ask_within_seconds`` is how
+long after a bar's boundary the judge may still be asked about it: it
+reads news and prices through the moment it is asked, so a late question
+sees hours past the fill the run trades at, which the control run never
+does. Past the window the tokens not yet judged are left unrated, while
+verdicts already stored stand (the default, four hours, covers the
+scheduled visit and its two retries; the least is 3600 seconds, which the
+first visit's verdict, asked 10 to 35 minutes after the boundary, always
+clears, so a typo cannot leave every bar unrated); a fake rating is not
+bound by it.
 
 None of this enters a run's config snapshot: the verdicts a run reads are
 data in the store, which record the model that gave each one, and which
@@ -50,6 +60,7 @@ class AgentSettings:
     quick_think_llm: str = "deepseek/deepseek-chat"
     selected_analysts: tuple[str, ...] = ("market", "social", "news")
     max_tokens: int = 8192
+    ask_within_seconds: int = 14_400
 
     def __post_init__(self) -> None:
         require_text(self.llm_provider, "llm_provider")
@@ -78,3 +89,4 @@ class AgentSettings:
             raise ValueError(f"selected_analysts names an analyst twice: {list(analysts)}")
         object.__setattr__(self, "selected_analysts", analysts)
         require_count(self.max_tokens, "max_tokens", at_least=1)
+        require_count(self.ask_within_seconds, "ask_within_seconds", at_least=3600)

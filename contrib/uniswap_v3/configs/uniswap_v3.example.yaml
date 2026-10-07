@@ -71,16 +71,24 @@ rpc:
 # variable the engine names for it, OPENROUTER_API_KEY here, never from this
 # file), with these analysts before its debate (any of market, social and
 # news; the engine's fundamentals analyst reads a company's statements and is
-# refused for a crypto asset), every completion capped at max_tokens. These are the defaults, the Hyperliquid paper run's judge, so that
-# the two scorecards compare; the whole section may be left out. It is not part
-# of the config's snapshot: the verdicts a run reads name the model that gave
-# each one. Only the verdict command reads it.
+# refused for a crypto asset), every completion capped at max_tokens, and
+# asked about a bar only within ask_within_seconds of its boundary: the judge
+# reads news and prices through the moment it is asked, so a later question
+# would see hours past the fill the run trades at, and the tokens not judged
+# yet are left unrated instead, what was stored standing (at least 3600, which
+# the first visit always clears; a fake rating is not bound by it). These are
+# the defaults, the
+# Hyperliquid paper run's judge, so that the two scorecards compare; the
+# whole section may be left out. It is not part of the config's snapshot: the
+# verdicts a run reads name the model that gave each one. Only the verdict
+# command reads it.
 agent:
   llm_provider: openrouter
   deep_think_llm: "anthropic/claude-sonnet-4-6"
   quick_think_llm: "deepseek/deepseek-chat"
   selected_analysts: [market, social, news]
   max_tokens: 8192
+  ask_within_seconds: 14400
 
 # fixed_weights is a placeholder that drives the engine: hold these shares of
 # portfolio value, and rebalance when one is more than `band` (absolute

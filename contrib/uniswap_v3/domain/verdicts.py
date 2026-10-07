@@ -40,6 +40,7 @@ __all__ = [
     "require_source",
     "require_text",
     "text_digest",
+    "usable_rating",
 ]
 
 
@@ -181,3 +182,12 @@ class VerdictSettings:
 
     def __post_init__(self) -> None:
         require_source(self.source)
+
+
+def usable_rating(verdict: Verdict | None) -> Rating | None:
+    """The rating a strategy can act on: ``None`` for no verdict, and for a ``REVIEW``, which holds none.
+
+    The one place the rule lives: the strategy that reads verdicts and the
+    replay that counts bars decided without a rating both go through it.
+    """
+    return None if verdict is None or verdict.rating.is_review else verdict.rating

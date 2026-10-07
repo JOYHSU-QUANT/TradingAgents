@@ -73,7 +73,7 @@ from typing import Final
 
 from ..domain.decimal_context import DECIMAL_CONTEXT, parse_decimal
 from ..domain.types import Hold, MarketView, Portfolio, TargetWeights
-from ..domain.verdicts import RATINGS, Rating
+from ..domain.verdicts import RATINGS, Rating, usable_rating
 from .rebalance import (
     floor_weight,
     rebalance_or_hold,
@@ -185,8 +185,8 @@ class AiGatedWeights:
         risky: dict[str, Decimal] = {}
         for symbol in sorted(view.latest.prices):
             weight = allowed[symbol]
-            verdict = said.get(symbol)
-            if verdict is None or verdict.rating.is_review:
+            rating = usable_rating(said.get(symbol))
+            if rating is None:
                 # No new risk: what is held stays (to the weights' places), and what the
                 # rule would not hold is sold.
                 held = (
@@ -197,7 +197,7 @@ class AiGatedWeights:
                 risky[symbol] = min(held, weight)
             else:
                 risky[symbol] = floor_weight(
-                    DECIMAL_CONTEXT.multiply(weight, self.multipliers[verdict.rating])
+                    DECIMAL_CONTEXT.multiply(weight, self.multipliers[rating])
                 )
         # No weight is above the rule's, so together they are at most 1.
         return weights_with_quote(risky, quote)

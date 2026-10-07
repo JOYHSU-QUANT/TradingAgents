@@ -13,11 +13,18 @@ from contrib.uniswap_v3.domain.verdicts import (
     VerdictRecord,
     VerdictSettings,
     text_digest,
+    usable_rating,
 )
 from contrib.uniswap_v3.tests.fakes.engine import DAY, FIRST_DAY
 from contrib.uniswap_v3.tests.fakes.verdicts import SOURCE, record, verdict
 
 _DIGEST = "ab" * 32
+
+
+def test_a_usable_rating_is_one_a_strategy_can_act_on():
+    assert usable_rating(None) is None
+    assert usable_rating(verdict(rating=Rating.REVIEW)) is None
+    assert usable_rating(verdict(rating=Rating.SELL)) is Rating.SELL
 
 
 def test_the_ratings_are_the_five_tiers_the_graph_answers_in_and_review():

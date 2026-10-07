@@ -1,0 +1,4 @@
+# Run on the Linux host as they are: no CRLF on a Windows checkout.
+*.sh text eol=lf
+*.service text eol=lf
+*.timer text eol=lf

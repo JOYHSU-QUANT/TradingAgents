@@ -20,7 +20,7 @@ Uniswap v3 現貨的執行架構：策略只回答「目標比例是多少」，
 `deploy/paper` 的部署。上游的 `tradingagents` 引擎只有 `agent/` 這一層會 import（測試除外；同一個測試釘住），
 而且是用到時才載入：`verdict` 以外的指令都不等它的相依。
 
-操作步驟（開 run、掛排程、出事怎麼辦）見 [RUNBOOK.md](./RUNBOOK.md)。
+操作步驟（伺服器部署、開 run、掛排程、出事怎麼辦）見 [RUNBOOK.md](./RUNBOOK.md)。
 
 ---
 
@@ -131,7 +131,8 @@ contrib/uniswap_v3/
   backfill.py           把一段 bar 從 archive 節點讀進 store
   paper.py              paper 的一次 visit
   fork_run.py           fork run，以及未結 send 與錢包的對照
-  schedule/             Windows 工作排程器的 task 與 visit 腳本（本機設定放 *.local.cmd）
+  schedule/             排程：Linux 的 visit 腳本、systemd unit 與 Lightsail 安裝腳本（本機設定放 paper-visit.local.sh）；
+                        Windows 工作排程器的 task 與 visit 腳本（本機設定放 *.local.cmd）
   data/                 （gitignored）排程的 store 與 log
   configs/              設定範例
   tests/                全部用 fake 或錄好的回應；打真節點的只有標成 smoke 的
@@ -170,20 +171,20 @@ store 與 sidecar 要一起搬）。同一（source、代幣、bar）問過就�
 | `backfill --config C --db D --from 2022-01-01 [--to …] [--dry-run]` | 把一段 bar 讀進 store；可重複執行，已有的不重讀 | 是（archive） |
 | `status --config C --db D [--bars N] [--run-id R]` | store 的範圍與最近 N 根 bar；設定檔有 `verdicts` 區塊時另印最近 N 根有判斷的覆蓋率；加 `--run-id` 再印該 run 的持倉、價值、報酬與最近 N 筆決策（含決策時間，讀判斷的 run 附每筆看到每個交易代幣的評等：`WBTC=none, WETH=Buy`，store 裡的判斷與決策看到的不同——事後補進、改了或刪了——印 `changed`）；paper run 另印跟不跟得上時鐘 | 否 |
 | `backtest --config C --db D --run-id R --from … [--to …] [--fills model\|quoter] [--balance USDC=10000 … --gas-eth 0.5]` | 用 store 的 bar 跑回測；新 run 要給起始餘額 | 只有 `--fills quoter` |
-| `paper --config C --db D --run-id R [--balance … --gas-eth …]` | paper 的一次 visit：補讀上次之後的 bar 並逐根決策 | 是 |
+| `paper --config C --db D --run-id R [--balance … --gas-eth …]` | paper 的一次 visit：補讀上次之後的 bar 並逐根決策；讀判斷的 run 這次決策的 bar 裡有代幣沒評等（沒判斷或 `REVIEW`）時 stderr 警告一行（replay 的 summary 數的，回測不警告） | 是 |
 | `fork --config C --db D --run-id R --from … [--to …] [--fork-url http://127.0.0.1:8545] [--balance … --gas-eth …]` | 用 store 的 bar 跑 fork run：每根要交易的 bar 在本機 anvil 分叉上簽名送出，前後對帳；有未結 send 時印出對照、結束碼 1 | 只讀分叉（分叉向 archive 節點取狀態） |
-| `report --db D --run-id R` | 報酬、最大回撤、周轉、成本拆解，並列「起始持倉不動」與「全放 USDC」兩個對照組 | 否 |
-| `verdict --config C --db D [--at 2024-01-01] [--fake-rating Buy]` | 對設定交易的每個代幣問 judge（TradingAgents graph）在**最近一個已過邊界**那根 bar 的判斷並寫進 store；問過的不再問；bar 還沒進 store 就結束碼 3。judge 讀的資料到問的那天為止，所以只問最新一根才誠實：`--at` 指更早的邊界只能配 `--fake-rating`（不打模型、直接寫該評等，只准用在沒有真判斷的 store） | 否（打 LLM；`agent` 區塊的供應商要有 key，見下） |
+| `report --db D --run-id R` | 報酬、最大回撤、周轉、成本拆解，並列「起始持倉不動」與「全放 USDC」兩個對照組；讀判斷的 run 另印幾根決策看到每個交易代幣的判斷、幾根只看到部分、幾根沒看到（`REVIEW` 算看到） | 否 |
+| `verdict --config C --db D [--at 2024-01-01] [--fake-rating Buy]` | 對設定交易的每個代幣問 judge（TradingAgents graph）在**最近一個已過邊界**那根 bar 的判斷並寫進 store；問過的不再問；bar 還沒進 store 就結束碼 3。judge 讀的資料到問的那天為止，所以只問最新一根才誠實：`--at` 指更早的邊界只能配 `--fake-rating`（不打模型、直接寫該評等，只准用在沒有真判斷的 store）；邊界過了超過 `agent.ask_within_seconds`（預設 4 小時、最低 1 小時）才問的話，還沒問的代幣不問、結束碼 0、那根沒判斷，已寫進的判斷照用（judge 讀到被問的那一刻，太晚問會比成交多看好幾個小時） | 否（打 LLM；`agent` 區塊的供應商要有 key，見下） |
 
 結束碼：
 
 | 碼 | 意思 | 排程該怎麼做 |
 |---|---|---|
-| 0 | 跑完了（含「這根已經決策過」、成交被拒、邊界沒答案；後兩者 stderr 有警告；`verdict` 的「問過了」、bar 是 suspect 所以沒問、judge 回 `REVIEW`——最後一個 stderr 有警告） | 不用動 |
+| 0 | 跑完了（含「這根已經決策過」、成交被拒、邊界沒答案；後兩者 stderr 有警告；`verdict` 的「問過了」、bar 是 suspect 所以沒問、邊界過了 `agent.ask_within_seconds` 所以沒問、judge 回 `REVIEW`——後兩者 stderr 有警告） | 不用動 |
 | 1 | 跑不下去，原樣重跑也不會好：設定、store、範圍、節點設定、時鐘落後於 run；fork 的錢包與帳本不符、run 有未結 send；`verdict` 的設定沒有 `verdicts` 區塊、代幣沒有 ticker、judge 建不起來（沒有 key）、供應商拒絕或引擎自己出錯（模型名打錯的 4xx、KeyError 之類）、`--at` 指舊邊界卻沒配 `--fake-rating`、`--fake-rating` 遇到有真判斷的 store、sidecar 寫不進去 | 看 log、修好 |
 | 2 | 命令列打錯（argparse） | 修排程的指令 |
 | 3 | 稍後再跑可能就好：節點連不上、落後（還沒到邊界或成交區塊）、回了錯誤，或 store 被別的程式鎖住；`verdict` 的 bar 還沒進 store、judge 沒答而原因可能會過（閘道／網路／額度：402、408、429、5xx 或連線逾時；分析師的資料源被限流或掛了；已答的代幣保留，下次只問剩下的） | 稍後再跑（排程一天三次就是為了這個） |
-| 4 | 只有排程的 visit 腳本會給：進不了 repo 目錄、寫不了 log，或 `PYTHON` 的路徑不存在，visit 沒有跑 | 看 RUNBOOK §5 |
+| 4 | 只有排程的 visit 腳本（`schedule/paper-visit.sh`、`.cmd`）會給：進不了 repo 目錄、寫不了 log，或 `PYTHON` 的路徑不存在，visit 沒有跑；或 log 在 visit 中途變成寫不了，前面幾步跑了、後面沒跑 | 看 RUNBOOK §5（Windows：附錄 B.2） |
 
 ---
 

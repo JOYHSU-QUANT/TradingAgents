@@ -1,10 +1,16 @@
-"""The shipped Windows schedule: when it visits, and what each visit runs."""
+"""The shipped schedules, Windows and Linux: when they visit, and what each visit runs."""
 
 from __future__ import annotations
 
+import os
+import re
+import shutil
+import subprocess
 import xml.etree.ElementTree as ElementTree
 from datetime import datetime
 from pathlib import Path
+
+import pytest
 
 from contrib.uniswap_v3.config import load_config
 
@@ -33,13 +39,14 @@ def _visit_times() -> list[int]:
     return times
 
 
-def _visit_lines() -> list[str]:
-    return _VISIT.read_text(encoding="ascii").splitlines()
+def _visit_lines(script: Path = _VISIT) -> list[str]:
+    return script.read_text(encoding="ascii").splitlines()
 
 
-def _at(prefix: str) -> int:
-    """The index of the visit script's first line that starts with ``prefix``."""
-    return next(index for index, line in enumerate(_visit_lines()) if line.startswith(prefix))
+def _at(prefix: str, script: Path = _VISIT) -> int:
+    """The index of the visit script's first line that starts with ``prefix``, indented or not."""
+    lines = _visit_lines(script)
+    return next(index for index, line in enumerate(lines) if line.lstrip().startswith(prefix))
 
 
 def _limit_seconds() -> int:
@@ -91,6 +98,8 @@ def test_a_visit_that_cannot_reach_the_repository_or_its_log_exits_4_and_runs_no
     cd, header, paper = _at("cd /d "), _at('>>"%LOG%" echo ==== %DATE%'), _at('"%PYTHON%" -m')
     assert lines[cd].endswith("|| exit /b 4") and lines[header].endswith("|| exit /b 4")
     assert cd < header < paper
+    # The log is checked again right before the visit: it may have stopped taking writes.
+    assert lines[paper - 1] == '>>"%LOG%" (call ) || exit /b 4'
 
 
 def test_a_visit_takes_its_settings_from_a_local_file_and_prints_unbuffered():
@@ -114,3 +123,255 @@ def test_a_visit_echoes_its_settings_in_quotes():
     for name in ("RUN_ID", "DB", "PYTHON"):
         uses = [line for line in echoes if f"%{name}%" in line]
         assert uses and all(f'"%{name}%"' in line for line in uses), name
+
+
+# The Linux schedule: the visit script a systemd timer runs, and the units.
+
+_VISIT_SH = _PACKAGE / "schedule" / "paper-visit.sh"
+_INSTALL_SH = _PACKAGE / "schedule" / "lightsail-install.sh"
+_SERVICE = _PACKAGE / "schedule" / "uniswap-v3-paper.service"
+_TIMER = _PACKAGE / "schedule" / "uniswap-v3-paper.timer"
+_SH = shutil.which("sh")
+
+
+def _unit(path: Path) -> dict[str, list[str]]:
+    """A unit file's keys to their values, in order; a key given twice has two."""
+    values: dict[str, list[str]] = {}
+    for line in path.read_text(encoding="ascii").splitlines():
+        if line.startswith("#") or not line.strip() or line.startswith("["):
+            continue
+        key, _, value = line.partition("=")
+        values.setdefault(key, []).append(value)
+    return values
+
+
+def _timer_times() -> list[int]:
+    """The seconds after 00:00 UTC each OnCalendar fires at, in order."""
+    times = []
+    for when in _unit(_TIMER)["OnCalendar"]:
+        date, clock, zone = when.split()
+        assert date == "*-*-*" and zone == "UTC", when
+        hour, minute, second = (int(part) for part in clock.split(":"))
+        times.append(hour * 3600 + minute * 60 + second)
+    return times
+
+
+def test_the_timer_visits_three_times_a_day_after_the_bar_fills_and_catches_up():
+    times = _timer_times()
+    assert times == [600, 4200, 7800]
+    delay_blocks = load_config(_EXAMPLE).execution.delay_blocks
+    assert times[0] > (delay_blocks + 1) * _BLOCK_SECONDS
+    timer = _unit(_TIMER)
+    assert timer["Persistent"] == ["true"]
+    assert timer["Unit"] == ["uniswap-v3-paper.service"]
+    assert timer["WantedBy"] == ["timers.target"]
+
+
+def test_the_service_is_stopped_before_the_next_visit_is_due_and_runs_the_script_as_trader():
+    service = _unit(_SERVICE)
+    times = _timer_times()
+    gaps = [later - earlier for earlier, later in zip(times, times[1:], strict=False)]
+    limit = service["TimeoutStartSec"][0]
+    assert limit.endswith("min") and int(limit[:-3]) * 60 < min(gaps)
+    assert service["Type"] == ["oneshot"]
+    assert service["User"] == ["trader"]
+    assert service["WorkingDirectory"] == ["/home/trader/uniswap-paper"]
+    # Short of memory, the kernel takes the visit, not the paper daemon beside it.
+    assert service["OOMScoreAdjust"] == ["500"]
+    assert service["ExecStart"] == [
+        "/home/trader/uniswap-paper/contrib/uniswap_v3/schedule/paper-visit.sh"
+    ]
+
+
+def test_the_linux_visit_takes_its_settings_from_a_local_file_before_using_them():
+    names = ("RUN_TREND", "RUN_AI", "CONFIG_TREND", "CONFIG_AI", "DB", "LOG", "PYTHON")
+    defaults = [_at(f"{name}=", _VISIT_SH) for name in names]
+    reads = 'if [ -f "$here/paper-visit.local.sh" ]; then . "$here/paper-visit.local.sh"'
+    local = _at(reads, _VISIT_SH)
+    root = _at('cd "$here/../../.."', _VISIT_SH)
+    assert max(defaults) < local < root
+    lines = _visit_lines(_VISIT_SH)
+    assert lines[root].endswith("|| exit 4")
+    assert "export PYTHONUNBUFFERED=1" in lines
+    assert lines[_at('"$PYTHON" -m dotenv run --', _VISIT_SH)].endswith('>>"$LOG" 2>&1')
+
+
+def test_the_installer_waits_for_a_running_visit_by_its_state_not_by_is_active():
+    # A oneshot service that is running is "activating", which is-active exits 3 on.
+    lines = [line.strip() for line in _visit_lines(_INSTALL_SH)]
+    state = next(index for index, line in enumerate(lines) if "ActiveState" in line)
+    assert lines[state].startswith('case "$(systemctl show -p ActiveState --value')
+    assert lines[state + 1] == "active | activating)"
+    assert "return 3" in lines[state + 1 : state + 6]
+    # The timer's state is read with is-active (it is no oneshot); the service's never is.
+    service = [line for line in lines if "is-active" in line and "$UNIT.service" in line]
+    assert service == []
+
+
+def test_the_installer_is_parsed_whole_before_it_runs():
+    # The upgrade rewrites the checkout, the installer with it: everything before the
+    # one call at the very end only defines things, so the whole run is read first.
+    lines = _visit_lines(_INSTALL_SH)
+    top = [
+        line
+        for line in lines[: lines.index('main "$@"')]
+        if line and not line[0].isspace() and not line.startswith("#")
+    ]
+    for line in top:
+        defines = line in ("set -eu", "}") or line.endswith("() {") or re.match(r"[A-Z_]+=", line)
+        assert defines, line
+    assert [line for line in lines if line.strip()][-2:] == ['main "$@"', "exit"]
+
+
+def test_the_shell_scripts_parse():
+    if _SH is None:
+        pytest.skip("no sh on this machine")
+    for script in (_VISIT_SH, _INSTALL_SH):
+        subprocess.run([_SH, "-n", str(script)], check=True)
+
+
+# A python that records what it is asked, one line per call, and exits as told
+# for the command (the word after contrib.uniswap_v3); the second paper call,
+# the AI run's, is told apart by EXIT_PAPER_AI. Told LOCK_LOG, it takes the
+# write bit off that file, as a log that stops taking writes mid-visit.
+_STUB = """#!/bin/sh
+printf '%s\\n' "$*" >>"$STUB_LOG"
+if [ -n "${LOCK_LOG:-}" ]; then chmod a-w "$LOCK_LOG"; fi
+case "$*" in
+    *" contrib.uniswap_v3 paper "*)
+        if [ "$(grep -c ' contrib.uniswap_v3 paper ' "$STUB_LOG")" -ge 2 ]; then
+            exit "${EXIT_PAPER_AI:-0}"
+        fi
+        exit "${EXIT_PAPER:-0}" ;;
+    *" contrib.uniswap_v3 backfill "*) exit "${EXIT_BACKFILL:-0}" ;;
+    *" contrib.uniswap_v3 verdict "*) exit "${EXIT_VERDICT:-0}" ;;
+esac
+exit 0
+"""
+
+
+def _visit(
+    tmp_path: Path, monkeypatch, python: str | None = None, extra: str = "", **exits: int
+) -> tuple[int, list[list[str]], list[str]]:
+    """Run a copy of the Linux visit script, laid out as in the repository, with a stub python.
+
+    The local settings name ``python`` (the stub, by default), the log and a
+    store, and then ``extra``, more lines of the file. Returns the exit code,
+    the words of each call the stub was asked in order, and the log's lines.
+    """
+    if _SH is None:
+        pytest.skip("no sh on this machine")
+    schedule = tmp_path / "contrib" / "uniswap_v3" / "schedule"
+    schedule.mkdir(parents=True)
+    script = schedule / "paper-visit.sh"
+    script.write_bytes(_VISIT_SH.read_bytes())
+    stub = tmp_path / "python"
+    stub.write_text(_STUB, encoding="ascii")
+    stub.chmod(0o755)
+    # Quoted, as a value with a space in it has to be: the file is sourced.
+    settings = f'PYTHON="{stub.as_posix() if python is None else python}"\n'
+    settings += "LOG=visits.log\nDB=store.db\n" + extra
+    (schedule / "paper-visit.local.sh").write_text(settings, encoding="ascii")
+    asked = tmp_path / "asked.txt"
+    monkeypatch.setenv("STUB_LOG", asked.as_posix())
+    for name, code in exits.items():
+        monkeypatch.setenv(name, str(code))
+    done = subprocess.run([_SH, str(script)], check=False)
+    calls = []
+    if asked.is_file():
+        calls = [line.split() for line in asked.read_text(encoding="ascii").splitlines()]
+    log = (tmp_path / "visits.log").read_text(encoding="ascii").splitlines()
+    return done.returncode, calls, log
+
+
+def _commands(calls: list[list[str]]) -> list[str]:
+    return [words[words.index("contrib.uniswap_v3") + 1] for words in calls]
+
+
+def test_a_linux_visit_runs_the_control_run_then_backfill_verdict_and_the_ai_run(
+    tmp_path, monkeypatch
+):
+    code, calls, log = _visit(tmp_path, monkeypatch)
+    assert code == 0
+    assert _commands(calls) == ["paper", "backfill", "verdict", "paper"]
+    trend, backfill, verdict, ai = calls
+    assert trend[trend.index("--run-id") + 1] == "paper-trend-1"
+    assert trend[trend.index("--config") + 1].endswith("paper-trend.local.yaml")
+    assert ai[ai.index("--run-id") + 1] == "paper-ai-1"
+    for call in (backfill, verdict, ai):
+        assert call[call.index("--config") + 1].endswith("paper-ai.local.yaml")
+    assert backfill[backfill.index("--from") + 1].count("-") == 2
+    for call in calls:
+        assert "--balance" not in call and "--gas-eth" not in call
+        assert call[:3] == ["-m", "dotenv", "run"] and "store.db" in call
+    assert log[0].startswith("==== ") and 'visit of "paper-trend-1" and "paper-ai-1"' in log[0]
+    assert '(db "store.db", python "' in log[0]
+    assert log[-1] == "==== exit 0"
+
+
+@pytest.mark.parametrize(
+    ("exits", "code", "commands"),
+    [
+        # The control run was visited; the AI run was not, its verdicts not being there.
+        ({"EXIT_VERDICT": 3}, 3, ["paper", "backfill", "verdict"]),
+        ({"EXIT_BACKFILL": 3}, 3, ["paper", "backfill"]),
+        ({"EXIT_PAPER": 1}, 1, ["paper"]),
+        # The AI run's own paper is the last step, and its code is the visit's.
+        ({"EXIT_PAPER_AI": 3}, 3, ["paper", "backfill", "verdict", "paper"]),
+        ({"EXIT_PAPER_AI": 1}, 1, ["paper", "backfill", "verdict", "paper"]),
+    ],
+)
+def test_a_linux_visit_stops_at_the_first_step_that_fails_and_exits_as_it_did(
+    tmp_path, monkeypatch, exits, code, commands
+):
+    exited, calls, log = _visit(tmp_path, monkeypatch, **exits)
+    assert exited == code
+    assert _commands(calls) == commands
+    assert log[-1] == f"==== exit {code}"
+
+
+_TREND_LEFT_OUT = "RUN_TREND is empty: the control run is left out"
+_AI_LEFT_OUT = "RUN_AI is empty: backfill, verdict and the AI run are left out"
+_BOTH_EMPTY = "RUN_TREND and RUN_AI are both empty: nothing to visit; fix paper-visit.local.sh"
+
+
+@pytest.mark.parametrize(
+    ("extra", "code", "commands", "said"),
+    [
+        ('RUN_TREND=""\n', 0, ["backfill", "verdict", "paper"], _TREND_LEFT_OUT),
+        ('RUN_AI=""\n', 0, ["paper"], _AI_LEFT_OUT),
+        ('RUN_TREND=""\nRUN_AI=""\n', 1, [], _BOTH_EMPTY),
+    ],
+)
+def test_a_linux_visit_with_an_empty_run_id_says_so_and_with_both_empty_exits_1(
+    tmp_path, monkeypatch, extra, code, commands, said
+):
+    exited, calls, log = _visit(tmp_path, monkeypatch, extra=extra)
+    assert exited == code
+    assert _commands(calls) == commands
+    assert f"==== {said}" in log and log[-1] == f"==== exit {code}"
+
+
+def test_a_linux_visit_whose_log_stops_taking_writes_exits_4_and_runs_no_further_step(
+    tmp_path, monkeypatch
+):
+    if getattr(os, "geteuid", lambda: 1)() == 0:
+        pytest.skip("root writes a read-only file: the guard cannot be seen to fire")
+    log = tmp_path / "visits.log"
+    monkeypatch.setenv("LOCK_LOG", log.as_posix())
+    try:
+        code, calls, lines = _visit(tmp_path, monkeypatch)
+    finally:
+        if log.exists():
+            log.chmod(0o644)
+    # The first step ran and took the write bit off; the second was not started.
+    assert code == 4
+    assert _commands(calls) == ["paper"]
+    assert lines[0].startswith("==== ") and not any(line.startswith("==== exit") for line in lines)
+
+
+def test_a_linux_visit_whose_python_path_is_not_there_exits_4_before_running(tmp_path, monkeypatch):
+    code, calls, log = _visit(tmp_path, monkeypatch, python="/nowhere/python")
+    assert code == 4 and calls == []
+    assert log[1] == '==== there is no "/nowhere/python": fix PYTHON in paper-visit.local.sh'
+    assert log[2] == "==== exit 4"

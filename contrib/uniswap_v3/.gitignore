@@ -1,6 +1,7 @@
 # A local copy of configs/uniswap_v3.example.yaml stays on the machine it was written on.
 *.local.yaml
-# The settings of a scheduled visit on this machine (schedule/paper-visit.cmd).
+# The settings of a scheduled visit on this machine (schedule/paper-visit.cmd, paper-visit.sh).
 *.local.cmd
+*.local.sh
 # What a scheduled paper run keeps on this machine: its store and its log.
 data/

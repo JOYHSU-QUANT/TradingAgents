@@ -38,6 +38,7 @@
       quick_think_llm: "deepseek/deepseek-chat"
       selected_analysts: [market, social, news]
       max_tokens: 8192
+      ask_within_seconds: 14400
 
 Tokens and pools are named by their keys in :mod:`.constants`; a config
 cannot supply an address, and :class:`UniswapConfig` itself refuses a token
@@ -118,7 +119,14 @@ __all__ = [
 _REQUIRED_KEYS: Final = frozenset({"chain_id", "quote_token", "tokens", "pools", "strategy"})
 _KEYS: Final = _REQUIRED_KEYS | {"agent", "bars", "execution", "fork", "rpc", "verdicts"}
 _AGENT_KEYS: Final = frozenset(
-    {"llm_provider", "deep_think_llm", "quick_think_llm", "selected_analysts", "max_tokens"}
+    {
+        "llm_provider",
+        "deep_think_llm",
+        "quick_think_llm",
+        "selected_analysts",
+        "max_tokens",
+        "ask_within_seconds",
+    }
 )
 _FORK_KEYS: Final = frozenset({"account", "deadline_seconds"})
 _VERDICT_KEYS: Final = frozenset({"source"})

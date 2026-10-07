@@ -55,7 +55,7 @@ from ..domain.bars import Finality
 from ..domain.ledger import Ledger
 from ..domain.records import Decision, Outcome, RejectionCode
 from ..domain.types import Bar, MarketView, RunMode
-from ..domain.verdicts import Verdict
+from ..domain.verdicts import Verdict, usable_rating
 from ..ports import Executor, Wallet
 from ..store.bar_source import StoredBar, load_bar
 from ..store.repository import Store
@@ -87,9 +87,12 @@ class BacktestSummary:
     ``gas_rejected`` had their rebalance refused for want of gas,
     ``executor_rejected`` had it refused by the executor (a rebalance a
     signed swap left partial is in neither, and is counted in ``outcomes``),
-    ``skipped`` were suspect and not traded on, and ``verdicts_changed`` were
+    ``skipped`` were suspect and not traded on, ``verdicts_changed`` were
     decided earlier on other verdicts than the store holds for them now (a
-    verdict recorded after the bar was decided, most often).
+    verdict recorded after the bar was decided, most often), and ``unrated``
+    were decided by this call, by a run that reads verdicts, with no rating
+    on some traded token: no verdict at the bar, or a ``REVIEW``. A bar
+    skipped as suspect is not among them: nothing was decided on it.
     """
 
     start: int
@@ -106,6 +109,9 @@ class BacktestSummary:
     # Boundaries decided earlier, by a run that reads verdicts, whose verdicts in the
     # store are no longer the ones the decision saw. Like ``changed``, the decisions stand.
     verdicts_changed: tuple[int, ...] = ()
+    # Boundaries this call decided on which some traded token had no rating. A
+    # strategy that reads verdicts takes no new risk on such a token there.
+    unrated: tuple[int, ...] = ()
 
     @property
     def boundaries(self) -> int:
@@ -145,6 +151,11 @@ def _judged_differently(decision: Decision, said: Mapping[str, Verdict]) -> bool
     return saw is not None and dict(saw) != {
         symbol: verdict.digest for symbol, verdict in said.items()
     }
+
+
+def _unrated(config: UniswapConfig, said: Mapping[str, Verdict]) -> bool:
+    """Whether some traded token has no rating in ``said``, by the strategies' own rule."""
+    return any(usable_rating(said.get(symbol)) is None for symbol in config.traded_symbols)
 
 
 def run_backtest(
@@ -254,6 +265,7 @@ def replay(
     decided = already_decided = on_pending = 0
     changed: list[int] = []
     verdicts_changed: list[int] = []
+    unrated: list[int] = []
     gas_rejected: list[int] = []
     executor_rejected: list[int] = []
     skipped: list[int] = []
@@ -286,6 +298,8 @@ def replay(
                 ) from exc
             decision = engine.step(view, seen=loaded.seen, suspicion=loaded.suspicion).decision
             decided += 1
+            if source is not None and not loaded.bar.suspect and _unrated(config, said):
+                unrated.append(time)
             # A suspect bar is skipped whatever its finality: nothing was decided on it.
             on_pending += loaded.finality is Finality.PENDING and not loaded.bar.suspect
         outcomes[decision.outcome] += 1
@@ -310,4 +324,5 @@ def replay(
         skipped=tuple(skipped),
         outcomes=MappingProxyType(dict(outcomes)),
         verdicts_changed=tuple(verdicts_changed),
+        unrated=tuple(unrated),
     )

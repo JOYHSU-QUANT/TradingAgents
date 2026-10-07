@@ -15,7 +15,11 @@ from contrib.uniswap_v3.agent.errors import AgentError, JudgeUnavailable
 from contrib.uniswap_v3.domain.verdicts import Rating
 from contrib.uniswap_v3.store.repository import open_store
 from contrib.uniswap_v3.tests.fakes.node import DAY, DEFAULT_TICK, FIRST_DAY, put_day
-from contrib.uniswap_v3.tests.fakes.verdicts import ScriptedJudge, record as _record
+from contrib.uniswap_v3.tests.fakes.verdicts import (
+    ScriptedJudge,
+    judged_config,
+    record as _record,
+)
 
 _EXAMPLE = Path(__file__).resolve().parents[1] / "configs" / "uniswap_v3.example.yaml"
 _DAY2 = FIRST_DAY + 2 * DAY
@@ -25,14 +29,7 @@ _NOW = _DAY2 + 600
 @pytest.fixture
 def config(tmp_path):
     """The example config, with its verdicts section switched on under the source ``judge-v1``."""
-    text = _EXAMPLE.read_text(encoding="utf-8")
-    switched = text.replace(
-        "# verdicts:\n#   source: tradingagents-rating-v1", "verdicts:\n  source: judge-v1"
-    )
-    assert switched != text
-    path = tmp_path / "judged.yaml"
-    path.write_text(switched, encoding="utf-8")
-    return path
+    return judged_config(tmp_path, "judge-v1")
 
 
 @pytest.fixture
@@ -125,6 +122,52 @@ def test_a_judge_is_asked_about_the_latest_bar_alone(config, db, monkeypatch, ca
     # Naming the latest boundary is the default spelled out.
     _judging(monkeypatch, ScriptedJudge())
     assert _verdict(config, db, "--at", "2024-01-03")[0] == cli.EXIT_OK
+
+
+def test_a_bar_whose_boundary_passed_longer_ago_than_the_window_is_left_unrated(
+    config, db, capsys, monkeypatch
+):
+    judge = ScriptedJudge()
+    _judging(monkeypatch, judge)
+    # The default window is four hours; the boundary passed four hours and a minute ago.
+    late = _DAY2 + 4 * 3_600 + 60
+    code, lines = _verdict(config, db, now=late)
+    assert code == cli.EXIT_OK and judge.asked == []
+    assert lines == [
+        "verdicts of judge-v1 at 2024-01-03T00:00:00Z (trade date 2024-01-03):",
+        "0 asked, 0 already stored, 2 past the judge's window",
+    ]
+    assert (
+        "warning: the boundary 2024-01-03T00:00:00Z passed 14460 s ago, more than "
+        "agent.ask_within_seconds (14400 s); the judge would see that long past the fill, so it "
+        "is not asked, and WBTC, WETH left unrated"
+    ) in capsys.readouterr().err
+    with open_store(db, create=False) as store:
+        assert store.verdicts_at("judge-v1", _DAY2) == []
+    # What the store holds stands, late or not: one token stored, the other left.
+    with open_store(db) as store:
+        store.insert_verdict(_record("WETH", 2, Rating.HOLD, source="judge-v1"))
+    code, lines = _verdict(config, db, now=late)
+    assert code == cli.EXIT_OK and judge.asked == []
+    assert lines[1:] == [
+        "WETH (ETH-USD): already stored: Hold, model synthetic, asked 2024-01-03T00:10:00Z",
+        "0 asked, 1 already stored, 1 past the judge's window",
+    ]
+    assert "and WBTC left unrated" in capsys.readouterr().err
+    # Both stored: nothing is late any more, and nothing is warned of.
+    with open_store(db) as store:
+        store.insert_verdict(_record("WBTC", 2, Rating.SELL, source="judge-v1"))
+    code, lines = _verdict(config, db, now=late)
+    assert code == cli.EXIT_OK and lines[-1] == "0 asked, 2 already stored"
+    assert "left unrated" not in capsys.readouterr().err
+
+
+def test_a_fake_rating_is_not_bound_by_the_window(config, db):
+    # A rehearsal, not a judge reading the day.
+    late = _DAY2 + 4 * 3_600 + 60
+    assert _verdict(config, db, "--fake-rating", "Buy", now=late)[0] == cli.EXIT_OK
+    with open_store(db, create=False) as store:
+        assert len(store.verdicts_at("judge-v1", _DAY2)) == 2
 
 
 def test_a_bar_the_store_lacks_is_try_again_later(config, db, capsys):

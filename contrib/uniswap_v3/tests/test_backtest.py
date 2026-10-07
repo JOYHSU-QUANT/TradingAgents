@@ -459,6 +459,28 @@ def test_the_strategy_sees_the_verdicts_up_to_the_bar_decided_and_none_after(sto
     ]
 
 
+def test_a_replay_counts_the_bars_it_decided_with_no_rating_on_some_token(store, monkeypatch):
+    _recorder(monkeypatch)
+    _put_days(store, [DEFAULT_TICK] * 4)
+    # Day 0 rated on both tokens; day 1 on one; day 2 on both, one a REVIEW; day 3 on none.
+    for day, symbol, rating in [
+        (0, "WETH", Rating.BUY), (0, "WBTC", Rating.HOLD),
+        (1, "WETH", Rating.BUY),
+        (2, "WETH", Rating.SELL), (2, "WBTC", Rating.REVIEW),
+    ]:  # fmt: skip
+        store.insert_verdict(record(symbol, day, rating))
+
+    # Day 4 is suspect: skipped, so nothing was decided on it, rated or not.
+    _put(store, 4, twap_tick=BTC_TICK + 600)
+
+    summary = _backtest(store, config=_verdict_config())
+
+    assert summary.unrated == (_day(1), _day(2), _day(3))
+    assert summary.skipped == (_day(4),)
+    # Decided earlier: not this call's, so not counted again.
+    assert _backtest(store, config=_verdict_config()).unrated == ()
+
+
 def test_a_run_that_reads_no_verdicts_is_handed_none_and_keeps_none(store, monkeypatch):
     strategy = _recorder(monkeypatch)
     _put_days(store, [DEFAULT_TICK] * 2)
@@ -471,6 +493,7 @@ def test_a_run_that_reads_no_verdicts_is_handed_none_and_keeps_none(store, monke
     assert [decision.verdicts for decision in store.decisions(_RUN)] == [None, None]
     # A run that reads none saw none, and is compared with nothing on a rerun.
     assert _backtest(store).verdicts_changed == ()
+    assert _backtest(store).unrated == ()
 
 
 def test_a_verdict_recorded_after_its_bar_was_decided_is_seen_later_and_changes_no_decision(

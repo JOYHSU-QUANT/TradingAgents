@@ -29,8 +29,9 @@
   wallet holds, and exits 1. The fork is started separately (RUNBOOK.md).
 - ``report`` prints a run's return, drawdown, turnover and costs, beside
   what leaving the opening balances untouched, or in the quote token, would
-  have come to. It reads the store alone, and takes the run's config from
-  the run.
+  have come to, and, for a run that reads verdicts, how many decided bars
+  saw a verdict on every traded token, on some and on none. It reads the
+  store alone, and takes the run's config from the run.
 - ``verdict`` asks the judge, the TradingAgents graph, for a verdict on
   every traded token at the latest bar whose boundary has passed, and
   writes each into the store's ``verdicts`` table under the config's
@@ -38,7 +39,10 @@
   store. A verdict the store already holds is not asked for again. It
   reads no chain: the bar must be in the store already. The judge reads
   its data through the day it is asked on, so only the latest bar gets an
-  honest verdict; ``--at`` names an older boundary only together with
+  honest verdict, and only within ``agent.ask_within_seconds`` of its
+  boundary: later than that the tokens not yet judged are left unrated,
+  with a warning and exit 0, while verdicts already stored stand; ``--at``
+  names an older boundary only together with
   ``--fake-rating``, which records that rating without asking any judge,
   for a rehearsal on a store that holds no real verdicts.
 
@@ -72,8 +76,9 @@ A ``paper`` visit exits 0 once the latest bar is decided, by this visit or
 an earlier one and whatever the decision, and also when the chain had no
 answer at the bar's boundary. It warns on stderr, still exiting 0, of a
 boundary without an answer, of a rebalance that was rejected, of a bar
-skipped as suspect, and of stored readings a check found to be off the
-final chain. It exits 3, having decided nothing of the latest bar, when
+skipped as suspect, of stored readings a check found to be off the
+final chain and, for a run that reads verdicts, of bars decided with no
+rating on some traded token. It exits 3, having decided nothing of the latest bar, when
 the node's chain has not yet reached the boundary or the bar's fill block,
 and when a quote reverted without a reason of a pool's: whoever schedules
 the visit runs it again later. It exits 1 when its clock is behind the run.
@@ -82,7 +87,9 @@ an anvil fork on a loopback address, when the wallet does not hold what the
 run's ledger says, and when the run has an open send.
 A ``verdict`` exits 0 once every traded token has a verdict at the bar, by
 this visit or an earlier one, and also when the bar is suspect, which no run
-decides, so no judge is asked. It warns on stderr of a verdict that holds no
+decides, so no judge is asked, and when the boundary passed longer ago than
+the judge's window, so the tokens not yet judged are left unrated, warned of
+on stderr. It warns on stderr of a verdict that holds no
 rating (``REVIEW``) as it is given. It exits 3, keeping the verdicts given so far, when the
 store has no bar at the boundary yet, and when the judge did not answer for
 a reason that may pass (the provider's rate limit, timeout, server error or
@@ -776,8 +783,9 @@ def _replayed(
     """Print what a replay did, and warn on stderr of what a reader should know of it.
 
     A paper visit, ``paper``, is watched by its exit code and stderr alone, and so is
-    warned of a rebalance the executor rejected and of a bar skipped as suspect, which
-    in a backtest are counted and no more. It is not warned of bars decided on readings
+    warned of a rebalance the executor rejected, of a bar skipped as suspect and, for
+    a run that reads verdicts, of a bar decided with no rating on some traded token,
+    which in a backtest are counted and no more. It is not warned of bars decided on readings
     that were not final: a visit made on time always decides its latest bar on one.
     A run whose swaps are signed, ``signs``, is warned of rejected rebalances as well,
     and of those left partial, which hold a wallet half rebalanced.
@@ -820,6 +828,12 @@ def _replayed(
             f"the store than their decisions saw, from {_iso(summary.verdicts_changed[0])} to "
             f"{_iso(summary.verdicts_changed[-1])}; their decisions stand, and a new run decides "
             f"them on what the store holds now"
+        )
+    if summary.unrated and paper:
+        warnings.append(
+            f"{len(summary.unrated)} bar(s) decided now, from {_iso(summary.unrated[0])} to "
+            f"{_iso(summary.unrated[-1])}, saw no rating (no verdict, or a REVIEW) on some "
+            f"traded token; status --run-id shows which"
         )
     if summary.gas_rejected:
         warnings.append(
@@ -1076,7 +1090,16 @@ def _verdict(args: argparse.Namespace, out: Callable[[str], None], now: Callable
     if summary.suspect:
         out(f"the bar at {_iso(at)} is suspect, which no run decides; no judge was asked")
         return EXIT_OK
-    out(f"{len(summary.asked)} asked, {len(summary.already_stored)} already stored")
+    if summary.late:
+        print(
+            f"warning: the boundary {_iso(at)} passed {present - at} s ago, more than "
+            f"agent.ask_within_seconds ({config.agent.ask_within_seconds} s); the judge would "
+            f"see that long past the fill, so it is not asked, and {', '.join(summary.late)} "
+            f"left unrated",
+            file=sys.stderr,
+        )
+    window = f", {len(summary.late)} past the judge's window" if summary.late else ""
+    out(f"{len(summary.asked)} asked, {len(summary.already_stored)} already stored{window}")
     return EXIT_OK
 
 
@@ -1086,6 +1109,23 @@ def _curve_line(name: str, curve: Curve) -> str:
     return f"{name:<18}{_fixed(curve.start):>14}{_fixed(curve.end):>14}{change:>11}{fall:>14}"
 
 
+def _verdicts_seen(source: str, traded: int, decisions: Sequence[Decision]) -> str:
+    """How many decided bars saw a verdict on every one of the ``traded`` tokens, on some and on none.
+
+    A ``REVIEW`` counts as seen, as ``status`` counts it: the judge was
+    asked and answered. What a strategy made of each bar is its own policy
+    (``ai_gated_weights`` takes no new risk on a token without a rating). A
+    bar skipped as suspect is not counted: nothing was decided on it, and no
+    judge is asked about it.
+    """
+    seen = [len(decision.verdicts or {}) for decision in decisions if not decision.suspect]
+    every, none = seen.count(traded), seen.count(0)
+    return (
+        f"verdicts from {source}: {every} decided bar(s) saw one on every traded token, "
+        f"{len(seen) - every - none} on some, {none} on none"
+    )
+
+
 def _report(args: argparse.Namespace, out: Callable[[str], None]) -> int:
     # One view for all the reads: a backtest may be writing the run meanwhile.
     with open_store(args.db, create=False) as store, store.reading():
@@ -1093,9 +1133,8 @@ def _report(args: argparse.Namespace, out: Callable[[str], None]) -> int:
         decisions = store.decisions(args.run_id)
         valuations = store.valuations(args.run_id)
         fills = store.fills(args.run_id)
-    measured, metrics = _measured(
-        run, config_from_snapshot(run.config), decisions, valuations, fills
-    )
+    config = config_from_snapshot(run.config)
+    measured, metrics = _measured(run, config, decisions, valuations, fills)
     quote = run.quote
     out(_run_header(run))
     out(_decided_span(decisions))
@@ -1108,6 +1147,8 @@ def _report(args: argparse.Namespace, out: Callable[[str], None]) -> int:
         )
         if codes:
             out(f"{outcome.value}: {_counts(codes)}")
+    if config.verdicts is not None:
+        out(_verdicts_seen(config.verdicts.source, len(config.traded_symbols), decisions))
     # The report reads no bars, so it cannot tell whether such a reading held.
     unsettled = sum(
         1

@@ -53,6 +53,10 @@ def test_the_context_names_the_market_the_bar_the_close_and_the_role():
         "and the least on Sell." in text
     )
     assert "Rate ETH-USD on its own; the other tokens are rated separately." in text
+    assert text.endswith(
+        "End the decision with one line that reads `Rating: <rating>`, the rating one of "
+        "Buy, Overweight, Hold, Underweight or Sell, and nothing after it."
+    )
     # The context gives no answer format, no multipliers (each run's own) and nothing of the
     # rule's state: the rating is read from the graph's own decision.
     assert "format" not in text.lower() and "JSON" not in text

@@ -8,8 +8,10 @@ every agent reads. Nothing else does: no holding, which belongs to a run
 while a verdict belongs to none, and no verdict of the rule strategy, which
 the rating is not to second-guess; nor the multipliers, which are each
 run's own while a verdict is shared by every run that reads the source.
-The text gives context and asks for no answer format: the rating is read
-out of the graph's own decision.
+The text gives context and asks one thing of the answer's shape: that the
+decision end with a ``Rating: <rating>`` line, the line the rating is read
+from (:mod:`.graph`); a decision cut short or written otherwise has none,
+and is a ``REVIEW``, not the first rating word that happens to be in it.
 
 The closes come one per boundary, with ``None`` where a bar is missing or
 suspect, and a gap is told as a gap: a change is given only when the bar
@@ -122,5 +124,7 @@ def spot_context(
         f"The verdict feeds a spot rebalance between {_listed(quote, traded)} that trades once "
         f"per bar, at these closes. The rating sets how much of a rule-capped position in "
         f"{symbol} is held, the most on Buy and the least on Sell. Rate {ticker} on its own; "
-        f"the other tokens are rated separately."
+        f"the other tokens are rated separately. End the decision with one line that reads "
+        f"`Rating: <rating>`, the rating one of Buy, Overweight, Hold, Underweight or Sell, "
+        f"and nothing after it."
     )

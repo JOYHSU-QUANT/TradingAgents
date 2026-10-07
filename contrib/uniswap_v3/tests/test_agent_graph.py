@@ -33,9 +33,10 @@ def test_engine_config_lays_the_settings_and_the_directories_over_the_engines_de
     assert "max_debate_rounds" in config and "data_vendors" in config
 
 
-def test_the_answer_is_read_from_the_final_state_and_the_signal():
+def test_the_answer_is_read_from_the_final_state_and_its_rating_line():
     state = {"final_trade_decision": "**Rating**: Buy", "market_report": "m", "messages": [1]}
-    answer = _answer((state, "Buy"), "ETH-USD", ("market",), 2.5)
+    # The engine's signal is not read: the rating line is.
+    answer = _answer((state, "Sell"), "ETH-USD", ("market",), 2.5)
     assert answer.rating is Rating.BUY
     assert answer.decision == "**Rating**: Buy"
     assert answer.elapsed_seconds == 2.5
@@ -50,13 +51,35 @@ def test_the_answer_is_read_from_the_final_state_and_the_signal():
 
 
 @pytest.mark.parametrize(
+    ("decision", "rating"),
+    [
+        ("Weighing the Buy case against the Sell case...\n\n**Final rating: Hold**", Rating.HOLD),
+        ("Rating: Buy\nOn reflection:\n- rating: underweight", Rating.UNDERWEIGHT),
+        ("> **Rating** - Overweight", Rating.OVERWEIGHT),
+        # Cut short before the line: the first rating word in the prose is not read.
+        ("The Buy case rests on flows; the Sell case on", Rating.REVIEW),
+        # A word that is not a rating; a rating named mid-sentence is not the line.
+        ("Rating: Strong Buy", Rating.REVIEW),
+        ("the rating: Buy, as the plan says", Rating.REVIEW),
+        ("", Rating.REVIEW),
+    ],
+)
+def test_the_rating_is_the_decisions_last_rating_line_or_review(decision, rating, caplog):
+    answer = _answer(({"final_trade_decision": decision}, "Buy"), "ETH-USD", (), 0)
+    assert answer.rating is rating
+    if rating is Rating.REVIEW:
+        assert "recorded as REVIEW" in caplog.text
+    else:
+        assert "REVIEW" not in caplog.text
+
+
+@pytest.mark.parametrize(
     ("propagated", "match"),
     [
         ("Buy", r"shape that cannot be read \(str\)"),
         (({"final_trade_decision": "x"}, "Buy", 3), r"shape that cannot be read \(tuple\)"),
         (("state", "Buy"), "holds no final_trade_decision text"),
         (({"final_trade_decision": None}, "Buy"), "holds no final_trade_decision text"),
-        (({"final_trade_decision": "x"}, "Strong Buy"), r"signal on ETH-USD is 'Strong Buy'"),
     ],
 )
 def test_an_answer_of_another_shape_is_refused(propagated, match):

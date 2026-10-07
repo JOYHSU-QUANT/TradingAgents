@@ -67,7 +67,8 @@ Breaking changes within the 0.x line are called out explicitly.
   `deepseek/deepseek-chat`. The cap pinned equal in three places
   (`engine_bridge._DEFAULT_MAX_COMPLETION_TOKENS`,
   `default_config.DEFAULT_MAX_TOKENS`, `replay.variant.DEFAULT_MAX_TOKENS`)
-  and in `AgentSettings.max_tokens` rises from 8192 to 16384: the cap counts
+  and, separately, `AgentSettings.max_tokens` rise from 8192 to 16384 (the
+  CLI's default rises for every provider, not only the Anthropic ones): the cap counts
   the thinking tokens of a model that thinks, and Sonnet 5.5 cannot switch
   thinking off, so at 8192 the perp's target JSON is what gets truncated
   (`truncated_output`) and the Uniswap judge's answer loses its rating
@@ -78,6 +79,14 @@ Breaking changes within the 0.x line are called out explicitly.
   signal processor, which the free-text path serves as well, and the
   structured binding forces a `tool_choice` the Claude 5.5 models refuse
   with a 400 from each manager before the same free-text fallback (#338).
+  With the free-text path the only one, the rating is no longer taken
+  from the engine's signal, whose reader falls back to the first rating
+  word anywhere in the text (a decision cut short by the cap, or written
+  in another shape, read as a direction): the spot context now asks the
+  decision to end with a `Rating: <rating>` line (`PROMPT_VERSION`
+  `spot-context-v3`), and `agent/graph.py` reads the last such line,
+  recording `REVIEW` with a warning that names the cause when there is
+  none or its word is not a rating.
   SETUP.md, RUNBOOK.md (perp §5), INTEGRATION.md, README.md, `.env.example`,
   the replay README and the Uniswap RUNBOOK (§1.2, §2.5, appendix A, with
   the switch dated) quote the new number and model. Checked before the

@@ -5,7 +5,7 @@ A variant is a YAML file, not code::
     name: current-sonnet
     model:
       provider: openrouter
-      id: anthropic/claude-sonnet-4-6
+      id: anthropic/claude-sonnet-5.5
     system_prompt_path: current_system.md   # relative to this file
     temperature: 0.2                        # optional; absent = the provider's own default
     max_tokens: 16384                       # optional; the perp daemon's completion cap

@@ -58,7 +58,7 @@ def test_the_sidecar_record_keeps_what_was_asked_and_everything_that_came_back()
         "trade_date": "2024-01-03",
         "model": "vendor/model",
         "judge": {"llm_provider": "vendor", "max_tokens": 8192},
-        "prompt_version": "spot-context-v2",
+        "prompt_version": "spot-context-v3",
         "asked_at": _ASKED_AT,
         "elapsed_seconds": 12.346,
         "rating": "Buy",
@@ -113,7 +113,7 @@ def test_a_verdict_record_names_its_sidecar_or_none():
     )
     assert (kept.model, kept.prompt_version, kept.asked_at) == (
         "vendor/model",
-        "spot-context-v2",
+        "spot-context-v3",
         _ASKED_AT,
     )
     assert (kept.sidecar_path, kept.sidecar_digest) == (

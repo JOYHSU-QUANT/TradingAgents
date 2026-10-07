@@ -75,9 +75,9 @@ engine:
   # a copied-out value would pin every local.yaml to today's number. Perp runs
   # are never uncapped (issue #177). The cap includes reasoning/thinking
   # tokens: the default is sized for the thinking deep model above (Sonnet
-  # 5.5 cannot switch thinking off), so raise it further when a cycle is
-  # recorded as truncated_output, or the visible tail (the target JSON) is
-  # what gets truncated.
+  # 5.5 cannot switch thinking off); raise it further when a cycle is
+  # recorded as truncated_output, which is the visible tail (the target
+  # JSON) being cut.
   # max_completion_tokens: 16384
   # Deep-think structured output is OFF by default for perp runs — the Phase 2
   # target JSON must survive in final_trade_decision free text; a schema render

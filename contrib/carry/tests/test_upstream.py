@@ -4,8 +4,8 @@ The same parsed-import scan ``contrib.replay`` and ``contrib.autoresearch``
 run, with this package's own rules (carry plan §1.2): it may import its two
 upstream packages and no other package under ``contrib/``; NO package under
 ``contrib/`` — nor any package's tests — may import ``contrib.carry``; and
-``contrib.uniswap_v3`` is never named, not even by a test, because the spot
-leg is reached through its store and the handoff alone. Read from the
+``contrib.uniswap_v3`` is never imported, not even by a test, because the
+spot leg is reached through its store and the handoff alone. Read from the
 import graph, not searched for as a string.
 """
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ast
 import importlib
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -97,17 +98,18 @@ def test_every_borrow_is_used_by_some_module_of_the_package():
     """A name kept alive in three lists for nothing is a borrow to drop.
 
     A test counts as a user: the sample floor is borrowed so the suite can
-    pin the reading's behaviour at the perp package's own threshold.
+    pin the reading's behaviour at the perp package's own threshold. Matched
+    as a whole word, so ``from_epoch_ms`` does not stand in for ``epoch_ms``.
     """
-    bodies = {
-        path.name: path.read_text(encoding="utf-8")
+    bodies = [
+        path.read_text(encoding="utf-8")
         for path in _sources(_PACKAGE, include_tests=True)
         if path.name not in ("upstream.py", "test_upstream.py")
-    }
+    ]
     unused = {
         attribute
         for _, attribute in upstream.BORROWED
-        if not any(attribute in body for body in bodies.values())
+        if not any(re.search(rf"\b{re.escape(attribute)}\b", body) for body in bodies)
     }
     assert unused == set()
 
@@ -137,7 +139,7 @@ def test_upstream_imports_exactly_what_it_declares():
     assert inside_load_market == set(upstream.VENUE_BORROWED)
 
 
-def test_no_module_of_this_package_names_the_spot_package_or_replay():
+def test_no_module_of_this_package_imports_the_spot_package_or_replay():
     offenders = {
         path.name
         for path in _sources(_PACKAGE, include_tests=True)

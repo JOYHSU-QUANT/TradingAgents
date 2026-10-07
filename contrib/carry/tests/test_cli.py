@@ -9,14 +9,15 @@ from pathlib import Path
 import pytest
 
 from contrib.carry import __main__ as entry
-from contrib.carry.cli import main
+from contrib.carry.cli import GRACE_HOURS, default_boundary, main
 from contrib.carry.handoff import read_handoff
 from contrib.carry.signal import Action, Position, Side
-from contrib.carry.upstream import ExchangeError, ResearchStore, from_epoch_ms
+from contrib.carry.upstream import ExchangeError, ResearchStore, StopReason, from_epoch_ms
 
 from .conftest import (
     COIN,
     DAY0,
+    MS_PER_HOUR,
     FakeMarket,
     alternating,
     day,
@@ -43,11 +44,15 @@ def _signal(research: Path, out: Path, *extra: str, coin: str = COIN) -> list[st
     return ["signal", "--coin", coin, "--out", str(out), "--research-db", str(research), *extra]
 
 
-def _two_stores(tmp_path: Path, *, perp_equity: str, spot_equity: str = "10000") -> list[str]:
+def _two_stores(
+    tmp_path: Path,
+    *,
+    perp_equity: str,
+    spot_equity: str = "10000",
+    perp_at: str = "2026-02-10T20:00:00+00:00",
+) -> list[str]:
     """The four store flags, over a perp and a spot store holding one equity row each."""
-    perp = write_perp_store(
-        tmp_path / "paper.db", [("2026-02-10T20:00:00+00:00", "carry-ETH-1", perp_equity)]
-    )
+    perp = write_perp_store(tmp_path / "paper.db", [(perp_at, "carry-ETH-1", perp_equity)])
     spot = write_spot_store(
         tmp_path / "uniswap.db", [("paper-carry-1", day(40) // 1000, spot_equity)]
     )
@@ -66,7 +71,7 @@ def test_the_module_entry_hands_argv_to_main():
 def test_history_prints_the_summary(research: Path, capsys):
     assert main(["history", "--coin", COIN, "--research-db", str(research)]) == 0
     out = capsys.readouterr().out.splitlines()
-    assert out[0].startswith("carry history: ETH, 60 boundaries from 2026-01-31T00:00:00+00:00")
+    assert out[0].startswith("carry history: ETH, 59 boundaries from 2026-01-31T00:00:00+00:00")
     assert "entries 1, exits 1; longest hold 15 days" in out[2]
 
 
@@ -81,7 +86,8 @@ def test_history_rows_list_the_entries_and_exits(research: Path, capsys):
 def test_history_refuses_an_empty_store(tmp_path: Path, capsys):
     empty = write_research_store(tmp_path / "autoresearch.sqlite", [])
     assert main(["history", "--coin", COIN, "--research-db", str(empty)]) == 1
-    assert "fetch it first" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "fetch it first" in err and f"--db {empty}" in err
 
 
 def test_history_refuses_a_bad_parameter(research: Path, capsys):
@@ -95,6 +101,36 @@ def test_history_refuses_a_bad_instant(research: Path, capsys):
     assert "--since: not an ISO-8601" in capsys.readouterr().err
 
 
+# --- the boundary -----------------------------------------------------------
+
+
+def test_the_default_boundary_is_the_next_midnight_or_within_the_grace_the_last_one():
+    assert default_boundary(day(41) - TEN_MINUTES) == day(41)
+    assert default_boundary(day(41)) == day(41)
+    assert default_boundary(day(41) + 30 * 1000) == day(41)
+    assert default_boundary(day(41) + GRACE_HOURS * MS_PER_HOUR - 1) == day(41)
+    assert default_boundary(day(41) + GRACE_HOURS * MS_PER_HOUR) == day(42)
+    assert default_boundary(day(42) - 1) == day(42)
+
+
+def test_signal_run_just_after_midnight_decides_that_midnight(research: Path, tmp_path, capsys):
+    out = tmp_path / "carry-eth.json"
+    assert main(_signal(research, out, "--no-fetch"), now=_clock(day(41) + 5 * 60 * 1000)) == 0
+    assert capsys.readouterr().out.splitlines()[0].endswith("as of 2026-02-11T00:00:00+00:00")
+    assert read_handoff(out).as_of_ms == day(41)
+
+
+def test_signal_warns_when_a_boundary_was_skipped(research: Path, tmp_path, capsys):
+    out = tmp_path / "carry-eth.json"
+    assert main(_signal(research, out, "--no-fetch"), now=_clock(day(41) - TEN_MINUTES)) == 0
+    capsys.readouterr()
+    assert main(_signal(research, out, "--no-fetch"), now=_clock(day(43) - TEN_MINUTES)) == 0
+    err = capsys.readouterr().err
+    assert "no handoff was written for 2026-02-12T00:00:00+00:00" in err
+    assert "the venues ran on the one for 2026-02-11T00:00:00+00:00" in err
+    assert read_handoff(out).as_of_ms == day(43)
+
+
 # --- signal -----------------------------------------------------------------
 
 
@@ -104,6 +140,8 @@ def test_signal_writes_the_handoff_and_remembers_its_position(research: Path, tm
     assert main(_signal(research, out, "--no-fetch"), now=_clock(now)) == 0
     lines = capsys.readouterr().out.splitlines()
     assert lines[0] == "carry signal: ETH as of 2026-02-11T00:00:00+00:00"
+    assert lines[1].startswith("  funding: 0.00004500/h at 2026-02-10T23:00:00+00:00 (")
+    assert "last-day mean over 24 settlements" in lines[1]
     assert lines[2] == "  position: out -> in (enter); in since 2026-02-11T00:00:00+00:00"
     assert lines[3] == (
         "  targets: perp short 30% margin; spot WETH weight 0.3000 "
@@ -139,16 +177,18 @@ def test_signal_reruns_a_decided_boundary_without_deciding_again(research, tmp_p
     assert first.action is Action.ENTER
     capsys.readouterr()
     # Rerun (say, after a crash past the write, or to refresh the sizing): the decision
-    # stands — even with no minimum hold, which would otherwise let the rule read its own
-    # entry as a reason to exit — and the sizing is recomputed from the stores given now.
+    # stands with the reading it was made from — even with no minimum hold, which would
+    # otherwise let the rule read its own entry as a reason to exit — and the sizing is
+    # recomputed from the stores given now. Different rule params are a warning, not a refusal.
     stores = _two_stores(tmp_path, perp_equity="20000")
-    assert main([*argv, *stores], now=_clock(day(41) - 1)) == 0
-    assert "(enter; this boundary was already decided, sizing refreshed)" in (
-        capsys.readouterr().out
-    )
+    assert main([*argv, *stores, "--margin-pct", "40"], now=_clock(day(41) - 1)) == 0
+    captured = capsys.readouterr()
+    assert "(enter; this boundary was already decided, sizing refreshed)" in captured.out
+    assert "rerun with different rule parameters" in captured.err
     again = read_handoff(out)
     assert again.action is Action.ENTER and again.position == first.position
-    assert again.spot_weight == Decimal("0.6000")
+    assert again.reading == first.reading
+    assert again.margin_pct == 40 and again.spot_weight == Decimal("0.8000")
 
 
 def test_signal_refuses_a_boundary_older_than_its_memory(research: Path, tmp_path, capsys):
@@ -179,12 +219,23 @@ def test_signal_sizes_the_spot_leg_from_the_two_stores(research: Path, tmp_path,
     out = tmp_path / "carry-eth.json"
     argv = _signal(research, out, "--no-fetch", *_two_stores(tmp_path, perp_equity="20000"))
     assert main(argv, now=_clock(day(41) - TEN_MINUTES)) == 0
-    assert "spot WETH weight 0.6000 (perp equity 20000, spot equity 10000)" in (
-        capsys.readouterr().out
-    )
+    captured = capsys.readouterr()
+    assert "spot WETH weight 0.6000 (perp equity 20000, spot equity 10000)" in captured.out
+    assert captured.err == ""
     handoff = read_handoff(out)
     assert handoff.spot_weight == Decimal("0.6000")
-    assert handoff.equity_perp == Decimal("20000")
+    assert handoff.equity_perp is not None and handoff.equity_perp.value == Decimal("20000")
+    assert handoff.equity_perp.at_ms == day(40) + 20 * MS_PER_HOUR
+
+
+def test_signal_warns_when_an_equity_snapshot_is_old(research: Path, tmp_path, capsys):
+    out = tmp_path / "carry-eth.json"
+    stores = _two_stores(tmp_path, perp_equity="20000", perp_at="2026-02-01T00:00:00+00:00")
+    assert main(_signal(research, out, "--no-fetch", *stores), now=_clock(day(41) - 1)) == 0
+    err = capsys.readouterr().err
+    assert "perp equity 20000 was written 240 hours ago" in err
+    assert "is run 'carry-ETH-1' still running?" in err
+    assert read_handoff(out).spot_weight == Decimal("0.6000")
 
 
 def test_signal_refuses_a_run_without_an_equity_row(research: Path, tmp_path, capsys):
@@ -204,7 +255,14 @@ def test_signal_warns_and_still_writes_when_a_leg_has_no_equity(research, tmp_pa
     assert "WARNING: spot weight is 0 while in: a leg has no equity" in captured.err
     handoff = read_handoff(out)
     assert handoff.position.side is Side.IN and handoff.spot_weight == 0
-    assert handoff.equity_perp == 0
+    assert handoff.equity_perp is not None and handoff.equity_perp.value == 0
+
+
+def test_signal_names_a_rounding_zero_differently(research: Path, tmp_path, capsys):
+    out = tmp_path / "carry-eth.json"
+    stores = _two_stores(tmp_path, perp_equity="1", spot_equity="100000")
+    assert main(_signal(research, out, "--no-fetch", *stores), now=_clock(day(41) - 1)) == 0
+    assert "the perp notional rounds to nothing of the spot" in capsys.readouterr().err
 
 
 def test_signal_fetches_the_window_through_the_venue(tmp_path: Path, capsys):
@@ -225,11 +283,50 @@ def test_signal_fetches_the_window_through_the_venue(tmp_path: Path, capsys):
     assert read_handoff(out).action is Action.ENTER
 
 
-def test_signal_defaults_to_the_next_utc_midnight(research: Path, tmp_path, capsys):
+def test_signal_refuses_a_walk_that_did_not_reach_the_end(research, tmp_path, capsys, monkeypatch):
+    """A walk the request limit ended covers less than it was asked for, and that is no decision."""
+    from types import SimpleNamespace
+
+    from contrib.carry import cli
+
+    def cut_short(market, store, *, coin, since, end):
+        return SimpleNamespace(
+            label=f"{coin} funding", pages=4, rows_written=96, rows_before=2160,
+            rows_after=2160, rows_added=0, stopped=StopReason.PAGE_LIMIT,
+        )  # fmt: skip
+
+    monkeypatch.setattr(cli, "backfill_funding", cut_short)
     out = tmp_path / "carry-eth.json"
-    assert main(_signal(research, out, "--no-fetch"), now=_clock(day(41) + 1)) == 0
-    assert capsys.readouterr().out.splitlines()[0].endswith("as of 2026-02-12T00:00:00+00:00")
-    assert read_handoff(out).as_of_ms == day(42)
+    argv = _signal(research, out)
+    assert main(argv, market_factory=lambda: FakeMarket([]), now=_clock(day(41) - 1)) == 1
+    captured = capsys.readouterr()
+    assert "stopped because hit the request limit" in captured.out
+    assert "did not reach the end of the window" in captured.err
+    assert not out.exists()
+
+
+def test_signal_refuses_a_stale_reading(tmp_path: Path, capsys):
+    """A store that missed a day must not decide; the handoff is left for the readers to age."""
+    gapped = [p for p in hump_series() if p.time < day(40) + 12 * MS_PER_HOUR]
+    research = write_research_store(tmp_path / "autoresearch.sqlite", gapped)
+    out = tmp_path / "carry-eth.json"
+    assert main(_signal(research, out, "--no-fetch"), now=_clock(day(41) - 1)) == 1
+    err = capsys.readouterr().err
+    assert (
+        "is 13 hours before 2026-02-11T00:00:00+00:00, more than --max-reading-age-hours 3" in err
+    )
+    assert not out.exists()
+    argv = _signal(research, out, "--no-fetch", "--max-reading-age-hours", "24")
+    assert main(argv, now=_clock(day(41) - 1)) == 0
+    assert read_handoff(out).reading is not None
+
+
+def test_signal_refuses_a_boundary_that_is_not_midnight(research: Path, tmp_path, capsys):
+    out = tmp_path / "carry-eth.json"
+    argv = _signal(research, out, "--no-fetch", "--as-of", "2026-02-11T04:00:00+00:00")
+    assert main(argv, now=_clock(day(41))) == 1
+    assert "is not a UTC day boundary" in capsys.readouterr().err
+    assert not out.exists()
 
 
 def test_signal_accepts_an_explicit_boundary_as_a_date_or_an_instant(research, tmp_path):
@@ -239,14 +336,6 @@ def test_signal_accepts_an_explicit_boundary_as_a_date_or_an_instant(research, t
         assert main(argv, now=_clock(day(41))) == 0
         assert read_handoff(out).as_of_ms == day(41)
         out.unlink()
-
-
-def test_signal_refuses_a_boundary_that_is_not_midnight(research: Path, tmp_path, capsys):
-    out = tmp_path / "carry-eth.json"
-    argv = _signal(research, out, "--no-fetch", "--as-of", "2026-02-11T04:00:00+00:00")
-    assert main(argv, now=_clock(day(41))) == 1
-    assert "is not a UTC day boundary" in capsys.readouterr().err
-    assert not out.exists()
 
 
 def test_signal_refuses_a_naive_instant(research: Path, tmp_path, capsys):
@@ -270,6 +359,13 @@ def test_signal_refuses_half_a_store_argument(research: Path, tmp_path, capsys):
     assert main(argv, now=_clock(day(41))) == 1
     assert "--perp-db and --perp-run-id go together" in capsys.readouterr().err
     assert not out.exists()
+
+
+def test_signal_refuses_a_bad_reading_age(research: Path, tmp_path, capsys):
+    out = tmp_path / "carry-eth.json"
+    argv = _signal(research, out, "--no-fetch", "--max-reading-age-hours", "0")
+    assert main(argv, now=_clock(day(41))) == 1
+    assert "--max-reading-age-hours must be at least 1" in capsys.readouterr().err
 
 
 def test_signal_refuses_a_store_it_cannot_read(research: Path, tmp_path, capsys):

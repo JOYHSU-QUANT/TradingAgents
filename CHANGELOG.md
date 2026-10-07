@@ -854,10 +854,19 @@ Breaking changes within the 0.x line are called out explicitly.
   rate is positive, exit at z ≤ 0.5 or a non-positive last-day mean once
   held 3 days — and writes ONE handoff document naming the perp target
   (short at 30% margin, or flat) and the spot weight (the perp notional
-  over the spot run's equity, both read with read-only `sqlite3`). The
-  handoff is also the coordinator's memory: the next run reads it for its
-  position, and refuses another coin's file, an older boundary, or a file
-  it cannot parse rather than entering twice. `history` replays the same
+  over the spot run's equity, both read with read-only `sqlite3` and
+  stamped with the instant their store wrote them; a known dead leg sizes
+  to 0 with a warning). The document also records the rule's parameters.
+  A reader ages the document by `as_of_ms` (act only while
+  `as_of_ms <= now < as_of_ms + 1 day`), fields may be added under the
+  same version, and the coordinator refuses to decide on a settlement
+  older than `--max-reading-age-hours` (3) or a funding walk that did not
+  reach its end. A run within 6 hours after a midnight decides that
+  midnight, not the next. The handoff is also the coordinator's memory:
+  the next run reads it for its position, and refuses another coin's
+  file, a later boundary, or a file it cannot parse rather than entering
+  twice; a rerun of a decided boundary keeps the decision and only
+  refreshes the sizing. `history` replays the same
   three calls over the stored funding and prints days in, entries and
   exits, and what the short leg collected. The borrow is funnelled through
   `upstream.py` as replay's is; no package under `contrib/` may import

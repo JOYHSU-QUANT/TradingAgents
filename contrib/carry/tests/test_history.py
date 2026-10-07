@@ -14,10 +14,11 @@ PARAMS = Params()
 
 def test_a_series_without_a_hump_never_enters():
     rows, summary = replay(COIN, hourly(DAY0, alternating(90)), PARAMS)
-    # The first boundary with a full window is day 30; the last settlement is day 89 23:00.
+    # The first boundary with a window behind it is day 30; the last settlement is day 89
+    # 23:00, so day 88 is the last boundary whose following day is fully settled.
     assert summary.first_boundary_ms == day(30)
-    assert summary.last_boundary_ms == day(89)
-    assert summary.days == 60
+    assert summary.last_boundary_ms == day(88)
+    assert summary.days == 59
     assert summary.days_without_z == 0
     assert summary.entries == summary.exits == summary.days_in == 0
     assert summary.collected == 0
@@ -44,13 +45,16 @@ def test_a_hump_enters_once_and_exits_after_the_minimum_hold():
     assert summary.annualized_while_in is not None and summary.annualized_over_span is not None
     assert summary.annualized_while_in > summary.annualized_over_span > 0
     assert all(r.collected == 0 and r.settlements == 0 for r in rows if r.position.side is Side.OUT)
+    assert all(r.settlements == 24 for r in rows if r.position.side is Side.IN)
 
 
 def test_the_minimum_hold_delays_an_exit_the_rule_would_take():
     short_hump = hump_series(hump=(40, 41))
-    _, summary = replay(COIN, short_hump, Params(min_hold_days=5))
-    assert summary.entries == 1
-    assert summary.longest_hold_days == 5
+    _, prompt = replay(COIN, short_hump, Params(min_hold_days=0))
+    _, held = replay(COIN, short_hump, Params(min_hold_days=5))
+    assert prompt.entries == held.entries == 1
+    assert prompt.longest_hold_days < 5
+    assert held.longest_hold_days == 5
 
 
 def test_since_and_until_narrow_the_span_to_boundaries():

@@ -14,19 +14,23 @@ What is borrowed and why:
   reader and the research store both speak), ``funding_zscore`` and its
   sample floor (so the number this package acts on is the number the perp
   prompt prints — one definition, not a copy), the instants (so a boundary
-  is encoded by the same integer arithmetic the stores use), the atomic
-  writer (a half-written handoff must never be readable), the SQLite URI
-  spelling (``Path.as_uri`` is wrong for a UNC share and a relative path;
-  the perp store opens through this one, so the carry read must too), and
-  the venue error type (a fetch the venue refused is reported, not
+  is encoded by the same integer arithmetic the stores use, and a perp
+  snapshot's timestamp is decoded by the function that encoded it), the
+  atomic writer (a half-written handoff must never be readable), the SQLite
+  URI spelling (``Path.as_uri`` is wrong for a UNC share and a relative
+  path; the perp store opens through this one, so the carry read must too),
+  and the venue error type (a fetch the venue refused is reported, not
   tracebacked);
 - from the research package: the research store and its funding walk
   (``backfill_funding`` pages the venue's capped endpoint forwards and
-  loses nothing; ``render_fetch`` is the one line the research package
-  prints for the same walk, so the two commands' output lines up), the day
-  and the settlement cadence in milliseconds, and ``require_number`` — THE
-  numeric guard that package keeps beside its error, so a threshold here is
-  refused the way a threshold there is (bool, huge int, non-finite).
+  loses nothing; ``StopReason`` says how it ended, and only a walk that
+  reached its end is decided on; ``render_fetch`` is the one line the
+  research package prints for the same walk), the venue reader's
+  ``HistoryMarketData`` protocol (so the fetch seam is typed, not ``Any``),
+  the day and the settlement cadence in milliseconds, and
+  ``require_number`` — THE numeric guard that package keeps beside its
+  error, so a threshold here is refused the way a threshold there is
+  (bool, huge int, non-finite).
 
 The venue reader is borrowed LAZILY: ``VENUE_BORROWED`` lists it and only
 :func:`load_market` imports it, because it pulls in the Hyperliquid SDK and
@@ -36,14 +40,13 @@ that.
 
 from __future__ import annotations
 
-from typing import Any
-
 from contrib.autoresearch.constants import FUNDING_INTERVAL_MS, MS_PER_DAY
-from contrib.autoresearch.fetch import backfill_funding, render_fetch
+from contrib.autoresearch.fetch import StopReason, backfill_funding, render_fetch
+from contrib.autoresearch.ports import HistoryMarketData
 from contrib.autoresearch.store import ResearchStore, StoreError
 from contrib.autoresearch.vocabulary import SpecError, require_number
 from contrib.hyperliquid_perp.common.atomic_io import atomic_write_text
-from contrib.hyperliquid_perp.common.instants import epoch_ms, from_epoch_ms
+from contrib.hyperliquid_perp.common.instants import epoch_ms, from_epoch_ms, parse_instant
 from contrib.hyperliquid_perp.domains.perp.context_builder import (
     MIN_FUNDING_SAMPLES,
     funding_zscore,
@@ -61,8 +64,10 @@ __all__ = [
     "VENUE_BORROWED",
     "ExchangeError",
     "FundingPoint",
+    "HistoryMarketData",
     "ResearchStore",
     "SpecError",
+    "StopReason",
     "StoreError",
     "atomic_write_text",
     "backfill_funding",
@@ -70,6 +75,7 @@ __all__ = [
     "from_epoch_ms",
     "funding_zscore",
     "load_market",
+    "parse_instant",
     "render_fetch",
     "require_number",
     "sqlite_file_uri",
@@ -85,8 +91,10 @@ UPSTREAM_PACKAGES: tuple[str, ...] = ("contrib.hyperliquid_perp", "contrib.autor
 BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.constants", "FUNDING_INTERVAL_MS"),
     ("contrib.autoresearch.constants", "MS_PER_DAY"),
+    ("contrib.autoresearch.fetch", "StopReason"),
     ("contrib.autoresearch.fetch", "backfill_funding"),
     ("contrib.autoresearch.fetch", "render_fetch"),
+    ("contrib.autoresearch.ports", "HistoryMarketData"),
     ("contrib.autoresearch.store", "ResearchStore"),
     ("contrib.autoresearch.store", "StoreError"),
     ("contrib.autoresearch.vocabulary", "SpecError"),
@@ -94,6 +102,7 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.hyperliquid_perp.common.atomic_io", "atomic_write_text"),
     ("contrib.hyperliquid_perp.common.instants", "epoch_ms"),
     ("contrib.hyperliquid_perp.common.instants", "from_epoch_ms"),
+    ("contrib.hyperliquid_perp.common.instants", "parse_instant"),
     ("contrib.hyperliquid_perp.domains.perp.context_builder", "MIN_FUNDING_SAMPLES"),
     ("contrib.hyperliquid_perp.domains.perp.context_builder", "funding_zscore"),
     ("contrib.hyperliquid_perp.domains.perp.schema", "FundingPoint"),
@@ -110,7 +119,7 @@ VENUE_BORROWED: tuple[tuple[str, str], ...] = (
 )
 
 
-def load_market() -> Any:
+def load_market() -> HistoryMarketData:
     """The mainnet venue reader, built on first use.
 
     Mainnet only, for the reason ``contrib.autoresearch.upstream`` gives:

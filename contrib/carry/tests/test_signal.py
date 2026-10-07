@@ -103,6 +103,20 @@ def test_annualised_readings_multiply_by_the_hours_in_a_year():
     assert _reading(1.0, recent=None).recent_annualized is None
 
 
+def test_a_reading_holds_the_floors_read_produces():
+    with pytest.raises(SignalError, match="a z-score needs at least"):
+        Reading(at_ms=day(1), current=Decimal(1), z=1.0, samples=MIN_FUNDING_SAMPLES - 1,
+                recent_mean=None, recent_samples=0)  # fmt: skip
+    with pytest.raises(SignalError, match="a recent mean needs at least"):
+        Reading(at_ms=day(1), current=Decimal(1), z=None, samples=0,
+                recent_mean=Decimal(1), recent_samples=MIN_RECENT_SAMPLES - 1)  # fmt: skip
+    with pytest.raises(SignalError, match="at_ms must be at least 1"):
+        Reading(at_ms=0, current=Decimal(1), z=None, samples=0, recent_mean=None, recent_samples=0)
+    with pytest.raises(SignalError, match="z: expected a finite number"):
+        Reading(at_ms=1, current=Decimal(1), z=float("nan"), samples=700,
+                recent_mean=None, recent_samples=0)  # fmt: skip
+
+
 # --- decide: out ------------------------------------------------------------
 
 
@@ -149,6 +163,12 @@ def test_in_exits_when_the_last_day_paid_nothing():
     assert decide(_reading(1.0, recent="0"), IN_AT_DAY1, day(4), PARAMS) is Action.EXIT
     assert decide(_reading(1.0, recent="-0.000001"), IN_AT_DAY1, day(4), PARAMS) is Action.EXIT
     assert decide(_reading(1.0, recent="0.000001"), IN_AT_DAY1, day(4), PARAMS) is Action.HOLD
+
+
+def test_in_still_exits_on_the_recent_mean_leg_when_there_is_no_z():
+    """D6 made the two exit legs independent: a flat window blinds z, not the day's mean."""
+    assert decide(_reading(None, recent="0"), IN_AT_DAY1, day(4), PARAMS) is Action.EXIT
+    assert decide(_reading(None, recent="0.000001"), IN_AT_DAY1, day(4), PARAMS) is Action.HOLD
 
 
 def test_in_holds_when_neither_exit_leg_can_be_read():

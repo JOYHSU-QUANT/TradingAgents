@@ -104,10 +104,12 @@ def replay(
     """Drive the rule over ``points`` at every UTC day boundary the window can be read at.
 
     The first boundary is the first one at least ``window_days`` after the
-    oldest settlement, so the first z-score has a full window behind it;
-    the last is the last boundary at or before the newest settlement.
-    ``since_ms`` / ``until_ms`` narrow that span (rounded to boundaries),
-    never widen it.
+    oldest settlement, so the first z-score has a window behind it (one
+    sample short of full: the oldest settlement sits on the window's open
+    edge); the last is the last boundary whose following day is fully
+    settled, so every row's ``collected`` covers a whole day and the span
+    annualisation counts no partial day. ``since_ms`` / ``until_ms``
+    narrow that span (rounded to boundaries), never widen it.
     """
     rows: list[DayRow] = []
     ordered = sorted(points, key=lambda p: p.time)
@@ -115,7 +117,7 @@ def replay(
         return rows, _summary(coin, rows)
     times = [p.time for p in ordered]
     first = _ceil_day(ordered[0].time + params.window_days * MS_PER_DAY)
-    last = floor_day(ordered[-1].time)
+    last = floor_day(ordered[-1].time - MS_PER_DAY)
     if since_ms is not None:
         first = max(first, _ceil_day(since_ms))
     if until_ms is not None:

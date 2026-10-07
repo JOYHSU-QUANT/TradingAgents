@@ -9,16 +9,19 @@ measures is what the live signal does:
    latest one is "current"; its z-score against the trailing
    ``window_days`` (the perp package's own :func:`funding_zscore`, which
    excludes the current point from its own sample) and the mean of the
-   last :data:`RECENT_HOURS` settlements are the reading.
+   settlements in the last :data:`RECENT_HOURS` hours (current included)
+   are the reading.
 2. :func:`decide` — the state machine (carry plan §2 D6):
    out → enter when ``z >= z_in`` and the current rate is positive (a
    short perp collects positive funding; there is no spot borrow, so a
    negative rate is never traded — plan §1.2 item 5); in → exit when
-   ``z <= z_out`` or the recent mean is at or below zero, and only once
-   the position has been held ``min_hold_days`` (churn control); every
-   other case holds what it has. A boundary with no reading, or a reading
-   with no z (too few samples, or a flat window), changes nothing: out
-   stays out, in stays in.
+   ``z <= z_out`` OR the recent mean is at or below zero, each leg read on
+   its own, and only once the position has been held ``min_hold_days``
+   (churn control); every other case holds what it has. A boundary with
+   no reading changes nothing. A reading with no z (too few samples, or a
+   flat window) cannot enter, and cannot exit on the z leg — but the
+   recent-mean leg still can, because D6 made the two exit legs
+   independent.
 3. :func:`advance` — the position after the action. Which side an action
    leaves the book on is :attr:`Action.side_after`, stated once; the
    handoff's consistency check reads the same attribute.
@@ -26,7 +29,8 @@ measures is what the live signal does:
 A rate is a fraction per hour (``Decimal("0.0000125")`` is 0.00125%/h), as
 the venue reports it; annualising multiplies by :data:`HOURS_PER_YEAR`.
 The two value guards, :func:`whole` and :func:`finite`, live here because
-every other module validates through them with its own error class.
+the handoff module validates its document through them with its own error
+class, so a document and a parameter are refused the same way.
 """
 
 from __future__ import annotations
@@ -39,6 +43,7 @@ from typing import Final
 
 from .upstream import (
     FUNDING_INTERVAL_MS,
+    MIN_FUNDING_SAMPLES,
     MS_PER_DAY,
     FundingPoint,
     SpecError,
@@ -73,7 +78,7 @@ MIN_RECENT_SAMPLES: Final = 12
 
 
 class SignalError(ValueError):
-    """A parameter the rule cannot be run with."""
+    """A parameter or a value the rule cannot be run with."""
 
 
 def whole(
@@ -171,7 +176,13 @@ OUT: Final = Position(Side.OUT)
 
 @dataclass(frozen=True)
 class Reading:
-    """What the funding series said at a boundary, from the settlements before it."""
+    """What the funding series said at a boundary, from the settlements before it.
+
+    The invariants :func:`read` produces are enforced here too, so a reading
+    rebuilt from a document is held to the same floors as one read from the
+    series: a z-score exists only over at least :data:`MIN_FUNDING_SAMPLES`
+    samples, a recent mean only over at least :data:`MIN_RECENT_SAMPLES`.
+    """
 
     at_ms: int
     """The current settlement's instant — the latest one strictly before the boundary."""
@@ -182,8 +193,24 @@ class Reading:
     samples: int
     """How many settlements the window held."""
     recent_mean: Decimal | None
-    """The mean rate of the last :data:`RECENT_HOURS`, incl. current; ``None`` under the floor."""
+    """The mean rate over the last :data:`RECENT_HOURS` hours, incl. current; ``None`` under the floor."""
     recent_samples: int
+
+    def __post_init__(self) -> None:
+        whole(self.at_ms, "at_ms", low=1)
+        whole(self.samples, "samples", low=0)
+        whole(self.recent_samples, "recent_samples", low=0)
+        if self.z is not None:
+            finite(self.z, "z")
+            if self.samples < MIN_FUNDING_SAMPLES:
+                raise SignalError(
+                    f"a z-score needs at least {MIN_FUNDING_SAMPLES} samples, got {self.samples}"
+                )
+        if self.recent_mean is not None and self.recent_samples < MIN_RECENT_SAMPLES:
+            raise SignalError(
+                f"a recent mean needs at least {MIN_RECENT_SAMPLES} samples, "
+                f"got {self.recent_samples}"
+            )
 
     @property
     def recent_annualized(self) -> Decimal | None:

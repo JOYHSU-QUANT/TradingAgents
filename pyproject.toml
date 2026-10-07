@@ -82,17 +82,20 @@ filterwarnings = [
 # the CI job installs mypy alone and the suites import pytest.
 # ``contrib/uniswap_v3``'s pure layers (``domain/`` and ``ports.py``) joined
 # clean on 2026-10-04; they import the standard library and each other only.
+# ``contrib/carry`` (the carry coordinator, carry plan PR 1) joined clean on
+# 2026-10-07; its tests are excluded for the same reason as replay's.
 files = [
     "contrib/hyperliquid_perp/common",
     "contrib/hyperliquid_perp/domains",
     "contrib/hyperliquid_perp/persistence",
     "contrib/hyperliquid_perp/ports.py",
     "contrib/hyperliquid_perp/runtime",
+    "contrib/carry",
     "contrib/replay",
     "contrib/uniswap_v3/domain",
     "contrib/uniswap_v3/ports.py",
 ]
-exclude = ["^contrib/replay/tests/"]
+exclude = ["^contrib/carry/tests/", "^contrib/replay/tests/"]
 python_version = "3.10"
 follow_imports = "silent"
 warn_unused_ignores = true

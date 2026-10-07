@@ -842,6 +842,29 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **`contrib/carry`: the carry coordinator (carry plan PR 1).** A new
+  package for one hedged book — short the Hyperliquid perp, hold the
+  Uniswap spot — that places no orders and writes into neither venue's
+  store. `python -m contrib.carry signal --coin ETH --out <handoff.json>
+  --research-db <autoresearch.sqlite>` fetches the funding window into the
+  research store (the research package's own forward walk, so the venue's
+  500-record cap loses nothing), reads one rule at the next UTC day
+  boundary — the latest settlement's z-score against the trailing 30 days
+  (the perp package's own `funding_zscore`), enter at z ≥ 1.5 while the
+  rate is positive, exit at z ≤ 0.5 or a non-positive last-day mean once
+  held 3 days — and writes ONE handoff document naming the perp target
+  (short at 30% margin, or flat) and the spot weight (the perp notional
+  over the spot run's equity, both read with read-only `sqlite3`). The
+  handoff is also the coordinator's memory: the next run reads it for its
+  position, and refuses another coin's file, an older boundary, or a file
+  it cannot parse rather than entering twice. `history` replays the same
+  three calls over the stored funding and prints days in, entries and
+  exits, and what the short leg collected. The borrow is funnelled through
+  `upstream.py` as replay's is; no package under `contrib/` may import
+  this one, and it never names `contrib.uniswap_v3`. The perp-side reader
+  (PR 2), the spot-side `targets` table (PR 3) and the report with the
+  deployment (PR 4) follow.
+
 - **`contrib/uniswap_v3`: the Linux schedule and the Lightsail deployment
   (`schedule/`).** The paper runs move to the Lightsail host the Hyperliquid
   paper run is on, beside it and apart from it: their own checkout

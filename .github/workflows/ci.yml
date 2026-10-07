@@ -79,7 +79,7 @@ jobs:
         run: mypy
 
   autoresearch:
-    name: autoresearch + replay tests (py3.12)
+    name: autoresearch + replay + carry tests (py3.12)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -90,15 +90,16 @@ jobs:
         # contrib/autoresearch borrows read-only from contrib/hyperliquid_perp,
         # and its pin tests import the venue reader, which needs the Hyperliquid
         # SDK that requirements.txt declares and pyproject does not.
-        # contrib/replay borrows from both packages and shares this install.
+        # contrib/replay and contrib/carry borrow from both packages and share
+        # this install.
         # requirements.txt also lists ".", which would rebuild and replace the
         # editable install just made; that line is filtered out.
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
           grep -v '^\.$' requirements.txt | pip install -r /dev/stdin
-      - name: Run the research radar's and the replay package's suites
-        run: pytest -q contrib/autoresearch/tests contrib/replay/tests
+      - name: Run the research radar's, the replay package's and the carry package's suites
+        run: pytest -q contrib/autoresearch/tests contrib/replay/tests contrib/carry/tests
 
   uniswap-v3:
     name: uniswap_v3 tests (py3.12)

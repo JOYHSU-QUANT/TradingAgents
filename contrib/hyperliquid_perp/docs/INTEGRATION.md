@@ -242,7 +242,7 @@ result = risk_gate.evaluate(
 
 ```python
 config["llm_provider"]    = "openrouter"
-config["deep_think_llm"]  = "anthropic/claude-sonnet-4-6"
+config["deep_think_llm"]  = "anthropic/claude-sonnet-5.5"
 config["quick_think_llm"] = "deepseek/deepseek-chat"
 ```
 

@@ -176,7 +176,11 @@ def engine_config(settings: AgentSettings, home: Path) -> dict[str, Any]:
     """The engine's config: its defaults, with the judge's settings and this package's directories over them.
 
     ``backend_url`` is left to the provider's own endpoint. The memory log
-    is switched off by giving it no path.
+    is switched off by giving it no path. Structured output is off, as the
+    perp engine has it: the rating is read from the decision's text, which
+    the free-text path gives as well, and the structured binding forces a
+    tool choice that the Claude 5.5 models refuse (a 400 from each manager,
+    then the same free-text fallback).
     """
     from tradingagents.default_config import DEFAULT_CONFIG
 
@@ -188,6 +192,7 @@ def engine_config(settings: AgentSettings, home: Path) -> dict[str, Any]:
             "quick_think_llm": settings.quick_think_llm,
             "backend_url": None,
             "max_tokens": settings.max_tokens,
+            "structured_output": False,
             "results_dir": str(home / "logs"),
             "data_cache_dir": str(home / "cache"),
             "memory_log_path": None,

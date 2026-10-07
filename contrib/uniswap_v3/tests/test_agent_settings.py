@@ -31,11 +31,11 @@ def test_the_defaults_are_the_judge_of_the_hyperliquid_paper_run():
     settings = AgentSettings()
     assert (settings.llm_provider, settings.deep_think_llm, settings.quick_think_llm) == (
         "openrouter",
-        "anthropic/claude-sonnet-4-6",
+        "anthropic/claude-sonnet-5.5",
         "deepseek/deepseek-chat",
     )
     assert settings.selected_analysts == ("market", "social", "news")
-    assert settings.max_tokens == 8192
+    assert settings.max_tokens == 16384
     assert settings.ask_within_seconds == 14_400
     # The least the first visit's verdict, 10 to 35 minutes after the boundary, clears.
     assert AgentSettings(ask_within_seconds=3600).ask_within_seconds == 3600

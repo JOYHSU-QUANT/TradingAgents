@@ -84,10 +84,10 @@ rpc:
 # command reads it.
 agent:
   llm_provider: openrouter
-  deep_think_llm: "anthropic/claude-sonnet-4-6"
+  deep_think_llm: "anthropic/claude-sonnet-5.5"
   quick_think_llm: "deepseek/deepseek-chat"
   selected_analysts: [market, social, news]
-  max_tokens: 8192
+  max_tokens: 16384
   ask_within_seconds: 14400
 
 # fixed_weights is a placeholder that drives the engine: hold these shares of

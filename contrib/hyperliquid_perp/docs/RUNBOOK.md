@@ -431,7 +431,7 @@ LLM 呼叫**之前**的失敗（連線、warmup、payload 寫入）零 AI 花費
 structured-output 事故。
 
 **`risk_reason = truncated_output`（issue #182）是第三個成因，且它不是模型的問題。**
-completion 上限（`engine.max_completion_tokens`，預設 8192）綁到時供應商回 HTTP 200
+completion 上限（`engine.max_completion_tokens`，預設 16384）綁到時供應商回 HTTP 200
 加一個「停在上限」的 stop reason（OpenAI Chat Completions 系（OpenRouter 等）`length`、
 **native `openai` 走 Responses API 是 `max_output_tokens`**、Anthropic `max_tokens`、Google
 `MAX_TOKENS`、Bedrock Converse `max_tokens`；sidecar 的 `stop_reason` 欄記的就是這些原字），target JSON 在尾端被砍掉。這種 cycle 的 `decision_attempts.status` 一樣是

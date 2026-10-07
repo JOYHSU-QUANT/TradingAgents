@@ -109,7 +109,7 @@ Copy-Item contrib/uniswap_v3/configs/uniswap_v3.example.yaml contrib/uniswap_v3/
   第一根就 `failed: the strategy refused the bar at …`，而且 run 列已經寫進 store，補上區塊後要換一個 run id）；
   它的 `rule` 要與對照 run 的 `trend_vol_weights` 參數**一字不差**，兩個 run 才比得起來。`verdict` 讀的也是這份。
 - `agent` 區塊是 `verdict` 問的 judge（供應商、兩個模型、分析師、completion 上限），預設＝hyperliquid paper 在用的
-  （deep `anthropic/claude-sonnet-4-6`、quick `deepseek/deepseek-chat`），**不改**；它不進設定快照。要換模型見附錄 A。
+  （deep `anthropic/claude-sonnet-5.5`、quick `deepseek/deepseek-chat`、`max_tokens` 16384），**不改**；它不進設定快照。要換模型見附錄 A。
 - 其餘兩份都照預設：一天一根 bar、成交在邊界後 25 塊（`execution.delay_blocks`）——排程時間是照這個值排的，
   改大到超過 45 塊（約 9 分鐘）就要把 timer 一起往後挪。
 
@@ -218,7 +218,8 @@ systemctl list-timers uniswap-v3-paper.timer         # 下一次 visit 的時間
   `--fake-rating` 不受視窗限制。
 - 上游用**本機日期**當 trade date：伺服器是 UTC 沒事；在台灣的本機於 UTC 16:00 之後手動跑，上游會把「今天」算成明天、
   把這次當回測、即時資料源留白。要在本機手動跑就在台北時間 08:10–23:59 之間跑。
-- 每個代幣約 15–20 次 completion；實測（2026-10-06，sonnet-4-6 經 OpenRouter）一個代幣約 11 分鐘，兩個代幣一次 visit 抓 20–25 分鐘。
+- 每個代幣約 15–20 次 completion；實測經 OpenRouter 一個代幣約 11 分鐘（2026-10-06，sonnet-4-6）到 15 分鐘（2026-10-07，sonnet-5.5 會思考），
+  兩個代幣一次 visit 抓 25–30 分鐘。
   問過的（source、代幣、bar）**永不改寫**、重跑直接印 `already stored`；judge 中途沒答（閘道、額度、網路、分析師的資料源被限流或掛了）
   結束碼 3、已答的代幣保留、下次只問剩下的。
 - 印出每個代幣：評等、模型、耗時、原文存在哪：`WETH (ETH-USD): Buy, model anthropic/claude-sonnet-4-6, 662 s, words in verdicts/tradingagents-rating-v1/WETH-20261006T000000Z.json`。
@@ -507,7 +508,7 @@ fork run 用 store 裡的 bar（同回測），但每根要交易的 bar 都在�
 
 ## 附錄 A：換 judge 的模型
 
-`agent` 的預設（deep `anthropic/claude-sonnet-4-6`、quick `deepseek/deepseek-chat`）＝hyperliquid paper 在用的，兩邊成績單才可比；
+`agent` 的預設（deep `anthropic/claude-sonnet-5.5`、quick `deepseek/deepseek-chat`、`max_tokens` 16384）＝hyperliquid paper 在用的，兩邊成績單才可比；
 要換就**兩邊同一天一起換**（hyperliquid 換段的時候）。`agent` 不進設定快照、每筆判斷的列與 sidecar 都記著模型，
 所以換模型**不用開新 run**；換的那天在這裡記一行當分段點，成績單分段看。換之前：
 
@@ -521,7 +522,12 @@ fork run 用 store 裡的 bar（同回測），但每根要交易的 bar 都在�
    跑 `verdict` 看評等讀不讀得出來、耗時多少（`--fake-rating` 不打模型，驗不到這些）。
 5. 只有 `paper-ai.local.yaml` 的 `agent` 要改（`verdict` 只讀它）；對照 run 不受影響。
 
-換過的紀錄：（還沒換過；2026-10-07 開 run 時維持 sonnet-4-6）
+換過的紀錄：
+
+- 2026-10-07：預設從 `anthropic/claude-sonnet-4-6`／`max_tokens` 8192 換成 `anthropic/claude-sonnet-5.5`／16384（與 hyperliquid
+  開 run 8 同日）；伺服器上的 run 是這天才開的，所以沒有 4-6 的段。翻之前照上面第 4 條在 scratch store 真問一次：
+  WETH＝Hold、868 秒、`decision` 完整；同時抓到 5.5 拒絕強制 tool_choice（兩個 manager 各 400 一次再退回純文字），
+  所以 judge 的引擎設定從這天起 `structured_output: false`（與 perp 相同；評等本來就從純文字讀）。
 
 ---
 

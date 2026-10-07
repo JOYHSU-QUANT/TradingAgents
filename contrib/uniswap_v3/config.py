@@ -34,10 +34,10 @@
       source: tradingagents-rating-v1
     agent:                      # optional, and so is each key in it
       llm_provider: openrouter
-      deep_think_llm: "anthropic/claude-sonnet-4-6"
+      deep_think_llm: "anthropic/claude-sonnet-5.5"
       quick_think_llm: "deepseek/deepseek-chat"
       selected_analysts: [market, social, news]
-      max_tokens: 8192
+      max_tokens: 16384
       ask_within_seconds: 14400
 
 Tokens and pools are named by their keys in :mod:`.constants`; a config

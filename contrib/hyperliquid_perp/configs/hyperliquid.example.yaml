@@ -67,16 +67,18 @@ indicators: [rsi_14, ema_20, ema_50, atr_14, macd]   # computed by context_build
 
 engine:
   llm_provider: openrouter
-  deep_think_llm: "anthropic/claude-sonnet-4-6"
+  deep_think_llm: "anthropic/claude-sonnet-5.5"
   quick_think_llm: "deepseek/deepseek-chat"
   selected_analysts: [market, social, news]
   # Completion-token cap sent with every LLM call (positive integer). Left
-  # commented out so the code default (8192) stays the single declaration —
+  # commented out so the code default (16384) stays the single declaration —
   # a copied-out value would pin every local.yaml to today's number. Perp runs
   # are never uncapped (issue #177). The cap includes reasoning/thinking
-  # tokens — raise it explicitly if you switch deep_think_llm to a thinking
-  # model, or the visible tail (the target JSON) is what gets truncated.
-  # max_completion_tokens: 8192
+  # tokens: the default is sized for the thinking deep model above (Sonnet
+  # 5.5 cannot switch thinking off), so raise it further when a cycle is
+  # recorded as truncated_output, or the visible tail (the target JSON) is
+  # what gets truncated.
+  # max_completion_tokens: 16384
   # Deep-think structured output is OFF by default for perp runs — the Phase 2
   # target JSON must survive in final_trade_decision free text; a schema render
   # drops it and every cycle fail-closes as invalid_output (RUNBOOK §7). Only

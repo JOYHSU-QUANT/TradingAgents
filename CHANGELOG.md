@@ -59,6 +59,33 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **The default deep-think model of both paper traders is Claude Sonnet 5.5,
+  and the default completion cap is 16384** (`contrib/hyperliquid_perp`,
+  `contrib/uniswap_v3`, `contrib/replay`, the CLI). `hyperliquid.example.yaml`
+  and `AgentSettings.deep_think_llm` name `anthropic/claude-sonnet-5.5` in
+  place of `anthropic/claude-sonnet-4-6`; the quick model stays
+  `deepseek/deepseek-chat`. The cap pinned equal in three places
+  (`engine_bridge._DEFAULT_MAX_COMPLETION_TOKENS`,
+  `default_config.DEFAULT_MAX_TOKENS`, `replay.variant.DEFAULT_MAX_TOKENS`)
+  and in `AgentSettings.max_tokens` rises from 8192 to 16384: the cap counts
+  the thinking tokens of a model that thinks, and Sonnet 5.5 cannot switch
+  thinking off, so at 8192 the perp's target JSON is what gets truncated
+  (`truncated_output`) and the Uniswap judge's answer loses its rating
+  (`REVIEW`). The shipped replay variant `current-sonnet.yaml` now names
+  `max_tokens: 8192` itself, the cap paper-BTC-6 and -7 were asked under.
+  The Uniswap judge's engine config sets `structured_output: False`, as the
+  perp's does: the rating is read from the decision's text by the engine's
+  signal processor, which the free-text path serves as well, and the
+  structured binding forces a `tool_choice` the Claude 5.5 models refuse
+  with a 400 from each manager before the same free-text fallback (#338).
+  SETUP.md, RUNBOOK.md (perp §5), INTEGRATION.md, README.md, `.env.example`,
+  the replay README and the Uniswap RUNBOOK (§1.2, §2.5, appendix A, with
+  the switch dated) quote the new number and model. Checked before the
+  switch with one real question on each side (a perp one-shot and a Uniswap
+  `verdict` on a scratch store): both parsed, neither truncated. The paper
+  hosts' own `local.yaml` files are not in the repo; the servers switch
+  with their next run (paper-BTC-8).
+
 - **The autoresearch CLI builds its parser one command at a time, and the
   store's timestamp helper has a public name** (refactor plan v2, T7 — PR 18
   of the plan; no behaviour change). `contrib/autoresearch/cli.py`'s

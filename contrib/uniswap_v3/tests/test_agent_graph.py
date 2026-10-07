@@ -21,10 +21,11 @@ from contrib.uniswap_v3.domain.verdicts import Rating
 def test_engine_config_lays_the_settings_and_the_directories_over_the_engines_defaults(tmp_path):
     config = engine_config(AgentSettings(max_tokens=4096, selected_analysts=["market"]), tmp_path)
     assert config["llm_provider"] == "openrouter"
-    assert config["deep_think_llm"] == "anthropic/claude-sonnet-4-6"
+    assert config["deep_think_llm"] == "anthropic/claude-sonnet-5.5"
     assert config["quick_think_llm"] == "deepseek/deepseek-chat"
     assert config["backend_url"] is None
     assert config["max_tokens"] == 4096
+    assert config["structured_output"] is False
     assert config["results_dir"] == str(tmp_path / "logs")
     assert config["data_cache_dir"] == str(tmp_path / "cache")
     assert config["memory_log_path"] is None
@@ -98,7 +99,7 @@ def stub():
 def test_the_judge_builds_a_graph_per_question_with_the_spot_context_on_it(tmp_path, stub):
     settings = AgentSettings(selected_analysts=["market", "news"], max_tokens=1234)
     judge = TradingAgentsJudge(settings, tmp_path, graph_class=stub)
-    assert judge.model == "anthropic/claude-sonnet-4-6"
+    assert judge.model == "anthropic/claude-sonnet-5.5"
     assert judge.rehearsal is False and judge.point_in_time is False
     answer = judge.ask("ETH-USD", "2024-01-03", "the spot context")
     (graph,) = stub.built

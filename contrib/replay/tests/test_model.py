@@ -88,7 +88,7 @@ def test_the_client_is_built_for_the_variants_provider_and_cap():
 def test_gemini_takes_its_cap_under_its_own_key_and_a_set_temperature_is_forwarded():
     fake = _Fake()
     engine_model(make_variant(provider="google", temperature=0.2), engine=fake.engine())
-    assert fake.client_kwargs["max_output_tokens"] == 8192
+    assert fake.client_kwargs["max_output_tokens"] == 16384
     assert "max_tokens" not in fake.client_kwargs
     assert fake.client_kwargs["temperature"] == 0.2
 

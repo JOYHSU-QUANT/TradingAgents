@@ -105,8 +105,9 @@ def replay(
 
     The first boundary is the first one at least ``window_days`` after the
     oldest settlement, so the first z-score has a window behind it (one
-    sample short of full: the oldest settlement sits on the window's open
-    edge); the last is the last boundary whose following day is fully
+    sample short of full, because the current settlement is the window's
+    open edge and is not in its own sample); the last is the last boundary
+    whose following day is fully
     settled, so every row's ``collected`` covers a whole day and the span
     annualisation counts no partial day. ``since_ms`` / ``until_ms``
     narrow that span (rounded to boundaries), never widen it.

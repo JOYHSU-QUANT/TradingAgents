@@ -4,7 +4,9 @@ The ONLY thing this package hands the two venues (carry plan §3.1). The
 perp leg's file-target provider (plan PR 2) and the spot leg's ``target``
 command (plan PR 3) read it; neither imports this package, so the document
 is the contract, and this module is its one writer and its one reader on
-this side. The fields, every one required:
+this side. The fields, every one present in a document; the ones spelled for
+a human (``as_of``, ``written_at``, ``perp_at``, ``spot_at``) are derived from
+their ``*_ms`` twins and never read back:
 
 - ``version`` — :data:`HANDOFF_VERSION`, a whole number; a reader refuses
   any other. Fields may be ADDED under the same version, and a reader
@@ -24,9 +26,12 @@ this side. The fields, every one required:
 - ``action`` and ``position`` — what the boundary did and the position
   after it; the position is also the coordinator's own memory: the next
   run reads the previous file to learn whether it is in (:func:`previous_handoff`);
-- ``params`` — the rule the decision was made with (window, thresholds,
-  hold, margin), so a rerun that changes them can say so and a later
-  report can group by them;
+- ``params`` — the rule parameters this document was written with
+  (window, thresholds, hold, margin). On a rerun of a decided boundary the
+  decision is kept but the sizing follows the rerun's margin, so these are
+  the rerun's and the coordinator warns when they differ from the file it
+  replaces; the parameters a decision was first made with are in that
+  earlier file, not here;
 - ``perp`` — ``side`` (``short`` while in, ``flat`` while out) and
   ``margin_pct`` (``params.margin_pct`` while in, 0 while out): the rule's
   INTENDED sizing, before the perp gate has spoken;

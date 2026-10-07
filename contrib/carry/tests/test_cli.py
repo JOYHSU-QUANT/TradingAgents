@@ -169,21 +169,31 @@ def test_signal_writes_the_handoff_and_remembers_its_position(research: Path, tm
     assert exited.margin_pct == 0 and exited.spot_weight == 0
 
 
-def test_signal_reruns_a_decided_boundary_without_deciding_again(research, tmp_path, capsys):
+def test_signal_reruns_a_decided_boundary_without_deciding_again(tmp_path, capsys):
+    # The first run sees the store without day 40's last two settlements and decides on
+    # the 21:00 one; then those settlements land and the boundary is rerun.
+    points = hump_series()
+    early = [p for p in points if p.time < day(41) - 2 * MS_PER_HOUR]
+    research = write_research_store(tmp_path / "autoresearch.sqlite", early)
     out = tmp_path / "carry-eth.json"
     argv = _signal(research, out, "--no-fetch", "--min-hold-days", "0")
     assert main(argv, now=_clock(day(41) - TEN_MINUTES)) == 0
     first = read_handoff(out)
     assert first.action is Action.ENTER
+    assert first.reading is not None and first.reading.at_ms == day(41) - 3 * MS_PER_HOUR
     capsys.readouterr()
-    # Rerun (say, after a crash past the write, or to refresh the sizing): the decision
-    # stands with the reading it was made from — even with no minimum hold, which would
-    # otherwise let the rule read its own entry as a reason to exit — and the sizing is
-    # recomputed from the stores given now. Different rule params are a warning, not a refusal.
+    write_research_store(research, points)
+    # Rerun (after a crash past the write, or to refresh the sizing): the decision stands
+    # with the reading it was made from (re-deciding from the position it left would read
+    # the rule against its own outcome), the sizing is recomputed from the stores given
+    # now, and different rule params are a warning, not a refusal.
     stores = _two_stores(tmp_path, perp_equity="20000")
     assert main([*argv, *stores, "--margin-pct", "40"], now=_clock(day(41) - 1)) == 0
     captured = capsys.readouterr()
-    assert "(enter; this boundary was already decided, sizing refreshed)" in captured.out
+    lines = captured.out.splitlines()
+    assert lines[1].startswith("  funding: 0.00004500/h at 2026-02-10T21:00:00+00:00 (")
+    assert lines[2].startswith("  current (not the decision's): 0.00004500/h at 2026-02-10T23:00")
+    assert "(enter; this boundary was already decided, sizing refreshed)" in lines[3]
     assert "rerun with different rule parameters" in captured.err
     again = read_handoff(out)
     assert again.action is Action.ENTER and again.position == first.position
@@ -313,7 +323,7 @@ def test_signal_refuses_a_stale_reading(tmp_path: Path, capsys):
     assert main(_signal(research, out, "--no-fetch"), now=_clock(day(41) - 1)) == 1
     err = capsys.readouterr().err
     assert (
-        "is 13 hours before 2026-02-11T00:00:00+00:00, more than --max-reading-age-hours 3" in err
+        "is 13.0 hours before 2026-02-11T00:00:00+00:00, more than --max-reading-age-hours 3" in err
     )
     assert not out.exists()
     argv = _signal(research, out, "--no-fetch", "--max-reading-age-hours", "24")
@@ -349,7 +359,7 @@ def test_signal_refuses_when_nothing_settled_before_the_boundary(tmp_path: Path,
     later = write_research_store(tmp_path / "autoresearch.sqlite", hourly(day(50), alternating(2)))
     out = tmp_path / "carry-eth.json"
     assert main(_signal(later, out, "--no-fetch"), now=_clock(day(41) - TEN_MINUTES)) == 1
-    assert "the handoff was not written" in capsys.readouterr().err
+    assert "no ETH settlement before 2026-02-11T00:00:00+00:00" in capsys.readouterr().err
     assert not out.exists()
 
 

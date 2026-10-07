@@ -42,7 +42,7 @@ from .handoff import (
     write_handoff,
 )
 from .history import floor_day, format_summary, pct, replay
-from .signal import OUT, Action, Params, Side, SignalError, advance, decide, read
+from .signal import OUT, Action, Params, Reading, Side, SignalError, advance, decide, read
 from .stores import Equity, StoreReadError, perp_equity, spot_equity
 from .upstream import (
     FUNDING_INTERVAL_MS,
@@ -237,6 +237,21 @@ def _describe_equity(equity: Equity | None) -> str:
     return "unknown" if equity is None else plain(equity.value)
 
 
+def _describe_reading(reading: Reading, params: Params) -> str:
+    z = "n/a" if reading.z is None else f"{reading.z:.2f}"
+    recent = (
+        "n/a"
+        if reading.recent_mean is None
+        else f"{plain(reading.recent_mean)}/h ({pct(reading.recent_annualized)} annualized)"
+    )
+    return (
+        f"{plain(reading.current)}/h at {iso_utc(reading.at_ms)} "
+        f"({pct(reading.current_annualized)} annualized); z {z} over {reading.samples} "
+        f"samples ({params.window_days}d); last-day mean over {reading.recent_samples} "
+        f"settlements {recent}"
+    )
+
+
 def _cmd_signal(
     args: argparse.Namespace,
     *,
@@ -246,7 +261,7 @@ def _cmd_signal(
     params = _params(args)
     coin: str = args.coin
     max_reading_age = args.max_reading_age_hours
-    if isinstance(max_reading_age, bool) or max_reading_age < 1:
+    if max_reading_age < 1:
         raise _Refused(f"--max-reading-age-hours must be at least 1, got {max_reading_age}")
     now_at = now()
     now_ms = epoch_ms(now_at, what="the clock")
@@ -292,7 +307,7 @@ def _cmd_signal(
     reading_age_hours = (as_of_ms - reading.at_ms) / FUNDING_INTERVAL_MS
     if reading_age_hours > max_reading_age:
         raise _Refused(
-            f"the latest {coin} settlement ({iso_utc(reading.at_ms)}) is {reading_age_hours:.0f} "
+            f"the latest {coin} settlement ({iso_utc(reading.at_ms)}) is {reading_age_hours:.1f} "
             f"hours before {iso_utc(as_of_ms)}, more than --max-reading-age-hours "
             f"{max_reading_age}; the handoff was not written"
         )
@@ -337,18 +352,13 @@ def _cmd_signal(
             f"spot weight is 0 while in: {cause} (perp equity {_describe_equity(equity_perp)}, "
             f"spot equity {_describe_equity(equity_spot)})"
         )
-    z = "n/a" if reading.z is None else f"{reading.z:.2f}"
-    recent = (
-        "n/a"
-        if reading.recent_mean is None
-        else f"{plain(reading.recent_mean)}/h ({pct(reading.recent_annualized)} annualized)"
-    )
-    print(
-        f"  funding: {plain(reading.current)}/h at {iso_utc(reading.at_ms)} "
-        f"({pct(reading.current_annualized)} annualized); z {z} over {reading.samples} "
-        f"samples ({params.window_days}d); last-day mean over {reading.recent_samples} "
-        f"settlements {recent}"
-    )
+    # The line describes the reading the document carries: on a rerun that is the
+    # one the decision was made from, and a fresh reading that differs is shown
+    # on its own line so the operator cannot mistake it for the decision's.
+    shown = decided_from if decided_from is not None else reading
+    print(f"  funding: {_describe_reading(shown, params)}")
+    if rerun and reading != shown:
+        print(f"  current (not the decision's): {_describe_reading(reading, params)}")
     held = f"; in since {iso_utc(position.entered_at_ms)}" if position.entered_at_ms else ""
     if rerun:
         print(

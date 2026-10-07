@@ -59,6 +59,50 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **The default deep-think model of both paper traders is Claude Sonnet 5.5,
+  and the default completion cap is 16384** (`contrib/hyperliquid_perp`,
+  `contrib/uniswap_v3`, `contrib/replay`, the CLI). `hyperliquid.example.yaml`
+  and `AgentSettings.deep_think_llm` name `anthropic/claude-sonnet-5.5` in
+  place of `anthropic/claude-sonnet-4-6`; the quick model stays
+  `deepseek/deepseek-chat`. The cap pinned equal in three places
+  (`engine_bridge._DEFAULT_MAX_COMPLETION_TOKENS`,
+  `default_config.DEFAULT_MAX_TOKENS`, `replay.variant.DEFAULT_MAX_TOKENS`)
+  and, separately, `AgentSettings.max_tokens` rise from 8192 to 16384 (the
+  CLI's default rises for every provider, not only the Anthropic ones): the cap counts
+  the thinking tokens of a model that thinks, and Sonnet 5.5 cannot switch
+  thinking off, so at 8192 the perp's target JSON is what gets truncated
+  (`truncated_output`) and the Uniswap judge's answer loses its rating
+  (`REVIEW`). The shipped replay variant `current-sonnet.yaml` now names
+  `max_tokens: 8192` itself, the cap paper-BTC-6 and -7 were asked under.
+  The Uniswap judge's engine config sets `structured_output: False`, as the
+  perp's does: the rating is read from the decision's text, which the
+  free-text path gives as well, and the structured binding forces a `tool_choice` the Claude 5.5 models refuse
+  with a 400 from each manager before the same free-text fallback (#338).
+  With the free-text path the only one, the rating is no longer taken
+  from the engine's signal, whose reader falls back to the first rating
+  word anywhere in the text (a decision cut short by the cap, or written
+  in another shape, read as a direction): the spot context now asks the
+  decision to end with a `Rating: <rating>` line (`PROMPT_VERSION`
+  `spot-context-v3`), and `agent/graph.py` reads the last such line,
+  recording `REVIEW` with a warning that names the cause when there is
+  none, its word is not a rating, or more than the word follows it; the
+  engine's signal, which `_answer` used to refuse when it was not a rating,
+  is no longer read at all. The closing sentence sits in the instrument
+  context every agent reads, so the analysts' reports may end with such a
+  line too; only the decision's is read.
+  SETUP.md, RUNBOOK.md (perp §5), INTEGRATION.md, README.md, `.env.example`,
+  the replay README and the Uniswap RUNBOOK (§1.2, §2.5, appendix A, with
+  the switch dated) quote the new number and model. Checked before the
+  switch with one real question on each side (a perp one-shot and a Uniswap
+  `verdict` on a scratch store): both parsed, neither truncated; asked
+  again under `spot-context-v3`, the decision ended with `Rating: Hold`.
+  The paper hosts' own `local.yaml` files are not in the repo: the perp
+  host's cap follows its `local.yaml` (set there, or this default on its
+  next restart), and the model switch is made there with run paper-BTC-8.
+  A replay variant file of your own that names no `max_tokens` now hashes
+  with 16384, a new `sha`: register it under a new name, or pin the old cap
+  in the file.
+
 - **The autoresearch CLI builds its parser one command at a time, and the
   store's timestamp helper has a public name** (refactor plan v2, T7 — PR 18
   of the plan; no behaviour change). `contrib/autoresearch/cli.py`'s

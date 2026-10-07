@@ -109,7 +109,7 @@ Copy-Item contrib/uniswap_v3/configs/uniswap_v3.example.yaml contrib/uniswap_v3/
   第一根就 `failed: the strategy refused the bar at …`，而且 run 列已經寫進 store，補上區塊後要換一個 run id）；
   它的 `rule` 要與對照 run 的 `trend_vol_weights` 參數**一字不差**，兩個 run 才比得起來。`verdict` 讀的也是這份。
 - `agent` 區塊是 `verdict` 問的 judge（供應商、兩個模型、分析師、completion 上限），預設＝hyperliquid paper 在用的
-  （deep `anthropic/claude-sonnet-4-6`、quick `deepseek/deepseek-chat`），**不改**；它不進設定快照。要換模型見附錄 A。
+  （deep `anthropic/claude-sonnet-5.5`、quick `deepseek/deepseek-chat`、`max_tokens` 16384），**不改**；它不進設定快照。要換模型見附錄 A。
 - 其餘兩份都照預設：一天一根 bar、成交在邊界後 25 塊（`execution.delay_blocks`）——排程時間是照這個值排的，
   改大到超過 45 塊（約 9 分鐘）就要把 timer 一起往後挪。
 
@@ -218,14 +218,18 @@ systemctl list-timers uniswap-v3-paper.timer         # 下一次 visit 的時間
   `--fake-rating` 不受視窗限制。
 - 上游用**本機日期**當 trade date：伺服器是 UTC 沒事；在台灣的本機於 UTC 16:00 之後手動跑，上游會把「今天」算成明天、
   把這次當回測、即時資料源留白。要在本機手動跑就在台北時間 08:10–23:59 之間跑。
-- 每個代幣約 15–20 次 completion；實測（2026-10-06，sonnet-4-6 經 OpenRouter）一個代幣約 11 分鐘，兩個代幣一次 visit 抓 20–25 分鐘。
+- 每個代幣約 15–20 次 completion；實測經 OpenRouter 一個代幣約 11 分鐘（2026-10-06，sonnet-4-6）到 15 分鐘（2026-10-07，sonnet-5.5 會思考），
+  兩個代幣一次 visit 抓 25–30 分鐘。
   問過的（source、代幣、bar）**永不改寫**、重跑直接印 `already stored`；judge 中途沒答（閘道、額度、網路、分析師的資料源被限流或掛了）
   結束碼 3、已答的代幣保留、下次只問剩下的。
-- 印出每個代幣：評等、模型、耗時、原文存在哪：`WETH (ETH-USD): Buy, model anthropic/claude-sonnet-4-6, 662 s, words in verdicts/tradingagents-rating-v1/WETH-20261006T000000Z.json`。
+- 印出每個代幣：評等、模型、耗時、原文存在哪：`WETH (ETH-USD): Hold, model anthropic/claude-sonnet-5.5, 868 s, words in verdicts/tradingagents-rating-v1/WETH-20261007T000000Z.json`。
   sidecar 放在 **store 檔的同目錄**（伺服器上是 `/home/trader/data/uniswap/verdicts/<source>/`），裡面有最終決策全文、各分析師與辯論報告、
   給它看的現貨脈絡（最近收盤、1／7／30 根變動、20 根波動率）、模型與 judge 的設定、耗時；上游引擎自己的 log 與 cache 在同目錄的 `tradingagents/`。
   備份 store 時一起帶走。
-- judge 回 `REVIEW`（答了但讀不出評等）照樣寫、stderr 警告一行、不再問；`ai_gated_weights` 把它當沒判斷。
+- 評等只從決策全文**結尾的 `Rating: <評等>` 行**讀（脈絡的尾句要求這一行；不用上游「文中第一個評等字」的退路，
+  那會把被截斷或沒照格式的答案讀成方向錯的評等）。沒有這一行、那行的字不是五個評等之一、或評等後面還帶字
+  （`Rating: Buy (weak)`、`Rating: Buy/Hold` 都不算；markdown 與反引號的包裝、全形冒號可以），就記 `REVIEW`
+  （答了但讀不出評等）照樣寫、stderr 警告一行、不再問；`ai_gated_weights` 把它當沒判斷。
 - **演練**：`--fake-rating Buy` 不打模型、直接寫該評等（`model=fake`、沒有 sidecar）。它**只准用在沒有真判斷的 store**：
   store 裡該 source 已有非 fake 的列就結束碼 1——fake 列會永久擋掉那根 bar 真的判斷。排程演練請用另一個 db 與
   `verdicts.source` 不同的設定檔，不要碰 `paper.db`。
@@ -249,7 +253,7 @@ visit 的結束碼＝第一個不是 0 的：
   第一次若拿到結束碼 3（節點落後、成交區塊還沒到、judge 沒答、store 被鎖住），後兩次就是重試；
   一天最多試三次，三次都失敗的那根，隔天的 visit 會補決策（成交區塊照舊，與準時的一樣；AI run 補的那根多半沒有判斷——那天 `verdict`
   那步沒成功的話——走「沒判斷」政策）。
-- 每次最多跑 **55 分鐘**（`TimeoutStartSec`）：兩個代幣的問答約 20–25 分鐘，超時多半是節點或閘道卡住，下一次 visit 會重來。
+- 每次最多跑 **55 分鐘**（`TimeoutStartSec`）：兩個代幣的問答約 25–30 分鐘，超時多半是節點或閘道卡住，下一次 visit 會重來。
   還在跑的 visit 不會被下一次 timer 再開一次；`Persistent=true` 補跑主機關機時錯過的那次。
 - `RUN_TREND`／`RUN_AI` 留空就跳過該段、log 寫一行；兩個都空是設定錯：log 一行、結束碼 1。
 - 這台機器 2 GB 記憶體：judge 的 graph 與 hl-paper 的引擎各是一個 Python 行程，visit 時段兩者可能同時在跑。service 設了
@@ -366,7 +370,7 @@ cd ~/uniswap-paper
 | `verdict`：`failed: the bar at ... is not the latest whose boundary has passed` | 想補問舊的 bar | 不補：舊 bar 的判斷會看到未來；那天照「沒判斷」走 |
 | `verdict`：`failed: verdict writes under the source the config's verdicts section names, and the config has no verdicts section` | `CONFIG_AI` 指到沒打開 `verdicts` 的設定檔 | 對照 §1.2、§3.1 |
 | `verdict`：`failed: the store holds verdicts of '...' given by [...]` | 在有真判斷的 store 上用了 `--fake-rating` | 演練換 scratch store（§2.5） |
-| `verdict`：`warning: the judge gave no rating on WBTC (REVIEW)` | judge 答了但讀不出評等；已寫成 `REVIEW`、不再問 | 沒事；`ai_gated_weights` 當沒判斷處理。常發生就看 sidecar 的 `decision` |
+| `verdict`：`warning: the judge gave no rating on WBTC (REVIEW)` | judge 答了但決策全文沒有結尾的 `Rating: <評等>` 行（答案被 `agent.max_tokens` 截斷、或沒照格式）；已寫成 `REVIEW`、不再問；前面會有一行 log 說是哪一種 | 沒事；`ai_gated_weights` 當沒判斷處理。常發生就看 sidecar 的 `decision`：斷在半句就是 cap，調高 `agent.max_tokens` |
 | `failed: paper needs the packages in contrib/uniswap_v3/requirements.txt` | `PYTHON` 不是裝了相依的那個 venv | 改 §3.1 的 `PYTHON` |
 | `==== there is no ".../python": fix PYTHON ...` 接 `==== exit 4` | §3.1 的 `PYTHON` 路徑打錯 | 改 `paper-visit.local.sh` |
 | `python3: not found` 接 `==== exit 127` | `PYTHON` 不是路徑而且 PATH 上沒有 | 改 §3.1 的 `PYTHON` 成 `.venv/bin/python` 的完整路徑 |
@@ -507,28 +511,36 @@ fork run 用 store 裡的 bar（同回測），但每根要交易的 bar 都在�
 
 ## 附錄 A：換 judge 的模型
 
-`agent` 的預設（deep `anthropic/claude-sonnet-4-6`、quick `deepseek/deepseek-chat`）＝hyperliquid paper 在用的，兩邊成績單才可比；
+`agent` 的預設（deep `anthropic/claude-sonnet-5.5`、quick `deepseek/deepseek-chat`、`max_tokens` 16384）＝hyperliquid paper 在用的，兩邊成績單才可比；
 要換就**兩邊同一天一起換**（hyperliquid 換段的時候）。`agent` 不進設定快照、每筆判斷的列與 sidecar 都記著模型，
 所以換模型**不用開新 run**；換的那天在這裡記一行當分段點，成績單分段看。換之前：
 
 1. **確認 OpenRouter 的 slug**：對照 OpenRouter 的模型頁，名字打錯是 4xx、`verdict` 結束碼 1（§5 的 `for good`）。
-2. **會「思考」的模型（Sonnet 5.5 之類）**：`agent.max_tokens` 是每次 completion 的上限、**含 thinking token**，8192 會被綁住、
-   答案被截斷而讀不出評等（看起來是 `REVIEW` 變多、sidecar 的 `decision` 斷在半句）。要一起調高（例如 16384 起），
-   目前沒有偵測「上限綁住」的機制，換完頭幾天看 sidecar。
+2. **會「思考」的模型（Sonnet 5.5 之類）**：`agent.max_tokens` 是每次 completion 的上限、**含 thinking token**，太小會被綁住、
+   答案被截斷而讀不出評等（看起來是 `REVIEW` 變多、sidecar 的 `decision` 斷在半句）。預設 16384 是照 Sonnet 5.5 定的；
+   換成想得更多的模型就再調高。目前沒有偵測「上限綁住」的機制，換完頭幾天看 sidecar。
 3. **temperature**：這類模型對非預設的 `temperature` 回 400。上游的 `TRADINGAGENTS_*` 環境變數（temperature、辯論回合等）
-   會覆蓋設定而且**不在 sidecar 裡**（重現性缺口），伺服器的 `.env` 不要設它們。
+   會覆蓋設定而且**不在 sidecar 裡**（重現性缺口），伺服器的 `.env` 不要設它們（`TRADINGAGENTS_OUTPUT_LANGUAGE` 也是：
+   非英文的結尾行讀不出評等，整天都是 `REVIEW`）。
 4. **先在 scratch store 上真問一次**：複製一份 store（§9 第一條）、設定檔 `verdicts.source` 換個名字（例如 `tradingagents-rating-v1-try`），
    跑 `verdict` 看評等讀不讀得出來、耗時多少（`--fake-rating` 不打模型，驗不到這些）。
-5. 只有 `paper-ai.local.yaml` 的 `agent` 要改（`verdict` 只讀它）；對照 run 不受影響。
+5. 只有 `paper-ai.local.yaml` 的 `agent` 要改（`verdict` 只讀它）；對照 run 不受影響。範例檔的 `agent` 帶的是明確值，
+   複製出去的 local.yaml 不會跟著程式預設翻——翻完要對一次**伺服器上那份**的 `agent` 區塊。
 
-換過的紀錄：（還沒換過；2026-10-07 開 run 時維持 sonnet-4-6）
+換過的紀錄：
+
+- 2026-10-07：預設從 `anthropic/claude-sonnet-4-6`／`max_tokens` 8192 換成 `anthropic/claude-sonnet-5.5`／16384（與 hyperliquid
+  開 run 8 同日）；伺服器上的 run 是這天才開的，所以沒有 4-6 的段。翻之前照上面第 4 條在 scratch store 真問一次：
+  WETH＝Hold、868 秒、`decision` 完整；同時抓到 5.5 拒絕強制 tool_choice（兩個 manager 各 400 一次再退回純文字），
+  所以 judge 的引擎設定從這天起 `structured_output: false`（與 perp 相同；評等本來就從純文字讀），脈絡也從這天起要求結尾的
+  `Rating:` 行（`spot-context-v3`；再真問一次：Hold、628 秒、最後一行正是 `Rating: Hold`）。
 
 ---
 
 ## 附錄 B：本機 Windows 工作排程器（單一 run）
 
 在本機跑**一個**不讀判斷的 run（`fixed_weights`、`trend_vol_weights`）的寫法；`ai_gated_weights` 要 §3 的四步串接，
-而且兩個代幣的問答就要 20–25 分鐘、加上 backfill 與 paper 就超過這裡 25 分鐘的時限，**不要在 Windows 上拿這個 task 跑它**
+而且兩個代幣的問答就要 25–30 分鐘、加上 backfill 與 paper 就超過這裡 25 分鐘的時限，**不要在 Windows 上拿這個 task 跑它**
 （paper 會在判斷寫進來之前就把當根決策掉）。指令都用 PowerShell、在排程 worktree 的根目錄執行。
 
 ### B.1 排程專用的 worktree

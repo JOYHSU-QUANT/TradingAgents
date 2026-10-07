@@ -431,14 +431,14 @@ LLM 呼叫**之前**的失敗（連線、warmup、payload 寫入）零 AI 花費
 structured-output 事故。
 
 **`risk_reason = truncated_output`（issue #182）是第三個成因，且它不是模型的問題。**
-completion 上限（`engine.max_completion_tokens`，預設 8192）綁到時供應商回 HTTP 200
+completion 上限（`engine.max_completion_tokens`，預設 16384）綁到時供應商回 HTTP 200
 加一個「停在上限」的 stop reason（OpenAI Chat Completions 系（OpenRouter 等）`length`、
 **native `openai` 走 Responses API 是 `max_output_tokens`**、Anthropic `max_tokens`、Google
 `MAX_TOKENS`、Bedrock Converse `max_tokens`；sidecar 的 `stop_reason` 欄記的就是這些原字），target JSON 在尾端被砍掉。這種 cycle 的 `decision_attempts.status` 一樣是
 `invalid_output`（fail-closed、計入 30 輪、不重問），但 `ai_outputs.risk_reason` 記
 `truncated_output` 而不是 `invalid_output`，log 同時有一行 ERROR
 `the decision completion was truncated: N output tokens against a cap of C`——處置是調大
-`engine.max_completion_tokens`（換 thinking 模型尤其會踩到，上限含 reasoning tokens），
+`engine.max_completion_tokens`（換成想得更多的模型尤其會踩到，上限含 reasoning tokens），
 **不是**去稽核 prompt 契約。JSON 區塊倖存、只有後面的說明被砍時照常接受，只留一行 WARNING。
 決策 completion 綁到上限、但引擎**隨後**才失敗（例如尾端的 `process_signal` 呼叫逾時、
 回傳形狀壞掉）時沒有 parse 可判，那條走 §3.1 ladder 記成 `api_failed`：log 有一行 ERROR
@@ -449,7 +449,7 @@ cap 的問題，不是那個 timeout。
 `completion truncated in <node>`。每次引擎跑完都有一行 INFO
 `completion usage: N call(s), T output tokens total, cap C; truncated: …`，並在 payload
 目錄旁寫一個 `<payload>.usage.json`（per-call 的 node／model／output_tokens／stop_reason），
-「8192 夠不夠」從此可量測——注意那個檔沒有任何列指向它，也**不在** `input_payload_hash`
+「cap 夠不夠」從此可量測——注意那個檔沒有任何列指向它，也**不在** `input_payload_hash`
 的契約內（payload 本體 bytes 被 hash 釘住，不能事後補寫）；`validate`、`export`、
 fingerprint backfill 都不讀它，刪掉或輪替 sidecar 不影響任何驗收判定，只會少掉那段量測。
 同一個目錄還有第二個 sidecar `<payload>.reports.json`：`selected_analysts`（這個 cycle 配了

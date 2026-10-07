@@ -21,10 +21,11 @@ from contrib.uniswap_v3.domain.verdicts import Rating
 def test_engine_config_lays_the_settings_and_the_directories_over_the_engines_defaults(tmp_path):
     config = engine_config(AgentSettings(max_tokens=4096, selected_analysts=["market"]), tmp_path)
     assert config["llm_provider"] == "openrouter"
-    assert config["deep_think_llm"] == "anthropic/claude-sonnet-4-6"
+    assert config["deep_think_llm"] == "anthropic/claude-sonnet-5.5"
     assert config["quick_think_llm"] == "deepseek/deepseek-chat"
     assert config["backend_url"] is None
     assert config["max_tokens"] == 4096
+    assert config["structured_output"] is False
     assert config["results_dir"] == str(tmp_path / "logs")
     assert config["data_cache_dir"] == str(tmp_path / "cache")
     assert config["memory_log_path"] is None
@@ -32,9 +33,10 @@ def test_engine_config_lays_the_settings_and_the_directories_over_the_engines_de
     assert "max_debate_rounds" in config and "data_vendors" in config
 
 
-def test_the_answer_is_read_from_the_final_state_and_the_signal():
+def test_the_answer_is_read_from_the_final_state_and_its_rating_line():
     state = {"final_trade_decision": "**Rating**: Buy", "market_report": "m", "messages": [1]}
-    answer = _answer((state, "Buy"), "ETH-USD", ("market",), 2.5)
+    # The engine's signal is not read: the rating line is.
+    answer = _answer((state, "Sell"), "ETH-USD", ("market",), 2.5)
     assert answer.rating is Rating.BUY
     assert answer.decision == "**Rating**: Buy"
     assert answer.elapsed_seconds == 2.5
@@ -49,13 +51,41 @@ def test_the_answer_is_read_from_the_final_state_and_the_signal():
 
 
 @pytest.mark.parametrize(
+    ("decision", "rating"),
+    [
+        ("Weighing the Buy case against the Sell case...\n\n**Final rating: Hold**", Rating.HOLD),
+        ("Rating: Buy\nOn reflection:\n- rating: underweight", Rating.UNDERWEIGHT),
+        ("> **Rating** - Overweight", Rating.OVERWEIGHT),
+        ("`Rating: Sell`", Rating.SELL),
+        ("Rating: **Hold**.", Rating.HOLD),
+        # More than the word on the line: not one rating.
+        ("Rating: Buy/Hold", Rating.REVIEW),
+        ("Rating: Buy (moderate conviction)", Rating.REVIEW),
+        ("Rating：Overweight", Rating.OVERWEIGHT),
+        # Cut short before the line: the first rating word in the prose is not read.
+        ("The Buy case rests on flows; the Sell case on", Rating.REVIEW),
+        # A word that is not a rating; a rating named mid-sentence is not the line.
+        ("Rating: Strong Buy", Rating.REVIEW),
+        ("the rating: Buy, as the plan says", Rating.REVIEW),
+        ("", Rating.REVIEW),
+    ],
+)
+def test_the_rating_is_the_decisions_last_rating_line_or_review(decision, rating, caplog):
+    answer = _answer(({"final_trade_decision": decision}, "Buy"), "ETH-USD", (), 0)
+    assert answer.rating is rating
+    if rating is Rating.REVIEW:
+        assert "recorded as REVIEW" in caplog.text
+    else:
+        assert "REVIEW" not in caplog.text
+
+
+@pytest.mark.parametrize(
     ("propagated", "match"),
     [
         ("Buy", r"shape that cannot be read \(str\)"),
         (({"final_trade_decision": "x"}, "Buy", 3), r"shape that cannot be read \(tuple\)"),
         (("state", "Buy"), "holds no final_trade_decision text"),
         (({"final_trade_decision": None}, "Buy"), "holds no final_trade_decision text"),
-        (({"final_trade_decision": "x"}, "Strong Buy"), r"signal on ETH-USD is 'Strong Buy'"),
     ],
 )
 def test_an_answer_of_another_shape_is_refused(propagated, match):
@@ -86,7 +116,7 @@ class _StubGraph:
         self.seen = self.resolve_instrument_context(ticker, asset_type)
         if _StubGraph.answer_error is not None:
             raise _StubGraph.answer_error
-        return {"final_trade_decision": f"**Rating**: Hold on {trade_date}"}, "Hold"
+        return {"final_trade_decision": f"Decided on {trade_date}.\n\n**Rating**: Hold"}, "Hold"
 
 
 @pytest.fixture
@@ -98,7 +128,7 @@ def stub():
 def test_the_judge_builds_a_graph_per_question_with_the_spot_context_on_it(tmp_path, stub):
     settings = AgentSettings(selected_analysts=["market", "news"], max_tokens=1234)
     judge = TradingAgentsJudge(settings, tmp_path, graph_class=stub)
-    assert judge.model == "anthropic/claude-sonnet-4-6"
+    assert judge.model == "anthropic/claude-sonnet-5.5"
     assert judge.rehearsal is False and judge.point_in_time is False
     answer = judge.ask("ETH-USD", "2024-01-03", "the spot context")
     (graph,) = stub.built
@@ -108,7 +138,8 @@ def test_the_judge_builds_a_graph_per_question_with_the_spot_context_on_it(tmp_p
     assert graph.seen == (
         "base context for ETH-USD as crypto\n\n## Spot market context\nthe spot context"
     )
-    assert answer.rating is Rating.HOLD and answer.decision == "**Rating**: Hold on 2024-01-03"
+    assert answer.rating is Rating.HOLD
+    assert answer.decision == "Decided on 2024-01-03.\n\n**Rating**: Hold"
     assert answer.elapsed_seconds >= 0
     # Each question gets its own graph with its own context.
     judge.ask("BTC-USD", "2024-01-03", "another context")

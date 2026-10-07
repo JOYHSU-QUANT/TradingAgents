@@ -1,7 +1,8 @@
 """The package's literals that spell an engine name, pinned to the engine's own symbols.
 
 The agent layer reaches into the ``tradingagents`` engine by name: the
-rating strings it reads out of the graph's signal, the ``final_state``
+rating strings the graph answers in (read off the decision's ``Rating:``
+line), the ``final_state``
 keys the sidecar keeps, the config keys it writes over the engine's
 defaults, the analysts it sets the graph up with. A rename upstream would
 not raise on our side: a rating would fail to parse on every verdict, a

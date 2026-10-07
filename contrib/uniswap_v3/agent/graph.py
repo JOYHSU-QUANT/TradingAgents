@@ -3,9 +3,10 @@
 :class:`TradingAgentsJudge` builds the engine's graph over the config's
 :class:`~.settings.AgentSettings` laid over the engine's own defaults, with
 the spot context (:mod:`.context`) appended to the instrument context the
-graph hands every agent, and reads the rating the graph itself extracts
-from the portfolio manager's decision. The engine is imported here and
-nowhere else in the package, and only when a question is first asked.
+graph hands every agent, and reads the rating off the ``Rating:`` line the
+portfolio manager's decision ends with (:data:`_RATING_LINE`). The engine is
+imported here and nowhere else in the package, and only when a question is
+first asked.
 
 The engine writes as it runs: a JSON log of each run's state under its
 ``results_dir``, and a data cache. Both are pointed into ``home``, a
@@ -35,6 +36,8 @@ answers every question with one rating and keeps no words, for
 
 from __future__ import annotations
 
+import logging
+import re
 import time as _time
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -58,7 +61,7 @@ __all__ = [
 
 #: Which contract the verdicts were asked under: the spot context's wording
 #: and what is read back. Bump it when either changes.
-PROMPT_VERSION: Final = "spot-context-v2"
+PROMPT_VERSION: Final = "spot-context-v3"
 #: What a verdict given by :class:`FakeJudge` records as its model: the
 #: mark by which a stored verdict is known to be a rehearsal's.
 FAKE_MODEL: Final = "fake"
@@ -80,6 +83,20 @@ REPORT_KEYS: Final = (
     "final_trade_decision",
 )
 _DECISION_KEY: Final = "final_trade_decision"
+#: The ``Rating: <rating>`` line the spot context asks the decision to end with,
+#: as markdown may dress it (``**Rating**: Hold``, ``**Final rating: Hold**``,
+#: ```Rating: Hold```, a fullwidth colon), with one word and nothing but
+#: dressing after it (so neither ``Rating: Buy/Hold`` nor ``Rating: Buy (weak)``
+#: is read as Buy); the last such line is the rating. The engine's own signal
+#: is not read: its free-text reader falls back to the first rating word
+#: anywhere in the text, which reads a decision cut short, or written
+#: otherwise, as a direction.
+_RATING_LINE: Final = re.compile(
+    r"^[\s*_#>`-]*(?:final\s+)?rating[\s*_`]*[:\-：][\s*_`]*([A-Za-z]+)[\s*_`.]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+logger = logging.getLogger(__name__)
 #: The engine's ``propagate`` argument that selects its crypto pipeline.
 _ASSET_TYPE: Final = "crypto"
 # Provider statuses that say "later": an empty balance, a timeout, a rate limit.
@@ -176,7 +193,11 @@ def engine_config(settings: AgentSettings, home: Path) -> dict[str, Any]:
     """The engine's config: its defaults, with the judge's settings and this package's directories over them.
 
     ``backend_url`` is left to the provider's own endpoint. The memory log
-    is switched off by giving it no path.
+    is switched off by giving it no path. Structured output is off, as the
+    perp engine has it: the rating is read from the decision's text, which
+    the free-text path gives as well, and the structured binding forces a
+    tool choice that the Claude 5.5 models refuse (a 400 from each manager,
+    then the same free-text fallback).
     """
     from tradingagents.default_config import DEFAULT_CONFIG
 
@@ -188,6 +209,7 @@ def engine_config(settings: AgentSettings, home: Path) -> dict[str, Any]:
             "quick_think_llm": settings.quick_think_llm,
             "backend_url": None,
             "max_tokens": settings.max_tokens,
+            "structured_output": False,
             "results_dir": str(home / "logs"),
             "data_cache_dir": str(home / "cache"),
             "memory_log_path": None,
@@ -331,27 +353,50 @@ def _may_pass(exc: BaseException) -> bool:
     return False
 
 
+def _rating_of(decision: str, ticker: str) -> Rating:
+    """The rating on the decision's last ``Rating:`` line; ``REVIEW``, and a warning, when there is none."""
+    lines = _RATING_LINE.findall(decision)
+    if not lines:
+        logger.warning(
+            "the judge's decision on %s has no `Rating:` line (cut short by agent.max_tokens, "
+            "or not in the asked shape): recorded as REVIEW",
+            ticker,
+        )
+        return Rating.REVIEW
+    word = lines[-1].capitalize()
+    try:
+        return Rating(word)
+    except ValueError:
+        logger.warning(
+            "the judge's decision on %s ends with `Rating: %s`, and a rating is one of %s: "
+            "recorded as REVIEW",
+            ticker,
+            word,
+            [rating.value for rating in Rating if not rating.is_review],
+        )
+        return Rating.REVIEW
+
+
 def _answer(
     propagated: object, ticker: str, selected_analysts: Sequence[str], elapsed: float
 ) -> Answer:
-    """Read the engine's ``(final_state, signal)`` into an :class:`Answer`; another shape is refused."""
+    """Read the engine's ``(final_state, signal)`` into an :class:`Answer`; another shape is refused.
+
+    The rating is read from the decision text's ``Rating:`` line by
+    :func:`_rating_of`; the engine's ``signal`` is not read (see
+    :data:`_RATING_LINE`).
+    """
     if not isinstance(propagated, tuple | list) or len(propagated) != 2:
         raise AgentError(
             f"the judge answered on {ticker} in a shape that cannot be read "
             f"({type(propagated).__name__})"
         )
-    final_state, signal = propagated
+    final_state, _signal = propagated
     if not isinstance(final_state, Mapping) or not isinstance(
         final_state.get(_DECISION_KEY), str
     ):
         raise AgentError(f"the judge's answer on {ticker} holds no {_DECISION_KEY} text")
-    try:
-        rating = Rating(signal)
-    except ValueError:
-        raise AgentError(
-            f"the judge's signal on {ticker} is {signal!r}, and a rating is one of "
-            f"{[rating.value for rating in Rating]}"
-        ) from None
+    rating = _rating_of(final_state[_DECISION_KEY], ticker)
     reports: dict[str, object] = {"selected_analysts": list(selected_analysts)}
     reports.update({key: final_state.get(key) for key in REPORT_KEYS})
     return Answer(

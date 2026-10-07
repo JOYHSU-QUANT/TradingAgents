@@ -571,7 +571,7 @@ def test_load_config_stays_quiet_for_known_engine_keys(tmp_path, capsys):
 
 
 def test_the_example_config_and_setup_doc_quote_the_completion_cap_default():
-    """The ``8192`` in the example YAML and SETUP.md, derived not retyped.
+    """The cap default in the example YAML and SETUP.md, derived not retyped.
 
     ``_DEFAULT_MAX_COMPLETION_TOKENS`` is the single declaration (the example
     ships the key commented out so a copied local.yaml cannot pin yesterday's

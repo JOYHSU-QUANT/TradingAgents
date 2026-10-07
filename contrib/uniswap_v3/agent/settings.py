@@ -4,10 +4,10 @@
 
     agent:                      # optional, and so is each key in it
       llm_provider: openrouter
-      deep_think_llm: "anthropic/claude-sonnet-4-6"
+      deep_think_llm: "anthropic/claude-sonnet-5.5"
       quick_think_llm: "deepseek/deepseek-chat"
       selected_analysts: [market, social, news]
-      max_tokens: 8192
+      max_tokens: 16384
       ask_within_seconds: 14400
 
 The defaults are the models the Hyperliquid paper run is judged by, so
@@ -20,8 +20,10 @@ any of ``market``, ``social`` and ``news``; the engine's fourth, the
 fundamentals analyst, reads a company's statements and has no crypto
 branch, so it is refused here, where every ticker is a crypto asset.
 ``max_tokens`` caps every completion: a gateway asked for no cap may
-refuse every call, so a cap is always sent. ``ask_within_seconds`` is how
-long after a bar's boundary the judge may still be asked about it: it
+refuse every call, so a cap is always sent; it counts the thinking tokens
+of a model that thinks (the default deep model does, and cannot switch it
+off), and a cap that binds shows as answers with no rating.
+``ask_within_seconds`` is how long after a bar's boundary the judge may still be asked about it: it
 reads news and prices through the moment it is asked, so a late question
 sees hours past the fill the run trades at, which the control run never
 does. Past the window the tokens not yet judged are left unrated, while
@@ -56,10 +58,10 @@ class AgentSettings:
     """Provider, models, analysts and completion cap of the judge."""
 
     llm_provider: str = "openrouter"
-    deep_think_llm: str = "anthropic/claude-sonnet-4-6"
+    deep_think_llm: str = "anthropic/claude-sonnet-5.5"
     quick_think_llm: str = "deepseek/deepseek-chat"
     selected_analysts: tuple[str, ...] = ("market", "social", "news")
-    max_tokens: int = 8192
+    max_tokens: int = 16384
     ask_within_seconds: int = 14_400
 
     def __post_init__(self) -> None:

@@ -42,7 +42,9 @@ _BOOL_FALSE = ("false", "0", "no", "off")
 # while the CLI — the one non-perp path with an operator at the keyboard —
 # never goes out uncapped through a gateway (#177, #183). The perp bridge
 # declares the same number as its own default; a contrib test pins them equal.
-DEFAULT_MAX_TOKENS = 8192
+# Sized for a deep-think model that thinks (the cap counts its thinking
+# tokens), since the defaults on every path now are such models.
+DEFAULT_MAX_TOKENS = 16384
 
 
 # The validators for the cross-provider LLM knobs an env string can reach

@@ -8,7 +8,7 @@ A variant is a YAML file, not code::
       id: anthropic/claude-sonnet-4-6
     system_prompt_path: current_system.md   # relative to this file
     temperature: 0.2                        # optional; absent = the provider's own default
-    max_tokens: 8192                        # optional; the perp daemon's completion cap
+    max_tokens: 8192                        # optional; absent = the perp daemon's cap (DEFAULT_MAX_TOKENS)
     extra_context: |                        # optional; one more section after the market
       A lesson learned ...                  #   context, before the format block
     model_cutoff: 2025-03-31                # optional; the model's training cutoff (plan §6)
@@ -52,8 +52,10 @@ __all__ = [
 
 # The perp daemon's completion cap when neither its YAML nor the environment
 # sets one (``engine_bridge._DEFAULT_MAX_COMPLETION_TOKENS``): a variant that
-# names none is asked under the cap the paper trader was.
-DEFAULT_MAX_TOKENS: Final = 8192
+# names none is asked under the cap the paper trader is. A variant that
+# replays a run recorded under an older cap names that cap itself (the
+# shipped ``current-sonnet`` does: 8192, the cap of paper-BTC-6 and -7).
+DEFAULT_MAX_TOKENS: Final = 16384
 
 _KEYS: Final = frozenset(
     {"name", "model", "system_prompt_path", "temperature", "max_tokens", "extra_context", "model_cutoff"}

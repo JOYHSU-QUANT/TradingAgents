@@ -15,7 +15,9 @@ system_prompt_path: current_system.md
 # No temperature: the perp engine block has no such key, so unless the
 # daemon's host sets TRADINGAGENTS_TEMPERATURE each call takes the
 # provider's default. So does this variant.
-# max_tokens: 8192 is the default, the paper trader's completion cap.
+# The completion cap paper-BTC-6 and -7 were asked under (the perp default
+# until 2026-10-07; the default is 16384 since, for the thinking Sonnet 5.5).
+max_tokens: 8192
 # model_cutoff: the model's published TRAINING DATA cutoff, January 2026
 # (platform.claude.com, Claude Sonnet 4.6: "Training data cutoff Jan 2026";
 # its reliable knowledge cutoff, Aug 2025, is earlier and not the one that

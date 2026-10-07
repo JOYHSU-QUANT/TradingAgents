@@ -83,7 +83,7 @@ run's ledger says, and when the run has an open send.
 A ``verdict`` exits 0 once every traded token has a verdict at the bar, by
 this visit or an earlier one, and also when the bar is suspect, which no run
 decides, so no judge is asked. It warns on stderr of a verdict that holds no
-rating (``REVIEW``). It exits 3, keeping the verdicts given so far, when the
+rating (``REVIEW``) as it is given. It exits 3, keeping the verdicts given so far, when the
 store has no bar at the boundary yet, and when the judge did not answer for
 a reason that may pass (the provider's rate limit, timeout, server error or
 empty balance, a network error, a data vendor down): whoever schedules it
@@ -1054,6 +1054,13 @@ def _verdict(args: argparse.Namespace, out: Callable[[str], None], now: Callable
     def recorded(asked: Asked) -> None:
         # Told as each verdict lands, so that a later token's failure loses no line.
         out(_asked_line(asked))
+        if asked.superseded:
+            print(
+                f"warning: another visit recorded {asked.symbol} while this one's judge was "
+                f"thinking; this visit's answer is dropped, and the engine's log of the day "
+                f"under tradingagents/logs is the dropped one's",
+                file=sys.stderr,
+            )
         if asked.asked_now and asked.record.verdict.rating.is_review:
             print(
                 f"warning: the judge gave no rating on {asked.symbol} (REVIEW); the verdict is "
@@ -1161,7 +1168,9 @@ def main(
     except (TransientChainError, RpcRejected, StoreBusy, BarNotStored, JudgeUnavailable) as exc:
         # A node that answers a read with an error is as likely to be having
         # a bad moment as to be broken, and a store another program holds is
-        # let go of; the run stopped, and a later one asks.
+        # let go of; the run stopped, and a later one asks. A bar not yet in
+        # the store, and a judge that did not answer for a reason that may
+        # pass, are the same: a later visit asks.
         print(f"try again later: {_one_ascii_line(exc)}", file=sys.stderr)
         return EXIT_RETRY
     except (

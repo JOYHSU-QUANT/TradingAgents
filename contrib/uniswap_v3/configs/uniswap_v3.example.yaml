@@ -69,8 +69,9 @@ rpc:
 # The judge the verdict command asks: the TradingAgents graph, over this LLM
 # provider and these models (the provider's API key comes from the environment
 # variable the engine names for it, OPENROUTER_API_KEY here, never from this
-# file), with these analysts before its debate, every completion capped at
-# max_tokens. These are the defaults, the Hyperliquid paper run's judge, so that
+# file), with these analysts before its debate (any of market, social and
+# news; the engine's fundamentals analyst reads a company's statements and is
+# refused for a crypto asset), every completion capped at max_tokens. These are the defaults, the Hyperliquid paper run's judge, so that
 # the two scorecards compare; the whole section may be left out. It is not part
 # of the config's snapshot: the verdicts a run reads name the model that gave
 # each one. Only the verdict command reads it.

@@ -1,4 +1,5 @@
-"""The package's decimal helpers: a sum under the one context, whatever the ambient one."""
+"""The package's decimal helpers: a sum under the one context, whatever the ambient one. The shared estimators and the text formats live here too.
+"""
 
 from __future__ import annotations
 
@@ -36,10 +37,6 @@ def test_decimal_sum_ignores_the_ambient_context(prec):
 
 
 def test_the_estimators_refuse_too_few_values():
-    from decimal import Decimal
-
-    import pytest
-
     from contrib.uniswap_v3.domain.decimal_context import log_returns, mean, sample_volatility
 
     with pytest.raises(ValueError, match="at least one value"):
@@ -50,4 +47,3 @@ def test_the_estimators_refuse_too_few_values():
     assert mean([Decimal("1"), Decimal("3")]) == Decimal("2")
     # Two equal returns: no deviation, whatever the annualiser.
     assert sample_volatility([Decimal("0.1"), Decimal("0.1")], Decimal(19)) == Decimal("0")
-

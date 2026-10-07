@@ -238,15 +238,14 @@ def test_a_verdict_another_visit_recorded_meanwhile_is_kept_and_this_ones_droppe
 ):
     class Meanwhile(ScriptedJudge):
         def ask(self, ticker, trade_date, context):
-            if ticker == "WBTC-NEVER":
-                raise AssertionError
             # Another visit lands the same token's verdict while this judge thinks.
             store.insert_verdict(_record("WBTC" if ticker == "BTC-USD" else "WETH", 2))
             return super().ask(ticker, trade_date, context)
 
     summary = _ask(store, Meanwhile(), tmp_path)
     assert summary.asked == () and [a.symbol for a in summary.already_stored] == ["WBTC", "WETH"]
-    assert all(a.record.model == "synthetic" for a in summary.verdicts)
+    assert all(a.record.model == "synthetic" and a.superseded for a in summary.verdicts)
+    assert summary.verdicts[0].elapsed_seconds == 1.5
     assert not (tmp_path / "verdicts").exists()
 
 
@@ -258,6 +257,8 @@ def test_the_record_types_hold_their_invariants():
         Asked(symbol="WBTC", ticker="BTC-USD", record=held, asked_now=False)
     with pytest.raises(ValueError, match="took this visit no time"):
         Asked(symbol="WETH", ticker="ETH-USD", record=held, asked_now=False, elapsed_seconds=1)
+    with pytest.raises(ValueError, match="a superseded answer is not the verdict"):
+        Asked(symbol="WETH", ticker="ETH-USD", record=held, asked_now=True, superseded=True)
     found = Asked(symbol="WETH", ticker="ETH-USD", record=held, asked_now=False)
     with pytest.raises(ValueError, match="a suspect bar has no verdicts"):
         AskSummary(time=_DAY2, source=SOURCE, verdicts=(found,), suspect=True)

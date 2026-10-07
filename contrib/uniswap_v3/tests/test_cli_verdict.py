@@ -200,14 +200,14 @@ def test_a_judge_that_does_not_answer_is_try_again_later_and_keeps_what_it_said(
 
 
 def test_a_judge_that_cannot_be_built_fails(config, db, monkeypatch, capsys):
-    def refuse(settings, home):
-        raise AgentError("the judge cannot be built (ValueError: Please set the key)")
-
-    monkeypatch.setattr(_graph, "TradingAgentsJudge", refuse)
+    # The real judge refuses on the first question, after the header line is printed.
+    judge = ScriptedJudge({"BTC-USD": AgentError("the judge cannot be built (ValueError: no key)")})
+    _judging(monkeypatch, judge)
     code, lines = _verdict(config, db)
-    assert code == cli.EXIT_FAILED and lines == []
-    assert "failed: the judge cannot be built (ValueError: Please set the key)" in (
-        capsys.readouterr().err
+    assert code == cli.EXIT_FAILED and len(lines) == 1
+    assert (
+        "failed: the judge cannot be built (ValueError: no key); 0 verdict(s) at 2024-01-03 "
+        "stay recorded" in capsys.readouterr().err
     )
 
 
@@ -266,6 +266,29 @@ def test_a_sidecar_that_cannot_be_written_fails_without_a_traceback(
     monkeypatch.setattr(os, "replace", refuse)
     code, lines = _verdict(config, db)
     assert code == cli.EXIT_FAILED and len(lines) == 1
-    assert "failed: " in capsys.readouterr().err
+    assert (
+        "failed: the sidecar for WBTC at 2024-01-03 could not be written at "
+        "verdicts/judge-v1/WBTC-20240103T000000Z.json (PermissionError: the target is held "
+        "open); the judge's answer (Hold) is not recorded, 0 verdict(s) at 2024-01-03 stay "
+        "recorded, and a later visit asks again"
+    ) in capsys.readouterr().err
     with open_store(db, create=False) as store:
         assert store.verdicts_at("judge-v1", _DAY2) == []
+
+
+def test_an_answer_another_visit_overtook_is_warned_of(config, db, monkeypatch, capsys):
+    from contrib.uniswap_v3.tests.fakes.verdicts import record as _synthetic
+
+    class Overtaken(ScriptedJudge):
+        def ask(self, ticker, trade_date, context):
+            with open_store(db, create=False) as store:
+                store.insert_verdict(_synthetic("WBTC" if ticker == "BTC-USD" else "WETH", 2, source="judge-v1"))
+            return super().ask(ticker, trade_date, context)
+
+    _judging(monkeypatch, Overtaken())
+    code, lines = _verdict(config, db)
+    assert code == cli.EXIT_OK and lines[-1] == "0 asked, 2 already stored"
+    assert lines[1].startswith("WBTC (BTC-USD): already stored: Buy, model synthetic")
+    err = capsys.readouterr().err
+    assert "warning: another visit recorded WBTC while this one's judge was thinking" in err
+    assert "warning: another visit recorded WETH" in err

@@ -1,7 +1,7 @@
 """The agent layer: asks the TradingAgents graph for a verdict on each traded token, and records it.
 
-The one place in the package that may import the ``tradingagents`` engine
-(``tests/test_isolation.py``), and it does so lazily, in :mod:`.graph`, so
+The one place in the package's code, its tests aside, that may import the
+``tradingagents`` engine (``tests/test_isolation.py``), and it does so lazily, in :mod:`.graph`, so
 that a command which asks no judge waits on none of the engine's
 dependencies. Nothing here reaches ``domain/`` or ``ports.py`` with an
 engine type: a verdict leaves this layer as the stdlib

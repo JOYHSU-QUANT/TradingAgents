@@ -59,14 +59,20 @@ class Asked:
     # Whether this visit asked for it; ``False`` for one the store already held.
     asked_now: bool
     elapsed_seconds: float = 0.0
+    # Whether this visit asked, and found the token recorded by another visit
+    # by the time its judge answered: the record is the other's, and this
+    # visit's answer was dropped.
+    superseded: bool = False
 
     def __post_init__(self) -> None:
         if self.record.verdict.symbol != self.symbol:
             raise ValueError(
                 f"the record is of {self.record.verdict.symbol}, and the token is {self.symbol}"
             )
-        if not self.asked_now and self.elapsed_seconds:
+        if not self.asked_now and self.elapsed_seconds and not self.superseded:
             raise ValueError("a verdict found stored took this visit no time")
+        if self.superseded and self.asked_now:
+            raise ValueError("a superseded answer is not the verdict this visit recorded")
 
 
 @dataclass(frozen=True)
@@ -215,28 +221,45 @@ def ask_verdicts(
         # Another visit may have recorded this token while the judge was thinking.
         meanwhile = store.verdict(source, symbol, time)
         if meanwhile is not None:
-            done.append(Asked(symbol=symbol, ticker=ticker, record=meanwhile, asked_now=False))
+            done.append(
+                Asked(
+                    symbol=symbol,
+                    ticker=ticker,
+                    record=meanwhile,
+                    asked_now=False,
+                    elapsed_seconds=answer.elapsed_seconds,
+                    superseded=True,
+                )
+            )
             report(done[-1])
             continue
         relative = digest = None
         if answer.reports is not None:
             relative = sidecar_path(source, symbol, time)
-            digest = write_sidecar(
-                home,
-                relative,
-                sidecar_record(
-                    answer,
-                    source=source,
-                    symbol=symbol,
-                    ticker=ticker,
-                    time=time,
-                    trade_date=trade_date,
-                    context=context,
-                    model=judge.model,
-                    settings=judge.settings,
-                    asked_at=now,
-                ),
-            )
+            try:
+                digest = write_sidecar(
+                    home,
+                    relative,
+                    sidecar_record(
+                        answer,
+                        source=source,
+                        symbol=symbol,
+                        ticker=ticker,
+                        time=time,
+                        trade_date=trade_date,
+                        context=context,
+                        model=judge.model,
+                        settings=judge.settings,
+                        asked_at=now,
+                    ),
+                )
+            except OSError as exc:
+                raise AgentError(
+                    f"the sidecar for {symbol} at {trade_date} could not be written at "
+                    f"{relative} ({type(exc).__name__}: {exc}); the judge's answer "
+                    f"({answer.rating.value}) is not recorded, {len(done)} verdict(s) at "
+                    f"{trade_date} stay recorded, and a later visit asks again"
+                ) from exc
         record = verdict_record(
             answer,
             source=source,

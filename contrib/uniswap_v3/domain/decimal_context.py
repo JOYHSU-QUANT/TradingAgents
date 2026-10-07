@@ -13,6 +13,11 @@ a ledger must not round one away. That context is wide enough for any two
 amounts a chain can carry and traps a result it would have had to round. A
 cut to a token's decimal places (:func:`floor_to_places`) uses a context as
 wide that does not trap, since dropping digits is the point of a cut.
+
+The module also holds the estimators the rule strategy and the agent layer
+share (:func:`mean`, :func:`log_returns`, :func:`sample_volatility`) and the
+price and percentage text the command line and the agent layer print
+(:func:`fixed_text`, :func:`price_text`).
 """
 
 from __future__ import annotations
@@ -33,12 +38,12 @@ from typing import Final
 
 __all__ = [
     "DECIMAL_CONTEXT",
-    "decimal_sum",
     "EXACT_CONTEXT",
+    "MAX_MAGNITUDE",
+    "decimal_sum",
     "fixed_text",
     "floor_to_places",
     "log_returns",
-    "MAX_MAGNITUDE",
     "mean",
     "parse_decimal",
     "plain",

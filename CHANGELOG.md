@@ -856,11 +856,13 @@ Breaking changes within the 0.x line are called out explicitly.
   beside the store, named by the row with its digest. A verdict the store
   holds is not asked for again, and each is written as it is given, so a
   judge that fails on the second token keeps the first and the next visit
-  asks about the rest; a failure the provider or the network says may pass
-  (a rate limit, a timeout, a server error, an empty balance, a connection
-  error) exits 3, as `paper` says "try again later", and any other, from a
-  model the provider does not serve to an error inside the engine, exits
-  1; a `REVIEW` is recorded as a verdict and warned of. The judge is the
+  asks about the rest; a failure the provider, the network or a data
+  vendor says may pass (a rate limit, a timeout, a server error, an empty
+  balance, a connection error, a vendor throttled or down) exits 3, as
+  `paper` says "try again later", and so does a bar not yet in the store;
+  any other failure, from a model the provider does not serve to any other
+  error inside the engine, exits 1; a `REVIEW` is recorded as a verdict
+  and warned of. The judge is the
   engine's graph over the config's new `agent` section (provider, the two
   models, analysts among market, social and news, since the engine's
   fundamentals analyst reads a company's statements, completion cap; the
@@ -877,7 +879,8 @@ Breaking changes within the 0.x line are called out explicitly.
   `domain/times.py`). `--fake-rating` records a rating without a model
   for a rehearsal, and is refused by a store that holds real verdicts of
   the source, since a verdict is never rewritten. The engine is imported
-  from `agent/` only, lazily; the isolation guard pins that, and
+  from `agent/` only (the tests aside), lazily; the isolation guard pins
+  that, and
   `tests/test_upstream_names.py` pins the rating strings, the report keys
   and the config keys to the engine's own. `agent` is not part of the
   config snapshot. The smoke test `tests/test_agent_smoke.py` asks the

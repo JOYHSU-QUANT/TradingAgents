@@ -16,11 +16,12 @@ graph's answer to that day alone, as the Hyperliquid paper run's are.
 
 A failure while asking is sorted by whether a later visit may do better.
 What the provider says is passing (a rate limit, a timeout, a server
-error, an empty balance) and what the network says (a connection or a
-timeout error) is :class:`~.errors.JudgeUnavailable`; everything else,
-from a model the provider does not serve to an error inside the engine,
-is an :class:`~.errors.AgentError`, since asking again unchanged would
-meet it again, and pay for the analysts' calls before it does.
+error, an empty balance), what the network says (a connection or a
+timeout error) and what a data vendor says (throttled, or down) is
+:class:`~.errors.JudgeUnavailable`; everything else, from a model the
+provider does not serve to any other error inside the engine, is an
+:class:`~.errors.AgentError`, since asking again unchanged would meet it
+again, and pay for the analysts' calls before it does.
 
 A judge says two things about itself beside its ``model``: whether it is a
 ``rehearsal``, answering without a model, whose verdicts must not mix
@@ -86,8 +87,9 @@ _PASSING_STATUSES: Final = frozenset({402, 408, 429})
 # Error classes that say "later", by name, matched anywhere in an error's class
 # hierarchy: the network's and the provider SDKs' transport errors (the SDKs
 # are not imported here, and the names are shared by openai, httpx, requests,
-# urllib3 and curl_cffi), and the engine's own "vendor down" and "vendor
-# throttled" errors, which every data vendor's error derives from.
+# urllib3 and curl_cffi, whose every error derives from ``CurlError``), and
+# the engine's own "vendor throttled" and "vendor down" errors, which each
+# vendor's throttle and outage errors derive from.
 _PASSING_ERRORS: Final = frozenset(
     {
         "APIConnectionError",
@@ -95,6 +97,7 @@ _PASSING_ERRORS: Final = frozenset(
         "ConnectError",
         "ConnectTimeout",
         "ConnectionError",
+        "CurlError",
         "MaxRetryError",
         "NewConnectionError",
         "PoolTimeout",
@@ -102,6 +105,7 @@ _PASSING_ERRORS: Final = frozenset(
         "ReadError",
         "ReadTimeout",
         "RemoteProtocolError",
+        "Timeout",
         "TimeoutError",
         "TimeoutException",
         "TransportError",
@@ -287,14 +291,14 @@ def _status_of(exc: BaseException) -> int | None:
     """The HTTP status an error carries, when it carries one.
 
     The provider SDKs spell it ``status_code`` or ``code`` on the error;
-    ``requests`` and ``httpx`` keep it on the error's ``response``. A number
-    outside the HTTP range is not a status: curl's error numbers ride on a
-    ``code`` too.
+    ``requests`` and ``httpx`` keep it on the error's ``response``. Only a
+    number an error can carry, 400 to 599, is a status: curl's error
+    numbers ride on a ``code`` too, and reach 100 and beyond.
     """
     for owner in (exc, getattr(exc, "response", None)):
         for name in ("status_code", "code"):
             status = getattr(owner, name, None)
-            if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
+            if isinstance(status, int) and not isinstance(status, bool) and 400 <= status <= 599:
                 return status
     return None
 
@@ -305,10 +309,10 @@ def _may_pass(exc: BaseException) -> bool:
     A provider's status is read first: a server error, a rate limit, a
     timeout or an empty balance may pass, and any other 4xx (a model it
     does not serve, a key it does not accept, a request it cannot read)
-    will not. Without a status, an error of the network's, the SDK's
-    transport or a data vendor's, known by a class name in its hierarchy,
-    may pass; anything else is taken to be the engine's own, and
-    permanent. The chain is followed through causes, and through the
+    will not. Without a status, an error of the network's or the SDK's
+    transport, or a data vendor's throttle or outage, known by a class
+    name in its hierarchy, may pass; anything else is taken to be the
+    engine's own, and permanent. The chain is followed through causes, and through the
     context of an error only where that context was not suppressed
     (``raise ... from None``).
     """

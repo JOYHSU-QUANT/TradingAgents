@@ -17,7 +17,7 @@ Uniswap v3 現貨的執行架構：策略只回答「目標比例是多少」，
 
 它與 `contrib/hyperliquid_perp`、`contrib/autoresearch`、`contrib/replay` 完全隔離：
 互不 import（`tests/test_isolation.py` 釘住），store 是自己的 SQLite 檔，也不碰
-`deploy/paper` 的部署。上游的 `tradingagents` 引擎只有 `agent/` 這一層會 import（同一個測試釘住），
+`deploy/paper` 的部署。上游的 `tradingagents` 引擎只有 `agent/` 這一層會 import（測試除外；同一個測試釘住），
 而且是用到時才載入：`verdict` 以外的指令都不等它的相依。
 
 操作步驟（開 run、掛排程、出事怎麼辦）見 [RUNBOOK.md](./RUNBOOK.md)。
@@ -125,7 +125,7 @@ contrib/uniswap_v3/
                         分叉防線與開發帳戶（fork.py）、簽名送出（transactions.py）、ChainExecutor（swaps.py）、
                         fork run 的錢包（wallet.py）
   store/                SQLite schema（含版本號與 migration）與讀寫；bar 與判斷（verdict）的載入
-  agent/                問 TradingAgents 要判斷的那一層（唯一 import 上游引擎的地方）：設定（agent 區塊）、
+  agent/                問 TradingAgents 要判斷的那一層（程式碼裡唯一 import 上游引擎的地方）：設定（agent 區塊）、
                         代幣→ticker、現貨脈絡、judge（上游 graph 的包裝＋不打模型的 fake）、sidecar 與列的寫入、
                         一次 visit 的問法
   backfill.py           把一段 bar 從 archive 節點讀進 store
@@ -182,7 +182,7 @@ store 與 sidecar 要一起搬）。同一（source、代幣、bar）問過就�
 | 0 | 跑完了（含「這根已經決策過」、成交被拒、邊界沒答案；後兩者 stderr 有警告；`verdict` 的「問過了」、bar 是 suspect 所以沒問、judge 回 `REVIEW`——最後一個 stderr 有警告） | 不用動 |
 | 1 | 跑不下去，原樣重跑也不會好：設定、store、範圍、節點設定、時鐘落後於 run；fork 的錢包與帳本不符、run 有未結 send；`verdict` 的設定沒有 `verdicts` 區塊、代幣沒有 ticker、judge 建不起來（沒有 key）、供應商拒絕或引擎自己出錯（模型名打錯的 4xx、KeyError 之類）、`--at` 指舊邊界卻沒配 `--fake-rating`、`--fake-rating` 遇到有真判斷的 store、sidecar 寫不進去 | 看 log、修好 |
 | 2 | 命令列打錯（argparse） | 修排程的指令 |
-| 3 | 稍後再跑可能就好：節點連不上、落後（還沒到邊界或成交區塊）、回了錯誤，或 store 被別的程式鎖住；`verdict` 的 bar 還沒進 store、judge 沒答而原因可能會過（閘道／網路／額度：402、408、429、5xx 或連線逾時；已答的代幣保留，下次只問剩下的） | 稍後再跑（排程一天三次就是為了這個） |
+| 3 | 稍後再跑可能就好：節點連不上、落後（還沒到邊界或成交區塊）、回了錯誤，或 store 被別的程式鎖住；`verdict` 的 bar 還沒進 store、judge 沒答而原因可能會過（閘道／網路／額度：402、408、429、5xx 或連線逾時；分析師的資料源被限流或掛了；已答的代幣保留，下次只問剩下的） | 稍後再跑（排程一天三次就是為了這個） |
 | 4 | 只有排程的 visit 腳本會給：進不了 repo 目錄、寫不了 log，或 `PYTHON` 的路徑不存在，visit 沒有跑 | 看 RUNBOOK §5 |
 
 ---

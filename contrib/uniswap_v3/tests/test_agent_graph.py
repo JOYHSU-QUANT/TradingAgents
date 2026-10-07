@@ -209,8 +209,11 @@ class _CurlError(Exception):
         self.code = code
 
 
-# Named as curl_cffi names its error, without shadowing the builtin in this module.
-_CurlConnectionError = type("ConnectionError", (_CurlError,), {})
+# Named as curl_cffi names its errors, without shadowing the builtin in this module;
+# every one of curl_cffi's derives from ``CurlError``, and its timeout is ``Timeout``.
+CurlError = _CurlError
+_CurlConnectionError = type("ConnectionError", (CurlError,), {})
+_CurlTimeout = type("Timeout", (CurlError,), {})
 
 
 class VendorRateLimitError(Exception):
@@ -231,7 +234,8 @@ class _WithResponse(Exception):
     "error",
     [
         _CurlConnectionError(7),
-        _CurlConnectionError(28),
+        _CurlTimeout(28),
+        _CurlTimeout(100),
         _VendorThrottled("throttled"),
         _WithResponse(503),
     ],

@@ -842,6 +842,36 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **`contrib/uniswap_v3`: the Linux schedule and the Lightsail deployment
+  (`schedule/`).** The paper runs move to the Lightsail host the Hyperliquid
+  paper run is on, beside it and apart from it: their own checkout
+  (`/home/trader/uniswap-paper`, detached at one commit), venv, `.env`,
+  store (`/home/trader/data/uniswap/paper.db`) and systemd units
+  (`uniswap-v3-paper.service`, a oneshot as `trader`, and
+  `uniswap-v3-paper.timer`, three visits a day at 00:10, 01:10 and 02:10
+  UTC, persistent), so that neither deployment restarts the other.
+  `schedule/paper-visit.sh` is one visit, the Windows script's Linux twin
+  with its settings in `paper-visit.local.sh` beside it: the control run's
+  `paper`, then today's `backfill`, the `verdict` and the AI-gated run's
+  `paper`, each only when the one before exited 0, and the visit exits with
+  the first code that was not 0 (so the judge failing never holds the
+  control run, and the AI run never decides a bar before its verdicts are
+  there); an empty run id leaves its steps out. `schedule/lightsail-install.sh`
+  installs or upgrades it all in one `sudo sh lightsail-install.sh
+  <commit>` (clone or fetch, detach, venv, templates of `.env` and the
+  settings when they are not there, the package's tests, the units, the
+  timer back on when a store is there). The replay summary gains `unrated`,
+  the bars a call decided, for a run that reads verdicts, on which some
+  traded token had no rating (no verdict, or a `REVIEW`); `paper` warns of
+  them on stderr, and `report` prints,
+  for such a run, how many decided bars saw a verdict on every traded
+  token, on some and on none. The RUNBOOK is rewritten around the host:
+  the install, the two configs and the two runs (`trend_vol_weights` as the
+  control, `ai_gated_weights` beside it, on one store), the daily checks
+  over `journalctl` and the log, and what to do before the judge's model
+  is changed; the Windows Task Scheduler is its appendix. The judge's
+  model stays the Hyperliquid paper run's.
+
 - **`contrib/uniswap_v3`: the agent layer and `verdict` (`agent/`).** The
   package now asks the TradingAgents graph for its verdicts. `python -m
   contrib.uniswap_v3 verdict --config C --db D [--at BOUNDARY]

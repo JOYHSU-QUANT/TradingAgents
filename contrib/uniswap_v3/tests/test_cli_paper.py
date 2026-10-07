@@ -11,6 +11,8 @@ import pytest
 from contrib.uniswap_v3 import cli
 from contrib.uniswap_v3.chain import rpc as chain_rpc
 from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS
+from contrib.uniswap_v3.domain.verdicts import Rating
+from contrib.uniswap_v3.store.repository import open_store
 from contrib.uniswap_v3.tests.fakes.node import (
     BTC_TICK,
     DAY,
@@ -22,6 +24,7 @@ from contrib.uniswap_v3.tests.fakes.node import (
     sqrt_price_at,
 )
 from contrib.uniswap_v3.tests.fakes.rpc import block_hash, rpc_over
+from contrib.uniswap_v3.tests.fakes.verdicts import judged_config, record as _record
 
 _EXAMPLE = Path(__file__).resolve().parents[1] / "configs" / "uniswap_v3.example.yaml"
 _USDC_WETH = POOLS[ETHEREUM_MAINNET]["USDC/WETH-500"].address.lower()
@@ -52,9 +55,11 @@ def _run(node: FakeNode, *argv: str, now: int = _TEN_PAST) -> tuple[int, list[st
     return code, lines
 
 
-def _paper(node: FakeNode, db: Path, *extra: str, run_id: str = "p", **kwargs) -> tuple[int, list[str]]:
+def _paper(
+    node: FakeNode, db: Path, *extra: str, run_id: str = "p", config: Path = _EXAMPLE, **kwargs
+) -> tuple[int, list[str]]:
     return _run(
-        node, "paper", "--config", str(_EXAMPLE), "--db", str(db), "--run-id", run_id, *extra,
+        node, "paper", "--config", str(config), "--db", str(db), "--run-id", run_id, *extra,
         **kwargs,
     )  # fmt: skip
 
@@ -533,3 +538,91 @@ def test_status_of_a_paper_run_says_when_the_clock_is_behind_it(node, tmp_path):
         "the clock is behind the run: it is at 2024-01-01T00:10:00Z, and the run has decided "
         "the bar at 2024-01-02T00:00:00Z"
     ) in lines
+
+
+# A run that reads verdicts: what a visit warns of, and what the report counts.
+
+_NO_RATING = (
+    "saw no rating on some traded token; a strategy that reads verdicts takes no new risk "
+    "on such a token, and status --run-id shows which"
+)
+
+
+def _rated(node: FakeNode, config: Path, db: Path, rating: str, *, now: int) -> None:
+    """Record a fake ``rating`` on every traded token at the latest bar, backfilling it first."""
+    assert _run(node, "backfill", "--config", str(config), "--db", str(db), "--from", "2024-01-02", now=now)[0] == 0  # fmt: skip
+    assert _run(node, "verdict", "--config", str(config), "--db", str(db), "--fake-rating", rating, now=now)[0] == 0  # fmt: skip
+
+
+def test_paper_warns_of_a_bar_decided_with_no_rating_on_a_traded_token(node, tmp_path, capsys):
+    db, judged = tmp_path / "store.db", judged_config(tmp_path)
+    assert _paper(node, db, *_OPENING, config=judged)[0] == cli.EXIT_OK
+    assert (
+        f"warning: 1 bar(s) decided now, from 2024-01-01T00:00:00Z to 2024-01-01T00:00:00Z, "
+        f"{_NO_RATING}"
+    ) in capsys.readouterr().err
+    # The next day both tokens are rated before the visit: nothing to warn of.
+    later = _TEN_PAST + DAY
+    _rated(node, judged, db, "Buy", now=later)
+    capsys.readouterr()
+    assert _paper(node, db, config=judged, now=later)[0] == cli.EXIT_OK
+    assert "saw no rating" not in capsys.readouterr().err
+    # A visit that finds the bar decided decides nothing, and warns of nothing.
+    assert _paper(node, db, config=judged, now=later + 600)[0] == cli.EXIT_OK
+    assert "saw no rating" not in capsys.readouterr().err
+
+
+def test_paper_warns_of_a_review_as_of_no_rating(node, tmp_path, capsys):
+    db, judged = tmp_path / "store.db", judged_config(tmp_path)
+    with open_store(db) as store:
+        store.insert_verdict(_record("WETH", 0, Rating.REVIEW))
+        store.insert_verdict(_record("WBTC", 0, Rating.BUY))
+    assert _paper(node, db, *_OPENING, config=judged)[0] == cli.EXIT_OK
+    assert "warning: 1 bar(s) decided now, from 2024-01-01T00:00:00Z" in capsys.readouterr().err
+
+
+def test_paper_warns_once_of_the_bars_it_caught_up_on_without_a_rating(node, tmp_path, capsys):
+    db, judged = tmp_path / "store.db", judged_config(tmp_path)
+    assert _paper(node, db, *_OPENING, config=judged)[0] == cli.EXIT_OK
+    capsys.readouterr()
+    assert _paper(node, db, config=judged, now=_TEN_PAST + 2 * DAY)[0] == cli.EXIT_OK
+    err = capsys.readouterr().err
+    assert (
+        f"warning: 2 bar(s) decided now, from 2024-01-02T00:00:00Z to 2024-01-03T00:00:00Z, "
+        f"{_NO_RATING}"
+    ) in err
+    assert err.count("saw no rating") == 1
+
+
+def test_paper_of_a_run_that_reads_no_verdicts_warns_of_no_rating(node, tmp_path, capsys):
+    db = tmp_path / "store.db"
+    assert _paper(node, db, *_OPENING)[0] == cli.EXIT_OK
+    assert "saw no rating" not in capsys.readouterr().err
+
+
+def test_report_counts_the_bars_that_saw_a_verdict_on_every_traded_token(node, tmp_path):
+    db, judged = tmp_path / "store.db", judged_config(tmp_path)
+    assert _paper(node, db, *_OPENING, config=judged)[0] == cli.EXIT_OK
+    later = _TEN_PAST + DAY
+    _rated(node, judged, db, "Hold", now=later)
+    assert _paper(node, db, config=judged, now=later)[0] == cli.EXIT_OK
+    with open_store(db) as store:
+        # A third bar with a verdict on one token alone: a decision that saw some.
+        store.insert_verdict(_record("WETH", 2, Rating.SELL))
+    assert _paper(node, db, config=judged, now=later + DAY)[0] == cli.EXIT_OK
+    code, lines = cli_report(db, "p")
+    assert code == cli.EXIT_OK
+    assert lines[1] == "3 bar(s) decided from 2024-01-01T00:00:00Z to 2024-01-03T00:00:00Z"
+    # The line comes right after the decisions' counts.
+    counts = next(index for index, line in enumerate(lines) if line.startswith("decisions: "))
+    assert lines[counts + 1] == (
+        "verdicts from test-judge: 1 decided bar(s) saw one on every traded token, 1 on some, "
+        "1 on none"
+    )
+
+
+def test_report_of_a_run_that_reads_no_verdicts_counts_none(node, tmp_path):
+    db = tmp_path / "store.db"
+    _paper(node, db, *_OPENING)
+    _, lines = cli_report(db, "p")
+    assert not any(line.startswith("verdicts from") for line in lines)

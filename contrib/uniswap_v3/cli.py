@@ -821,6 +821,12 @@ def _replayed(
             f"{_iso(summary.verdicts_changed[-1])}; their decisions stand, and a new run decides "
             f"them on what the store holds now"
         )
+    if summary.unrated and paper:
+        warnings.append(
+            f"{len(summary.unrated)} bar(s) decided now, from {_iso(summary.unrated[0])} to "
+            f"{_iso(summary.unrated[-1])}, saw no rating on some traded token; a strategy that "
+            f"reads verdicts takes no new risk on such a token, and status --run-id shows which"
+        )
     if summary.gas_rejected:
         warnings.append(
             f"{len(summary.gas_rejected)} rebalance(s) were rejected because the gas balance "
@@ -1086,6 +1092,21 @@ def _curve_line(name: str, curve: Curve) -> str:
     return f"{name:<18}{_fixed(curve.start):>14}{_fixed(curve.end):>14}{change:>11}{fall:>14}"
 
 
+def _verdicts_seen(source: str, traded: int, decisions: Sequence[Decision]) -> str:
+    """How many decided bars saw a verdict on every one of the ``traded`` tokens, on some and on none.
+
+    A ``REVIEW`` counts as seen, as ``status`` counts it: the judge was
+    asked and answered. What a strategy made of each bar is its own policy
+    (``ai_gated_weights`` takes no new risk on a token without a rating).
+    """
+    seen = [len(decision.verdicts or {}) for decision in decisions]
+    every, none = seen.count(traded), seen.count(0)
+    return (
+        f"verdicts from {source}: {every} decided bar(s) saw one on every traded token, "
+        f"{len(seen) - every - none} on some, {none} on none"
+    )
+
+
 def _report(args: argparse.Namespace, out: Callable[[str], None]) -> int:
     # One view for all the reads: a backtest may be writing the run meanwhile.
     with open_store(args.db, create=False) as store, store.reading():
@@ -1093,9 +1114,8 @@ def _report(args: argparse.Namespace, out: Callable[[str], None]) -> int:
         decisions = store.decisions(args.run_id)
         valuations = store.valuations(args.run_id)
         fills = store.fills(args.run_id)
-    measured, metrics = _measured(
-        run, config_from_snapshot(run.config), decisions, valuations, fills
-    )
+    config = config_from_snapshot(run.config)
+    measured, metrics = _measured(run, config, decisions, valuations, fills)
     quote = run.quote
     out(_run_header(run))
     out(_decided_span(decisions))
@@ -1108,6 +1128,8 @@ def _report(args: argparse.Namespace, out: Callable[[str], None]) -> int:
         )
         if codes:
             out(f"{outcome.value}: {_counts(codes)}")
+    if config.verdicts is not None:
+        out(_verdicts_seen(config.verdicts.source, len(config.traded_symbols), decisions))
     # The report reads no bars, so it cannot tell whether such a reading held.
     unsettled = sum(
         1

@@ -1,0 +1,18 @@
+# One visit of the contrib/uniswap_v3 paper runs on the Lightsail host, as
+# uniswap-v3-paper.timer beside this file schedules it. lightsail-install.sh
+# installs both into /etc/systemd/system; the paths are the host's
+# (RUNBOOK.md): the checkout the runs are kept at, and the trader user that
+# owns it, the store and the log.
+[Unit]
+Description=contrib/uniswap_v3 paper visit
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=trader
+WorkingDirectory=/home/trader/uniswap-paper
+ExecStart=/home/trader/uniswap-paper/contrib/uniswap_v3/schedule/paper-visit.sh
+# The two tokens' verdicts take 20 to 25 minutes; a visit is stopped before
+# the next is due.
+TimeoutStartSec=55min

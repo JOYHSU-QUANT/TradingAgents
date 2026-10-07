@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from contrib.uniswap_v3.agent.graph import REPORT_KEYS, Answer
@@ -18,10 +19,23 @@ from contrib.uniswap_v3.domain.verdicts import (
 
 from .engine import DAY, FIRST_DAY, config as _config
 
-__all__ = ["SOURCE", "ScriptedJudge", "config", "record", "verdict"]
+__all__ = ["SOURCE", "ScriptedJudge", "config", "judged_config", "record", "verdict"]
 
 # The source the tests' verdicts come from.
 SOURCE = "test-judge"
+_EXAMPLE = Path(__file__).resolve().parents[2] / "configs" / "uniswap_v3.example.yaml"
+
+
+def judged_config(directory: Path, source: str = SOURCE) -> Path:
+    """The example config written under ``directory``, its verdicts section switched on under ``source``."""
+    text = _EXAMPLE.read_text(encoding="utf-8")
+    switched = text.replace(
+        "# verdicts:\n#   source: tradingagents-rating-v1", f"verdicts:\n  source: {source}"
+    )
+    assert switched != text, "the example's commented verdicts section has moved"
+    path = directory / "judged.yaml"
+    path.write_text(switched, encoding="utf-8")
+    return path
 
 
 def verdict(

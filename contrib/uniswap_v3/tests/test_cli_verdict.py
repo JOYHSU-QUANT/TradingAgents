@@ -15,7 +15,11 @@ from contrib.uniswap_v3.agent.errors import AgentError, JudgeUnavailable
 from contrib.uniswap_v3.domain.verdicts import Rating
 from contrib.uniswap_v3.store.repository import open_store
 from contrib.uniswap_v3.tests.fakes.node import DAY, DEFAULT_TICK, FIRST_DAY, put_day
-from contrib.uniswap_v3.tests.fakes.verdicts import ScriptedJudge, record as _record
+from contrib.uniswap_v3.tests.fakes.verdicts import (
+    ScriptedJudge,
+    judged_config,
+    record as _record,
+)
 
 _EXAMPLE = Path(__file__).resolve().parents[1] / "configs" / "uniswap_v3.example.yaml"
 _DAY2 = FIRST_DAY + 2 * DAY
@@ -25,14 +29,7 @@ _NOW = _DAY2 + 600
 @pytest.fixture
 def config(tmp_path):
     """The example config, with its verdicts section switched on under the source ``judge-v1``."""
-    text = _EXAMPLE.read_text(encoding="utf-8")
-    switched = text.replace(
-        "# verdicts:\n#   source: tradingagents-rating-v1", "verdicts:\n  source: judge-v1"
-    )
-    assert switched != text
-    path = tmp_path / "judged.yaml"
-    path.write_text(switched, encoding="utf-8")
-    return path
+    return judged_config(tmp_path, "judge-v1")
 
 
 @pytest.fixture

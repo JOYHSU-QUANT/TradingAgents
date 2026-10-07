@@ -1,10 +1,14 @@
-"""The shipped Windows schedule: when it visits, and what each visit runs."""
+"""The shipped schedules, Windows and Linux: when they visit, and what each visit runs."""
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 import xml.etree.ElementTree as ElementTree
 from datetime import datetime
 from pathlib import Path
+
+import pytest
 
 from contrib.uniswap_v3.config import load_config
 
@@ -33,13 +37,14 @@ def _visit_times() -> list[int]:
     return times
 
 
-def _visit_lines() -> list[str]:
-    return _VISIT.read_text(encoding="ascii").splitlines()
+def _visit_lines(script: Path = _VISIT) -> list[str]:
+    return script.read_text(encoding="ascii").splitlines()
 
 
-def _at(prefix: str) -> int:
-    """The index of the visit script's first line that starts with ``prefix``."""
-    return next(index for index, line in enumerate(_visit_lines()) if line.startswith(prefix))
+def _at(prefix: str, script: Path = _VISIT) -> int:
+    """The index of the visit script's first line that starts with ``prefix``, indented or not."""
+    lines = _visit_lines(script)
+    return next(index for index, line in enumerate(lines) if line.lstrip().startswith(prefix))
 
 
 def _limit_seconds() -> int:
@@ -114,3 +119,187 @@ def test_a_visit_echoes_its_settings_in_quotes():
     for name in ("RUN_ID", "DB", "PYTHON"):
         uses = [line for line in echoes if f"%{name}%" in line]
         assert uses and all(f'"%{name}%"' in line for line in uses), name
+
+
+# The Linux schedule: the visit script a systemd timer runs, and the units.
+
+_VISIT_SH = _PACKAGE / "schedule" / "paper-visit.sh"
+_INSTALL_SH = _PACKAGE / "schedule" / "lightsail-install.sh"
+_SERVICE = _PACKAGE / "schedule" / "uniswap-v3-paper.service"
+_TIMER = _PACKAGE / "schedule" / "uniswap-v3-paper.timer"
+_SH = shutil.which("sh")
+
+
+def _unit(path: Path) -> dict[str, list[str]]:
+    """A unit file's keys to their values, in order; a key given twice has two."""
+    values: dict[str, list[str]] = {}
+    for line in path.read_text(encoding="ascii").splitlines():
+        if line.startswith("#") or not line.strip() or line.startswith("["):
+            continue
+        key, _, value = line.partition("=")
+        values.setdefault(key, []).append(value)
+    return values
+
+
+def _timer_times() -> list[int]:
+    """The seconds after 00:00 UTC each OnCalendar fires at, in order."""
+    times = []
+    for when in _unit(_TIMER)["OnCalendar"]:
+        date, clock, zone = when.split()
+        assert date == "*-*-*" and zone == "UTC", when
+        hour, minute, second = (int(part) for part in clock.split(":"))
+        times.append(hour * 3600 + minute * 60 + second)
+    return times
+
+
+def test_the_timer_visits_three_times_a_day_after_the_bar_fills_and_catches_up():
+    times = _timer_times()
+    assert times == [600, 4200, 7800]
+    delay_blocks = load_config(_EXAMPLE).execution.delay_blocks
+    assert times[0] > (delay_blocks + 1) * _BLOCK_SECONDS
+    timer = _unit(_TIMER)
+    assert timer["Persistent"] == ["true"]
+    assert timer["Unit"] == ["uniswap-v3-paper.service"]
+    assert timer["WantedBy"] == ["timers.target"]
+
+
+def test_the_service_is_stopped_before_the_next_visit_is_due_and_runs_the_script_as_trader():
+    service = _unit(_SERVICE)
+    times = _timer_times()
+    gaps = [later - earlier for earlier, later in zip(times, times[1:], strict=False)]
+    limit = service["TimeoutStartSec"][0]
+    assert limit.endswith("min") and int(limit[:-3]) * 60 < min(gaps)
+    assert service["Type"] == ["oneshot"]
+    assert service["User"] == ["trader"]
+    assert service["WorkingDirectory"] == ["/home/trader/uniswap-paper"]
+    assert service["ExecStart"] == [
+        "/home/trader/uniswap-paper/contrib/uniswap_v3/schedule/paper-visit.sh"
+    ]
+
+
+def test_the_linux_visit_takes_its_settings_from_a_local_file_before_using_them():
+    names = ("RUN_TREND", "RUN_AI", "CONFIG_TREND", "CONFIG_AI", "DB", "LOG", "PYTHON")
+    defaults = [_at(f"{name}=", _VISIT_SH) for name in names]
+    local = _at('if [ -f "$here/paper-visit.local.sh" ]; then . "$here/paper-visit.local.sh"', _VISIT_SH)  # fmt: skip
+    root = _at('cd "$here/../../.."', _VISIT_SH)
+    assert max(defaults) < local < root
+    lines = _visit_lines(_VISIT_SH)
+    assert lines[root].endswith("|| exit 4")
+    assert "export PYTHONUNBUFFERED=1" in lines
+    assert lines[_at('"$PYTHON" -m dotenv run --', _VISIT_SH)].endswith('>>"$LOG" 2>&1')
+
+
+def test_the_installer_waits_for_a_running_visit_by_its_state_not_by_is_active():
+    # A oneshot service that is running is "activating", which is-active exits 3 on.
+    lines = [line.strip() for line in _visit_lines(_INSTALL_SH)]
+    state = next(index for index, line in enumerate(lines) if "ActiveState" in line)
+    assert lines[state].startswith('case "$(systemctl show -p ActiveState --value')
+    assert lines[state + 1] == "active | activating)"
+    assert "exit 3" in lines[state + 1 : state + 6]
+    assert not any("is-active" in line for line in lines if not line.startswith("#"))
+
+
+def test_the_shell_scripts_parse():
+    if _SH is None:
+        pytest.skip("no sh on this machine")
+    for script in (_VISIT_SH, _INSTALL_SH):
+        subprocess.run([_SH, "-n", str(script)], check=True)
+
+
+# A python that records what it is asked, one line per call, and exits as told
+# for the command (the word after contrib.uniswap_v3).
+_STUB = """#!/bin/sh
+printf '%s\\n' "$*" >>"$STUB_LOG"
+case "$*" in
+    *" contrib.uniswap_v3 paper "*) exit "${EXIT_PAPER:-0}" ;;
+    *" contrib.uniswap_v3 backfill "*) exit "${EXIT_BACKFILL:-0}" ;;
+    *" contrib.uniswap_v3 verdict"*) exit "${EXIT_VERDICT:-0}" ;;
+esac
+exit 0
+"""
+
+
+def _visit(
+    tmp_path: Path, monkeypatch, settings: str | None = None, **exits: int
+) -> tuple[int, list[list[str]], list[str]]:
+    """Run a copy of the Linux visit script, laid out as in the repository, with a stub python.
+
+    ``settings`` is the local settings file; by default the stub's python,
+    the log and a store. Returns the exit code, the words of each call the
+    stub was asked in order, and the log's lines.
+    """
+    if _SH is None:
+        pytest.skip("no sh on this machine")
+    schedule = tmp_path / "contrib" / "uniswap_v3" / "schedule"
+    schedule.mkdir(parents=True)
+    script = schedule / "paper-visit.sh"
+    script.write_bytes(_VISIT_SH.read_bytes())
+    stub = tmp_path / "python"
+    stub.write_text(_STUB, encoding="ascii")
+    stub.chmod(0o755)
+    if settings is None:
+        # Quoted, as a value with a space in it has to be: the file is sourced.
+        settings = f'PYTHON="{stub.as_posix()}"\nLOG=visits.log\nDB=store.db\n'
+    (schedule / "paper-visit.local.sh").write_text(settings, encoding="ascii")
+    asked = tmp_path / "asked.txt"
+    monkeypatch.setenv("STUB_LOG", asked.as_posix())
+    for name, code in exits.items():
+        monkeypatch.setenv(name, str(code))
+    done = subprocess.run([_SH, str(script)], check=False)
+    calls = [line.split() for line in asked.read_text(encoding="ascii").splitlines()] if asked.is_file() else []  # fmt: skip
+    log = (tmp_path / "visits.log").read_text(encoding="ascii").splitlines()
+    return done.returncode, calls, log
+
+
+def _commands(calls: list[list[str]]) -> list[str]:
+    return [words[words.index("contrib.uniswap_v3") + 1] for words in calls]
+
+
+def test_a_linux_visit_runs_the_control_run_then_backfill_verdict_and_the_ai_run(
+    tmp_path, monkeypatch
+):
+    code, calls, log = _visit(tmp_path, monkeypatch)
+    assert code == 0
+    assert _commands(calls) == ["paper", "backfill", "verdict", "paper"]
+    trend, backfill, verdict, ai = calls
+    assert trend[trend.index("--run-id") + 1] == "paper-trend-1"
+    assert trend[trend.index("--config") + 1].endswith("paper-trend.local.yaml")
+    assert ai[ai.index("--run-id") + 1] == "paper-ai-1"
+    for call in (backfill, verdict, ai):
+        assert call[call.index("--config") + 1].endswith("paper-ai.local.yaml")
+    assert backfill[backfill.index("--from") + 1].count("-") == 2
+    for call in calls:
+        assert "--balance" not in call and "--gas-eth" not in call
+        assert call[:3] == ["-m", "dotenv", "run"] and "store.db" in call
+    assert log[0].startswith("==== ") and 'visit of "paper-trend-1" and "paper-ai-1"' in log[0]
+    assert '(db "store.db", python "' in log[0]
+    assert log[-1] == "==== exit 0"
+
+
+@pytest.mark.parametrize(
+    ("exits", "code", "commands"),
+    [
+        # The control run was visited; the AI run was not, its verdicts not being there.
+        ({"EXIT_VERDICT": 3}, 3, ["paper", "backfill", "verdict"]),
+        ({"EXIT_BACKFILL": 3}, 3, ["paper", "backfill"]),
+        ({"EXIT_PAPER": 1}, 1, ["paper"]),
+    ],
+)
+def test_a_linux_visit_stops_at_the_first_step_that_fails_and_exits_as_it_did(
+    tmp_path, monkeypatch, exits, code, commands
+):
+    exited, calls, log = _visit(tmp_path, monkeypatch, **exits)
+    assert exited == code
+    assert _commands(calls) == commands
+    assert log[-1] == f"==== exit {code}"
+
+
+def test_a_linux_visit_whose_python_path_is_not_there_exits_4_before_running(
+    tmp_path, monkeypatch
+):
+    code, calls, log = _visit(
+        tmp_path, monkeypatch, settings="PYTHON=/nowhere/python\nLOG=visits.log\n"
+    )
+    assert code == 4 and calls == []
+    assert log[1] == '==== there is no "/nowhere/python": fix PYTHON in paper-visit.local.sh'
+    assert log[2] == "==== exit 4"

@@ -1,0 +1,16 @@
+# Three visits a day, the first after the fill block of the bar that closed
+# at 00:00 UTC and the others an hour apart, as retries: a visit still running
+# when the next is due is not started again beside it. Persistent catches up
+# a visit missed while the host was down.
+[Unit]
+Description=contrib/uniswap_v3 paper visits, three a day
+
+[Timer]
+OnCalendar=*-*-* 00:10:00 UTC
+OnCalendar=*-*-* 01:10:00 UTC
+OnCalendar=*-*-* 02:10:00 UTC
+Persistent=true
+Unit=uniswap-v3-paper.service
+
+[Install]
+WantedBy=timers.target

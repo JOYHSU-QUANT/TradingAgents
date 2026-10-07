@@ -3,9 +3,10 @@
 :class:`TradingAgentsJudge` builds the engine's graph over the config's
 :class:`~.settings.AgentSettings` laid over the engine's own defaults, with
 the spot context (:mod:`.context`) appended to the instrument context the
-graph hands every agent, and reads the rating the graph itself extracts
-from the portfolio manager's decision. The engine is imported here and
-nowhere else in the package, and only when a question is first asked.
+graph hands every agent, and reads the rating off the ``Rating:`` line the
+portfolio manager's decision ends with (:data:`_RATING_LINE`). The engine is
+imported here and nowhere else in the package, and only when a question is
+first asked.
 
 The engine writes as it runs: a JSON log of each run's state under its
 ``results_dir``, and a data cache. Both are pointed into ``home``, a
@@ -83,12 +84,15 @@ REPORT_KEYS: Final = (
 )
 _DECISION_KEY: Final = "final_trade_decision"
 #: The ``Rating: <rating>`` line the spot context asks the decision to end with,
-#: as markdown may dress it (``**Rating**: Hold``, ``**Final rating: Hold**``);
-#: the last such line is the rating. The engine's own signal is not read: its
-#: free-text reader falls back to the first rating word anywhere in the text,
-#: which reads a decision cut short, or written otherwise, as a direction.
+#: as markdown may dress it (``**Rating**: Hold``, ``**Final rating: Hold**``,
+#: ```Rating: Hold```), with one word and nothing but dressing after it (so
+#: ``Rating: Buy/Hold`` is not read as Buy); the last such line is the rating.
+#: The engine's own signal is not read: its free-text reader falls back to the
+#: first rating word anywhere in the text, which reads a decision cut short, or
+#: written otherwise, as a direction.
 _RATING_LINE: Final = re.compile(
-    r"^[\s*_#>-]*(?:final\s+)?rating[\s*_]*[:\-][\s*_]*([A-Za-z]+)", re.IGNORECASE | re.MULTILINE
+    r"^[\s*_#>`-]*(?:final\s+)?rating[\s*_`]*[:\-][\s*_`]*([A-Za-z]+)[\s*_`.]*$",
+    re.IGNORECASE | re.MULTILINE,
 )
 
 logger = logging.getLogger(__name__)

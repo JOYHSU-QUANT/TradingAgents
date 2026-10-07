@@ -56,6 +56,10 @@ def test_the_answer_is_read_from_the_final_state_and_its_rating_line():
         ("Weighing the Buy case against the Sell case...\n\n**Final rating: Hold**", Rating.HOLD),
         ("Rating: Buy\nOn reflection:\n- rating: underweight", Rating.UNDERWEIGHT),
         ("> **Rating** - Overweight", Rating.OVERWEIGHT),
+        ("`Rating: Sell`", Rating.SELL),
+        ("Rating: **Hold**.", Rating.HOLD),
+        # Two words on the line: not one rating.
+        ("Rating: Buy/Hold", Rating.REVIEW),
         # Cut short before the line: the first rating word in the prose is not read.
         ("The Buy case rests on flows; the Sell case on", Rating.REVIEW),
         # A word that is not a rating; a rating named mid-sentence is not the line.
@@ -110,7 +114,7 @@ class _StubGraph:
         self.seen = self.resolve_instrument_context(ticker, asset_type)
         if _StubGraph.answer_error is not None:
             raise _StubGraph.answer_error
-        return {"final_trade_decision": f"**Rating**: Hold on {trade_date}"}, "Hold"
+        return {"final_trade_decision": f"Decided on {trade_date}.\n\n**Rating**: Hold"}, "Hold"
 
 
 @pytest.fixture
@@ -132,7 +136,8 @@ def test_the_judge_builds_a_graph_per_question_with_the_spot_context_on_it(tmp_p
     assert graph.seen == (
         "base context for ETH-USD as crypto\n\n## Spot market context\nthe spot context"
     )
-    assert answer.rating is Rating.HOLD and answer.decision == "**Rating**: Hold on 2024-01-03"
+    assert answer.rating is Rating.HOLD
+    assert answer.decision == "Decided on 2024-01-03.\n\n**Rating**: Hold"
     assert answer.elapsed_seconds >= 0
     # Each question gets its own graph with its own context.
     judge.ask("BTC-USD", "2024-01-03", "another context")

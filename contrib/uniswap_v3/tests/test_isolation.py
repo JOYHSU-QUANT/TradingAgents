@@ -1,11 +1,15 @@
-"""Guards for the package's two import rules, read off the sources.
+"""Guards for the package's three import rules, read off the sources.
 
 - Isolation: nothing under ``contrib/uniswap_v3`` imports another package
   under ``contrib/``, and no other package there imports this one.
 - Purity: ``domain/`` and ``ports.py`` import the standard library and each
   other only. CI type-checks them in a job that installs mypy alone.
+- The engine: the ``tradingagents`` package is imported from ``agent/``
+  and from the tests only, so that the judge is reached through the agent
+  layer and nowhere else, and a command that asks no judge waits on none
+  of the engine's dependencies.
 
-Both read every import statement in a file, at any depth: a lazy import
+All three read every import statement in a file, at any depth: a lazy import
 inside a function and one under ``TYPE_CHECKING`` are the same dependency
 here. A dynamic import (``import_module`` or ``__import__``) is read when
 its module name is a string literal; one built at run time is not seen.
@@ -22,6 +26,9 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _OWN = "contrib.uniswap_v3"
 _PURE = (f"{_OWN}.domain", f"{_OWN}.ports")
+_ENGINE = "tradingagents"
+# Where the engine may be imported from.
+_ENGINE_GATES = (f"{_OWN}.agent", f"{_OWN}.tests")
 # Every other package under ``contrib/``, found on disk so that one added
 # later is guarded without being listed here.
 _NEIGHBOURS = sorted(
@@ -112,6 +119,19 @@ def test_the_pure_layers_import_only_the_standard_library_and_each_other():
 
     offenders = [found for pure in _PURE for found in _offenders(pure, impure)]
     assert not offenders, f"domain/ and ports.py import beyond the standard library: {offenders}"
+
+
+def test_the_engine_is_imported_from_the_agent_layer_and_the_tests_only():
+    offenders = [
+        (source, name)
+        for source, name in _offenders(_OWN, lambda name: _within(name, _ENGINE))
+        if not any(
+            source.startswith(gate.replace(".", "/") + "/") for gate in _ENGINE_GATES
+        )
+    ]
+    assert not offenders, f"the engine is imported outside agent/ and tests/: {offenders}"
+    # The rule guards something: the agent layer does import the engine.
+    assert _offenders(f"{_OWN}.agent", lambda name: _within(name, _ENGINE))
 
 
 def test_the_import_scan_resolves_every_shape(tmp_path):

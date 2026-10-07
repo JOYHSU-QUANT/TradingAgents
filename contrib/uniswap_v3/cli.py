@@ -31,11 +31,23 @@
   what leaving the opening balances untouched, or in the quote token, would
   have come to. It reads the store alone, and takes the run's config from
   the run.
+- ``verdict`` asks the judge, the TradingAgents graph, for a verdict on
+  every traded token at the latest bar whose boundary has passed, and
+  writes each into the store's ``verdicts`` table under the config's
+  ``verdicts.source``, with the judge's words in a sidecar beside the
+  store. A verdict the store already holds is not asked for again. It
+  reads no chain: the bar must be in the store already. The judge reads
+  its data through the day it is asked on, so only the latest bar gets an
+  honest verdict; ``--at`` names an older boundary only together with
+  ``--fake-rating``, which records that rating without asking any judge,
+  for a rehearsal on a store that holds no real verdicts.
 
 ``backfill``, ``paper`` and ``backtest --fills quoter`` take the node's URL
 from the environment variable the config names (``ETH_RPC_URL`` unless it
 names another); with the URL in a ``.env`` file, run them as
-``python -m dotenv run -- python -m contrib.uniswap_v3 ...``.
+``python -m dotenv run -- python -m contrib.uniswap_v3 ...``. ``verdict``
+takes the judge's API key from the environment variable its provider names
+(``OPENROUTER_API_KEY`` for OpenRouter), the same way.
 
 Exit codes: 0 when the command ran to its end, 1 when it could not and
 running it again unchanged will not help (the config, the store, the range,
@@ -68,6 +80,21 @@ the visit runs it again later. It exits 1 when its clock is behind the run.
 A ``fork`` run exits as a ``backtest`` does, and also 1 when the fork is not
 an anvil fork on a loopback address, when the wallet does not hold what the
 run's ledger says, and when the run has an open send.
+A ``verdict`` exits 0 once every traded token has a verdict at the bar, by
+this visit or an earlier one, and also when the bar is suspect, which no run
+decides, so no judge is asked. It warns on stderr of a verdict that holds no
+rating (``REVIEW``) as it is given. It exits 3, keeping the verdicts given so far, when the
+store has no bar at the boundary yet, and when the judge did not answer for
+a reason that may pass (the provider's rate limit, timeout, server error or
+empty balance, a network error, a data vendor throttled or down): whoever schedules it
+runs it again later. It exits 1, keeping the verdicts given so far as well,
+when the config reads no verdicts, when a traded token has no ticker, when
+the judge cannot be set up or built (the engine is not installed, its
+provider's key is not in the environment) or failed for good (any other
+refusal of the provider's, such as a model it does not serve, or an error
+inside the engine), when the sidecar cannot be written, when ``--at`` names
+an older bar than the latest without ``--fake-rating``, and when
+``--fake-rating`` meets a store that holds real verdicts of the source.
 """
 
 from __future__ import annotations
@@ -83,16 +110,19 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
+from .agent.errors import AgentError, BarNotStored, JudgeUnavailable
 from .chain.errors import ChainError, RpcRejected, TransientChainError
 from .config import ConfigError, UniswapConfig, config_from_snapshot, load_config
 from .constants import WRAPPED_NATIVE, pool_key
 from .domain.bars import Finality
-from .domain.decimal_context import parse_decimal, plain
+from .domain.decimal_context import fixed_text, parse_decimal, plain, price_text
 from .domain.execution import ForkSettings
 from .domain.ledger import Ledger
 from .domain.metrics import Curve, MetricsError, RunMetrics, measurable, run_metrics
 from .domain.records import Decision, FillRecord, Outcome, RunRecord, Valuation
+from .domain.times import utc_text
 from .domain.types import RunMode
+from .domain.verdicts import RATINGS, Rating
 from .engine.backtest import BacktestRangeError, BacktestSummary, run_backtest
 from .engine.executors import QuoteExecutor
 from .engine.step import EngineError, UnsettledSend, holdings_text
@@ -101,6 +131,8 @@ from .store.repository import Store, StoreBusy, StoreError, open_store
 from .store.verdict_source import load_verdicts
 
 if TYPE_CHECKING:
+    from .agent.graph import Judge
+    from .agent.verdicts import Asked
     from .backfill import BackfillSummary
     from .chain.rpc import Rpc
     from .fork_run import Reconciliation
@@ -174,8 +206,8 @@ def _balance(text: str) -> tuple[str, Decimal]:
     return symbol, _amount(amount)
 
 
-def _iso(time: int) -> str:
-    return datetime.fromtimestamp(time, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+_iso = utc_text
+_fixed = fixed_text
 
 
 def _one_ascii_line(text: object) -> str:
@@ -301,6 +333,23 @@ def _parser() -> argparse.ArgumentParser:
     fork.add_argument(
         "--fork-url",
         help="the anvil fork's URL, on a loopback address (default: http://127.0.0.1:8545)",
+    )
+
+    verdict = add(
+        "verdict", "Ask the judge for a verdict on every traded token at a bar, and record it."
+    )
+    verdict.add_argument(
+        "--at",
+        type=_parse_time,
+        help="the bar boundary to judge, in UTC: 2024-01-01 or 2024-01-01T12:00:00 "
+        "(default: the latest boundary that has passed, which is the only one a judge is "
+        "asked about; an older one takes --fake-rating)",
+    )
+    verdict.add_argument(
+        "--fake-rating",
+        choices=[rating.value for rating in RATINGS],
+        help="record this rating for every token without asking any judge, on a store that "
+        "holds no real verdicts of the source",
     )
 
     report = commands.add_parser(
@@ -444,10 +493,8 @@ def _status_lines(store: Store, config: UniswapConfig, bars: int) -> list[str]:
             lines.append(f"{_iso(time)}  incomplete: a configured pool has no reading")
             continue
         with_bar.append(time)
-        # Two decimal places for a price of 1 or more, six digits for a smaller one.
         prices = "  ".join(
-            f"{symbol} {price:.2f}" if price >= 1 else f"{symbol} {price:.6g}"
-            for symbol, price in sorted(stored.bar.prices.items())
+            f"{symbol} {price_text(price)}" for symbol, price in sorted(stored.bar.prices.items())
         )
         flags = [
             f"{pool_key(pool)}:{flag.value}"
@@ -955,12 +1002,82 @@ def _fork(args: argparse.Namespace, out: Callable[[str], None], now: Callable[[]
     return EXIT_OK
 
 
-def _fixed(value: Decimal, *, signed: bool = False) -> str:
-    """``value`` to two decimal places, with its sign when ``signed``, and never a negative zero."""
-    text = f"{value:+.2f}" if signed else f"{value:.2f}"
-    if text.strip("+-0."):
-        return text
-    return ("+" if signed else "") + text.lstrip("+-")
+def _asked_line(asked: Asked) -> str:
+    """One token's verdict as ``verdict`` prints it."""
+    record = asked.record
+    rating = record.verdict.rating.value
+    if not asked.asked_now:
+        return (
+            f"{asked.symbol} ({asked.ticker}): already stored: {rating}, model "
+            f"{_one_ascii_line(record.model)}, asked {_iso(record.asked_at)}"
+        )
+    words = (
+        "no words kept"
+        if record.sidecar_path is None
+        else f"words in {_one_ascii_line(record.sidecar_path)}"
+    )
+    return (
+        f"{asked.symbol} ({asked.ticker}): {rating}, model {_one_ascii_line(record.model)}, "
+        f"{asked.elapsed_seconds:.0f} s, {words}"
+    )
+
+
+def _verdict(args: argparse.Namespace, out: Callable[[str], None], now: Callable[[], float]) -> int:
+    config = _config(args)
+    interval = config.bars.interval_seconds
+    present = int(now())
+    latest = present - present % interval
+    at = latest if args.at is None else args.at
+    if at % interval:
+        raise ConfigError(
+            f"--at {_iso(at)} is not a bar boundary: a boundary is a multiple of {interval} "
+            f"seconds since the epoch"
+        )
+    if at > latest:
+        raise ConfigError(
+            f"--at {_iso(at)} has not passed; the latest boundary that has is {_iso(latest)}"
+        )
+    from .agent.verdicts import ask_verdicts, trade_date_of, verdict_source
+
+    source = verdict_source(config)
+    home = args.db.resolve().parent
+    judge: Judge
+    if args.fake_rating is not None:
+        from .agent.graph import FakeJudge
+
+        judge = FakeJudge(Rating(args.fake_rating))
+    else:
+        from .agent.graph import TradingAgentsJudge
+
+        judge = TradingAgentsJudge(config.agent, home / "tradingagents")
+
+    def recorded(asked: Asked) -> None:
+        # Told as each verdict lands, so that a later token's failure loses no line.
+        out(_asked_line(asked))
+        if asked.superseded:
+            print(
+                f"warning: another visit recorded {asked.symbol} while this one's judge was "
+                f"thinking; this visit's answer is dropped, and the engine's log of the day "
+                f"under tradingagents/logs is the dropped one's",
+                file=sys.stderr,
+            )
+        if asked.asked_now and asked.record.verdict.rating.is_review:
+            print(
+                f"warning: the judge gave no rating on {asked.symbol} (REVIEW); the verdict is "
+                f"kept as such, a strategy treats it as none, and it is not asked again",
+                file=sys.stderr,
+            )
+
+    out(f"verdicts of {_one_ascii_line(source)} at {_iso(at)} (trade date {trade_date_of(at)}):")
+    with open_store(args.db, create=False) as store:
+        summary = ask_verdicts(
+            store, config, judge, time=at, home=home, now=present, report=recorded
+        )
+    if summary.suspect:
+        out(f"the bar at {_iso(at)} is suspect, which no run decides; no judge was asked")
+        return EXIT_OK
+    out(f"{len(summary.asked)} asked, {len(summary.already_stored)} already stored")
+    return EXIT_OK
 
 
 def _curve_line(name: str, curve: Curve) -> str:
@@ -1045,20 +1162,28 @@ def main(
             return _fork(args, out, now)
         if args.command == "report":
             return _report(args, out)
+        if args.command == "verdict":
+            return _verdict(args, out, now)
         return _status(args, out, now)
-    except (TransientChainError, RpcRejected, StoreBusy) as exc:
+    except (TransientChainError, RpcRejected, StoreBusy, BarNotStored, JudgeUnavailable) as exc:
         # A node that answers a read with an error is as likely to be having
         # a bad moment as to be broken, and a store another program holds is
-        # let go of; the run stopped, and a later one asks.
+        # let go of; the run stopped, and a later one asks. A bar not yet in
+        # the store, and a judge that did not answer for a reason that may
+        # pass, are the same: a later visit asks.
         print(f"try again later: {_one_ascii_line(exc)}", file=sys.stderr)
         return EXIT_RETRY
     except (
+        AgentError,
         BacktestRangeError,
         ChainError,
         ConfigError,
         EngineError,
         MetricsError,
+        OSError,
         StoreError,
     ) as exc:
+        # OSError: a local file that could not be written or read, the sidecar
+        # beside the store first of all; the chain reader wraps its own.
         print(f"failed: {_one_ascii_line(exc)}", file=sys.stderr)
         return EXIT_FAILED

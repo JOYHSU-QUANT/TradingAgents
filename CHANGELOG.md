@@ -842,6 +842,50 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **`contrib/uniswap_v3`: the agent layer and `verdict` (`agent/`).** The
+  package now asks the TradingAgents graph for its verdicts. `python -m
+  contrib.uniswap_v3 verdict --config C --db D [--at BOUNDARY]
+  [--fake-rating RATING]` asks the judge about every traded token at the
+  latest bar whose boundary has passed (`--at` names an older one only
+  with `--fake-rating`, since the judge reads data through the day it is
+  asked on; a suspect bar, which no run decides, is not judged) and
+  writes each verdict into the store's `verdicts` table (schema v6, #333)
+  under the config's `verdicts.source`, with the judge's words, the
+  reports its agents wrote on the way, the spot context it was handed and
+  the time it took in a sidecar at `verdicts/<source>/<token>-<bar>.json`
+  beside the store, named by the row with its digest. A verdict the store
+  holds is not asked for again, and each is written as it is given, so a
+  judge that fails on the second token keeps the first and the next visit
+  asks about the rest; a failure the provider, the network or a data
+  vendor says may pass (a rate limit, a timeout, a server error, an empty
+  balance, a connection error, a vendor throttled or down) exits 3, as
+  `paper` says "try again later", and so does a bar not yet in the store;
+  any other failure, from a model the provider does not serve to any other
+  error inside the engine, exits 1; a `REVIEW` is recorded as a verdict
+  and warned of. The judge is the
+  engine's graph over the config's new `agent` section (provider, the two
+  models, analysts among market, social and news, since the engine's
+  fundamentals analyst reads a company's statements, completion cap; the
+  defaults are the Hyperliquid paper run's judge, so the two scorecards
+  compare; the sidecar keeps them), with the spot context from the store's
+  closes appended to the instrument context every agent reads: the close,
+  its change over 1, 7 and 30 bars, the realised volatility over 20 (a
+  missing or suspect bar is told as a gap), and what a rating does,
+  nothing about any run's holdings, the rule's state or the multipliers.
+  The engine's logs and cache go under `<store dir>/tradingagents/` and
+  its memory log is left off. The volatility estimator, the UTC text and
+  the price and percentage formats are now shared by the rule strategy,
+  the CLI and the agent layer (`domain/decimal_context.py`,
+  `domain/times.py`). `--fake-rating` records a rating without a model
+  for a rehearsal, and is refused by a store that holds real verdicts of
+  the source, since a verdict is never rewritten. The engine is imported
+  from `agent/` only (the tests aside), lazily; the isolation guard pins
+  that, and
+  `tests/test_upstream_names.py` pins the rating strings, the report keys
+  and the config keys to the engine's own. `agent` is not part of the
+  config snapshot. The smoke test `tests/test_agent_smoke.py` asks the
+  real judge once.
+
 - **`contrib/uniswap_v3`: an AI-gated strategy, `ai_gated_weights`
   (`strategies/ai_gated_weights.py`).** A third strategy through the same
   `Strategy` port and the registry, and the first to read the verdicts the
@@ -870,9 +914,9 @@ Breaking changes within the 0.x line are called out explicitly.
   replay warns of. What the two weight strategies share now lives in
   `strategies/rebalance.py`: the bounded-decimal check (`require_decimal`),
   the cut to a weight's four places (`floor_weight`) and the exact
-  remainder to the quote token (`weights_with_quote`). Nothing writes
-  verdicts yet: a backtest replays the ones the store holds and asks no
-  judge, and the agent layer that asks TradingAgents is the next PR.
+  remainder to the quote token (`weights_with_quote`). A backtest replays
+  the verdicts the store holds and asks no judge; the `verdict` command
+  (the entry above) writes them.
 
 - **`contrib/uniswap_v3`: a rule strategy, `trend_vol_weights`
   (`strategies/trend_vol_weights.py`).** A second strategy next to the

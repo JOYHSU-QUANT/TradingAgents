@@ -54,13 +54,17 @@ Start-ScheduledTask -TaskName 'uniswap-v3-paper'
 ### 1.1 相依與自我檢查
 
 ```powershell
+pip install -e ".[dev]"                                             # 上游引擎與測試相依（verdict 與 tests/test_upstream_names.py 要）
 pip install -r contrib/uniswap_v3/requirements.txt
 python -m pytest -q -m "not smoke" contrib/uniswap_v3/tests        # 全綠才繼續
 python -m dotenv run -- python -m pytest -q -m smoke contrib/uniswap_v3/tests/test_chain_smoke.py
+python -m dotenv run -- python -m pytest -q -m smoke contrib/uniswap_v3/tests/test_agent_smoke.py -s
 ```
 
 第二條 pytest 打真的節點：`.env` 要有 `ETH_RPC_URL=https://...`（完整 URL，不是只有 key），
 而且要是 **archive** 節點（漏跑的 visit 補跑、回補歷史都要讀舊區塊）。
+第三條真的問一次 judge（ETH-USD、今天；約 15–20 次 completion，花錢）：`.env` 要有 `OPENROUTER_API_KEY`，
+沒有就 skip；它印出評等與耗時，是跑 AI 閘門策略前唯一一次「引擎＋閘道＋key 通不通」的檢查。
 
 記下這個 Python 的完整路徑（`(Get-Command python).Source`）：排程用的要是同一個 `python.exe`。
 repo 的 `.venv` 不一定裝了 web3。
@@ -74,7 +78,8 @@ Copy-Item contrib/uniswap_v3/configs/uniswap_v3.example.yaml contrib/uniswap_v3/
 要改的只有 `strategy`（`fixed_weights` 是佔位策略；要跑規則策略就把 example 裡註解掉的
 `trend_vol_weights` 區塊換上去；要跑 AI 閘門策略 `ai_gated_weights` 則換上它的區塊，**並把 `verdicts` 區塊打開**——
 沒有判斷來源的 run 第一根就 `failed: the strategy refused the bar at …`，而且 run 列已經寫進 store，補上區塊後要換一個
-run id；它的 `rule` 要與對照 run 的 `trend_vol_weights` 參數一字不差，兩個 run 才比得起來）。其餘照預設：一天一根 bar、
+run id；它的 `rule` 要與對照 run 的 `trend_vol_weights` 參數一字不差，兩個 run 才比得起來）。`agent` 區塊是 `verdict`
+問的 judge（供應商、兩個模型、分析師、completion 上限），預設＝hyperliquid paper 在用的，不改；它不進設定快照。其餘照預設：一天一根 bar、
 成交在邊界後 25 塊（`execution.delay_blocks`）——排程時間是照這個值排的，
 改大到超過 45 塊（約 9 分鐘）就要把排程一起往後挪。
 
@@ -122,7 +127,42 @@ python -m dotenv run -- python -m contrib.uniswap_v3 paper --config contrib/unis
 
 ---
 
+## 2.5 問判斷：`verdict`
+
+跑 `ai_gated_weights` 的 run 要有判斷可讀。`verdict` 對設定交易的每個代幣（WETH→ETH-USD、WBTC→BTC-USD）
+問一次 TradingAgents graph，以設定的 `verdicts.source` 寫進 store：
+
+```powershell
+python -m dotenv run -- python -m contrib.uniswap_v3 verdict --config contrib/uniswap_v3/configs/paper.local.yaml --db contrib/uniswap_v3/data/paper.db
+```
+
+- 問的是**最近一個已過的邊界**那根 bar，而且只問這一根：judge 讀的新聞與價格到問的那天為止，隔天再問前一根會看到未來，
+  所以 `--at` 指更早的邊界會被拒（結束碼 1），只有 `--fake-rating` 可以配舊邊界；漏問的那天就照 D3 當沒判斷。
+  那根 bar 要先在 store 裡，而 `paper` 是「讀進來就決策」，所以**當天的順序是三步**：
+  `backfill --from <今天的邊界>`（只讀最新那根、不決策；它不在 §1.3「不要在跑著的 run 後面回補」的範圍，因為 run 還沒走到這根）
+  → `verdict` → `paper`。bar 不在就 `verdict` 結束碼 3、稍後再跑；掛排程時把三條串起來，前一條結束碼不是 0 就不跑下一條
+  （當天後面的重試會補）。排程的 service 寫法見附錄。
+- 上游用**本機日期**當 trade date：伺服器是 UTC 沒事；本機（台灣）在 UTC 16:00 之後手動跑，上游會把「今天」算成明天、
+  把這次當回測、即時資料源留白。要手動跑就在台北時間 08:10–23:59 之間跑。
+- 每個代幣約 15–20 次 completion；實測（2026-10-06，sonnet-4-6 經 OpenRouter）一個代幣約 11 分鐘，兩個代幣一次 visit 抓 20–25 分鐘。問過的（source、代幣、bar）**永不改寫**、
+  重跑直接印 `already stored`；judge 中途沒答（閘道、額度、網路、分析師的資料源被限流或掛了）結束碼 3、已答的代幣保留、下次只問剩下的。
+- 印出每個代幣：評等、模型、耗時、原文存在哪：`WETH (ETH-USD): Buy, model anthropic/claude-sonnet-4-6, 662 s, words in verdicts/tradingagents-rating-v1/WETH-20261006T000000Z.json`。
+  sidecar 放在 **store 檔的同目錄**（`contrib/uniswap_v3/data/verdicts/<source>/`），裡面有最終決策全文、各分析師與辯論報告、
+  給它看的現貨脈絡（最近收盤、1／7／30 根變動、20 根波動率）；上游引擎自己的 log 與 cache 在 `data/tradingagents/`。
+  這些都在 gitignored 的 `data/` 下，備份 store 時一起帶走。
+- judge 回 `REVIEW`（答了但讀不出評等）照樣寫、stderr 警告一行、不再問；`ai_gated_weights` 把它當沒判斷。
+- **演練**：`--fake-rating Buy` 不打模型、直接寫該評等（`model=fake`、沒有 sidecar）。它**只准用在沒有真判斷的 store**：
+  store 裡該 source 已有非 fake 的列就結束碼 1——fake 列會永久擋掉那根 bar 真的判斷。排程演練請用另一個 db 與
+  `verdicts.source` 不同的設定檔，不要碰 `paper.db`。
+- 判斷是 store 的資料、不屬於任何 run：對照 run（`trend_vol_weights`）與 AI run（`ai_gated_weights`）讀同一份。
+
+---
+
 ## 3. 掛排程（Windows 工作排程器）
+
+**這一節的 task 只跑 `paper`，適用於不讀判斷的 run**（`fixed_weights`、`trend_vol_weights`）。`ai_gated_weights` 的 run 要照 §2.5
+的三步串接、而且兩個代幣的問答就要 20–25 分鐘、超過這裡 25 分鐘的時限；它的排程是 Lightsail 上的 systemd unit（附錄），
+下一張 PR 才正式落地，**在 Windows 上先不要拿這個 task 跑 ai_gated_weights**（paper 會在判斷寫進來之前就把當根決策掉）。
 
 `schedule/paper-visit.xml` 每天 **00:10、00:40、01:10 UTC**（台灣時間 08:10、08:40、09:10）
 各跑一次 `schedule/paper-visit.cmd`：
@@ -230,6 +270,14 @@ python -m contrib.uniswap_v3 report --db contrib/uniswap_v3/data/paper.db --run-
 | `failed: the run 'paper-1' was started under another config` | 設定檔改了，或新版程式改了預設值 | run 只能在開它的設定下接續：見 §6 開新 run |
 | `failed: ... the clock is behind` | 這台機器的時鐘早於 run 已走到的邊界 | 校時 |
 | `failed: the strategy refused the bar at ... (ai_gated_weights reads verdicts, and the view carries none ...)` | 策略讀判斷，設定檔卻沒有 `verdicts` 區塊 | 設定補上 `verdicts`，用新的 run id 開 run（原 run 已開在沒有判斷的設定下） |
+| `verdict`：`try again later: the store has no bar at ...` 接 `exit 3` | 當天的 bar 還沒進 store（前一步的 `backfill` 沒跑或沒讀到，多半是節點落後） | 當天後面的重試會補；順序見 §2.5 |
+| `verdict`：`try again later: the judge did not answer on ETH-USD (...)` 接 `exit 3` | 原因可能會過：閘道回 402（額度）、408、429、5xx，連線／逾時類錯誤，或分析師的資料源被限流／掛了（括號裡是 `VendorRateLimitError`／`VendorUnavailableError` 之類）；已答的代幣已寫進 store | 當天後面的重試只問剩下的；**一整天都是 3** 就看括號裡的例外：閘道的就查 OpenRouter 額度與服務狀態，資料源的就查該資料源 |
+| `verdict`：`failed: the judge cannot be built (ValueError: API key for provider 'openrouter' is not set. Please set ...)` | `.env`（或環境）沒有供應商的 key | 補 key |
+| `verdict`：`failed: the judge failed on ... for good (...)` | 供應商回其他 4xx（模型名打錯、key 無效、請求格式不對）或引擎自己出錯（KeyError 之類），重試也一樣、還會先花掉分析師的呼叫 | 對照 `agent` 區塊的模型名與 key；是引擎的錯就看括號裡的例外 |
+| `verdict`：`failed: the bar at ... is not the latest whose boundary has passed` | 想補問舊的 bar | 不補：舊 bar 的判斷會看到未來；那天照「沒判斷」走 |
+| `verdict`：`failed: verdict writes under the source the config's verdicts section names, and the config has no verdicts section` | 設定檔沒打開 `verdicts` 區塊 | 打開它（§1.2） |
+| `verdict`：`failed: the store holds verdicts of '...' given by [...]` | 在有真判斷的 store 上用了 `--fake-rating` | 演練換 scratch store（§2.5） |
+| `verdict`：`warning: the judge gave no rating on WBTC (REVIEW)` | judge 答了但讀不出評等；已寫成 `REVIEW`、不再問 | 沒事；`ai_gated_weights` 當沒判斷處理。常發生就看 sidecar 的 `decision` |
 | `failed: paper needs the packages in contrib/uniswap_v3/requirements.txt` | 排程用的 Python 不是裝了相依的那個 | 改 §3.1 的 `PYTHON` |
 | `'python' is not recognized ...`（中文 Windows 是「不是內部或外部命令」）接 `==== exit 9009` | 排程找不到 `PYTHON` | 改 §3.1 的 `PYTHON` 成完整路徑 |
 | `==== there is no "...python.exe": fix PYTHON ...` 接 `==== exit 4` | §3.1 的 `PYTHON` 路徑打錯 | 改 `paper-visit.local.cmd` |
@@ -396,3 +444,9 @@ WantedBy=timers.target
 
 `systemctl --user enable --now uniswap-v3-paper.timer`。還在跑的 oneshot 不會被再啟動一次，
 `Persistent=true` 補跑關機時錯過的那次，與 Windows 版的設定對應。
+
+跑 `ai_gated_weights` 時 `ExecStart` 是 §2.5 的三步：先把今天的 bar 讀進來、再問判斷、最後 visit，前一步成功才跑下一步，
+失敗就把它的結束碼當這次 visit 的
+（`ExecStart=/bin/sh -c 'exec >> contrib/uniswap_v3/data/paper-visits.log 2>&1; D="$$(date -u +%%F)"; python -m dotenv run -- python -m contrib.uniswap_v3 backfill --config ... --db ... --from "$$D" && python -m dotenv run -- python -m contrib.uniswap_v3 verdict --config ... --db ... && python -m dotenv run -- python -m contrib.uniswap_v3 paper --config ... --db ... --run-id ...'`；
+開頭的 `exec >> ... 2>&1` 讓三條的輸出都進同一個 log；unit 檔裡 `%` 要寫成 `%%`、`$` 要寫成 `$$`，systemd 才不會自己展開），
+`TimeoutStartSec` 也要把兩個代幣各約 11 分鐘的問答算進去（例如 60min）。正式的 unit 與 Lightsail 部署步驟是下一張 PR 的事。

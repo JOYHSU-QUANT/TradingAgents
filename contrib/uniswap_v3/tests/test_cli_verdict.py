@@ -135,16 +135,36 @@ def test_a_bar_whose_boundary_passed_longer_ago_than_the_window_is_left_unrated(
     assert code == cli.EXIT_OK and judge.asked == []
     assert lines == [
         "verdicts of judge-v1 at 2024-01-03T00:00:00Z (trade date 2024-01-03):",
-        "the bar at 2024-01-03T00:00:00Z is past the judge's window; no judge was asked",
+        "0 asked, 0 already stored, 2 past the judge's window",
     ]
     assert (
         "warning: the boundary 2024-01-03T00:00:00Z passed 14460 s ago, more than "
         "agent.ask_within_seconds (14400 s); the judge would see that long past the fill, so it "
-        "is not asked, and the bar is left unrated"
+        "is not asked, and WBTC, WETH left unrated"
     ) in capsys.readouterr().err
     with open_store(db, create=False) as store:
         assert store.verdicts_at("judge-v1", _DAY2) == []
-    # A fake rating is a rehearsal, not a judge reading the day: not bound by the window.
+    # What the store holds stands, late or not: one token stored, the other left.
+    with open_store(db) as store:
+        store.insert_verdict(_record("WETH", 2, Rating.HOLD, source="judge-v1"))
+    code, lines = _verdict(config, db, now=late)
+    assert code == cli.EXIT_OK and judge.asked == []
+    assert lines[1:] == [
+        "WETH (ETH-USD): already stored: Hold, model synthetic, asked 2024-01-03T00:10:00Z",
+        "0 asked, 1 already stored, 1 past the judge's window",
+    ]
+    assert "and WBTC left unrated" in capsys.readouterr().err
+    # Both stored: nothing is late any more, and nothing is warned of.
+    with open_store(db) as store:
+        store.insert_verdict(_record("WBTC", 2, Rating.SELL, source="judge-v1"))
+    code, lines = _verdict(config, db, now=late)
+    assert code == cli.EXIT_OK and lines[-1] == "0 asked, 2 already stored"
+    assert "left unrated" not in capsys.readouterr().err
+
+
+def test_a_fake_rating_is_not_bound_by_the_window(config, db):
+    # A rehearsal, not a judge reading the day.
+    late = _DAY2 + 4 * 3_600 + 60
     assert _verdict(config, db, "--fake-rating", "Buy", now=late)[0] == cli.EXIT_OK
     with open_store(db, create=False) as store:
         assert len(store.verdicts_at("judge-v1", _DAY2)) == 2

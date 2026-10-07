@@ -32,10 +32,12 @@ SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 as_trader() {
     before=
     if [ -d "$CHECKOUT/.git" ]; then
-        before=$(git -C "$CHECKOUT" rev-parse --short HEAD)
+        # A clone that was cut short has no HEAD to go back to.
+        before=$(git -C "$CHECKOUT" rev-parse --short HEAD 2>/dev/null || true)
     else
         url=${REPO_URL:-$(git -C "$SOURCE" remote get-url origin)}
-        echo "cloning $url"
+        # Without any credential a URL may carry before its @.
+        echo "cloning ${url##*@}"
         git clone --quiet --no-checkout "$url" "$CHECKOUT"
     fi
     cd "$CHECKOUT"
@@ -52,8 +54,9 @@ as_trader() {
         echo "wrote $CHECKOUT/.env"
     fi
     for key in ETH_RPC_URL OPENROUTER_API_KEY; do
-        # A line with a value: not missing, not empty, not an empty pair of quotes.
-        if ! grep -qE "^$key=[^[:space:]\"']" .env; then
+        # A line with a value: not missing, not empty, not an empty pair of quotes;
+        # a quoted value is one too.
+        if ! grep -qE "^$key=([^[:space:]\"']|\"[^\"]|'[^'])" .env; then
             echo "warning: $CHECKOUT/.env has no $key with a value: the visits need it"
         fi
     done
@@ -112,7 +115,7 @@ main() {
 # was stopped here and not put back.
 left_stopped() {
     if [ "${was:-}" = active ] && ! systemctl is-active --quiet "$UNIT.timer"; then
-        echo "the timer was running and is left stopped: finish the upgrade, or sudo systemctl start $UNIT.timer" >&2
+        echo "the timer was running and is left stopped; a rerun does not start it: rerun this, then sudo systemctl enable --now $UNIT.timer, or sudo systemctl start $UNIT.timer to go back as it was" >&2
     fi
 }
 

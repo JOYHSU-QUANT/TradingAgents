@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -230,13 +231,18 @@ def test_the_shell_scripts_parse():
 
 
 # A python that records what it is asked, one line per call, and exits as told
-# for the command (the word after contrib.uniswap_v3). Told LOCK_LOG, it takes
-# the write bit off that file, as a log that stops taking writes mid-visit.
+# for the command (the word after contrib.uniswap_v3); the second paper call,
+# the AI run's, is told apart by EXIT_PAPER_AI. Told LOCK_LOG, it takes the
+# write bit off that file, as a log that stops taking writes mid-visit.
 _STUB = """#!/bin/sh
 printf '%s\\n' "$*" >>"$STUB_LOG"
 if [ -n "${LOCK_LOG:-}" ]; then chmod a-w "$LOCK_LOG"; fi
 case "$*" in
-    *" contrib.uniswap_v3 paper "*) exit "${EXIT_PAPER:-0}" ;;
+    *" contrib.uniswap_v3 paper "*)
+        if [ "$(grep -c ' contrib.uniswap_v3 paper ' "$STUB_LOG")" -ge 2 ]; then
+            exit "${EXIT_PAPER_AI:-0}"
+        fi
+        exit "${EXIT_PAPER:-0}" ;;
     *" contrib.uniswap_v3 backfill "*) exit "${EXIT_BACKFILL:-0}" ;;
     *" contrib.uniswap_v3 verdict "*) exit "${EXIT_VERDICT:-0}" ;;
 esac
@@ -310,6 +316,9 @@ def test_a_linux_visit_runs_the_control_run_then_backfill_verdict_and_the_ai_run
         ({"EXIT_VERDICT": 3}, 3, ["paper", "backfill", "verdict"]),
         ({"EXIT_BACKFILL": 3}, 3, ["paper", "backfill"]),
         ({"EXIT_PAPER": 1}, 1, ["paper"]),
+        # The AI run's own paper is the last step, and its code is the visit's.
+        ({"EXIT_PAPER_AI": 3}, 3, ["paper", "backfill", "verdict", "paper"]),
+        ({"EXIT_PAPER_AI": 1}, 1, ["paper", "backfill", "verdict", "paper"]),
     ],
 )
 def test_a_linux_visit_stops_at_the_first_step_that_fails_and_exits_as_it_did(
@@ -346,6 +355,8 @@ def test_a_linux_visit_with_an_empty_run_id_says_so_and_with_both_empty_exits_1(
 def test_a_linux_visit_whose_log_stops_taking_writes_exits_4_and_runs_no_further_step(
     tmp_path, monkeypatch
 ):
+    if getattr(os, "geteuid", lambda: 1)() == 0:
+        pytest.skip("root writes a read-only file: the guard cannot be seen to fire")
     log = tmp_path / "visits.log"
     monkeypatch.setenv("LOCK_LOG", log.as_posix())
     try:
@@ -359,9 +370,7 @@ def test_a_linux_visit_whose_log_stops_taking_writes_exits_4_and_runs_no_further
     assert lines[0].startswith("==== ") and not any(line.startswith("==== exit") for line in lines)
 
 
-def test_a_linux_visit_whose_python_path_is_not_there_exits_4_before_running(
-    tmp_path, monkeypatch
-):
+def test_a_linux_visit_whose_python_path_is_not_there_exits_4_before_running(tmp_path, monkeypatch):
     code, calls, log = _visit(tmp_path, monkeypatch, python="/nowhere/python")
     assert code == 4 and calls == []
     assert log[1] == '==== there is no "/nowhere/python": fix PYTHON in paper-visit.local.sh'

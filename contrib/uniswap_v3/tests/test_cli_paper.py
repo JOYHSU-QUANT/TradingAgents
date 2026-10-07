@@ -594,9 +594,7 @@ def test_paper_warns_once_of_the_bars_it_caught_up_on_without_a_rating(node, tmp
     assert err.count("saw no rating") == 1
 
 
-def test_paper_of_a_run_that_reads_no_verdicts_does_not_warn_of_no_rating(
-    node, tmp_path, capsys
-):
+def test_paper_of_a_run_that_reads_no_verdicts_does_not_warn_of_no_rating(node, tmp_path, capsys):
     db = tmp_path / "store.db"
     assert _paper(node, db, *_OPENING)[0] == cli.EXIT_OK
     assert "saw no rating" not in capsys.readouterr().err

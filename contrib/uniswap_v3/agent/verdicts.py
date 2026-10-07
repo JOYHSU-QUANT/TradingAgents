@@ -83,19 +83,23 @@ class AskSummary:
     """What a visit did at the bar ``time``, in symbol order.
 
     ``suspect`` says the bar is suspect, so nothing was asked and ``verdicts``
-    is empty; ``late`` says the boundary passed longer ago than the judge's
-    ``ask_within_seconds``, so nothing was asked either.
+    is empty. ``late`` names the traded tokens left unasked because the
+    boundary passed longer ago than the judge's ``ask_within_seconds``; what
+    the store already held of the others is in ``verdicts``, found, not
+    asked.
     """
 
     time: int
     source: str
     verdicts: tuple[Asked, ...] = ()
     suspect: bool = False
-    late: bool = False
+    late: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if (self.suspect or self.late) and self.verdicts:
-            raise ValueError("a suspect or late bar has no verdicts asked or found")
+        if self.suspect and self.verdicts:
+            raise ValueError("a suspect bar has no verdicts asked or found")
+        if self.late and any(each.asked_now for each in self.verdicts):
+            raise ValueError("a late bar has no verdicts asked, only found")
 
     @property
     def asked(self) -> tuple[Asked, ...]:
@@ -171,8 +175,9 @@ def ask_verdicts(
     fake: a fake verdict blocks the real one at its bar for good, so a
     rehearsal is for a store that holds no real verdicts. A judge that is
     not point in time is asked only within the config's
-    ``agent.ask_within_seconds`` of the boundary; later, the summary says
-    ``late`` and nothing is asked or written.
+    ``agent.ask_within_seconds`` of the boundary; later, the tokens it has
+    not been asked about are left unasked and named in the summary's
+    ``late``, while the verdicts the store already holds are found as usual.
     """
     source = verdict_source(config)
     tickers = tickers_for(config.traded_symbols)
@@ -193,10 +198,6 @@ def ask_verdicts(
             f"since its data runs to the day it is asked on, and an older bar takes "
             f"--fake-rating"
         )
-    if not judge.point_in_time and now - time > config.agent.ask_within_seconds:
-        # The judge reads through the moment it is asked: this late it would see
-        # hours past the fill the run trades at.
-        return AskSummary(time=time, source=source, late=True)
     stored = load_bar(store, config, time)
     if stored is None:
         raise BarNotStored(
@@ -206,12 +207,20 @@ def ask_verdicts(
     if stored.bar.suspect:
         return AskSummary(time=time, source=source, suspect=True)
     held = {record.verdict.symbol: record for record in store.verdicts_at(source, time)}
+    # The judge reads through the moment it is asked: this long after the boundary
+    # it would see hours past the fill the run trades at, so what it has not said
+    # yet is left unsaid; what it said earlier stands.
+    late = not judge.point_in_time and now - time > config.agent.ask_within_seconds
+    left: list[str] = []
     closes: Mapping[str, list[Decimal | None]] | None = None
     done: list[Asked] = []
     for symbol, ticker in tickers.items():
         if symbol in held:
             done.append(Asked(symbol=symbol, ticker=ticker, record=held[symbol], asked_now=False))
             report(done[-1])
+            continue
+        if late:
+            left.append(symbol)
             continue
         if closes is None:
             closes = _closes(store, config, stored)
@@ -294,4 +303,4 @@ def ask_verdicts(
             )
         )
         report(done[-1])
-    return AskSummary(time=time, source=source, verdicts=tuple(done))
+    return AskSummary(time=time, source=source, verdicts=tuple(done), late=tuple(left))

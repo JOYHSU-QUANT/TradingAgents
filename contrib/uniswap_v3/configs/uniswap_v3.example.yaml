@@ -74,8 +74,10 @@ rpc:
 # refused for a crypto asset), every completion capped at max_tokens, and
 # asked about a bar only within ask_within_seconds of its boundary: the judge
 # reads news and prices through the moment it is asked, so a later question
-# would see hours past the fill the run trades at, and the bar is left unrated
-# instead (a fake rating is not bound by it). These are the defaults, the
+# would see hours past the fill the run trades at, and the tokens not judged
+# yet are left unrated instead, what was stored standing (at least 3600, which
+# the first visit always clears; a fake rating is not bound by it). These are
+# the defaults, the
 # Hyperliquid paper run's judge, so that the two scorecards compare; the
 # whole section may be left out. It is not part of the config's snapshot: the
 # verdicts a run reads name the model that gave each one. Only the verdict

@@ -58,8 +58,9 @@ ssh -i ~/.ssh/<key> ubuntu@<host> sudo sh /tmp/lightsail-install.sh <commit>
    結束碼 3，等它跑完再來一次。升級避開 visit 的時段（00:10–03:05 UTC）就不會撞到。
 2. 以 `trader` 身分：沒有 checkout 就從 hyperliquid checkout 的 origin（伺服器上唯一有 deploy key 的遠端）clone 一份；
    fetch、`git checkout --detach <commit>`（印出原本在哪個 commit，回退用）；沒有 `.venv` 就建；
-   `pip install -e ".[dev]" -r contrib/uniswap_v3/requirements.txt`；建 `/home/trader/data/uniswap`；`.env` 與 `paper-visit.local.sh`
-   不在就寫空白範本（§1.4、§3.1），`.env` 裡哪個 key 不在或沒有值每次都會警告；最後跑 `pytest -q -m "not smoke" contrib/uniswap_v3/tests`。
+   `pip install -e ".[dev]" -r contrib/uniswap_v3/requirements.txt`；建 `/home/trader/data/uniswap`；`.env` 不在就寫空白範本（§1.4）、
+   `paper-visit.local.sh` 不在就寫好伺服器路徑的那份（§3.1），`.env` 裡哪個 key 不在或沒有值每次都會警告；
+   最後跑 `pytest -q -m "not smoke" contrib/uniswap_v3/tests`。
    **這一半任何一步失敗（fetch、pip、測試）就停在那裡**：checkout 可能已在 `<commit>`、timer 是停的（stderr 會說），
    回到上一版＝用印出來的那個 commit 再跑一次這條。
 3. 以 root 身分：把 checkout 裡 `contrib/uniswap_v3/schedule/` 的兩個 unit 複製到 `/etc/systemd/system/`、`daemon-reload`，
@@ -211,9 +212,10 @@ systemctl list-timers uniswap-v3-paper.timer         # 下一次 visit 的時間
   → `verdict` → `paper`。bar 不在就 `verdict` 結束碼 3、稍後再跑。排程的 visit 把這三步（與對照 run 的 `paper`）串起來，
   前一條結束碼不是 0 就不跑下一條（§3）。
 - **誠實視窗**：judge 讀的新聞與價格到被問的那一刻為止，而 AI run 的成交價是邊界後 25 塊（≈00:05 UTC）的，問得越晚 judge 比成交
-  多看越多、對照 run 沒有這個優勢。所以邊界過了超過 `agent.ask_within_seconds`（預設 14400＝4 小時，蓋過三次 visit 的時段）`verdict`
-  就不問：stderr `warning: the boundary ... passed N s ago, more than agent.ask_within_seconds`、結束碼 0、不寫列，那根照「沒判斷」走。
-  正常 visit（00:10–00:35）的 5–30 分鐘後見之明是已知取捨。`--fake-rating` 不受視窗限制。
+  多看越多、對照 run 沒有這個優勢。所以邊界過了超過 `agent.ask_within_seconds`（預設 14400＝4 小時，蓋過三次 visit 的時段；最低 3600，
+  第一次 visit 一定來得及）`verdict` 就不問還沒問的代幣：stderr `warning: the boundary ... passed N s ago, more than agent.ask_within_seconds`、
+  結束碼 0、不寫列，那些代幣那根照「沒判斷」走；早先已寫進 store 的判斷照用、照印。正常 visit（00:10–00:35）的 5–30 分鐘後見之明是已知取捨。
+  `--fake-rating` 不受視窗限制。
 - 上游用**本機日期**當 trade date：伺服器是 UTC 沒事；在台灣的本機於 UTC 16:00 之後手動跑，上游會把「今天」算成明天、
   把這次當回測、即時資料源留白。要在本機手動跑就在台北時間 08:10–23:59 之間跑。
 - 每個代幣約 15–20 次 completion；實測（2026-10-06，sonnet-4-6 經 OpenRouter）一個代幣約 11 分鐘，兩個代幣一次 visit 抓 20–25 分鐘。
@@ -245,7 +247,8 @@ visit 的結束碼＝第一個不是 0 的：
 
 - 第一次 visit 決策 00:00 收盤的那根 bar；後兩次發現已決策，結束碼 0、不寫決策（只會把先前 pending 的讀數核對成 final）。
   第一次若拿到結束碼 3（節點落後、成交區塊還沒到、judge 沒答、store 被鎖住），後兩次就是重試；
-  一天最多試三次，三次都失敗的那根，隔天的 visit 會補決策（成交區塊照舊，與準時的一樣；AI run 補的那根沒有判斷，走「沒判斷」政策）。
+  一天最多試三次，三次都失敗的那根，隔天的 visit 會補決策（成交區塊照舊，與準時的一樣；AI run 補的那根多半沒有判斷——那天 `verdict`
+  那步沒成功的話——走「沒判斷」政策）。
 - 每次最多跑 **55 分鐘**（`TimeoutStartSec`）：兩個代幣的問答約 20–25 分鐘，超時多半是節點或閘道卡住，下一次 visit 會重來。
   還在跑的 visit 不會被下一次 timer 再開一次；`Persistent=true` 補跑主機關機時錯過的那次。
 - `RUN_TREND`／`RUN_AI` 留空就跳過該段、log 寫一行；兩個都空是設定錯：log 一行、結束碼 1。
@@ -296,7 +299,7 @@ sudo systemctl disable --now uniswap-v3-paper.timer          # 移除排程
 | `0` | 跑完了 |
 | `1` | 要修，看 log（§5） |
 | `3` | 稍後再試，當天後面的 visit 會重試 |
-| `4` | visit 腳本進不了 checkout 目錄、寫不了 log，或 `PYTHON` 的路徑不存在，visit **沒有跑**（§5） |
+| `4` | visit 腳本進不了 checkout 目錄、寫不了 log，或 `PYTHON` 的路徑不存在，visit **沒有跑**；或 log 在 visit 中途變成寫不了：前面幾步跑了、後面沒跑（§5） |
 | `127` | `PYTHON` 不是路徑而且 PATH 上找不到（§3.1） |
 | `result 'timeout'` | 跑超過 55 分鐘被 systemd 停掉了（§5） |
 
@@ -316,7 +319,7 @@ cd ~/uniswap-paper
 - log 每次 visit 有一行 `==== <UTC 時間> visit of "paper-trend-1" and "paper-ai-1" (db ..., python ...)`、四步各自的輸出、一行 `==== exit <碼>`。
   `verdict` 那步每個代幣一行評等與耗時（§2.5）。
 - `status --run-id` 從 `run paper-ai-1: ...` 那行算起的第三行，說 run 跟不跟得上時鐘：`up to date` 是最近一個
-  已過的邊界已決策；`behind: N boundary(ies) ...` 是有 N 根已過但還沒決策——00:00 到 00:10 之間是 1、正常；
+  已過的邊界已決策；`behind: N boundary(ies) ...` 是有 N 根已過但還沒決策——對照 run 到 00:10、AI run 到 00:3x（等判斷）之間是 1、正常；
   **過了 03:05 UTC（第三次 visit 的時限）還是 behind**，就去 log 看那天的 visit 為什麼沒成功。
   run 還沒決策過任何一根時沒有這一行。
 - 接著是持倉、價值、報酬（與 `report` 同一個算法：扣掉累計 gas）、最近幾筆決策，
@@ -331,9 +334,9 @@ cd ~/uniswap-paper
   `ai_gated_weights` 的 band 沿用規則的：判斷把目標砍到持倉 band 以內（例如 4% 的持倉收到 Sell）要等別的代幣漂出 band
   才一起賣，`status` 會看到 `WETH=Sell` 旁邊還有持倉，是設計。對照 run 不印這些。
 - `report` 對 AI run 多印一行 `verdicts from <source>: N decided bar(s) saw one on every traded token, M on some, K on none`
-  （`REVIEW` 算看到，不進 M 與 K；它在 §5 的 `saw no rating` warning 與 `status` 的 `verdicts:` 裡看得到）：K 與 M 只會從漏跑的日子、
-  過了誠實視窗的日子與 suspect bar 累加；成績單（記錄滿 30 根後比較兩個 run 的 `report`）看這行知道 AI 實際有判斷可用的根數。
-- `status` 與 `report` 不讀鏈，隨時可以跑；要避開的只有 §9 那種對同一個 store 寫入的事。
+  （`REVIEW` 算看到，不進 M 與 K；它在 §5 的 `saw no rating` warning 與 `status` 的 `verdicts:` 裡看得到；suspect 而 skip 的 bar 不算）：
+  K 與 M 只會從漏跑的日子與過了誠實視窗的日子累加；成績單（記錄滿 30 根後比較兩個 run 的 `report`）看這行知道 AI 實際有判斷可用的根數。
+- `status` 與 `report` 不讀鏈，隨時可以跑；要避開的只有對同一個 store 寫入的事（§7 的刪列與回補、在 `paper.db` 上直接跑回測；§9 是在複本上跑）。
 
 ---
 
@@ -354,7 +357,7 @@ cd ~/uniswap-paper
 | `failed: the run 'paper-ai-1' was started under another config` | 設定檔改了，或新版程式改了預設值 | run 只能在開它的設定下接續：見 §6 開新 run |
 | `failed: ... the clock is behind` | 這台機器的時鐘早於 run 已走到的邊界 | 校時 |
 | `failed: the strategy refused the bar at ... (ai_gated_weights reads verdicts, and the view carries none ...)` | 策略讀判斷，設定檔卻沒有 `verdicts` 區塊 | 設定補上 `verdicts`，用新的 run id 開 run（原 run 已開在沒有判斷的設定下） |
-| `verdict`：`warning: the boundary ... passed N s ago, more than agent.ask_within_seconds (14400 s)` 接 `exit 0` | 邊界過了超過 4 小時才跑到 `verdict`（整天的 visit 都失敗後的開機補跑、手動下午跑）；judge 沒問、那根沒判斷 | 沒事，是設計（§2.5）；排程時段內就出現的話，看前面幾步為什麼拖那麼久 |
+| `verdict`：`warning: the boundary ... passed N s ago, more than agent.ask_within_seconds (14400 s)` 接 `exit 0` | 邊界過了超過 4 小時才跑到 `verdict`（主機關機錯過 visit、過了 04:00 才開機補跑，或下午手動跑）；還沒問的代幣不問、那根沒判斷，已寫進的判斷照用 | 沒事，是設計（§2.5）；排程時段內就出現的話，看前面幾步為什麼拖那麼久 |
 | `==== RUN_TREND and RUN_AI are both empty` 接 `==== exit 1` | `paper-visit.local.sh` 把兩個 run id 都留空 | 填回去（§3.1） |
 | `verdict`：`try again later: the store has no bar at ...` 接 `exit 3` | 當天的 bar 還沒進 store（前一步的 `backfill` 沒讀到，多半是節點落後） | 當天後面的重試會補；順序見 §2.5 |
 | `verdict`：`try again later: the judge did not answer on ETH-USD (...)` 接 `exit 3` | 原因可能會過：閘道回 402（額度）、408、429、5xx，連線／逾時類錯誤，或分析師的資料源被限流／掛了（括號裡是 `VendorRateLimitError`／`VendorUnavailableError` 之類）；已答的代幣已寫進 store | 當天後面的重試只問剩下的；**一整天都是 3** 就看括號裡的例外：閘道的就查 OpenRouter 額度與服務狀態，資料源的就查該資料源 |
@@ -391,7 +394,7 @@ cd ~/uniswap-paper
 ## 7. 資料缺漏怎麼處理
 
 - **漏跑的 visit**：不用處理。下一次 visit 從 run 最後決策的下一根開始補讀、逐根決策，
-  每根都在自己的成交區塊報價（要 archive 節點）。AI run 補的那幾根沒有判斷（judge 只問最新一根），走「沒判斷」政策，
+  每根都在自己的成交區塊報價（要 archive 節點）。AI run 補的那幾根多半沒有判斷（judge 只問最新一根，而且過了視窗就不問），走「沒判斷」政策，
   log 會有 §5 的 `saw no rating` warning。
 - **邊界沒答案**（TWAP revert）：store 不寫那根；visit 會在下次再問。run 已經走過它之後就不會回頭決策，
   `report` 與回測的 summary 會數到這種缺口。
@@ -525,7 +528,7 @@ fork run 用 store 裡的 bar（同回測），但每根要交易的 bar 都在�
 ## 附錄 B：本機 Windows 工作排程器（單一 run）
 
 在本機跑**一個**不讀判斷的 run（`fixed_weights`、`trend_vol_weights`）的寫法；`ai_gated_weights` 要 §3 的四步串接，
-而且兩個代幣的問答就要 20–25 分鐘、超過這裡 25 分鐘的時限，**不要在 Windows 上拿這個 task 跑它**
+而且兩個代幣的問答就要 20–25 分鐘、加上 backfill 與 paper 就超過這裡 25 分鐘的時限，**不要在 Windows 上拿這個 task 跑它**
 （paper 會在判斷寫進來之前就把當根決策掉）。指令都用 PowerShell、在排程 worktree 的根目錄執行。
 
 ### B.1 排程專用的 worktree

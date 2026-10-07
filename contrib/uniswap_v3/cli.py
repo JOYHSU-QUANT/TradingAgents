@@ -40,8 +40,9 @@
   reads no chain: the bar must be in the store already. The judge reads
   its data through the day it is asked on, so only the latest bar gets an
   honest verdict, and only within ``agent.ask_within_seconds`` of its
-  boundary: later than that the bar is left unrated, with a warning and
-  exit 0; ``--at`` names an older boundary only together with
+  boundary: later than that the tokens not yet judged are left unrated,
+  with a warning and exit 0, while verdicts already stored stand; ``--at``
+  names an older boundary only together with
   ``--fake-rating``, which records that rating without asking any judge,
   for a rehearsal on a store that holds no real verdicts.
 
@@ -86,7 +87,9 @@ an anvil fork on a loopback address, when the wallet does not hold what the
 run's ledger says, and when the run has an open send.
 A ``verdict`` exits 0 once every traded token has a verdict at the bar, by
 this visit or an earlier one, and also when the bar is suspect, which no run
-decides, so no judge is asked. It warns on stderr of a verdict that holds no
+decides, so no judge is asked, and when the boundary passed longer ago than
+the judge's window, so the tokens not yet judged are left unrated, warned of
+on stderr. It warns on stderr of a verdict that holds no
 rating (``REVIEW``) as it is given. It exits 3, keeping the verdicts given so far, when the
 store has no bar at the boundary yet, and when the judge did not answer for
 a reason that may pass (the provider's rate limit, timeout, server error or
@@ -1084,19 +1087,19 @@ def _verdict(args: argparse.Namespace, out: Callable[[str], None], now: Callable
         summary = ask_verdicts(
             store, config, judge, time=at, home=home, now=present, report=recorded
         )
-    if summary.suspect or summary.late:
-        if summary.late:
-            print(
-                f"warning: the boundary {_iso(at)} passed {present - at} s ago, more than "
-                f"agent.ask_within_seconds ({config.agent.ask_within_seconds} s); the judge "
-                f"would see that long past the fill, so it is not asked, and the bar is left "
-                f"unrated",
-                file=sys.stderr,
-            )
-        why = "suspect, which no run decides" if summary.suspect else "past the judge's window"
-        out(f"the bar at {_iso(at)} is {why}; no judge was asked")
+    if summary.suspect:
+        out(f"the bar at {_iso(at)} is suspect, which no run decides; no judge was asked")
         return EXIT_OK
-    out(f"{len(summary.asked)} asked, {len(summary.already_stored)} already stored")
+    if summary.late:
+        print(
+            f"warning: the boundary {_iso(at)} passed {present - at} s ago, more than "
+            f"agent.ask_within_seconds ({config.agent.ask_within_seconds} s); the judge would "
+            f"see that long past the fill, so it is not asked, and {', '.join(summary.late)} "
+            f"left unrated",
+            file=sys.stderr,
+        )
+    window = f", {len(summary.late)} past the judge's window" if summary.late else ""
+    out(f"{len(summary.asked)} asked, {len(summary.already_stored)} already stored{window}")
     return EXIT_OK
 
 
@@ -1111,9 +1114,11 @@ def _verdicts_seen(source: str, traded: int, decisions: Sequence[Decision]) -> s
 
     A ``REVIEW`` counts as seen, as ``status`` counts it: the judge was
     asked and answered. What a strategy made of each bar is its own policy
-    (``ai_gated_weights`` takes no new risk on a token without a rating).
+    (``ai_gated_weights`` takes no new risk on a token without a rating). A
+    bar skipped as suspect is not counted: nothing was decided on it, and no
+    judge is asked about it.
     """
-    seen = [len(decision.verdicts or {}) for decision in decisions]
+    seen = [len(decision.verdicts or {}) for decision in decisions if not decision.suspect]
     every, none = seen.count(traded), seen.count(0)
     return (
         f"verdicts from {source}: {every} decided bar(s) saw one on every traded token, "

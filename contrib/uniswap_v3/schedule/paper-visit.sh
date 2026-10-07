@@ -6,7 +6,8 @@
 # had no answer at the boundary, which the log warns of), 1 something needs
 # fixing, 3 try again later. It exits 4 itself when it cannot get to the
 # repository or write the log, or PYTHON names a path that is not there: the
-# visit is not run then. See contrib/uniswap_v3/RUNBOOK.md.
+# visit is not run then; and when the log stops taking writes mid-visit: the
+# steps before ran, the rest do not. See contrib/uniswap_v3/RUNBOOK.md.
 #
 # A visit is, in this order, and each step only when the one before exited 0:
 #   1. paper     the control run, which reads no verdicts;

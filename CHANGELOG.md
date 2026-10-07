@@ -864,13 +864,17 @@ Breaking changes within the 0.x line are called out explicitly.
   <commit>` (clone or fetch, detach, venv, templates of `.env` and the
   settings when they are not there, the package's tests, the units, the
   timer put back the way it was found; safe to run from the checkout it
-  rewrites, being parsed whole first). The judge gains `agent.ask_within_seconds` (default
-  four hours): asked later than that after a bar's boundary, `verdict`
-  leaves the bar unrated instead, since the judge reads through the moment
-  it is asked and would see hours past the fill the run trades at; the
-  rule "no verdict, or a REVIEW, is no rating" now lives once, in
+  rewrites, being parsed whole first). The judge gains
+  `agent.ask_within_seconds` (default four hours, at least one, which the
+  first visit always clears): asked later than that after a bar's
+  boundary, `verdict` leaves the tokens not yet judged unrated instead,
+  verdicts already stored standing, since the judge reads through the
+  moment it is asked and would see hours past the fill the run trades at;
+  the rule "no verdict, or a REVIEW, is no rating" now lives once, in
   `domain.verdicts.usable_rating`, for the strategy and the replay alike.
-  The replay summary gains `unrated`,
+  The Windows visit script checks the log is still writable right before
+  its one step, exit 4 otherwise, as the Linux one does before each. The
+  replay summary gains `unrated`,
   the bars a call decided, for a run that reads verdicts, on which some
   traded token had no rating (no verdict, or a `REVIEW`; a bar skipped as
   suspect is not one); `paper` warns of

@@ -15,7 +15,7 @@ What is borrowed and why:
   sample floor (so the number this package acts on is the number the perp
   prompt prints — one definition, not a copy), the instants (so a boundary
   is encoded by the same integer arithmetic the stores use, and a perp
-  snapshot's timestamp is decoded by the function that encoded it), the
+  snapshot's timestamp is decoded by the decoder paired with its encoder), the
   atomic writer (a half-written handoff must never be readable), the SQLite
   URI spelling (``Path.as_uri`` is wrong for a UNC share and a relative
   path; the perp store opens through this one, so the carry read must too),

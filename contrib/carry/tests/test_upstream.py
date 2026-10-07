@@ -25,7 +25,6 @@ from contrib.carry import upstream
 _PACKAGE = Path(upstream.__file__).resolve().parent
 _CONTRIB = _PACKAGE.parent
 _NAME = "contrib.carry"
-_NEVER_NAMED = ("contrib.uniswap_v3", "contrib.replay")
 
 
 def _sources(package_dir: Path, *, include_tests: bool) -> list[Path]:
@@ -139,14 +138,21 @@ def test_upstream_imports_exactly_what_it_declares():
     assert inside_load_market == set(upstream.VENUE_BORROWED)
 
 
-def test_no_module_of_this_package_imports_the_spot_package_or_replay():
+def test_no_module_of_this_package_imports_a_neighbour_that_is_not_upstream():
+    """Every package found on disk that is not an upstream is off limits, tests included."""
+    forbidden = [
+        f"contrib.{n.name}"
+        for n in _neighbours()
+        if f"contrib.{n.name}" not in upstream.UPSTREAM_PACKAGES
+    ]
+    assert {"contrib.uniswap_v3", "contrib.replay"} <= set(forbidden)
     offenders = {
         path.name
         for path in _sources(_PACKAGE, include_tests=True)
         if any(
             _is_within(name, never)
             for name in _imported_modules(path, _PACKAGE, _NAME)
-            for never in _NEVER_NAMED
+            for never in forbidden
         )
     }
     assert offenders == set()

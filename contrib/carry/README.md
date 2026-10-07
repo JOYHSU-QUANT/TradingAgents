@@ -68,22 +68,26 @@ python -m contrib.carry signal --coin ETH --out <handoff.json> --research-db <au
 **什麼時候 exit 1、不碰交接檔**：邊界前沒有任何結算；最後一筆結算離邊界超過 `--max-reading-age-hours`（預設 3）——
 對著幾天沒更新的 store 做決定比不做更糟；回補沒走到視窗盡頭（不論原因：請求上限、venue 沒資料、走不動）；venue 失敗（不退回 store 裡的舊資料，
 由 PR 4 的 23:55 重試補；重試不是同邊界重跑，是正常決定）；現有的交接檔讀不懂、是別的幣的、或邊界比它晚
-（讀不懂不會當成 out 再進一次；每個幣要有自己的 `--out`）；`--perp-run-id`／`--spot-run-id` 在 store 裡沒有 equity 列
+（讀不懂不會當成 out 再進一次；每個幣要有自己的 `--out`）；`--out` 的目錄不存在；`--no-fetch` 或 `history` 指到不存在的
+research store（不會偷偷建一個空的）；`--as-of` 不是 UTC 午夜、沒有時區、或遠到視窗還在未來（接受 `2026-10-08`、
+`2026-10-08T00:00:00Z`、`...+00:00` 三種寫法）；只給 `--perp-db` 沒給 `--perp-run-id`（反之亦然）；現貨 run 的計價幣不是
+美元穩定幣（USDC／USDT／DAI，否則 equity 單位對不上 perp）；`--perp-run-id`／`--spot-run-id` 在 store 裡沒有 equity 列
 （打錯 run id 跟剛開的 run 長得一樣，不能靜默退回等額；真的剛開、還沒有快照的 run，那一次把該腿的兩個 store 旗標
 一起省掉就是「等額」）。
 
-**同一個邊界重跑不重做決定**：動作、position 與當時的 `signal` 照上一份，只重算現貨 weight——重做會讓規則對著自己的
+**同一個邊界重跑不重做決定**：動作、position 與當時的 `signal` 照上一份，只重算兩腿的倉位大小（perp margin 跟著這次的 `params`、現貨 weight 跟著 equity）——重做會讓規則對著自己的
 結果讀。重跑時規則參數與上一份不同會 WARNING，不拒絕（換 `--margin-pct` 重跑就是中途調倉的方式）；stdout 的 `funding:` 行印的是檔裡那份決策讀數，
 新讀數若不同會另印一行 `current (not the decision's)`。
 
 **WARNING 不擋**：任一邊 equity ≤ 0（帳戶已爆或現貨空了）時 weight 寫 0、檔照寫——那一天正是另一條腿最需要知道的一天；
-兩邊都為正但比例四捨到 0 也會說；equity 快照超過 48 小時沒更新（那個 run 大概停了）也會說。
+兩邊都為正但比例截到 0 也會說；equity 快照超過 48 小時沒更新（那個 run 大概停了）也會說。
 
 ```
 python -m contrib.carry history --coin ETH --research-db <autoresearch.sqlite> [--since 2024-01-01] [--until ...] [--rows]
 ```
 
-把規則跑過 store 裡每一個讀得到完整視窗、而且後面一整天都已結算的日線邊界，印出：在場天數比例、進出次數、
+把規則跑過 store 裡每一個讀得到完整視窗、而且後面一整天都已結算的日線邊界（最後一筆結算離邊界超過
+`--max-reading-age-hours` 的邊界比照 live 不做決定、只計數），印出：在場天數比例、進出次數、
 最長持有、在場期間收到的 funding（每小時費率加總，佔名目的比例；空 perp 收正 funding）與年化。不是回測——沒有成交、
 手續費、現貨腿、gas；那是 PR 4 的 report 對真實 run 算的事。先用 autoresearch 自己的 walk 把歷史放進**同一個** store 檔：
 
@@ -94,7 +98,7 @@ python -m contrib.autoresearch fetch --db <autoresearch.sqlite> --coin ETH --sin
 ## 交接檔
 
 一份 JSON，`handoff.py` 是它在本套件這邊唯一的寫方與讀方；PR 2（perp 的檔案目標 provider）與 PR 3（uniswap 的
-`target` 指令）照這份 schema 讀，不 import 本套件。所有欄位都會寫；給人看的 ISO 字串（`as_of`、`written_at`、`perp_at`、`spot_at`）
+`target` 指令）照這份 schema 讀，不 import 本套件。所有欄位都會寫；給人看的 ISO 字串（`as_of`、`written_at`、`signal.read_at`、`perp_at`、`spot_at`）
 由 `*_ms` 導出、不讀回：
 
 | 欄位 | 內容 |
@@ -108,7 +112,7 @@ python -m contrib.autoresearch fetch --db <autoresearch.sqlite> --coin ETH --sin
 | `params` | 寫這份檔時的規則參數 `{window_days, z_in, z_out, min_hold_days, margin_pct}`；同邊界重跑時是重跑那次的（倉位大小跟著它），決策當時的參數在被取代的前一份檔裡 |
 | `perp` | `{side: short|flat, margin_pct}`；margin ＝ `params.margin_pct`（in）或 0（out）。這是規則的 **intent**，perp 閘門可能給不到；差額由 PR 4 的 report 對帳（計畫 D7） |
 | `spot` | `{token, weight}`；weight 由 margin 與兩邊 equity 導出（perp 名目 ÷ 現貨 equity，上限 1、四位小數；**已知**的任一邊 ≤ 0 → 0；未知 → 等額；out 時 0），寫出來給讀方省事。**讀方只檢查 0 ≤ weight ≤ 1，不重算**；寫方讀回自己的檔時會對照 `equity` 驗它 |
-| `signal` | 做決定時的讀數（`read_at_ms` 一定在 `as_of_ms` 之前；`enter` 一定有），或 `null` |
+| `signal` | 做決定時的讀數 `{read_at_ms, read_at, funding_hourly, z, samples, recent_mean_hourly, recent_samples}`（`read_at_ms` 一定在 `as_of_ms` 之前；`enter` 一定有），或 `null` |
 | `equity` | 算 weight 用的兩邊 equity 與各自快照的時戳 `{perp, perp_at_ms, perp_at, spot, spot_at_ms, spot_at}`；沒給 store 的那邊整組 `null`（此時兩邊視為等額）；≤ 0 照寫，weight 為 0 |
 
 Decimal 一律字串、純位置記法（`0.0000005`，不會是 `5E-7`）；z 與門檻是 float。

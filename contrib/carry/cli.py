@@ -41,7 +41,7 @@ from .handoff import (
     previous_handoff,
     write_handoff,
 )
-from .history import floor_day, format_summary, pct, replay
+from .history import DEFAULT_MAX_READING_AGE_HOURS, floor_day, format_summary, pct, replay
 from .signal import OUT, Action, Params, Reading, Side, SignalError, advance, decide, read
 from .stores import Equity, StoreReadError, perp_equity, spot_equity
 from .upstream import (
@@ -73,7 +73,6 @@ GRACE_HOURS: Final = 6
 # wrote it may have stopped. Not refused — the dead-account day must still
 # write (see spot_weight).
 MAX_EQUITY_AGE_HOURS: Final = 48
-_DEFAULT_MAX_READING_AGE_HOURS: Final = 3
 
 
 class _Refused(Exception):
@@ -175,15 +174,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not call the venue; read the rule from the funding the store already holds",
     )
-    signal.add_argument(
-        "--max-reading-age-hours",
-        type=int,
-        default=_DEFAULT_MAX_READING_AGE_HOURS,
-        help=(
-            "refuse when the latest settlement is more than this many hours before the boundary "
-            f"(default {_DEFAULT_MAX_READING_AGE_HOURS}); a stale reading must not decide"
-        ),
-    )
+    _add_reading_age_arg(signal, "refuse when")
     signal.add_argument("--perp-db", metavar="PATH", help="the perp leg's store, for its equity")
     signal.add_argument("--perp-run-id", metavar="RUN", help="the perp leg's run")
     signal.add_argument("--spot-db", metavar="PATH", help="the spot leg's store, for its equity")
@@ -207,8 +198,37 @@ def _build_parser() -> argparse.ArgumentParser:
     history.add_argument(
         "--rows", action="store_true", help="also print every boundary that entered or exited"
     )
+    _add_reading_age_arg(history, "leave a boundary undecided when")
     _add_param_args(history)
     return parser
+
+
+def _add_reading_age_arg(sub: argparse.ArgumentParser, verb: str) -> None:
+    sub.add_argument(
+        "--max-reading-age-hours",
+        type=int,
+        default=DEFAULT_MAX_READING_AGE_HOURS,
+        help=(
+            f"{verb} the latest settlement is more than this many hours before the boundary "
+            f"(default {DEFAULT_MAX_READING_AGE_HOURS}); a stale reading must not decide"
+        ),
+    )
+
+
+def _reading_age(args: argparse.Namespace) -> int:
+    if args.max_reading_age_hours < 1:
+        raise _Refused(
+            f"--max-reading-age-hours must be at least 1, got {args.max_reading_age_hours}"
+        )
+    return args.max_reading_age_hours
+
+
+def _existing_store(text: str) -> Path:
+    """A research store that must already exist: opening a mistyped path would create it."""
+    path = Path(text)
+    if not path.is_file():
+        raise _Refused(f"--research-db {path}: no such store")
+    return path
 
 
 def _equity(
@@ -260,17 +280,21 @@ def _cmd_signal(
 ) -> int:
     params = _params(args)
     coin: str = args.coin
-    max_reading_age = args.max_reading_age_hours
-    if max_reading_age < 1:
-        raise _Refused(f"--max-reading-age-hours must be at least 1, got {max_reading_age}")
+    max_reading_age = _reading_age(args)
     now_at = now()
     now_ms = epoch_ms(now_at, what="the clock")
     as_of_ms = _instant_ms(args.as_of, what="--as-of") if args.as_of else default_boundary(now_ms)
     if as_of_ms % MS_PER_DAY:
         raise _Refused(f"--as-of {iso_utc(as_of_ms)} is not a UTC day boundary")
     out = Path(args.out)
+    if not out.parent.is_dir():
+        raise _Refused(f"--out {out}: the directory does not exist")
+    research_db = _existing_store(args.research_db) if args.no_fetch else Path(args.research_db)
     last = previous_handoff(out, coin=coin, as_of_ms=as_of_ms)
-    since_ms = as_of_ms - (params.window_days + _SLACK_DAYS) * MS_PER_DAY
+    # The slack also covers a reading as old as the age limit allows, so the
+    # window behind it is never shorter than window_days.
+    slack_days = max(_SLACK_DAYS, -(-max_reading_age // 24) + 1)
+    since_ms = as_of_ms - (params.window_days + slack_days) * MS_PER_DAY
     print(f"carry signal: {coin} as of {iso_utc(as_of_ms)}")
     if last is not None and as_of_ms - last.as_of_ms > MS_PER_DAY:
         skipped = range(last.as_of_ms + MS_PER_DAY, as_of_ms, MS_PER_DAY)
@@ -278,7 +302,7 @@ def _cmd_signal(
             f"no handoff was written for {', '.join(iso_utc(b) for b in skipped)}; "
             f"the venues ran on the one for {iso_utc(last.as_of_ms)}"
         )
-    with ResearchStore(args.research_db) as store:
+    with ResearchStore(research_db) as store:
         if not args.no_fetch:
             if since_ms >= now_ms:
                 raise _Refused(
@@ -378,9 +402,10 @@ def _cmd_signal(
 
 def _cmd_history(args: argparse.Namespace) -> int:
     params = _params(args)
+    max_reading_age = _reading_age(args)
     since_ms = _instant_ms(args.since, what="--since") if args.since else None
     until_ms = _instant_ms(args.until, what="--until") if args.until else None
-    with ResearchStore(args.research_db) as store:
+    with ResearchStore(_existing_store(args.research_db)) as store:
         points = list(store.iter_funding(args.coin))
     if not points:
         raise _Refused(
@@ -388,7 +413,14 @@ def _cmd_history(args: argparse.Namespace) -> int:
             f"`python -m contrib.autoresearch fetch --db {args.research_db} --coin {args.coin} "
             f"--since <date>`"
         )
-    rows, summary = replay(args.coin, points, params, since_ms=since_ms, until_ms=until_ms)
+    rows, summary = replay(
+        args.coin,
+        points,
+        params,
+        since_ms=since_ms,
+        until_ms=until_ms,
+        max_reading_age_hours=max_reading_age,
+    )
     for line in format_summary(summary, params):
         print(line)
     if args.rows:

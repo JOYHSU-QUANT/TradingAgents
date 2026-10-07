@@ -11,11 +11,11 @@ see how old the sizing is):
 
 - perp: ``account_snapshots.account_equity`` and ``timestamp`` of the
   run's latest snapshot (the paper engine writes one per cycle; the
-  timestamp is the repository's ISO form, decoded by the function that
-  encoded it);
+  timestamp is the repository's ISO form, decoded by its paired decoder);
 - spot: ``valuations.total_value`` and ``time`` of the run's latest bar
   (the spot engine values the portfolio after every decision; ``time`` is
-  the bar's epoch seconds).
+  the bar's epoch seconds), joined with ``runs.quote`` so a run valued in
+  anything but a USD stable is refused rather than sized in the wrong unit.
 
 No row is :class:`StoreReadError`, not "unknown": a mistyped run id reads
 exactly like a run too new to have a row, and sizing the spot leg as if
@@ -32,10 +32,16 @@ from contextlib import closing
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import Final
 
 from .upstream import epoch_ms, parse_instant, sqlite_file_uri
 
-__all__ = ["Equity", "StoreReadError", "perp_equity", "spot_equity"]
+__all__ = ["USD_QUOTES", "Equity", "StoreReadError", "perp_equity", "spot_equity"]
+
+# The quote tokens a spot run may value itself in for its equity to be compared
+# with the perp leg's USD equity. A run quoted in WETH would hand the sizing a
+# number in the wrong unit that still looks like a weight.
+USD_QUOTES: Final = frozenset({"USDC", "USDT", "DAI"})
 
 
 class StoreReadError(RuntimeError):
@@ -50,7 +56,7 @@ class Equity:
     at_ms: int
 
 
-def _row(path: Path, query: str, run_id: str, *, leg: str) -> tuple[object, object]:
+def _row(path: Path, query: str, run_id: str, *, leg: str) -> tuple[object, ...]:
     if not path.is_file():
         raise StoreReadError(f"{leg} store {path}: no such file")
     try:
@@ -64,7 +70,7 @@ def _row(path: Path, query: str, run_id: str, *, leg: str) -> tuple[object, obje
             f"the same, and a run too new to have one is sized as equal capital by leaving "
             f"out --{leg}-db and --{leg}-run-id"
         )
-    return row[0], row[1]
+    return tuple(row)
 
 
 def _value(raw: object, path: Path, run_id: str, *, leg: str) -> Decimal:
@@ -97,12 +103,18 @@ def perp_equity(path: Path, run_id: str) -> Equity:
 
 def spot_equity(path: Path, run_id: str) -> Equity:
     """The spot run's latest ``total_value``, stamped with that bar's instant."""
-    raw, seconds = _row(
+    raw, seconds, quote = _row(
         path,
-        "SELECT total_value, time FROM valuations WHERE run_id = ? ORDER BY time DESC LIMIT 1",
+        "SELECT v.total_value, v.time, r.quote FROM valuations v JOIN runs r ON r.run_id = v.run_id "
+        "WHERE v.run_id = ? ORDER BY v.time DESC LIMIT 1",
         run_id,
         leg="spot",
     )
+    if quote not in USD_QUOTES:
+        raise StoreReadError(
+            f"spot store {path}: run {run_id!r} is quoted in {quote!r}, not a USD stable "
+            f"({', '.join(sorted(USD_QUOTES))}); its equity cannot be sized against the perp leg's"
+        )
     if isinstance(seconds, bool) or not isinstance(seconds, int) or seconds <= 0:
         raise StoreReadError(f"spot store {path}: run {run_id!r} bar time {seconds!r} is not valid")
     return Equity(_value(raw, path, run_id, leg="spot"), seconds * 1000)

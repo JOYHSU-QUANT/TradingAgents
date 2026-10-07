@@ -100,10 +100,17 @@ def write_perp_store(path: Path, rows: Sequence[tuple[str, str, str]]) -> Path:
     return path
 
 
-def write_spot_store(path: Path, rows: Sequence[tuple[str, int, str]]) -> Path:
-    """A spot store with only the table the coordinator reads: ``(run_id, time, total_value)``."""
+def write_spot_store(
+    path: Path, rows: Sequence[tuple[str, int, str]], *, quote: str = "USDC"
+) -> Path:
+    """A spot store with the tables the coordinator reads: ``runs`` (its quote) and the valuations."""
     conn = sqlite3.connect(path)
     with conn:
+        conn.execute("CREATE TABLE runs (run_id TEXT PRIMARY KEY, quote TEXT NOT NULL)")
+        conn.executemany(
+            "INSERT OR IGNORE INTO runs (run_id, quote) VALUES (?, ?)",
+            [(run_id, quote) for run_id, _, _ in rows],
+        )
         conn.execute(
             "CREATE TABLE valuations (run_id TEXT NOT NULL, time INTEGER NOT NULL, "
             "total_value TEXT NOT NULL, PRIMARY KEY (run_id, time))"

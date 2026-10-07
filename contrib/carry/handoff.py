@@ -5,8 +5,8 @@ perp leg's file-target provider (plan PR 2) and the spot leg's ``target``
 command (plan PR 3) read it; neither imports this package, so the document
 is the contract, and this module is its one writer and its one reader on
 this side. The fields, every one present in a document; the ones spelled for
-a human (``as_of``, ``written_at``, ``perp_at``, ``spot_at``) are derived from
-their ``*_ms`` twins and never read back:
+a human (``as_of``, ``written_at``, ``signal.read_at``, ``perp_at``, ``spot_at``)
+are derived from their ``*_ms`` twins and never read back:
 
 - ``version`` — :data:`HANDOFF_VERSION`, a whole number; a reader refuses
   any other. Fields may be ADDED under the same version, and a reader
@@ -433,8 +433,10 @@ def read_handoff(path: Path) -> Handoff:
     """The handoff at ``path``, validated; :class:`HandoffError` for anything else."""
     try:
         raw = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise HandoffError(f"{path}: cannot read: {exc.strerror or exc}") from None
+    except (OSError, UnicodeDecodeError) as exc:
+        raise HandoffError(
+            f"{path}: cannot read: {getattr(exc, 'strerror', None) or exc}"
+        ) from None
     try:
         doc = json.loads(raw)
     except ValueError as exc:

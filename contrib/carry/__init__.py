@@ -6,7 +6,7 @@ neither ``contrib.hyperliquid_perp``'s store nor ``contrib.uniswap_v3``'s.
 It reads Hyperliquid's funding history, applies one rule (the z-score of the
 latest settlement against the trailing window, and a state machine around
 it), and writes ONE handoff document naming the target each leg should hold
-at the next daily boundary. Each venue's own engine reads that document and
+at the UTC day boundary being decided. Each venue's own engine reads that document and
 decides, under its own gates, whether to act. That sentence is the
 package's scope test: a change that needs it softened is out of scope, not
 a bigger feature.

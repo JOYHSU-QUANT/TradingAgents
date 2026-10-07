@@ -371,6 +371,55 @@ def test_signal_refuses_half_a_store_argument(research: Path, tmp_path, capsys):
     assert not out.exists()
 
 
+def test_signal_refuses_an_out_directory_that_does_not_exist(research: Path, tmp_path, capsys):
+    out = tmp_path / "nowhere" / "carry-eth.json"
+    assert main(_signal(research, out, "--no-fetch"), now=_clock(day(41))) == 1
+    assert "the directory does not exist" in capsys.readouterr().err
+
+
+def test_a_missing_research_store_is_refused_rather_than_created(tmp_path: Path, capsys):
+    missing = tmp_path / "typo" / "autoresearch.sqlite"
+    out = tmp_path / "carry-eth.json"
+    assert main(_signal(missing, out, "--no-fetch"), now=_clock(day(41))) == 1
+    assert "no such store" in capsys.readouterr().err
+    assert main(["history", "--coin", COIN, "--research-db", str(missing)]) == 1
+    assert "no such store" in capsys.readouterr().err
+    assert not missing.exists() and not missing.parent.exists()
+
+
+def test_signal_refuses_a_spot_run_in_the_wrong_quote(research: Path, tmp_path, capsys):
+    spot = write_spot_store(
+        tmp_path / "uniswap.db", [("paper-carry-1", day(40) // 1000, "5")], quote="WETH"
+    )
+    out = tmp_path / "carry-eth.json"
+    argv = _signal(
+        research, out, "--no-fetch", "--spot-db", str(spot), "--spot-run-id", "paper-carry-1"
+    )
+    assert main(argv, now=_clock(day(41))) == 1
+    assert "quoted in 'WETH', not a USD stable" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_history_leaves_stale_boundaries_undecided(tmp_path: Path, capsys):
+    gapped = [p for p in hump_series() if not (day(44) - 20 * MS_PER_HOUR < p.time < day(46))]
+    research = write_research_store(tmp_path / "autoresearch.sqlite", gapped)
+    assert main(["history", "--coin", COIN, "--research-db", str(research)]) == 0
+    assert "with a reading older than 3h, left undecided as live would: 3" in (
+        capsys.readouterr().out
+    )
+    argv = [
+        "history",
+        "--coin",
+        COIN,
+        "--research-db",
+        str(research),
+        "--max-reading-age-hours",
+        "48",
+    ]
+    assert main(argv) == 0
+    assert "left undecided as live would: 1" in capsys.readouterr().out
+
+
 def test_signal_refuses_a_bad_reading_age(research: Path, tmp_path, capsys):
     out = tmp_path / "carry-eth.json"
     argv = _signal(research, out, "--no-fetch", "--max-reading-age-hours", "0")

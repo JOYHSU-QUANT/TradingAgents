@@ -33,9 +33,21 @@ from .signal import (
     decide,
     read,
 )
-from .upstream import MS_PER_DAY, FundingPoint
+from .upstream import FUNDING_INTERVAL_MS, MS_PER_DAY, FundingPoint
 
-__all__ = ["DayRow", "Summary", "floor_day", "format_summary", "pct", "replay"]
+__all__ = [
+    "DEFAULT_MAX_READING_AGE_HOURS",
+    "DayRow",
+    "Summary",
+    "floor_day",
+    "format_summary",
+    "pct",
+    "replay",
+]
+
+# The live coordinator refuses to decide on a settlement older than this; the
+# replay leaves such a boundary undecided for the same reason (one rule).
+DEFAULT_MAX_READING_AGE_HOURS = 3
 
 
 def floor_day(ms: int) -> int:
@@ -64,6 +76,8 @@ class DayRow:
     """The sum of the rates settled in the day after the boundary, while in; 0 while out."""
     settlements: int
     """How many settlements that sum holds."""
+    stale: bool = False
+    """The reading was older than the live age limit, so the boundary was left undecided."""
 
 
 @dataclass(frozen=True)
@@ -73,6 +87,8 @@ class Summary:
     last_boundary_ms: int | None
     days: int
     days_without_z: int
+    days_stale: int
+    max_reading_age_hours: int
     days_in: int
     entries: int
     exits: int
@@ -100,6 +116,7 @@ def replay(
     *,
     since_ms: int | None = None,
     until_ms: int | None = None,
+    max_reading_age_hours: int = DEFAULT_MAX_READING_AGE_HOURS,
 ) -> tuple[list[DayRow], Summary]:
     """Drive the rule over ``points`` at every UTC day boundary the window can be read at.
 
@@ -110,12 +127,16 @@ def replay(
     whose following day is fully
     settled, so every row's ``collected`` covers a whole day and the span
     annualisation counts no partial day. ``since_ms`` / ``until_ms``
-    narrow that span (rounded to boundaries), never widen it.
+    narrow that span (rounded to boundaries), never widen it. A boundary
+    whose latest settlement is more than ``max_reading_age_hours`` before
+    it is left undecided, as the live coordinator would refuse it: the
+    position carries, and the row is counted as stale.
     """
     rows: list[DayRow] = []
     ordered = sorted(points, key=lambda p: p.time)
+    max_age_ms = max_reading_age_hours * FUNDING_INTERVAL_MS
     if not ordered:
-        return rows, _summary(coin, rows)
+        return rows, _summary(coin, rows, max_reading_age_hours)
     times = [p.time for p in ordered]
     first = _ceil_day(ordered[0].time + params.window_days * MS_PER_DAY)
     last = floor_day(ordered[-1].time - MS_PER_DAY)
@@ -130,7 +151,8 @@ def replay(
         lo = bisect_left(times, boundary - reach)
         hi = bisect_left(times, boundary)
         reading = read(ordered[lo:hi], boundary, params)
-        action = decide(reading, position, boundary, params)
+        stale = reading is not None and boundary - reading.at_ms > max_age_ms
+        action = decide(None if stale else reading, position, boundary, params)
         position = advance(position, action, boundary)
         collected = Decimal(0)
         settlements = 0
@@ -139,12 +161,12 @@ def replay(
             stop = bisect_right(times, boundary + MS_PER_DAY)
             collected = sum((p.rate for p in ordered[start:stop]), Decimal(0))
             settlements = stop - start
-        rows.append(DayRow(boundary, reading, action, position, collected, settlements))
+        rows.append(DayRow(boundary, reading, action, position, collected, settlements, stale))
         boundary += MS_PER_DAY
-    return rows, _summary(coin, rows)
+    return rows, _summary(coin, rows, max_reading_age_hours)
 
 
-def _summary(coin: str, rows: Sequence[DayRow]) -> Summary:
+def _summary(coin: str, rows: Sequence[DayRow], max_reading_age_hours: int) -> Summary:
     longest = current = 0
     for row in rows:
         if row.position.side is Side.IN:
@@ -158,6 +180,8 @@ def _summary(coin: str, rows: Sequence[DayRow]) -> Summary:
         last_boundary_ms=rows[-1].boundary_ms if rows else None,
         days=len(rows),
         days_without_z=sum(1 for r in rows if r.reading is None or r.reading.z is None),
+        days_stale=sum(1 for r in rows if r.stale),
+        max_reading_age_hours=max_reading_age_hours,
         days_in=sum(1 for r in rows if r.position.side is Side.IN),
         entries=sum(1 for r in rows if r.action is Action.ENTER),
         exits=sum(1 for r in rows if r.action is Action.EXIT),
@@ -182,7 +206,11 @@ def format_summary(summary: Summary, params: Params) -> list[str]:
             f"(window {params.window_days}d, z in {params.z_in:g} / out {params.z_out:g}, "
             f"min hold {params.min_hold_days}d)"
         ),
-        f"  boundaries without a z-score: {summary.days_without_z}",
+        (
+            f"  boundaries without a z-score: {summary.days_without_z}; with a reading older "
+            f"than {summary.max_reading_age_hours}h, left undecided as live would: "
+            f"{summary.days_stale}"
+        ),
         (
             f"  in market: {summary.days_in} days ({pct(share)}); "
             f"entries {summary.entries}, exits {summary.exits}; "

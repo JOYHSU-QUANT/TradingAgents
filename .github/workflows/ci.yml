@@ -61,7 +61,7 @@ jobs:
         run: ruff check .
 
   typecheck:
-    name: mypy (perp lower layers + replay)
+    name: mypy (perp lower layers + replay + carry + uniswap domain)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

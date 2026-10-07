@@ -870,7 +870,8 @@ Breaking changes within the 0.x line are called out explicitly.
   three calls over the stored funding and prints days in, entries and
   exits, and what the short leg collected. The borrow is funnelled through
   `upstream.py` as replay's is; no package under `contrib/` may import
-  this one, and it never names `contrib.uniswap_v3`. The perp-side reader
+  this one, and it never imports `contrib.uniswap_v3` or `contrib.replay`.
+  The perp-side reader
   (PR 2), the spot-side `targets` table (PR 3) and the report with the
   deployment (PR 4) follow.
 

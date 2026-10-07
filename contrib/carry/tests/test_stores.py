@@ -50,6 +50,14 @@ def test_no_row_is_an_error_that_says_how_to_size_a_brand_new_run(tmp_path: Path
         spot_equity(spot, "paper-ai-1")
 
 
+def test_a_spot_run_not_quoted_in_a_usd_stable_is_refused(tmp_path: Path):
+    weth = write_spot_store(tmp_path / "uniswap.db", [("r", day(40) // 1000, "5")], quote="WETH")
+    with pytest.raises(StoreReadError, match="quoted in 'WETH', not a USD stable"):
+        spot_equity(weth, "r")
+    dai = write_spot_store(tmp_path / "dai.db", [("r", day(40) // 1000, "5")], quote="DAI")
+    assert spot_equity(dai, "r").value == Decimal("5")
+
+
 def test_a_missing_file_is_an_error(tmp_path: Path):
     with pytest.raises(StoreReadError, match="no such file"):
         perp_equity(tmp_path / "nowhere.db", "carry-ETH-1")

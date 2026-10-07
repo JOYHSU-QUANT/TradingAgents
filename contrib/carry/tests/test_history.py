@@ -7,7 +7,7 @@ from decimal import Decimal
 from contrib.carry.history import Summary, floor_day, format_summary, replay
 from contrib.carry.signal import Action, Params, Side
 
-from .conftest import COIN, DAY0, alternating, day, hourly, hump_series
+from .conftest import COIN, DAY0, MS_PER_HOUR, alternating, day, hourly, hump_series
 
 PARAMS = Params()
 
@@ -78,6 +78,20 @@ def test_an_empty_series_or_one_shorter_than_the_window_has_no_boundary():
     ]
 
 
+def test_a_gap_leaves_its_boundaries_undecided_as_live_would():
+    points = [p for p in hump_series() if not (day(44) - 20 * MS_PER_HOUR < p.time < day(46))]
+    rows, summary = replay(COIN, points, PARAMS)
+    stale = [r for r in rows if r.stale]
+    # The gap starts after day 43 04:00: the boundaries of days 44, 45 and 46 see that
+    # settlement 20, 44 and 68 hours old, all over the 3-hour limit, and carry the position
+    # instead of deciding. At 48 hours only day 46's is still too old.
+    assert [r.boundary_ms for r in stale] == [day(44), day(45), day(46)]
+    assert all(r.action is Action.HOLD and r.position.side is Side.IN for r in stale)
+    assert summary.days_stale == 3
+    _, lenient = replay(COIN, points, PARAMS, max_reading_age_hours=48)
+    assert lenient.days_stale == 1
+
+
 def test_floor_day_is_the_utc_midnight_at_or_before():
     assert floor_day(day(3)) == day(3)
     assert floor_day(day(3) + 1) == day(3)
@@ -91,6 +105,8 @@ def test_the_summary_lines():
         last_boundary_ms=day(89),
         days=60,
         days_without_z=2,
+        days_stale=1,
+        max_reading_age_hours=3,
         days_in=15,
         entries=1,
         exits=1,
@@ -101,7 +117,8 @@ def test_the_summary_lines():
     assert format_summary(summary, PARAMS) == [
         "carry history: ETH, 60 boundaries from 2026-01-31T00:00:00+00:00 to "
         "2026-03-31T00:00:00+00:00 (window 30d, z in 1.5 / out 0.5, min hold 3d)",
-        "  boundaries without a z-score: 2",
+        "  boundaries without a z-score: 2; with a reading older than 3h, left undecided as "
+        "live would: 1",
         "  in market: 15 days (25.00%); entries 1, exits 1; longest hold 15 days",
         "  collected while in: 1.44% of notional over 360 settlements; 35.04% annualized "
         "while in, 8.76% annualized over the span",

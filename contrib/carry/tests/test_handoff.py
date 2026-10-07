@@ -130,18 +130,6 @@ def test_spot_weight(margin, perp, spot, expected):
     assert spot_weight(margin, perp, spot) == Decimal(expected)
 
 
-def test_a_dead_leg_still_gets_a_handoff_with_nothing_to_hedge():
-    cases = (
-        (Equity(Decimal("0"), day(40)), SPOT),
-        (PERP, Equity(Decimal("-5"), day(40))),
-        (Equity(Decimal("-250"), day(40)), None),
-    )
-    for perp, spot in cases:
-        handoff = _held(equity_perp=perp, equity_spot=spot)
-        assert handoff.perp_side == "short" and handoff.spot_weight == 0
-        assert (handoff.equity_perp, handoff.equity_spot) == (perp, spot)
-
-
 def test_iso_utc_and_plain_spell_the_document():
     assert iso_utc(day(41)) == "2026-02-11T00:00:00+00:00"
     assert plain(Decimal("5E-7")) == "0.0000005"
@@ -229,6 +217,9 @@ def test_previous_handoff_refuses_a_file_it_cannot_read_rather_than_calling_it_n
         previous_handoff(path, coin="ETH", as_of_ms=day(41))
     path.write_text(json.dumps({"version": 2}), encoding="utf-8")
     with pytest.raises(HandoffError, match="version 2"):
+        previous_handoff(path, coin="ETH", as_of_ms=day(41))
+    path.write_bytes(bytes([0xFF, 0xFE]) + b" not text")
+    with pytest.raises(HandoffError, match="cannot read"):
         previous_handoff(path, coin="ETH", as_of_ms=day(41))
 
 

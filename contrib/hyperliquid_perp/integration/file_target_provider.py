@@ -50,12 +50,15 @@ self-healing: a cycle the gate or the venue refused is retried four hours
 later, and a leg the stops closed is re-opened while the document still asks
 for it — the hedge, not a view, is what the document expresses.
 
-**The document acted on is kept.** The coordinator overwrites one path every
-day, so a cycle that acted writes the document it read beside its payload as
-``<payload>.handoff.json`` (the sidecar contract, ``common.sidecar``), with
-the bytes' digest: the carry report (plan PR 4, D7) reconciles each day's
-legs against the handoff of that day, not against whatever the path holds
-when it runs.
+**The document a decision was built from is kept.** The coordinator
+overwrites one path every day, so a cycle whose document applied writes it
+beside its payload as ``<payload>.handoff.json`` (the sidecar contract,
+``common.sidecar``): the parsed document re-serialized, plus the sha256 of
+the bytes it was read from. The carry report (plan PR 4, D7) reconciles each
+day's legs against the handoff of that day, not against whatever the path
+holds when it runs. Whether the cycle then ACTED is the ``ai_outputs`` row's
+business — an off-grid margin fails closed with its sidecar written — so the
+sidecar's presence says "read and applicable", not "traded".
 
 Only what this leg reads is checked (``version``, ``coin``, ``as_of_ms``,
 ``perp``); unknown keys are ignored (the version policy, R4), and the
@@ -184,6 +187,8 @@ class FileTarget:
             check_enum(self.side, PERP_SIDES, name="perp.side")
         except ValueError as exc:
             raise StaleTarget(str(exc)) from None
+        if type(self.margin_pct) is not int:
+            raise StaleTarget(f"perp.margin_pct must be a whole number, got {self.margin_pct!r}")
         if not 0 <= self.margin_pct <= 100:
             raise StaleTarget(f"perp.margin_pct must be within 0..100, got {self.margin_pct}")
         if (self.side == TargetSide.FLAT.value) != (self.margin_pct == 0):
@@ -200,8 +205,9 @@ class FileTarget:
 def read_document(path: Path) -> tuple[bytes, object]:
     """The handoff file at ``path`` as its bytes and the JSON they decode to; :class:`StaleTarget` otherwise.
 
-    The bytes come back too because the sidecar keeps them (and their digest)
-    exactly as the coordinator wrote them.
+    The bytes come back too so the sidecar can record their digest — the one
+    fact about the file as written that survives the coordinator's daily
+    overwrite.
     """
     try:
         raw = path.read_bytes()
@@ -261,6 +267,13 @@ def check_applicable(target: FileTarget, *, coin: str, now: datetime) -> None:
     """
     if target.coin != coin:
         raise StaleTarget(f"the handoff is {target.coin}'s and this run trades {coin}")
+    if now < target.as_of - HANDOFF_WINDOW:
+        # Further ahead than the coordinator's next write could be: a clock
+        # that is off, or a hand-written --as-of. A fault, not the schedule.
+        raise StaleTarget(
+            f"the handoff is for {target.as_of.isoformat()}, more than a day after "
+            f"this cycle at {now.isoformat()}"
+        )
     if now < target.as_of:
         raise PendingTarget(
             f"the handoff is for {target.as_of.isoformat()}, which this cycle "
@@ -379,7 +392,7 @@ class FileTargetDecisionProvider(MarketContextProvider):
                 f"{target_path.parent} does not exist, so the carry coordinator could never "
                 "write the handoff there — fix the path (or create the directory) and restart"
             )
-        if not target_path.is_file():
+        if not target_path.exists():
             logger.warning(
                 "file target %s does not exist yet: every cycle maintains the current position "
                 "until the carry coordinator writes it",

@@ -217,7 +217,7 @@ def test_request_decision_without_a_build_input_has_no_clock_and_says_so(tmp_pat
 # --------------------------------------------------------------------------
 
 
-def test_a_cycle_that_acts_writes_the_document_and_its_digest_as_a_sidecar(tmp_path):
+def test_an_applicable_document_is_kept_beside_the_payload_with_its_digest(tmp_path):
     path = _write(tmp_path, _handoff())
     payload = tmp_path / "payloads" / "BTC-20260315T040700_000000Z.json"
     payload.parent.mkdir()
@@ -298,6 +298,22 @@ def test_a_handoff_for_a_boundary_not_yet_reached_is_pending_not_a_fault(tmp_pat
     assert any("maintaining until the boundary" in r.getMessage() for r in caplog.records)
 
 
+def test_a_handoff_more_than_a_day_ahead_is_a_fault_not_pending(tmp_path, caplog):
+    # The coordinator writes at most the NEXT boundary's document; anything
+    # further ahead is a clock that is off or a hand-written --as-of, and it
+    # must not sit at INFO forever under the pending prefix.
+    provider = _provider(_write(tmp_path, _handoff()))
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        parsed = _ask(provider, BOUNDARY - HANDOFF_WINDOW - timedelta(seconds=1))
+    _assert_maintains(parsed, caplog, "more than a day after this cycle")
+    # ...while exactly one day ahead is still the schedule's lead.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        pending = _ask(provider, BOUNDARY - HANDOFF_WINDOW)
+    assert pending.decision.rationale.startswith(FILE_TARGET_PENDING_PREFIX)
+    assert not caplog.records
+
+
 def test_another_coins_handoff_maintains(tmp_path, caplog):
     provider = _provider(_write(tmp_path, _handoff(coin="ETH")))
     with caplog.at_level(logging.WARNING, logger=_LOGGER):
@@ -372,6 +388,9 @@ def test_read_document_names_the_file_in_its_refusals(tmp_path):
         # ... and one shared with the document path, to pin that the rules
         # live on the dataclass: the parametrize above reaches them through it.
         ({"side": "long", "margin_pct": 30}, "perp.side must be one of"),
+        # ... and the one type rule the decoder also enforces, since a direct
+        # construction could hand in a float or a bool.
+        ({"margin_pct": 30.5}, "whole number"),
     ],
 )
 def test_a_file_target_built_directly_is_held_to_the_same_rules(kwargs, reason):

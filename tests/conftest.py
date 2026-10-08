@@ -1,5 +1,6 @@
 """Shared pytest fixtures that prevent CI hangs when API keys are absent."""
 
+import importlib
 import os
 import subprocess
 import sys
@@ -68,6 +69,43 @@ def _isolate_config():
     config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
     yield
     config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
+
+
+class _DefaultConfigReloader:
+    """Call to reload ``default_config`` with only the given ``TRADINGAGENTS_*``
+    vars set; ``restore()`` reverts the env and reloads once more (#346).
+
+    The env is reverted from a whole-environ snapshot (``patch.dict``) rather
+    than by undoing only this object's own edits: a test's ``monkeypatch``
+    fixture may tear down *after* this one, so a ``TRADINGAGENTS_*`` value it
+    set would otherwise still be in the env at the restoring reload and get
+    baked into the process-wide ``DEFAULT_CONFIG``.
+    """
+
+    def __init__(self):
+        import tradingagents.default_config as default_config_module
+
+        self._module = default_config_module
+        self._env = patch.dict(os.environ)
+        self._env.start()
+
+    def __call__(self, **overrides):
+        for key in self._module._ENV_OVERRIDES:
+            os.environ.pop(key, None)
+        os.environ.update(overrides)
+        return importlib.reload(self._module)
+
+    def restore(self):
+        self._env.stop()
+        importlib.reload(self._module)
+
+
+@pytest.fixture
+def reload_default_config():
+    """``_DefaultConfigReloader`` for one test; restores the module on teardown."""
+    reloader = _DefaultConfigReloader()
+    yield reloader
+    reloader.restore()
 
 
 @pytest.fixture(autouse=True)

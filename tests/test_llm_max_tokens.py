@@ -8,11 +8,8 @@ right key per provider.
 """
 from __future__ import annotations
 
-import importlib
-
 import pytest
 
-import tradingagents.default_config as default_config_module
 from tradingagents.graph.trading_graph import TradingAgentsGraph, _coerce_max_tokens
 
 # --- coercion / validation -------------------------------------------------
@@ -101,22 +98,14 @@ def test_openai_and_google_clients_accept_the_kwarg():
 
 # --- env overlay -----------------------------------------------------------
 
-def _reload_with_env(monkeypatch, **overrides):
-    for key in list(default_config_module._ENV_OVERRIDES):
-        monkeypatch.delenv(key, raising=False)
-    for key, val in overrides.items():
-        monkeypatch.setenv(key, val)
-    return importlib.reload(default_config_module)
-
-
 @pytest.mark.unit
-def test_default_is_none(monkeypatch):
-    dc = _reload_with_env(monkeypatch)
+def test_default_is_none(reload_default_config):
+    dc = reload_default_config()
     assert dc.DEFAULT_CONFIG["max_tokens"] is None
 
 
 @pytest.mark.unit
-def test_env_override_sets_config(monkeypatch):
-    dc = _reload_with_env(monkeypatch, TRADINGAGENTS_MAX_TOKENS="8192")
+def test_env_override_sets_config(reload_default_config):
+    dc = reload_default_config(TRADINGAGENTS_MAX_TOKENS="8192")
     assert dc.DEFAULT_CONFIG["max_tokens"] == "8192"
     assert _coerce_max_tokens(dc.DEFAULT_CONFIG["max_tokens"]) == 8192

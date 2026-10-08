@@ -194,9 +194,9 @@ def engine_config(settings: AgentSettings, home: Path) -> dict[str, Any]:
 
     ``backend_url`` is left to the provider's own endpoint. The memory log
     is switched off by giving it no path. Structured output is off, as the
-    perp engine has it: the rating is read from the decision's text, which
-    the free-text path gives as well, where a schema render would carry only
-    the schema's fields.
+    perp engine has it: the rating is read from the decision's text, whose
+    closing ``Rating:`` line the context asks for and the free-text path is
+    the one the judge was validated on.
     """
     from tradingagents.default_config import DEFAULT_CONFIG
 

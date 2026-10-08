@@ -83,8 +83,9 @@ _MINIMAX_THINKING = ModelCapabilities(
 )
 
 # Anthropic retired forced tool use with the Claude 5.5 generation: Sonnet 5.5,
-# Opus 5.5 and Fable 5.1 (and Mythos 5.1, Fable's twin) answer a ``tool_choice``
-# of type ``tool`` or ``any`` with a 400, "not supported for this model" (#338).
+# Opus 5.5 and Fable 5.1 answer a ``tool_choice`` of type ``tool`` or ``any``
+# with a 400, "not supported for this model" (#338); Mythos 5.1, Fable's twin,
+# is taken to as well, not observed.
 # The schema still binds as a tool; the choice is left to the model, which the
 # agents' prompts direct to it. Anthropic has no ``json_object`` mode; its
 # structured outputs are what the native client takes for these models.

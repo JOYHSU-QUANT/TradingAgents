@@ -22,8 +22,9 @@ Breaking changes within the 0.x line are called out explicitly.
   tool with the choice left to the model, as DeepSeek's thinking models
   already do. On the native Anthropic client, whose function-calling mode
   forces the tool, these models take Claude's structured outputs
-  (`method="json_schema"`) instead. Later versions of each family inherit;
-  Haiku and other publishers' namespaces keep the default.
+  (`method="json_schema"`) instead, which `langchain-anthropic` has from
+  1.1.0, now the floor. Later versions of each family inherit; Haiku and
+  other publishers' namespaces keep the default.
 
 - **`live --run-id` no longer exits 2 when the safe-mode read after the
   shutdown sweep fails** (`contrib/hyperliquid_perp/cli/live.py`, issue #308).
@@ -91,8 +92,9 @@ Breaking changes within the 0.x line are called out explicitly.
   `max_tokens: 8192` itself, the cap paper-BTC-6 and -7 were asked under.
   The Uniswap judge's engine config sets `structured_output: False`, as the
   perp's does: the rating is read from the decision's text, which the
-  free-text path gives as well, and the structured binding forces a `tool_choice` the Claude 5.5 models refuse
-  with a 400 from each manager before the same free-text fallback (#338).
+  free-text path gives as well; at the time the structured binding also forced a `tool_choice`
+  the Claude 5.5 models refused with a 400 from each manager before the same free-text fallback
+  (#338, fixed under Fixed above).
   With the free-text path the only one, the rating is no longer taken
   from the engine's signal, whose reader falls back to the first rating
   word anywhere in the text (a decision cut short by the cap, or written

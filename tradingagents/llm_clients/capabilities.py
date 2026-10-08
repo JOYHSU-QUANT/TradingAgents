@@ -115,6 +115,10 @@ _FORCED_TOOL_CHOICE_RETIRED = {"sonnet": (5, 5), "opus": (5, 5), "fable": (5, 1)
 # Bedrock's ``anthropic.`` with or without a cross-region inference profile
 # prefix (``us.``, ``global.``, ``us-gov.``). Another publisher's is left on.
 _ANTHROPIC_NAMESPACE = re.compile(r"^(?:[a-z-]+\.)?anthropic[./]")
+# A Bedrock ARN up to its resource: an inference profile's or a foundation
+# model's ends in the model ID; an application inference profile's ends in an
+# opaque ID that names no model, so it keeps the default.
+_BEDROCK_ARN = re.compile(r"^arn:aws[a-z-]*:bedrock:[^/]*/")
 
 
 def _claude_rejects_forced_tool_choice(model_name: str) -> bool:
@@ -124,7 +128,8 @@ def _claude_rejects_forced_tool_choice(model_name: str) -> bool:
     namespace (``_ANTHROPIC_NAMESPACE``: OpenRouter, Bedrock); other publishers'
     namespaces and other families (Haiku) are not known to, and answer ``False``.
     """
-    match = _CLAUDE_MODEL.match(_ANTHROPIC_NAMESPACE.sub("", model_name.lower()))
+    name = _BEDROCK_ARN.sub("", model_name.lower())
+    match = _CLAUDE_MODEL.match(_ANTHROPIC_NAMESPACE.sub("", name))
     if not match:
         return False
     family, major, minor = match.group(1), int(match.group(2)), int(match.group(3) or 0)

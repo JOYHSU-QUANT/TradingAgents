@@ -160,7 +160,9 @@ class TestClaudeForcedToolChoice:
             "anthropic/claude-sonnet-5.5",
             # Bedrock's spelling, with and without an inference-profile prefix (#344).
             "us.anthropic.claude-sonnet-5-5-20260915-v1:0", "anthropic.claude-opus-5-5-20261001-v1:0",
-            "us-gov.anthropic.claude-sonnet-5-5-v1:0",
+            "us-gov.anthropic.claude-sonnet-5-5-v1:0", "eu.anthropic.claude-sonnet-5-5-v1:0",
+            "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-sonnet-5-5-v1:0",
+            "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-opus-5-5-v1:0",
             # Dated, suffixed and later releases inherit.
             "claude-sonnet-5-5-20261001", "anthropic/claude-sonnet-5.5:thinking",
             "claude-sonnet-5-6", "claude-opus-6",
@@ -182,6 +184,8 @@ class TestClaudeForcedToolChoice:
             # A dated Sonnet 5.0 is not minor 20260901.
             "claude-sonnet-5-20260901", "anthropic/claude-sonnet-5",
             "us.anthropic.claude-sonnet-5-20260901-v1:0",
+            # An application inference profile names no model.
+            "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc123xyz",
             # Another publisher's namespace is not stripped.
             "someone/claude-sonnet-5.5", "gpt-5.6",
         ],

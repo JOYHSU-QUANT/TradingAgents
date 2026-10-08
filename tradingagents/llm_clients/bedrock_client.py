@@ -73,9 +73,10 @@ class BedrockClient(BaseLLMClient):
         bearer_token = os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
         if bearer_token:
             llm_kwargs["api_key"] = bearer_token
-        # langchain-aws infers forced tool use for every Claude, which the 5.5
-        # generation 400s (#338, #344); told "auto" only, its structured output
-        # binds the schema as a tool without forcing it, as OpenRouter's does.
+        # langchain-aws infers forced tool use for every Claude; the 5.5 generation
+        # rejects it (#338, #344: observed on Anthropic's API, inferred for
+        # Bedrock). Told "auto" only, langchain-aws's structured output binds the
+        # schema as a tool without forcing it, as OpenRouter's does.
         if not get_capabilities(self.model).supports_tool_choice:
             llm_kwargs["supports_tool_choice_values"] = ("auto",)
         llm_kwargs.update(self.forwarded_kwargs())

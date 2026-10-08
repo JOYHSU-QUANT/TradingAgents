@@ -15,13 +15,16 @@ Breaking changes within the 0.x line are called out explicitly.
   `capabilities.py`, issue #344). The #338 fix covered OpenRouter and the
   native Anthropic client; on Bedrock, langchain-aws infers forced tool use
   for every Claude, so structured output on `us.anthropic.claude-sonnet-5-5-*`
-  and the like still 400ed first and ran on the free-text fallback. The
-  capability table now reads Bedrock's spelling of these models (with or
-  without a cross-region inference profile prefix), and for a model it marks
-  as not taking `tool_choice` the client constructs langchain-aws with
+  and the like would still be forced, the 400 observed on Anthropic's API
+  with it, and run on the free-text fallback. The capability table now reads
+  Bedrock's spelling of these models (a model ID with or without a
+  cross-region inference profile prefix, or an inference-profile or
+  foundation-model ARN; an application inference profile names no model and
+  keeps the default), and for a model it marks as not taking `tool_choice`
+  the client constructs langchain-aws with
   `supports_tool_choice_values=("auto",)`, whose structured-output path then
   binds the schema as a tool without forcing it. Other Bedrock models are
-  constructed as before.
+  constructed as before. Not tried against Bedrock itself.
 
 - **Structured output no longer forces a `tool_choice` the Claude 5.5
   generation rejects** (`tradingagents/llm_clients/capabilities.py`,

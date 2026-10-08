@@ -12,14 +12,23 @@ import json
 # Every behaviour-defining block the resume drift check compares — the single
 # source shared by the genesis record and the comparison loop, so a new key
 # can't be recorded but silently never drift-checked (or vice versa).
-_DRIFT_COMPARED_KEYS = ("risk", "decision", "paper_trading", "engine", "market_data", "indicators")
+_DRIFT_COMPARED_KEYS = (
+    "risk",
+    "decision",
+    "decision_source",
+    "paper_trading",
+    "engine",
+    "market_data",
+    "indicators",
+)
 
 
 def _run_config_subset(config: dict, coin: str) -> dict:
     """The behaviour-defining blocks recorded at run genesis (never network/wallet).
 
     ``engine`` (model/analysts), ``market_data`` (candle window feeding the
-    context), and ``indicators`` (signal set + warm-up gate) are here because
+    context), ``indicators`` (signal set + warm-up gate) and
+    ``decision_source`` (which provider decides at all) are here because
     each redefines every subsequent decision at least as much as a
     risk-parameter tweak does; ``paper_trading`` is stored whole for the audit
     record even though only its ``execution`` sub-block is compared on resume
@@ -30,10 +39,14 @@ def _run_config_subset(config: dict, coin: str) -> dict:
     return subset
 
 
-# Genesis records written before these keys joined the subset lack them;
-# absence there means "unknown", not "was empty" — skip the comparison rather
-# than false-flag every pre-upgrade run whose config carries the block today.
-_DRIFT_KEYS_ADDED_LATER = frozenset({"engine", "market_data", "indicators"})
+# Blocks that lived in operators' configs BEFORE genesis started recording
+# them: a genesis record from before lacks the key, and absence there means
+# "unknown", not "was empty" — skip the comparison rather than false-flag
+# every pre-upgrade run whose config carries the block today. Not
+# ``decision_source``: it never existed unrecorded, so a missing key parses
+# to the engine default every such run was, and a switch to ``file_target``
+# is warned on an old run too.
+_DRIFT_KEYS_PREDATE_RECORDING = frozenset({"engine", "market_data", "indicators"})
 
 
 def _resume_effective(key: str, block: object) -> object:
@@ -76,6 +89,7 @@ def _block_parsers() -> dict[str, object]:
     ``risk_gate`` is the import ``config.py`` keeps off the ``--context-only``
     path for the same cost reason.
     """
+    from ..common.decision_source import DecisionSourceConfig
     from ..domains.perp.market_data_config import MarketDataConfig
     from ..domains.perp.risk_gate import RiskConfig
     from ..domains.perp.target_decision import DecisionConfig
@@ -84,6 +98,7 @@ def _block_parsers() -> dict[str, object]:
     return {
         "risk": RiskConfig.from_dict,
         "decision": DecisionConfig.from_dict,
+        "decision_source": DecisionSourceConfig.from_dict,
         "paper_trading": PaperExecutionConfig.from_dict,
         "market_data": MarketDataConfig.from_dict,
     }
@@ -122,7 +137,7 @@ def _drifted_keys(stored: dict, current: dict) -> list[str]:
     return sorted(
         key
         for key in _DRIFT_COMPARED_KEYS
-        if not (key in _DRIFT_KEYS_ADDED_LATER and key not in stored)
+        if not (key in _DRIFT_KEYS_PREDATE_RECORDING and key not in stored)
         and not _same_effective_block(
             parsers.get(key),
             _resume_effective(key, stored.get(key)),
@@ -153,11 +168,11 @@ def _config_drift_report(
     Returns ``("coin", msg)`` for a coin mismatch or ``("network", msg)`` for a
     ``live.network`` mismatch (both hard errors — a different instrument or a
     different exchange is a different run, not a resumption), ``("params",
-    msg)`` for risk/decision/paper_trading(execution)/engine/market_data/
-    indicators / non-network ``live:`` drift (warning — behaviour changes
+    msg)`` for risk/decision/decision_source/paper_trading(execution)/engine/
+    market_data/indicators / non-network ``live:`` drift (warning — behaviour changes
     mid-run but the operator may intend it; genesis-only
     ``paper_trading.account`` edits are inert on resume and don't warn, a
-    genesis record predating a key in ``_DRIFT_KEYS_ADDED_LATER`` skips that
+    genesis record predating a key in ``_DRIFT_KEYS_PREDATE_RECORDING`` skips that
     comparison rather than false-flagging, and blocks with a typed parser are
     compared PARSED, so a key added or removed at its documented default is
     not drift — see ``_block_parsers``), or ``None`` when nothing drifted or

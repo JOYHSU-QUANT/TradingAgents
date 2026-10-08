@@ -933,6 +933,38 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **hyperliquid_perp: the file-target decision provider (carry plan PR 2).**
+  A new top-level `decision_source:` config block picks the provider a run
+  asks each 4h cycle: `engine` (the TradingAgents engine behind an LLM; the
+  default, and byte-for-byte what every run before the block existed was)
+  or `file_target` with a `target_path`, which reads the carry coordinator's
+  handoff document and never calls a model — so the run needs no
+  `OPENROUTER_API_KEY` on either lane, and `ai_inputs.model` records
+  `file-target`. The engine provider's market-context half (fetch, guards,
+  payload, `ai_inputs` facts) became a shared abstract base that also
+  stashes the cycle's own clock; the file provider renders the document's
+  perp leg (`short` at its margin, or `flat`) as the decision contract
+  and puts it through the same `parse_target_decision`, so an off-grid
+  margin fails closed exactly as a model's would. The targets apply while
+  `as_of_ms <= cycle clock < as_of_ms + 1 day` (not the market context's
+  `as_of`, which is the last closed candle and trails the cycle by up to
+  four hours); every cycle in the window re-asserts them. Outside it — no
+  file, another coin or version, a document that contradicts itself — the
+  cycle is a VALID `maintain_current` whose rationale starts with
+  `carry handoff unusable: ` plus a WARNING, both legs holding (plan D5);
+  a document for the next boundary, already written at 23:50, is
+  `carry handoff pending: ` at INFO, and more than a day ahead is a fault
+  again. The document a decision was built from is kept beside its payload
+  as `<payload>.handoff.json` with the digest of the bytes read. A
+  `target_path` whose directory is missing, that is itself a directory, or
+  whose filesystem errors at startup is refused as an `EngineConfigError`
+  (exit 1 fresh, protection-only over a live position). `decision_source`
+  joins the resume drift comparison (parsed, so an absent block equals an
+  explicit `engine`, and an old genesis switched to `file_target` warns),
+  and `contrib.replay` refuses a run with any `file-target` row by name:
+  no model was asked, so there is no question to score or replay.
+  (#347)
+
 - **`contrib/carry`: the carry coordinator (carry plan PR 1).** A new
   package for one hedged book — short the Hyperliquid perp, hold the
   Uniswap spot — that places no orders and writes into neither venue's

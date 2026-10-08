@@ -104,6 +104,23 @@ decision:
   min_confidence: 0.3            # set_target below this is risk-REJECTED (flat included); confidence never scales sizing
   resize_min_confidence: 0.7     # same-side resize below this is risk-REJECTED (churn control); open/flip/flat use min_confidence; must be >= min_confidence (setting it equal disables the extra bar)
 
+# Which provider decides each 4h cycle (carry plan §2 D2). Absent = engine: the
+# TradingAgents engine behind an LLM, as every run so far. file_target reads
+# the carry coordinator's handoff (python -m contrib.carry signal --out <path>)
+# and asks no model, so the run needs no OPENROUTER_API_KEY. The targets apply
+# while as_of <= cycle clock < as_of + 1 day; outside that window — and with no
+# file, another coin, another version — every cycle maintains the current
+# position with a WARNING (both legs hold: plan D5); a cycle in the minutes
+# before midnight that already sees tomorrow's document maintains at INFO
+# ("pending", not a fault). The document a cycle acted on is kept beside its
+# payload as <payload>.handoff.json. Keep the coordinator's --margin-pct on the
+# decision: grid above, or every cycle fails closed off-grid. The path's
+# directory must exist at startup (the file itself may not yet). Changing the
+# provider mid-run is config drift, warned on resume.
+# decision_source:
+#   provider: file_target
+#   target_path: /srv/carry/handoff-ETH.json
+
 # Phase 2 paper-trading engine defaults (phase2-execution.md §5.4). initial
 # balance / positions apply only when a NEW run_id is created; a restart recovers
 # from the recorded SQLite accounting events, never resets to these.

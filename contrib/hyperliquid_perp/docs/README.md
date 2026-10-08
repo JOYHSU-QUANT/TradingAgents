@@ -126,7 +126,9 @@ TradingAgents/
         ├── domains/
         ├── common/                      # 跨層共用（enum guard · seam_guard.py 建構期 seam 守衛（callable 與物件兩型） · YAML coercion · decimal context · 常數含 CYCLE_INTERVAL · atomic write · instants.py 時戳解碼／whole-hours label／時距 label gap_label（呼叫者橫跨 domains／paper／live／cli，用 grep 找、不列舉；freshness 的複合 `14h 12m 30s` 刻意不收斂）／whole_hours 整點守衛（label 建在它上面）／epoch-ms 換算唯一實作／`*_seconds` 參數收斂 seconds_span）
         ├── integration/                 # bridge to the unmodified engine
-        │   └── trading_graph.py         #   HyperliquidTradingGraph subclass
+        │   ├── trading_graph.py         #   HyperliquidTradingGraph subclass
+        │   ├── decision_provider.py     #   市場 context 那一半＋引擎 provider＋依 decision_source: 選 provider 的 factory
+        │   └── file_target_provider.py  #   carry 交接檔→perp 目標，走同一條決策契約、不經 LLM（carry 計畫 PR 2）
         ├── persistence/                 # Phase 2 SQLite source of truth
         ├── runtime/                     # paper／live 共用的執行核心（模組清單見 `runtime/__init__`）
         ├── paper/                       # Phase 2 paper accounting + execution engine
@@ -136,7 +138,7 @@ TradingAgents/
         ├── audit/
         ├── notifications/
         ├── configs/
-        │   ├── hyperliquid.example.yaml   # network/wallet + risk:/decision:/paper_trading:/live: 區塊
+        │   ├── hyperliquid.example.yaml   # network/wallet + risk:/decision:/decision_source:/paper_trading:/live: 區塊
         │   └── hyperliquid.local.yaml     🔒 gitignored
         ├── docs/
         ├── ports.py
@@ -175,7 +177,8 @@ gate 區塊（mode / allow_real_orders / safety 等，見 phase3-spec §24）—
 | `domains/perp/prompt_context.py` | ⚠️ | 結構開源；確切措辭私有（funding-rate 的表述方式是你的 alpha）。另提供 `context_shape(ctx)`：當次渲染的段落結構字串（段落標題＋指標列名＋有無 `macro_trend` 段＋有無 volume profile 段＋有無 `autoresearch` 段＋有無 `position` 段；不含標籤裡的數字與隨資料有無出現的行），寫進 `ai_inputs.context_shape`（schema v10）與 payload JSON，與 `prompt_version` 並列為切段鍵（issue #97）；第三個鍵＝format 段的內容指紋 `ai_inputs.format_fingerprint`（schema v11，`target_decision.format_fingerprint`，issue #129），`validate` 依三鍵印 `prompt_regime:` 分佈。 |
 | `domains/perp/decision.py` | ~~✅~~ 已刪除 | `PerpTradeDecision` schema（Phase 1 意圖決策）。**Phase 2 起退役刪除**——舊 audit 紀錄（schema_version 2）仍可讀，但寫入路徑由 `target_decision.py` 的 structured target 契約取代。 |
 | `integration/trading_graph.py` | ✅ | `HyperliquidTradingGraph(TradingAgentsGraph)`——override `resolve_instrument_context()`，零核心修改；`build_graph(callbacks=…)` 把 callback handlers 轉給基底建構子。 |
-| `integration/decision_provider.py` | ✅ | `EngineDecisionProvider`（paper／live daemon 的 `ports.DecisionProvider` 實作）與建構它的 `build_decision_provider(...)`。 |
+| `integration/decision_provider.py` | ✅ | `MarketContextProvider`（每個 provider 共用的 `build_input` 半邊：市場 context、守衛、payload、ai_inputs 列）、其上的 `EngineDecisionProvider`（paper／live daemon 預設的 `ports.DecisionProvider` 實作），與依 `decision_source:` 區塊選 provider 的 `build_decision_provider(...)`。 |
+| `integration/file_target_provider.py` | ✅ | `FileTargetDecisionProvider`：讀 carry 協調者的交接檔、把 perp 那條腿渲染成同一份決策契約再走 `parse_target_decision`，不經 LLM；陳舊／缺檔回合法 `maintain_current`＋WARNING（carry 計畫 PR 2）。 |
 | `integration/engine_drive.py` | ✅ | 一次引擎 run：`build_engine_run(...)` 建 graph 並掛上新的 `CompletionUsageCollector`，`EngineRun.drive(...)` 跑 `propagate`、解析 `final_trade_decision`；有 input payload 時每個出口都寫 `.usage.json`、拿到 dict `final_state` 才寫 `.reports.json`。daemon 的 `request_decision` 與 one-shot 的 `main.run_engine` 都走這裡；拿不到可解析結果時丟 `EngineRunFailed`／`NonDictFinalState`／`EngineOutputError`，由兩個呼叫方各自措辭（`RetryableDecisionError` vs `error:` 行＋exit 1）。 |
 | `integration/decision_reports.py` | ✅ | `write_decision_reports`：每個**拿到 dict `final_state` 的** cycle 在 payload 旁寫 `<payload>.reports.json`（引擎拋錯或回傳 parse 讀不了的形狀時沒有東西可記，daemon 兩者都記成 `api_failed`，所以「有 `.usage.json`、沒 `.reports.json`」＝引擎失敗的 cycle，不是漏寫——除非該 cycle 的 log 有 `decision reports sidecar could not be written` ERROR）。內容＝`selected_analysts`（這個 cycle 配了哪些分析師，讓 `null` 分得出「沒選」與「選了但空」）＋ `REPORT_KEYS` 九個 key（四份分析師報告、兩場辯論、投資計畫、trader 計畫、`final_trade_decision` 本文；缺的記 `null`），走 `common/sidecar.py` 的契約（同目錄同 stem、`schema: 1`、atomic、寫失敗只 log）；只記錄不消費，留給離線重放。九個 key 名鏡射上游 `AgentState`，測試釘住，上游改名會紅。模型看到的文字零改動。 |
 | `integration/completion_usage.py` | ✅ | `CompletionUsageCollector`（issue #182）：掛在兩個 LLM client 上的 callback handler，每筆 completion 記 node（langgraph `langgraph_node`）、model、output／reasoning tokens、stop reason 與是否截斷；`integration/engine_drive` 用它決定 `truncated_output`、印 `completion usage:` 與 `<payload>.usage.json`（寫檔走 `common/sidecar.py`：`schema: 1`、atomic）。量測失敗只 log、絕不影響決策。 |

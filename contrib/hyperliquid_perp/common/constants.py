@@ -14,6 +14,9 @@ __all__ = [
     "CYCLE_INTERVAL",
     "ERROR_TYPES",
     "EXCHANGE_MIN_ORDER_NOTIONAL_USDC",
+    "FILE_TARGET_MODEL",
+    "FILE_TARGET_PENDING_PREFIX",
+    "FILE_TARGET_UNUSABLE_PREFIX",
     "HOLDING_COST_HOURS",
     "LEGAL_NETWORKS",
     "MACRO_FAST_PERIOD",
@@ -214,6 +217,28 @@ ERROR_TYPES = frozenset(
         "interrupted",
     }
 )
+
+# The ``ai_inputs.model`` a run decided from a FILE records in place of a
+# model id (carry plan §3.3): ``integration/file_target_provider`` reads the
+# carry coordinator's handoff document and asks no model, and
+# ``contrib.replay`` refuses a run whose rows carry this word — there was no
+# prompt, so there is no question to put to another model. Here, at the
+# bottom of the graph, because the writer and that reader must agree on the
+# exact spelling without importing each other, as with the error classes above.
+FILE_TARGET_MODEL = "file-target"
+
+# How a file-target cycle that did NOT act spells its ``maintain_current``
+# rationale, so the carry report (plan PR 4, D5's "超過 N 天才由人介入") and
+# any later ``validate`` streak read the row by one prefix instead of parsing
+# prose. Two words for two different days: ``unusable`` is a fault — no file,
+# a file for a day gone by, another coin, a document that contradicts itself —
+# and is logged as a WARNING each cycle; ``pending`` is the normal schedule —
+# the coordinator has already written the NEXT boundary's document (23:50 for
+# 00:00) and the cycle sits in the minutes before it — logged as INFO and not
+# a day to count. Here beside ``FILE_TARGET_MODEL`` for the same reason:
+# writer and readers agree on the spelling without importing each other.
+FILE_TARGET_UNUSABLE_PREFIX = "carry handoff unusable: "
+FILE_TARGET_PENDING_PREFIX = "carry handoff pending: "
 
 # The horizon the prompt's position section states holding cost over. Funding
 # on Hyperliquid is charged hourly; 8h is one conventional funding "period",

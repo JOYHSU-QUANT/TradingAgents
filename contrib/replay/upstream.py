@@ -27,6 +27,10 @@ What is borrowed and why:
 - the store (``Database``, ``SchemaVersionError``, ``get_run``) and the
   paper config (``PaperTradingConfig``), because the cost a run was
   measured under is the run's own fill model (plan §3-6);
+- the file-target marker (``FILE_TARGET_MODEL``), the word the perp
+  package writes in ``ai_inputs.model`` for a run decided from the carry
+  handoff rather than a prompt (carry plan PR 2), so such a run is refused
+  by name: no model was asked, so there is no question to score or re-ask;
 - the instants and the interval table, so a decision's ``timestamp`` is
   decoded by the same integer arithmetic that encoded it;
 - the on-disk layout (``payload_dir``, ``sidecar_path``), to count how many
@@ -78,6 +82,7 @@ from contrib.autoresearch.guardrail import (
 from contrib.autoresearch.split import SegmentName, Split, SplitError
 from contrib.autoresearch.store import ResearchStore, StoreError
 from contrib.autoresearch.vocabulary import SpecError, require_number
+from contrib.hyperliquid_perp.common.constants import FILE_TARGET_MODEL
 from contrib.hyperliquid_perp.common.decimal_context import DECIMAL_CONTEXT
 from contrib.hyperliquid_perp.common.digest import payload_digest
 from contrib.hyperliquid_perp.common.instants import epoch_ms, from_epoch_ms, parse_instant
@@ -110,6 +115,7 @@ __all__ = [
     "DECIMAL_CONTEXT",
     "DEFAULT_RULE",
     "ENGINE_BORROWED",
+    "FILE_TARGET_MODEL",
     "MS_PER_DAY",
     "RULE_INTERVAL",
     "STUDIED_INTERVALS",
@@ -183,6 +189,7 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.store", "StoreError"),
     ("contrib.autoresearch.vocabulary", "SpecError"),
     ("contrib.autoresearch.vocabulary", "require_number"),
+    ("contrib.hyperliquid_perp.common.constants", "FILE_TARGET_MODEL"),
     ("contrib.hyperliquid_perp.common.decimal_context", "DECIMAL_CONTEXT"),
     ("contrib.hyperliquid_perp.common.digest", "payload_digest"),
     ("contrib.hyperliquid_perp.common.instants", "epoch_ms"),

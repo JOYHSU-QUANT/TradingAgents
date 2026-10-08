@@ -1,10 +1,12 @@
 """A sidecar: a JSON artifact written beside a run's input payload.
 
-Two exist today — ``<payload>.usage.json`` (the cycle's completion
-measurement, :mod:`..integration.completion_usage`) and
-``<payload>.reports.json`` (what the engine's agents wrote on the way to the
-decision, :mod:`..integration.decision_reports`). Both follow one contract,
-and this module IS that contract, so a third sidecar cannot drift from it:
+Three exist today — ``<payload>.usage.json`` (the cycle's completion
+measurement, :mod:`..integration.completion_usage`), ``<payload>.reports.json``
+(what the engine's agents wrote on the way to the decision,
+:mod:`..integration.decision_reports`) and ``<payload>.handoff.json`` (the
+carry handoff a file-target cycle acted on,
+:mod:`..integration.file_target_provider`). All follow one contract, and this
+module IS that contract, so a fourth sidecar cannot drift from it:
 
 - same directory, same stem, its own suffix (:func:`sidecar_path`) — one
   spelling, so a rename at a writer cannot leave a reader looking in the old

@@ -22,6 +22,7 @@ from ..config import dotenv_diagnosis
 from ..integration.decision_provider import build_decision_provider
 from . import paper_export
 from ._common import (
+    _api_key_satisfied,
     _migrate_owned_store,
     _open_run_or_exit,
     _raise_keyboard_interrupt,
@@ -257,11 +258,12 @@ def _cmd_paper(argv: list[str]) -> int:
                         file=sys.stderr,
                     )
                     return 1
-                # A fresh run always drives the AI — demand the key before
-                # writing the run row, so a keyless ``--create`` fails cleanly
-                # instead of leaving a half-created run that the next attempt
-                # then rejects as "already exists".
-                if not _require_api_key():
+                # A fresh run drives its provider from the first cycle — demand
+                # the key it needs (none for a file_target run) before writing
+                # the run row, so a keyless ``--create`` fails cleanly instead
+                # of leaving a half-created run that the next attempt then
+                # rejects as "already exists".
+                if not _require_api_key(config):
                     return 1
                 # The decision provider is the other operator-fixable
                 # pre-flight: its construction triggers the process's first
@@ -387,8 +389,9 @@ def _cmd_paper(argv: list[str]) -> int:
                 engine.flag_restart_gap()
             # Only the healthy restart lane reaches here keyless or without a
             # provider: the fresh lane demanded the key and built the provider
-            # before writing the run row.
-            key_present = bool(os.environ.get("OPENROUTER_API_KEY"))
+            # before writing the run row. A file_target run asks no model and
+            # is satisfied by construction (``_api_key_satisfied``).
+            key_present = _api_key_satisfied(config)
             engine_error: EngineConfigError | None = None
             if not trading_halted and key_present and provider is None:
                 # Catch the base, not EngineImportError: a bad completion cap
@@ -406,7 +409,7 @@ def _cmd_paper(argv: list[str]) -> int:
             )
             if gate.exits:
                 if gate.halt_reason == "missing-key":
-                    _require_api_key()  # prints the standard abort message
+                    _require_api_key(config)  # prints the standard abort message
                 else:
                     print(f"error: {engine_error}", file=sys.stderr)
                 return 1

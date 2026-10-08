@@ -352,3 +352,40 @@ def test_config_drift_pre_upgrade_record_skips_later_keys():
         "indicators": ["atr_14"],
     }
     assert _config_drift_report(stored, current, "BTC") is None
+
+
+def test_config_drift_reports_a_changed_decision_source():
+    # Switching the provider mid-run changes every later decision at least as
+    # much as a risk tweak: warned on resume, like the other blocks.
+    stored = _subset_json({"risk": {"leverage": 1}}, "ETH")
+    current = {
+        "risk": {"leverage": 1},
+        "decision_source": {"provider": "file_target", "target_path": "/srv/h.json"},
+    }
+    kind, msg = _config_drift_report(stored, current, "ETH")
+    assert kind == "params"
+    assert "decision_source" in msg
+
+
+def test_config_drift_reads_an_explicit_engine_block_as_the_absent_default():
+    # Compared PARSED (``_block_parsers``): writing ``provider: engine`` out on
+    # a run whose genesis omitted the block is not drift.
+    stored = _subset_json({"risk": {"leverage": 1}, "decision_source": None}, "ETH")
+    current = {"risk": {"leverage": 1}, "decision_source": {"provider": "engine"}}
+    assert _config_drift_report(stored, current, "ETH") is None
+
+
+def test_config_drift_on_a_pre_upgrade_record_still_reports_a_file_target():
+    # Unlike engine/market_data/indicators, an absent ``decision_source`` is
+    # not "unknown": every run before the block existed WAS the engine, and
+    # the parsed comparison reads the missing key that way — so switching an
+    # old run to the file provider is warned, and leaving it alone is not.
+    stored = json.dumps({"risk": {"leverage": 1}, "coin": "ETH"})
+    current = {
+        "risk": {"leverage": 1},
+        "decision_source": {"provider": "file_target", "target_path": "/srv/h.json"},
+    }
+    kind, msg = _config_drift_report(stored, current, "ETH")
+    assert kind == "params"
+    assert "decision_source" in msg
+    assert _config_drift_report(stored, {"risk": {"leverage": 1}}, "ETH") is None

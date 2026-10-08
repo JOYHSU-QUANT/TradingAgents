@@ -95,9 +95,12 @@ def test_the_config_loader_imports_no_compute_module():
     # module and add THAT module here by name, rather than admitting a
     # compute module — ``common.enum_guard`` is on it because ``schema``'s
     # four vocabulary enums inherit their refusal sentence from it (issue
-    # #166). ``market_data_config`` is the one
-    # parser on the list — it runs on every load (the block is always
-    # present), so a lazy import would buy nothing — and ``schema`` is the DTO
+    # #166); ``common.decision_source`` because the loader validates the
+    # ``decision_source:`` block (which provider a run asks) on every load,
+    # and the parser sits in ``common`` for exactly this reason. Those two are
+    # the parsers on the list — each runs on every load (the market-data
+    # block is always present, the decision-source default always applies),
+    # so a lazy import would buy nothing — and ``schema`` is the DTO
     # module it reaches for the candle-interval vocabulary. Named module by
     # module, never by a ``common.*`` prefix: the common-layer check below
     # only forbids IN-PACKAGE imports, so a prefix would admit a ``common``
@@ -119,6 +122,7 @@ def test_the_config_loader_imports_no_compute_module():
     allowed = {
         "common.config_coercion",
         "common.constants",
+        "common.decision_source",
         "common.enum_guard",
         "domains.perp.indicator_vocab",
         "domains.perp.market_data_config",

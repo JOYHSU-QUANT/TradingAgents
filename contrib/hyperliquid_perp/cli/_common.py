@@ -14,6 +14,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from ..common.decision_source import decision_source
 from ..config import dotenv_diagnosis
 from ..persistence import repository as repo
 from ..persistence.db import Database
@@ -296,8 +297,20 @@ def note_stranded_attempt(db: Database, run_id: str, *, never: str, restart_will
     )
 
 
-def _require_api_key() -> bool:
-    """True when OPENROUTER_API_KEY is set; else print the abort message.
+def _api_key_satisfied(config: dict) -> bool:
+    """Whether the run ``config`` describes has the model key it needs.
+
+    The ONE answer to "does this run need ``OPENROUTER_API_KEY``": an engine
+    run needs it set, a ``file_target`` run (``common.decision_source``) reads
+    the carry handoff, calls no model and needs nothing. Both daemons read
+    this — the fresh-run and restart lanes of ``paper``, ``live --loop`` —
+    rather than each composing the provider's requirement by hand.
+    """
+    return not decision_source(config).drives_engine or bool(os.environ.get("OPENROUTER_API_KEY"))
+
+
+def _require_api_key(config: dict) -> bool:
+    """True when the run has the key it needs (:func:`_api_key_satisfied`); else print the abort message.
 
     Checked only on paths that will actually drive the AI engine — a fresh paper
     run (always, before the run row is written), a healthy paper restart with
@@ -308,8 +321,10 @@ def _require_api_key() -> bool:
     reconcile has already canceled the plans, so exiting would leave the
     position with nobody watching its SL/TP). ``live`` WITHOUT ``--loop`` is the
     same keyless case: it arms, sweeps and exits without ever polling the AI.
+    A ``file_target`` run passes whatever the environment holds: its provider
+    reads the carry handoff and calls no model, on either lane.
     """
-    if os.environ.get("OPENROUTER_API_KEY"):
+    if _api_key_satisfied(config):
         return True
     print(
         "error: OPENROUTER_API_KEY is not set — the run drives the AI engine every "

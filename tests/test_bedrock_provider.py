@@ -49,6 +49,21 @@ def _capture_kwargs(monkeypatch):
     return captured
 
 
+def _use_real_bedrock_class(monkeypatch, region="us-east-1"):
+    """The real langchain-aws class, built fresh, in a shell without AWS settings.
+
+    A named-but-absent AWS_PROFILE in the developer shell would fail boto3's
+    session build before any assertion; credentials themselves are not needed.
+    """
+    pytest.importorskip("langchain_aws")
+    import tradingagents.llm_clients.bedrock_client as bc
+
+    monkeypatch.setattr(bc, "_BEDROCK_CLASS", None)
+    monkeypatch.setenv("AWS_DEFAULT_REGION", region)
+    for var in ("AWS_BEARER_TOKEN_BEDROCK", "AWS_PROFILE", "AWS_REGION"):
+        monkeypatch.delenv(var, raising=False)
+
+
 @pytest.mark.unit
 def test_bearer_token_passed_as_api_key(monkeypatch):
     # #1103: a Bedrock API key authenticates without AWS access keys.
@@ -71,10 +86,7 @@ def test_no_bearer_token_omits_api_key(monkeypatch):
 
 @pytest.mark.unit
 def test_construction_when_extra_installed(monkeypatch):
-    pytest.importorskip("langchain_aws")
-    import tradingagents.llm_clients.bedrock_client as bc
-    monkeypatch.setattr(bc, "_BEDROCK_CLASS", None)
-    monkeypatch.setenv("AWS_DEFAULT_REGION", "eu-west-1")
+    _use_real_bedrock_class(monkeypatch, region="eu-west-1")
     llm = create_llm_client("bedrock", "us.anthropic.claude-sonnet-5").get_llm()
     assert type(llm).__name__ == "NormalizedChatBedrockConverse"
     assert llm.region_name == "eu-west-1"
@@ -91,15 +103,7 @@ def test_a_forwarded_max_retries_reaches_the_botocore_retry_config(monkeypatch):
     # client it builds (constructing one needs no credentials and makes no
     # call), so a langchain-aws release that moves the knob fails here
     # instead of silently reverting a Bedrock deployment to the SDK default.
-    pytest.importorskip("langchain_aws")
-    import tradingagents.llm_clients.bedrock_client as bc
-
-    monkeypatch.setattr(bc, "_BEDROCK_CLASS", None)
-    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
-    # A named-but-absent profile in the developer shell would fail boto3's
-    # session build before the assertion; credentials themselves are not needed.
-    for var in ("AWS_BEARER_TOKEN_BEDROCK", "AWS_PROFILE", "AWS_REGION"):
-        monkeypatch.delenv(var, raising=False)
+    _use_real_bedrock_class(monkeypatch)
     llm = create_llm_client("bedrock", "us.anthropic.claude-sonnet-5", max_retries=8).get_llm()
     # botocore counts the first attempt too: max_attempts=8 is 9 attempts in all.
     assert llm.client.meta.config.retries["total_max_attempts"] == 9
@@ -141,3 +145,47 @@ def test_the_converse_stop_reason_is_read_through_the_real_converter(stop_reason
     assert read.stop_reason == stop_reason
     assert read.truncated is truncated
     assert read.output_tokens == 8192
+
+
+_CLAUDE_CASES = [
+    # #344: langchain-aws infers forced tool use for every Claude; the 5.5
+    # generation 400s on it, so the client says what the model takes.
+    ("us.anthropic.claude-sonnet-5-5-20260915-v1:0", False),
+    ("us.anthropic.claude-opus-4-8-v1:0", True),
+]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("model", "forced"), _CLAUDE_CASES)
+def test_a_claude_that_takes_no_forced_tool_choice_is_constructed_with_auto_only(
+    monkeypatch, model, forced
+):
+    captured = _capture_kwargs(monkeypatch)
+    create_llm_client("bedrock", model).get_llm()
+    assert captured.get("supports_tool_choice_values") == (None if forced else ("auto",))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("model", "forced"), _CLAUDE_CASES)
+def test_structured_output_through_the_real_class_forces_the_tool_only_where_it_is_taken(
+    monkeypatch, model, forced
+):
+    # Through the REAL langchain-aws dispatch: its function-calling path forces
+    # the schema's tool when "tool" is among the supported values and binds it
+    # unforced otherwise. The bind is captured; no call leaves the machine.
+    _use_real_bedrock_class(monkeypatch)
+    from langchain_aws import ChatBedrockConverse
+    from pydantic import BaseModel
+
+    class Schema(BaseModel):
+        x: int
+
+    bound = {}
+    monkeypatch.setattr(
+        ChatBedrockConverse,
+        "bind_tools",
+        lambda self, tools, **kw: bound.update(kw) or self,
+    )
+    llm = create_llm_client("bedrock", model).get_llm()
+    llm.with_structured_output(Schema)
+    assert bound["tool_choice"] == ("Schema" if forced else None)

@@ -1,4 +1,4 @@
-"""Declarative per-model capability table for OpenAI-compatible providers.
+"""Declarative per-model capability table for the LLM clients.
 
 This is the single place that knows which model IDs reject which API
 parameters or require which structured-output method. The LLM client
@@ -28,7 +28,7 @@ StructuredMethod = Literal[
 
 @dataclass(frozen=True)
 class ModelCapabilities:
-    """What an OpenAI-compatible model accepts at the API level."""
+    """What a model accepts at the API level."""
 
     supports_tool_choice: bool
     supports_json_mode: bool
@@ -82,12 +82,49 @@ _MINIMAX_THINKING = ModelCapabilities(
     requires_reasoning_split=True,
 )
 
+# Anthropic retired forced tool use with the Claude 5.5 generation: Sonnet 5.5,
+# Opus 5.5 and Fable 5.1 answer a ``tool_choice`` of type ``tool`` or ``any``
+# with a 400, "not supported for this model" (#338); Mythos 5.1, Fable's twin,
+# is taken to as well, not observed.
+# The schema still binds as a tool with the choice left to the model; an
+# answer in prose instead is a logged miss and a free-text retry
+# (``agents/utils/structured.py``). Anthropic has no ``json_object`` mode; its
+# structured outputs are what the native client takes for these models.
+_CLAUDE_NO_FORCED_TOOL_CHOICE = ModelCapabilities(
+    supports_tool_choice=False,
+    supports_json_mode=False,
+    supports_json_schema=True,
+    preferred_structured_method="function_calling",
+)
+
 _DEFAULT = ModelCapabilities(
     supports_tool_choice=True,
     supports_json_mode=True,
     supports_json_schema=True,
     preferred_structured_method="function_calling",
 )
+
+# ``claude-<family>-<major>[.-<minor>]``: the minor is at most two digits and
+# may not be followed by a digit, so a dated release (``claude-sonnet-5-20260901``)
+# reads as minor 0, not 20260901. Dotted versions are OpenRouter's spelling
+# (``anthropic/claude-sonnet-5.5``).
+_CLAUDE_MODEL = re.compile(r"^claude-(sonnet|opus|fable|mythos)-(\d+)(?:[.-](\d{1,2}))?(?!\d)")
+# The first version of each family without forced tool use; later ones inherit.
+_FORCED_TOOL_CHOICE_RETIRED = {"sonnet": (5, 5), "opus": (5, 5), "fable": (5, 1), "mythos": (5, 1)}
+
+
+def _claude_rejects_forced_tool_choice(model_name: str) -> bool:
+    """Whether Anthropic answers a forced ``tool_choice`` for this model with a 400 (#338).
+
+    Takes the native ID (``claude-sonnet-5-5``) and OpenRouter's
+    (``anthropic/claude-sonnet-5.5``); other publishers' namespaces and other
+    families (Haiku) are not known to, and answer ``False``.
+    """
+    match = _CLAUDE_MODEL.match(model_name.lower().removeprefix("anthropic/"))
+    if not match:
+        return False
+    family, major, minor = match.group(1), int(match.group(2)), int(match.group(3) or 0)
+    return (major, minor) >= _FORCED_TOOL_CHOICE_RETIRED[family]
 
 
 # Exact-ID matches take precedence over pattern matches.
@@ -132,4 +169,6 @@ def get_capabilities(model_name: str) -> ModelCapabilities:
     for pattern, caps in _BY_PATTERN:
         if pattern.match(model_name):
             return caps
+    if _claude_rejects_forced_tool_choice(model_name):
+        return _CLAUDE_NO_FORCED_TOOL_CHOICE
     return _DEFAULT

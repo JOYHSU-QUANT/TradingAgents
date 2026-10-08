@@ -148,6 +148,45 @@ class TestOpenRouterDeepSeekNamespace:
 
 
 @pytest.mark.unit
+class TestClaudeForcedToolChoice:
+    """The Claude 5.5 generation 400s on a forced tool_choice (#338): native IDs and
+    OpenRouter's ``anthropic/`` spelling alike; earlier versions, Haiku and other
+    publishers keep the default."""
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1", "claude-mythos-5-1",
+            "anthropic/claude-sonnet-5.5",
+            # Dated, suffixed and later releases inherit.
+            "claude-sonnet-5-5-20261001", "anthropic/claude-sonnet-5.5:thinking",
+            "claude-sonnet-5-6", "claude-opus-6",
+        ],
+    )
+    def test_rejecting_models(self, model):
+        caps = get_capabilities(model)
+        assert caps.supports_tool_choice is False
+        assert caps.preferred_structured_method == "function_calling"
+        assert caps.supports_json_schema is True
+        assert caps.supports_json_mode is False
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            # Just below each threshold, a lower major, and Haiku.
+            "claude-sonnet-5-4", "claude-opus-5-4", "claude-fable-5", "claude-mythos-5",
+            "claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-5-5",
+            # A dated Sonnet 5.0 is not minor 20260901.
+            "claude-sonnet-5-20260901", "anthropic/claude-sonnet-5",
+            # Another publisher's namespace is not stripped.
+            "someone/claude-sonnet-5.5", "gpt-5.6",
+        ],
+    )
+    def test_other_models_keep_the_default(self, model):
+        assert get_capabilities(model).supports_tool_choice is True
+
+
+@pytest.mark.unit
 def test_capabilities_dataclass_is_frozen():
     """Capability rows are immutable so they can be safely shared."""
     caps = get_capabilities("deepseek-chat")

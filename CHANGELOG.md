@@ -10,6 +10,23 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **Structured output no longer forces a `tool_choice` the Claude 5.5
+  generation rejects** (`tradingagents/llm_clients/capabilities.py`,
+  `anthropic_client.py`, issue #338). Sonnet 5.5, Opus 5.5 and Fable 5.1
+  answer a `tool_choice` of type `tool` or `any` with a 400, so every
+  structured call of the Research Manager, Portfolio Manager, Trader and
+  Sentiment Analyst on those models failed first and ran on the free-text
+  fallback, with two warnings per call. Through OpenRouter
+  (`anthropic/claude-sonnet-5.5` and the like) the capability table now
+  marks these models as not taking `tool_choice`, so the schema binds as a
+  tool with the choice left to the model, as DeepSeek's thinking models
+  already do. On the native Anthropic client, whose function-calling mode
+  forces the tool, these models take Claude's structured outputs
+  (`method="json_schema"`, the `output_config.format` request field) instead;
+  `langchain-anthropic` sends that shape from 1.3.2, now the floor. Later
+  versions of each family inherit; Haiku and other publishers' namespaces
+  keep the default.
+
 - **`contrib/uniswap_v3`: `lightsail-install.sh` clones with the Hyperliquid
   checkout's deploy key** (`schedule/lightsail-install.sh`, issue #340). The
   first install on the Lightsail host failed at the clone with `Permission
@@ -88,8 +105,9 @@ Breaking changes within the 0.x line are called out explicitly.
   `max_tokens: 8192` itself, the cap paper-BTC-6 and -7 were asked under.
   The Uniswap judge's engine config sets `structured_output: False`, as the
   perp's does: the rating is read from the decision's text, which the
-  free-text path gives as well, and the structured binding forces a `tool_choice` the Claude 5.5 models refuse
-  with a 400 from each manager before the same free-text fallback (#338).
+  free-text path gives as well; at the time the structured binding also forced a `tool_choice`
+  the Claude 5.5 models refused with a 400 from each manager before the same free-text fallback
+  (#338, fixed under Fixed above).
   With the free-text path the only one, the rating is no longer taken
   from the engine's signal, whose reader falls back to the first rating
   word anywhere in the text (a decision cut short by the cap, or written

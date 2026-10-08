@@ -4,6 +4,7 @@ from typing import Any
 from langchain_anthropic import ChatAnthropic
 
 from .base_client import _COMMON_PASSTHROUGH_KWARGS, BaseLLMClient, normalize_content
+from .capabilities import get_capabilities
 from .validators import validate_model
 
 # Anthropic's extended-thinking ``effort`` parameter is accepted by Opus 4.5+,
@@ -34,15 +35,29 @@ def _supports_effort(model: str) -> bool:
 
 
 class NormalizedChatAnthropic(ChatAnthropic):
-    """ChatAnthropic with normalized content output.
+    """ChatAnthropic with normalized content output and a structured-output method per model.
 
     Claude models with extended thinking or tool use return content as a
     list of typed blocks. This normalizes to string for consistent
     downstream handling.
+
+    ``with_structured_output`` keeps langchain's default, the schema bound as
+    a tool the model is forced to call, for the models that take it. Forced
+    tool use is gone from the Claude 5.5 generation on (#338), and langchain's
+    function-calling path has no unforced form, so a model the capability
+    table marks as not taking ``tool_choice`` gets Claude's own structured
+    outputs (``method="json_schema"``, the ``output_config.format`` request
+    field) instead.
     """
 
     def invoke(self, input, config=None, **kwargs):
         return normalize_content(super().invoke(input, config, **kwargs))
+
+    def with_structured_output(self, schema, *, method="function_calling", **kwargs):
+        caps = get_capabilities(self.model)
+        if method == "function_calling" and not caps.supports_tool_choice and caps.supports_json_schema:
+            method = "json_schema"
+        return super().with_structured_output(schema, method=method, **kwargs)
 
 
 class AnthropicClient(BaseLLMClient):

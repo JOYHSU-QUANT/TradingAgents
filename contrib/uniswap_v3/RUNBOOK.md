@@ -51,12 +51,16 @@ ssh -i ~/.ssh/<key> ubuntu@<host> sudo sh /tmp/lightsail-install.sh <commit>
 `<commit>` 是要跑的版本（develop 上的 merge commit），**寫 commit、不要寫分支名**。從 checkout 裡跑是安全的：整支腳本先讀完才執行，
 升級改寫這個檔不影響正在跑的那次。clone 的來源預設是 hyperliquid checkout 的 origin；要指定就 `sudo REPO_URL=<url> sh ...`
 （寫在 `sudo` 後面：sudo 會丟掉呼叫者的環境變數），腳本會印出它 clone 的 URL。
+hyperliquid checkout 連得上 origin 靠的是它 **repo 內**的 `core.sshCommand`（deploy key），trader 沒有 `~/.ssh/config`；
+腳本 clone 時先把同一個設定寫進新 checkout 再 fetch，之後每次 fetch 也都用它，主機不必另補 `~/.ssh/config`
+（issue #340）。`REPO_URL` 指定的來源不帶這把 key，憑證自備。
 
 它做的事（可重複執行；第二次就是升級）：
 
 1. 記下 timer 原本有沒有在跑，然後停掉它。正在跑的 visit 會先跑完：腳本看到 service 還 active 就把 timer 開回去（原本在跑的話）、
    結束碼 3，等它跑完再來一次。升級避開 visit 的時段（00:10–03:05 UTC）就不會撞到。
-2. 以 `trader` 身分：沒有 checkout 就從 hyperliquid checkout 的 origin（伺服器上唯一有 deploy key 的遠端）clone 一份；
+2. 以 `trader` 身分：沒有 checkout 就從 hyperliquid checkout 的 origin（伺服器上唯一有 deploy key 的遠端）clone 一份，
+   帶上它的 `core.sshCommand`；已有的 checkout 若少了這個設定也在這裡補上（手動設過的不動；補了會印一行）；
    fetch、`git checkout --detach <commit>`（印出原本在哪個 commit，回退用）；沒有 `.venv` 就建；
    `pip install -e ".[dev]" -r contrib/uniswap_v3/requirements.txt`；建 `/home/trader/data/uniswap`；`.env` 不在就寫空白範本（§1.4）、
    `paper-visit.local.sh` 不在就寫好伺服器路徑的那份（§3.1），`.env` 裡哪個 key 不在或沒有值每次都會警告；

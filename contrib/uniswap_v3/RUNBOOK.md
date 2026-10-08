@@ -51,9 +51,12 @@ ssh -i ~/.ssh/<key> ubuntu@<host> sudo sh /tmp/lightsail-install.sh <commit>
 `<commit>` 是要跑的版本（develop 上的 merge commit），**寫 commit、不要寫分支名**。從 checkout 裡跑是安全的：整支腳本先讀完才執行，
 升級改寫這個檔不影響正在跑的那次。clone 的來源預設是 hyperliquid checkout 的 origin；要指定就 `sudo REPO_URL=<url> sh ...`
 （寫在 `sudo` 後面：sudo 會丟掉呼叫者的環境變數），腳本會印出它 clone 的 URL。
-hyperliquid checkout 連得上 origin 靠的是它 **repo 內**的 `core.sshCommand`（deploy key），trader 沒有 `~/.ssh/config`；
-腳本 clone 時先把同一個設定寫進新 checkout 再 fetch，之後每次 fetch 也都用它，主機不必另補 `~/.ssh/config`
-（issue #340）。`REPO_URL` 指定的來源不帶這把 key，憑證自備。
+hyperliquid checkout 連得上 origin 靠的是它 **repo 內**的 `core.sshCommand`（deploy key），不是 `~/.ssh/config`；
+腳本 clone 時用 `git clone --config` 把同一個設定寫進新 checkout（第一次 fetch 之前），之後每次 fetch 也都用它，
+主機不需要 `~/.ssh/config`（issue #340；2026-10-07 第一次裝時手寫的那份，升級印出 `core.sshCommand set from the
+Hyperliquid checkout` 之後可以刪掉，刪完 `sudo -u trader git -C ~trader/uniswap-paper fetch` 一次確認）。
+這是複製一次、不同步：hl checkout 之後換 key，這邊要自己 `git config core.sshCommand` 改。
+`REPO_URL` 指定的來源若不是 hl 的 origin 就不帶這把 key，憑證自備。
 
 它做的事（可重複執行；第二次就是升級）：
 

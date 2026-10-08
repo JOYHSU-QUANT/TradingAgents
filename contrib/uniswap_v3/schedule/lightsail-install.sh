@@ -48,15 +48,17 @@ as_trader() {
         before=$(git -C "$CHECKOUT" rev-parse --short HEAD 2>/dev/null || true)
     else
         url=${REPO_URL:-$(git -C "$SOURCE" remote get-url origin)}
+        ssh_command=$(deploy_key "$url")
         # Without any credential a URL may carry before its @.
-        echo "cloning ${url##*@}"
-        git init --quiet "$CHECKOUT"
-        git -C "$CHECKOUT" remote add origin "$url"
+        echo "cloning ${url##*@}${ssh_command:+ with the Hyperliquid checkout's deploy key}"
+        # --config: in the new checkout before its first fetch, and kept for every
+        # fetch after. A clone that fails leaves nothing behind, so the next run
+        # reads REPO_URL and the origin afresh.
+        git clone --quiet --no-checkout ${ssh_command:+--config "core.sshCommand=$ssh_command"} "$url" "$CHECKOUT"
     fi
     cd "$CHECKOUT"
-    # The key goes in before the first fetch, and stays for every fetch after;
-    # a checkout from before the key travelled gets it here too, one set by
-    # hand is left as it is.
+    # A checkout from before the key travelled gets it at the upgrade; one set
+    # by hand is left as it is.
     ssh_command=$(deploy_key "$(git remote get-url origin)")
     if [ -n "$ssh_command" ] && ! git config --get core.sshCommand >/dev/null; then
         git config core.sshCommand "$ssh_command"

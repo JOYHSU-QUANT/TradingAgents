@@ -14,9 +14,10 @@ Breaking changes within the 0.x line are called out explicitly.
   Claude 5.5 generation rejects** (`tradingagents/llm_clients/bedrock_client.py`,
   `capabilities.py`, issue #344). The #338 fix covered OpenRouter and the
   native Anthropic client; on Bedrock, langchain-aws infers forced tool use
-  for every Claude, so structured output on `us.anthropic.claude-sonnet-5-5-*`
-  and the like would still be forced, the 400 observed on Anthropic's API
-  with it, and run on the free-text fallback. The capability table now reads
+  for every Claude but a thinking-enabled 3.7 or 4.x, so structured output on
+  `us.anthropic.claude-sonnet-5-5-*` and the like would
+  still be forced; Anthropic's API answers that with a 400, and the agent
+  would run on the free-text fallback. The capability table now reads
   Bedrock's spelling of these models (a model ID with or without a
   cross-region inference profile prefix, or an inference-profile or
   foundation-model ARN; an application inference profile names no model and

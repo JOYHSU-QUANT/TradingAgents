@@ -22,9 +22,10 @@ Breaking changes within the 0.x line are called out explicitly.
   tool with the choice left to the model, as DeepSeek's thinking models
   already do. On the native Anthropic client, whose function-calling mode
   forces the tool, these models take Claude's structured outputs
-  (`method="json_schema"`) instead, which `langchain-anthropic` has from
-  1.1.0, now the floor. Later versions of each family inherit; Haiku and
-  other publishers' namespaces keep the default.
+  (`method="json_schema"`, the `output_config.format` request field) instead;
+  `langchain-anthropic` sends that shape from 1.3.2, now the floor. Later
+  versions of each family inherit; Haiku and other publishers' namespaces
+  keep the default.
 
 - **`live --run-id` no longer exits 2 when the safe-mode read after the
   shutdown sweep fails** (`contrib/hyperliquid_perp/cli/live.py`, issue #308).

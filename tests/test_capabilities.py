@@ -174,7 +174,8 @@ class TestClaudeForcedToolChoice:
         "model",
         [
             # Just below each threshold, a lower major, and Haiku.
-            "claude-sonnet-5-4", "claude-fable-5", "claude-sonnet-4-6", "claude-haiku-5-5",
+            "claude-sonnet-5-4", "claude-opus-5-4", "claude-fable-5", "claude-mythos-5",
+            "claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-5-5",
             # A dated Sonnet 5.0 is not minor 20260901.
             "claude-sonnet-5-20260901", "anthropic/claude-sonnet-5",
             # Another publisher's namespace is not stripped.

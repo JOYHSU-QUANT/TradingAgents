@@ -28,7 +28,7 @@ StructuredMethod = Literal[
 
 @dataclass(frozen=True)
 class ModelCapabilities:
-    """What an OpenAI-compatible model accepts at the API level."""
+    """What a model accepts at the API level."""
 
     supports_tool_choice: bool
     supports_json_mode: bool
@@ -86,8 +86,9 @@ _MINIMAX_THINKING = ModelCapabilities(
 # Opus 5.5 and Fable 5.1 answer a ``tool_choice`` of type ``tool`` or ``any``
 # with a 400, "not supported for this model" (#338); Mythos 5.1, Fable's twin,
 # is taken to as well, not observed.
-# The schema still binds as a tool; the choice is left to the model, which the
-# agents' prompts direct to it. Anthropic has no ``json_object`` mode; its
+# The schema still binds as a tool with the choice left to the model; an
+# answer in prose instead is a logged miss and a free-text retry
+# (``agents/utils/structured.py``). Anthropic has no ``json_object`` mode; its
 # structured outputs are what the native client takes for these models.
 _CLAUDE_NO_FORCED_TOOL_CHOICE = ModelCapabilities(
     supports_tool_choice=False,
@@ -103,9 +104,10 @@ _DEFAULT = ModelCapabilities(
     preferred_structured_method="function_calling",
 )
 
-# ``claude-<family>-<major>[.-<minor>]``, the minor at most two digits so a dated
-# release (``claude-sonnet-5-20260901``) is not read as minor 20260901. Dotted
-# versions are OpenRouter's spelling (``anthropic/claude-sonnet-5.5``).
+# ``claude-<family>-<major>[.-<minor>]``: the minor is at most two digits and
+# may not be followed by a digit, so a dated release (``claude-sonnet-5-20260901``)
+# reads as minor 0, not 20260901. Dotted versions are OpenRouter's spelling
+# (``anthropic/claude-sonnet-5.5``).
 _CLAUDE_MODEL = re.compile(r"^claude-(sonnet|opus|fable|mythos)-(\d+)(?:[.-](\d{1,2}))?(?!\d)")
 # The first version of each family without forced tool use; later ones inherit.
 _FORCED_TOOL_CHOICE_RETIRED = {"sonnet": (5, 5), "opus": (5, 5), "fable": (5, 1), "mythos": (5, 1)}

@@ -65,5 +65,7 @@ def test_native_anthropic_keeps_function_calling_for_an_earlier_claude(monkeypat
 def test_native_anthropic_sends_a_method_asked_for_by_name(monkeypatch):
     captured = _capture(monkeypatch, ChatAnthropic)
     llm = create_llm_client(provider="anthropic", model="claude-sonnet-5-5").get_llm()
-    llm.with_structured_output(Schema, method="json_schema", include_raw=True)
-    assert captured == {"method": "json_schema", "include_raw": True}
+    # A name other than the default is forwarded as given, not rewritten by the
+    # dispatch (the stub stands in for langchain, which would judge the name).
+    llm.with_structured_output(Schema, method="json_mode", include_raw=True)
+    assert captured == {"method": "json_mode", "include_raw": True}

@@ -9,8 +9,9 @@
 # the way it found it: running if it was running, and otherwise left for
 # `systemctl enable --now` once the store and the runs are there. As trader
 # (which the root half runs it as, with --as-trader) it clones the checkout
-# from the Hyperliquid checkout's origin, or REPO_URL when set (sudo drops
-# the caller's variables, so `sudo REPO_URL=<url> sh ...`), or fetches
+# from the Hyperliquid checkout's origin, with that checkout's deploy key
+# (its core.sshCommand) set in the clone, or from REPO_URL when set (sudo
+# drops the caller's variables, so `sudo REPO_URL=<url> sh ...`), or fetches
 # it, detaches it at <commit>, makes or updates its own venv, writes a
 # template of .env and of the visit's settings when they are not there, and
 # runs the package's tests: a checkout whose tests fail is left at <commit>
@@ -29,6 +30,17 @@ UNIT=uniswap-v3-paper
 SCHEDULE=contrib/uniswap_v3/schedule
 SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 
+# The Hyperliquid checkout reaches its origin with a deploy key its own config
+# names (core.sshCommand), not one in ~/.ssh/config, which the trader has none
+# of (#340). Prints that setting when $1 is that origin, for a checkout of it
+# to carry; nothing for another URL (REPO_URL), which brings its own
+# credential, or none.
+deploy_key() {
+    if [ "$1" = "$(git -C "$SOURCE" remote get-url origin 2>/dev/null)" ]; then
+        git -C "$SOURCE" config --local --get core.sshCommand || true
+    fi
+}
+
 as_trader() {
     before=
     if [ -d "$CHECKOUT/.git" ]; then
@@ -36,11 +48,22 @@ as_trader() {
         before=$(git -C "$CHECKOUT" rev-parse --short HEAD 2>/dev/null || true)
     else
         url=${REPO_URL:-$(git -C "$SOURCE" remote get-url origin)}
+        ssh_command=$(deploy_key "$url")
         # Without any credential a URL may carry before its @.
-        echo "cloning ${url##*@}"
-        git clone --quiet --no-checkout "$url" "$CHECKOUT"
+        echo "cloning ${url##*@}${ssh_command:+ with the Hyperliquid checkout's deploy key}"
+        # --config: in the new checkout before its first fetch, and kept for every
+        # fetch after. A clone that fails leaves nothing behind, so the next run
+        # reads REPO_URL and the origin afresh.
+        git clone --quiet --no-checkout ${ssh_command:+--config "core.sshCommand=$ssh_command"} "$url" "$CHECKOUT"
     fi
     cd "$CHECKOUT"
+    # A checkout from before the key travelled gets it at the upgrade; one set
+    # by hand is left as it is.
+    ssh_command=$(deploy_key "$(git remote get-url origin)")
+    if [ -n "$ssh_command" ] && ! git config --local --get core.sshCommand >/dev/null; then
+        git config core.sshCommand "$ssh_command"
+        echo "core.sshCommand set from the Hyperliquid checkout"
+    fi
     git fetch --quiet origin
     git checkout --quiet --detach "$1"
     echo "checkout at $(git rev-parse --short HEAD): $(git log -1 --format=%s)${before:+ (was at $before)}"

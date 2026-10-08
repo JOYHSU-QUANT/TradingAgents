@@ -230,6 +230,143 @@ def test_the_shell_scripts_parse():
         subprocess.run([_SH, "-n", str(script)], check=True)
 
 
+# The installer's trader half, run against a Hyperliquid checkout and an origin
+# made for the test, with a python3 whose venv is two stubs that exit 0 (the pip
+# install and the package's tests are not what is under test).
+_PYTHON3_STUB = """#!/bin/sh
+case "$*" in
+    "-m venv "*)
+        mkdir -p "$3/bin"
+        printf '#!/bin/sh\\nexit 0\\n' >"$3/bin/python"
+        cp "$3/bin/python" "$3/bin/pip"
+        chmod 755 "$3/bin/python" "$3/bin/pip" ;;
+esac
+exit 0
+"""
+# The origin is an ssh URL to a host that is not there: the one way to it is the
+# Hyperliquid checkout's core.sshCommand, this script standing in for ssh, which
+# serves the bare repository itself. Asked -G (git probing for OpenSSH) it says
+# no, so git passes it just the host and the command.
+_SSH_STUB = """#!/bin/sh
+[ "$1" = -G ] && exit 1
+case "$*" in
+    *git-upload-pack*) exec git upload-pack "{origin}" ;;
+    *git-receive-pack*) exec git receive-pack "{origin}" ;;
+esac
+exit 1
+"""
+_ORIGIN_URL = "ssh://git@nowhere.invalid/TradingAgents.git"
+# Git reads none of the developer's own config: the test is about what the
+# installer writes into the checkout.
+_GIT_ENV = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}
+
+
+def _git(*args: str, cwd: Path) -> str:
+    env = {**os.environ, **_GIT_ENV, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@x"}
+    done = subprocess.run(["git", *args], cwd=cwd, env=env, check=True, capture_output=True, text=True)
+    return done.stdout.strip()
+
+
+def _install_host(tmp_path: Path) -> tuple[Path, str, str]:
+    """A host as the installer finds it: the Hyperliquid checkout, reaching its origin with a deploy key.
+
+    Returns the trader half of the installer as a script that takes its paths
+    from the command line, the commit to install, and the deploy key (the
+    source checkout's core.sshCommand).
+    """
+    if _SH is None:
+        pytest.skip("no sh on this machine")
+    origin = tmp_path / "origin.git"
+    _git("init", "--quiet", "--bare", "--initial-branch=main", str(origin), cwd=tmp_path)
+    source = tmp_path / "TradingAgents"
+    _git("clone", "--quiet", origin.as_posix(), str(source), cwd=tmp_path)
+    (source / "contrib" / "uniswap_v3" / "schedule").mkdir(parents=True)
+    (source / "contrib" / "uniswap_v3" / "schedule" / ".keep").write_text("", encoding="ascii")
+    _git("add", ".", cwd=source)
+    _git("commit", "--quiet", "-m", "a tree the installer can check out", cwd=source)
+    _git("push", "--quiet", "origin", "HEAD:main", cwd=source)
+    ssh = tmp_path / "bin" / "ssh-stub"
+    ssh.parent.mkdir()
+    ssh.write_text(_SSH_STUB.format(origin=origin.as_posix()), encoding="ascii", newline="\n")
+    ssh.chmod(0o755)
+    deploy_key = f'sh "{ssh.as_posix()}"'
+    _git("remote", "set-url", "origin", _ORIGIN_URL, cwd=source)
+    _git("config", "core.sshCommand", deploy_key, cwd=source)
+    commit = _git("rev-parse", "HEAD", cwd=source)
+    lines = _visit_lines(_INSTALL_SH)
+    definitions = lines[: lines.index('main "$@"')]
+    trader_half = tmp_path / "trader-half.sh"
+    trader_half.write_text(
+        "\n".join(definitions)
+        + '\nSOURCE=$1\nCHECKOUT=$2\nDATA=$3\nas_trader "$4"\n',
+        encoding="ascii",
+        newline="\n",
+    )
+    stub = tmp_path / "bin" / "python3"
+    stub.write_text(_PYTHON3_STUB, encoding="ascii", newline="\n")
+    stub.chmod(0o755)
+    return trader_half, commit, deploy_key
+
+
+def _install(
+    tmp_path: Path, monkeypatch, trader_half: Path, commit: str, **env: str
+) -> tuple[Path, str]:
+    """Run the trader half; returns the checkout it made or upgraded, and what it said."""
+    checkout = tmp_path / "uniswap-paper"
+    monkeypatch.setenv("PATH", (tmp_path / "bin").as_posix() + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("HOME", tmp_path.as_posix())
+    for name, value in {**_GIT_ENV, **env}.items():
+        monkeypatch.setenv(name, value)
+    done = subprocess.run(
+        [_SH, str(trader_half), (tmp_path / "TradingAgents").as_posix(),
+         checkout.as_posix(), (tmp_path / "data").as_posix(), commit],
+        check=False, capture_output=True, text=True,
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    return checkout, done.stdout
+
+
+def test_the_installer_clones_with_the_hyperliquid_checkouts_deploy_key_and_keeps_it(
+    tmp_path, monkeypatch
+):
+    # The host has no ~/.ssh/config: the key the Hyperliquid checkout reaches its
+    # origin with is in that checkout's own config, and the clone of the same
+    # origin must take it (#340). The origin here is reachable through that key
+    # alone, so the install succeeds only when the key is in the checkout before
+    # its first fetch, and every fetch after.
+    trader_half, commit, deploy_key = _install_host(tmp_path)
+    checkout, said = _install(tmp_path, monkeypatch, trader_half, commit)
+    assert "cloning nowhere.invalid/TradingAgents.git with the Hyperliquid checkout's deploy key" in said
+    assert "core.sshCommand set" not in said
+    assert _git("config", "--local", "--get", "core.sshCommand", cwd=checkout) == deploy_key
+    assert _git("rev-parse", "HEAD", cwd=checkout) == commit
+    # The upgrade of a checkout from before the key travelled gives it the key,
+    # before that upgrade's own fetch.
+    _git("config", "--local", "--unset", "core.sshCommand", cwd=checkout)
+    _, said = _install(tmp_path, monkeypatch, trader_half, commit)
+    assert "core.sshCommand set from the Hyperliquid checkout" in said
+    assert _git("config", "--local", "--get", "core.sshCommand", cwd=checkout) == deploy_key
+    # One set by hand is left as it is.
+    by_hand = deploy_key + " -o BatchMode=yes"
+    _git("config", "core.sshCommand", by_hand, cwd=checkout)
+    _, said = _install(tmp_path, monkeypatch, trader_half, commit)
+    assert "core.sshCommand" not in said
+    assert _git("config", "--local", "--get", "core.sshCommand", cwd=checkout) == by_hand
+
+
+def test_the_installer_clones_repo_url_without_the_deploy_key(tmp_path, monkeypatch):
+    # Another origin brings its own credential, or none: the Hyperliquid key is
+    # for the Hyperliquid origin.
+    trader_half, commit, _ = _install_host(tmp_path)
+    other = tmp_path / "other.git"
+    _git("clone", "--quiet", "--bare", (tmp_path / "origin.git").as_posix(), str(other), cwd=tmp_path)
+    checkout, said = _install(tmp_path, monkeypatch, trader_half, commit, REPO_URL=other.as_posix())
+    assert f"cloning {other.as_posix()}\n" in said and "deploy key" not in said
+    assert _git("config", "--local", "--get", "--default=", "core.sshCommand", cwd=checkout) == ""
+    assert _git("remote", "get-url", "origin", cwd=checkout) == other.as_posix()
+
+
 # A python that records what it is asked, one line per call, and exits as told
 # for the command (the word after contrib.uniswap_v3); the second paper call,
 # the AI run's, is told apart by EXIT_PAPER_AI. Told LOCK_LOG, it takes the

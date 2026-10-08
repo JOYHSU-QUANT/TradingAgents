@@ -334,11 +334,12 @@ def test_another_coins_handoff_maintains(tmp_path, caplog):
         (_handoff(as_of_ms="1773532800000"), "as_of_ms must be a whole number"),
         (_handoff(as_of_ms=True), "as_of_ms must be a whole number"),
         (_handoff(as_of_ms=10**22), "is not an instant"),
-        # 9999-12-31 decodes; the day AFTER it does not exist, and that is
+        # 9999-12-31 decodes; the day AFTER it does not exist (nor, for the
+        # MIN row, the day before), and that is
         # caught at construction rather than inside check_applicable, where an
         # OverflowError would escape the StaleTarget net.
-        (_handoff(as_of_ms=MAX_EPOCH_MS), "has no day after it"),
-        (_handoff(as_of_ms=MIN_EPOCH_MS), "has no day after it"),  # nor a day before it
+        (_handoff(as_of_ms=MAX_EPOCH_MS), "no whole day on both sides"),
+        (_handoff(as_of_ms=MIN_EPOCH_MS), "no whole day on both sides"),
         (_handoff(perp="short"), "perp block must be an object"),
         (_handoff(perp={"side": "long", "margin_pct": 30}), "perp.side must be one of"),
         (_handoff(perp={"side": None, "margin_pct": 30}), "perp.side must be one of"),

@@ -183,7 +183,9 @@ class FileTarget:
             # Both ends: ``check_applicable`` also looks one window BEFORE as_of.
             _ = self.expires_at, self.as_of - HANDOFF_WINDOW
         except OverflowError:
-            raise StaleTarget(f"as_of {self.as_of.isoformat()} has no day after it") from None
+            raise StaleTarget(
+                f"as_of {self.as_of.isoformat()} has no whole day on both sides of it"
+            ) from None
         try:
             check_enum(self.side, PERP_SIDES, name="perp.side")
         except ValueError as exc:

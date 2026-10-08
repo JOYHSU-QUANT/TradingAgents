@@ -10,6 +10,21 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **Structured output no longer forces a `tool_choice` the Claude 5.5
+  generation rejects** (`tradingagents/llm_clients/capabilities.py`,
+  `anthropic_client.py`, issue #338). Sonnet 5.5, Opus 5.5 and Fable 5.1
+  answer a `tool_choice` of type `tool` or `any` with a 400, so every
+  structured call of the Research Manager, Portfolio Manager, Trader and
+  Sentiment Analyst on those models failed first and ran on the free-text
+  fallback, with two warnings per call. Through OpenRouter
+  (`anthropic/claude-sonnet-5.5` and the like) the capability table now
+  marks these models as not taking `tool_choice`, so the schema binds as a
+  tool with the choice left to the model, as DeepSeek's thinking models
+  already do. On the native Anthropic client, whose function-calling mode
+  forces the tool, these models take Claude's structured outputs
+  (`method="json_schema"`) instead. Later versions of each family inherit;
+  Haiku and other publishers' namespaces keep the default.
+
 - **`live --run-id` no longer exits 2 when the safe-mode read after the
   shutdown sweep fails** (`contrib/hyperliquid_perp/cli/live.py`, issue #308).
   The read behind the `safe_mode:` summary line had no guard, so a raise

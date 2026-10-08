@@ -111,16 +111,25 @@ _DEFAULT = ModelCapabilities(
 _CLAUDE_MODEL = re.compile(r"^claude-(sonnet|opus|fable|mythos)-(\d+)(?:[.-](\d{1,2}))?(?!\d)")
 # The first version of each family without forced tool use; later ones inherit.
 _FORCED_TOOL_CHOICE_RETIRED = {"sonnet": (5, 5), "opus": (5, 5), "fable": (5, 1), "mythos": (5, 1)}
+# Anthropic's own namespace in front of a Claude ID: OpenRouter's ``anthropic/``,
+# Bedrock's ``anthropic.`` with or without a cross-region inference profile
+# prefix (``us.``, ``global.``, ``us-gov.``). Another publisher's is left on.
+_ANTHROPIC_NAMESPACE = re.compile(r"^(?:[a-z-]+\.)?anthropic[./]")
+# A Bedrock ARN up to its resource: an inference profile's or a foundation
+# model's ends in the model ID; an application inference profile's ends in an
+# opaque ID that names no model, so it keeps the default.
+_BEDROCK_ARN = re.compile(r"^arn:aws[a-z-]*:bedrock:[^/]*/")
 
 
 def _claude_rejects_forced_tool_choice(model_name: str) -> bool:
     """Whether Anthropic answers a forced ``tool_choice`` for this model with a 400 (#338).
 
-    Takes the native ID (``claude-sonnet-5-5``) and OpenRouter's
-    (``anthropic/claude-sonnet-5.5``); other publishers' namespaces and other
-    families (Haiku) are not known to, and answer ``False``.
+    Takes the native ID (``claude-sonnet-5-5``) or one in Anthropic's own
+    namespace (``_ANTHROPIC_NAMESPACE``: OpenRouter, Bedrock); other publishers'
+    namespaces and other families (Haiku) are not known to, and answer ``False``.
     """
-    match = _CLAUDE_MODEL.match(model_name.lower().removeprefix("anthropic/"))
+    name = _BEDROCK_ARN.sub("", model_name.lower())
+    match = _CLAUDE_MODEL.match(_ANTHROPIC_NAMESPACE.sub("", name))
     if not match:
         return False
     family, major, minor = match.group(1), int(match.group(2)), int(match.group(3) or 0)

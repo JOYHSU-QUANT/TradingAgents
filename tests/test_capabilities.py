@@ -149,15 +149,20 @@ class TestOpenRouterDeepSeekNamespace:
 
 @pytest.mark.unit
 class TestClaudeForcedToolChoice:
-    """The Claude 5.5 generation 400s on a forced tool_choice (#338): native IDs and
-    OpenRouter's ``anthropic/`` spelling alike; earlier versions, Haiku and other
-    publishers keep the default."""
+    """The Claude 5.5 generation 400s on a forced tool_choice (#338): native IDs,
+    OpenRouter's ``anthropic/`` and Bedrock's ``anthropic.`` spellings alike (#344);
+    earlier versions, Haiku and other publishers keep the default."""
 
     @pytest.mark.parametrize(
         "model",
         [
             "claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1", "claude-mythos-5-1",
             "anthropic/claude-sonnet-5.5",
+            # Bedrock's spelling, with and without an inference-profile prefix (#344).
+            "us.anthropic.claude-sonnet-5-5-20260915-v1:0", "anthropic.claude-opus-5-5-20261001-v1:0",
+            "us-gov.anthropic.claude-sonnet-5-5-v1:0", "eu.anthropic.claude-sonnet-5-5-v1:0",
+            "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-sonnet-5-5-v1:0",
+            "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-opus-5-5-v1:0",
             # Dated, suffixed and later releases inherit.
             "claude-sonnet-5-5-20261001", "anthropic/claude-sonnet-5.5:thinking",
             "claude-sonnet-5-6", "claude-opus-6",
@@ -178,6 +183,9 @@ class TestClaudeForcedToolChoice:
             "claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-5-5",
             # A dated Sonnet 5.0 is not minor 20260901.
             "claude-sonnet-5-20260901", "anthropic/claude-sonnet-5",
+            "us.anthropic.claude-sonnet-5-20260901-v1:0",
+            # An application inference profile names no model.
+            "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc123xyz",
             # Another publisher's namespace is not stripped.
             "someone/claude-sonnet-5.5", "gpt-5.6",
         ],

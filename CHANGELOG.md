@@ -27,6 +27,18 @@ Breaking changes within the 0.x line are called out explicitly.
   versions of each family inherit; Haiku and other publishers' namespaces
   keep the default.
 
+- **`contrib/uniswap_v3`: `lightsail-install.sh` clones with the Hyperliquid
+  checkout's deploy key** (`schedule/lightsail-install.sh`, issue #340). The
+  first install on the Lightsail host failed at the clone with `Permission
+  denied (publickey)`: the script took the Hyperliquid checkout's origin URL
+  but not the `core.sshCommand` that checkout reaches it with, and the trader
+  has no `~/.ssh/config` to fall back on. A clone of that origin now passes
+  the setting with `git clone --config`, so it is in the new checkout before
+  its first fetch and stays for every fetch after; a checkout from before
+  this gets it at its next upgrade when it has none, and one set by hand is
+  left alone. It is copied once, not kept in step. A `REPO_URL` other than
+  that origin carries no key. RUNBOOK §0.1 says so.
+
 - **`live --run-id` no longer exits 2 when the safe-mode read after the
   shutdown sweep fails** (`contrib/hyperliquid_perp/cli/live.py`, issue #308).
   The read behind the `safe_mode:` summary line had no guard, so a raise

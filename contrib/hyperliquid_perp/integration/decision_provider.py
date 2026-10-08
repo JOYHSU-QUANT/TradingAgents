@@ -13,6 +13,7 @@ model. Which one a run gets is the ``decision_source:`` block's say
 from __future__ import annotations
 
 import logging
+from abc import ABC, abstractmethod
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -26,13 +27,15 @@ from ..common.decision_source import FILE_TARGET_PROVIDER, decision_source
 from ..common.prompt_regime import PROMPT_VERSION, position_section_omitted, prompt_regime_line
 
 if TYPE_CHECKING:  # annotation-only: the heavy in-package imports stay function-local
+    from ..domains.perp.target_decision import ParsedDecision
     from ..ports import DecisionProvider
+    from ..runtime.decision import DecisionInput
     from ..runtime.position_facts import BookFacts, BookSource
 
 logger = logging.getLogger(__name__)
 
 
-class MarketContextProvider:
+class MarketContextProvider(ABC):
     """The ``build_input`` half of a :class:`~..ports.DecisionProvider`.
 
     Fetches market data, runs the pre-LLM context guards, persists the full
@@ -49,6 +52,15 @@ class MarketContextProvider:
     stashes ``_context_text`` / ``_format_text`` on the instance for the
     engine's ``request_decision`` to read, not on ``decision_input`` — see
     :class:`EngineDecisionProvider` for the serialization this relies on.
+    ``_cycle_at`` is stashed the same way: the ``as_of`` the driver handed in,
+    the daemon's one time base. ``decision_input.context.as_of`` is NOT that —
+    it is the last CLOSED candle's close (``context_builder.context_as_of``),
+    trailing the cycle by up to one interval and reading xx:59:59.999 — so a
+    provider that ages or windows anything against "now" reads the stash.
+
+    Abstract: a subclass supplies ``request_decision`` and ``_model``, and a
+    half-provider that forgets one is a ``TypeError`` at construction, not a
+    failed cycle after the first payload write.
     """
 
     # Class-level defaults so an instance built without __init__ (the tests use
@@ -61,11 +73,30 @@ class MarketContextProvider:
     # The last ``(prompt_version, context_shape, format_fingerprint)`` this
     # instance logged (issue #163); ``None`` until the first prompt is built.
     _logged_regime = None
+    # The cycle clock of the LAST ``build_input`` (class docstring); ``None``
+    # before the first. Read through :attr:`cycle_at`, which enforces the order.
+    _cycle_at: datetime | None = None
 
     @property
+    def cycle_at(self) -> datetime:
+        """The clock reading of the cycle being decided — the ``as_of`` the last ``build_input`` got.
+
+        ``request_decision`` before any ``build_input`` has no clock to window
+        or age anything by; both drivers call the two in order (the busy gate
+        serializes them), so this fires only for a harness that did not.
+        """
+        if self._cycle_at is None:
+            raise RuntimeError("request_decision called before build_input: no cycle clock")
+        return self._cycle_at
+
+    @property
+    @abstractmethod
     def _model(self) -> str:
         """What the ``ai_inputs.model`` column records for this provider's cycles."""
-        raise NotImplementedError("a decision provider names the model it records")
+
+    @abstractmethod
+    def request_decision(self, decision_input: DecisionInput) -> ParsedDecision:
+        """The other half of :class:`~..ports.DecisionProvider`; see the subclasses."""
 
     def __init__(
         self,
@@ -322,6 +353,7 @@ class MarketContextProvider:
         candle_start = candle_end - timedelta(milliseconds=interval_to_ms(ctx.candle_interval))
         self._context_text = context_text
         self._format_text = format_text
+        self._cycle_at = as_of
         return DecisionInput(
             context=ctx,
             candle_start=candle_start,
@@ -398,11 +430,13 @@ class EngineDecisionProvider(MarketContextProvider):
             context_text=self._context_text,
             format_text=self._format_text,
         )
-        # Drive the base engine off the cycle's own as_of, not wall-clock now:
-        # a late/recovery cycle (process was down across schedule points) must
-        # feed the base news/sentiment analysts the same time base as the perp
-        # market context they reason alongside, and a single read can't straddle
-        # a UTC midnight between the two.
+        # Drive the base engine off the CONTEXT's as_of — the last closed
+        # candle's close, not the cycle clock (``_cycle_at``) and not
+        # wall-clock now: the base news/sentiment analysts must reason over the
+        # same time base as the perp market context beside them, a late or
+        # recovery cycle included, and a single read can't straddle a UTC
+        # midnight between the two. In the first interval after midnight that
+        # date is yesterday's, on purpose: it is the date of the data shown.
         trade_date = decision_input.context.as_of.strftime("%Y-%m-%d")
         try:
             return run.drive(

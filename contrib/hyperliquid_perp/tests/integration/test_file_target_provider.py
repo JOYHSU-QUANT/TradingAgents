@@ -10,23 +10,35 @@ from pathlib import Path
 
 import pytest
 
-from contrib.hyperliquid_perp.common.constants import FILE_TARGET_MODEL
+from contrib.hyperliquid_perp.common.constants import (
+    FILE_TARGET_MODEL,
+    FILE_TARGET_PENDING_PREFIX,
+    FILE_TARGET_UNUSABLE_PREFIX,
+    MAX_EPOCH_MS,
+)
+from contrib.hyperliquid_perp.common.digest import payload_digest
+from contrib.hyperliquid_perp.common.sidecar import sidecar_path
 from contrib.hyperliquid_perp.domains.perp.risk_gate import DecisionConfig, RiskConfig
 from contrib.hyperliquid_perp.domains.perp.target_decision import (
     DecisionMode,
     TargetDecision,
     TargetSide,
 )
+from contrib.hyperliquid_perp.engine_bridge import EngineConfigError
 from contrib.hyperliquid_perp.integration import decision_provider as decision_provider_mod
 from contrib.hyperliquid_perp.integration.decision_provider import (
     EngineDecisionProvider,
+    MarketContextProvider,
     build_decision_provider,
 )
 from contrib.hyperliquid_perp.integration.file_target_provider import (
+    HANDOFF_SIDECAR_SUFFIX,
     HANDOFF_WINDOW,
+    FileTarget,
+    FileTargetConfigError,
     FileTargetDecisionProvider,
     StaleTarget,
-    read_target,
+    read_document,
 )
 from contrib.hyperliquid_perp.runtime.decision import DecisionInput
 
@@ -40,6 +52,12 @@ _LOGGER = "contrib.hyperliquid_perp.integration.file_target_provider"
 BOUNDARY = datetime(2026, 3, 15, tzinfo=timezone.utc)
 BOUNDARY_MS = 1_773_532_800_000
 CYCLE = BOUNDARY + timedelta(hours=4, minutes=7)
+# What the market context's ``as_of`` really is at every cycle in the fixtures:
+# the last CLOSED candle's close, which for the first interval of the day is
+# the day BEFORE the boundary (xx:59:59.999). Fixed here so every test asks
+# with a context that would read "before the boundary" if the provider
+# measured the window against it instead of the cycle clock.
+LAST_CLOSE = BOUNDARY - timedelta(milliseconds=1)
 
 
 def _handoff(**overrides) -> dict:
@@ -90,8 +108,16 @@ def _provider(path: Path, decision: DecisionConfig | None = None) -> FileTargetD
     return provider
 
 
-def _ask(provider, at: datetime = CYCLE):
-    return provider.request_decision(DecisionInput(context=market_ctx(at)))
+def _ask(provider, at: datetime = CYCLE, payload_path: str | None = None):
+    """One cycle at ``at``: the clock the driver's ``build_input`` would have stashed, a context at the last close."""
+    provider._cycle_at = at
+    return provider.request_decision(
+        DecisionInput(
+            context=market_ctx(LAST_CLOSE),
+            input_payload_path=payload_path,
+            input_payload_hash=None if payload_path is None else "sha256:0",
+        )
+    )
 
 
 # --------------------------------------------------------------------------
@@ -138,11 +164,12 @@ def test_unknown_keys_are_ignored_under_the_same_version(tmp_path):
     assert parsed.is_valid and parsed.decision.target_side is TargetSide.SHORT
 
 
-def test_every_cycle_inside_the_day_acts_and_the_edges_are_the_documents(tmp_path):
-    # as_of <= now < as_of + 1 day (carry README 「陳舊政策」): the boundary
-    # itself acts, the next boundary does not, and the cycle just before the
-    # boundary — the 23:50 coordinator run has already written the file —
-    # holds until the day begins.
+def test_the_window_is_measured_on_the_cycle_clock_not_the_candle_close(tmp_path):
+    # as_of <= cycle clock < as_of + 1 day (carry README 「陳舊政策」). Every
+    # ask here hands in a context whose as_of is the LAST CLOSE before the
+    # boundary; a provider that read the window off that would call the whole
+    # first interval of the day "not reached". The boundary itself acts, the
+    # next boundary does not, and the minute before the boundary is pending.
     provider = _provider(_write(tmp_path, _handoff()))
     inside = (
         BOUNDARY,
@@ -155,6 +182,75 @@ def test_every_cycle_inside_the_day_acts_and_the_edges_are_the_documents(tmp_pat
         assert _ask(provider, at).decision.decision_mode is DecisionMode.MAINTAIN_CURRENT, at
 
 
+def test_build_input_then_request_decision_acts_in_the_first_interval_after_midnight(
+    tmp_path, monkeypatch
+):
+    # The production path end to end: the driver hands build_input the cycle
+    # clock (00:07), the market context's as_of is the 23:59:59.999 close of
+    # the day before, and request_decision must still act on today's document.
+    import contrib.hyperliquid_perp.engine_bridge as bridge_mod
+
+    cycle = BOUNDARY + timedelta(minutes=7)
+    ctx = _perp_ctx(LAST_CLOSE)
+    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin, **kw: (ctx, None))
+    path = _write(tmp_path, _handoff())
+    provider = _stub_provider(
+        cls=FileTargetDecisionProvider, _payload_dir=tmp_path / "payloads", _target_path=path
+    )
+
+    decision_input = provider.build_input(coin="BTC", as_of=cycle)
+    parsed = provider.request_decision(decision_input)
+
+    assert decision_input.context.as_of == LAST_CLOSE  # the trap the clock stash avoids
+    assert parsed.decision.decision_mode is DecisionMode.SET_TARGET
+    assert parsed.decision.target_side is TargetSide.SHORT
+
+
+def test_request_decision_without_a_build_input_has_no_clock_and_says_so(tmp_path):
+    provider = _provider(_write(tmp_path, _handoff()))
+    with pytest.raises(RuntimeError, match="before build_input"):
+        provider.request_decision(DecisionInput(context=market_ctx(LAST_CLOSE)))
+
+
+# --------------------------------------------------------------------------
+# the document acted on is kept beside the payload
+# --------------------------------------------------------------------------
+
+
+def test_a_cycle_that_acts_writes_the_document_and_its_digest_as_a_sidecar(tmp_path):
+    path = _write(tmp_path, _handoff())
+    payload = tmp_path / "payloads" / "BTC-20260315T040700_000000Z.json"
+    payload.parent.mkdir()
+    payload.write_bytes(b"{}")
+    parsed = _ask(_provider(path), payload_path=str(payload))
+    assert parsed.decision.decision_mode is DecisionMode.SET_TARGET
+    sidecar = sidecar_path(payload, HANDOFF_SIDECAR_SUFFIX)
+    record = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert record["schema"] == 1
+    assert record["path"] == str(path)
+    assert record["digest"] == payload_digest(path.read_bytes())
+    assert record["cycle_at"] == CYCLE.isoformat()
+    assert record["handoff"] == _handoff()  # the document, whole, unknown keys included
+    assert payload.read_bytes() == b"{}"  # the payload itself is never touched
+
+
+def test_a_cycle_that_maintains_writes_no_sidecar(tmp_path, caplog):
+    payload = tmp_path / "payloads" / "p.json"
+    payload.parent.mkdir()
+    payload.write_bytes(b"{}")
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        _ask(_provider(_write(tmp_path, _handoff(coin="ETH"))), payload_path=str(payload))
+    assert not sidecar_path(payload, HANDOFF_SIDECAR_SUFFIX).exists()
+
+
+def test_no_payload_means_no_sidecar_and_still_a_decision(tmp_path):
+    # The one-shot and test harnesses carry no payload path; the decision is
+    # the same, there is just nowhere to put the record.
+    parsed = _ask(_provider(_write(tmp_path, _handoff())))
+    assert parsed.decision.decision_mode is DecisionMode.SET_TARGET
+    assert not list(tmp_path.glob("*.handoff.json"))
+
+
 # --------------------------------------------------------------------------
 # anything unusable is a VALID maintain_current with the reason, and a WARNING
 # --------------------------------------------------------------------------
@@ -165,7 +261,7 @@ def _assert_maintains(parsed, caplog, reason: str) -> None:
     assert parsed.decision.decision_mode is DecisionMode.MAINTAIN_CURRENT
     assert parsed.decision.target_side is None
     assert parsed.decision.requested_target_margin_pct is None
-    assert parsed.decision.rationale.startswith("carry handoff unusable: ")
+    assert parsed.decision.rationale.startswith(FILE_TARGET_UNUSABLE_PREFIX)
     assert reason in parsed.decision.rationale
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
@@ -187,11 +283,19 @@ def test_a_handoff_for_a_day_ago_maintains_with_a_warning(tmp_path, caplog):
     _assert_maintains(parsed, caplog, "a day or more before this cycle")
 
 
-def test_a_handoff_for_a_boundary_not_yet_reached_maintains(tmp_path, caplog):
+def test_a_handoff_for_a_boundary_not_yet_reached_is_pending_not_a_fault(tmp_path, caplog):
+    # 23:50: the coordinator has written tomorrow's document; the cycle before
+    # midnight maintains, at INFO, under the pending prefix — the report must
+    # not count the normal schedule as a day the coordinator missed.
     provider = _provider(_write(tmp_path, _handoff()))
-    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+    with caplog.at_level(logging.INFO, logger=_LOGGER):
         parsed = _ask(provider, BOUNDARY - timedelta(minutes=10))
-    _assert_maintains(parsed, caplog, "has not reached")
+    assert parsed.is_valid
+    assert parsed.decision.decision_mode is DecisionMode.MAINTAIN_CURRENT
+    assert parsed.decision.rationale.startswith(FILE_TARGET_PENDING_PREFIX)
+    assert "has not reached" in parsed.decision.rationale
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("maintaining until the boundary" in r.getMessage() for r in caplog.records)
 
 
 def test_another_coins_handoff_maintains(tmp_path, caplog):
@@ -204,15 +308,22 @@ def test_another_coins_handoff_maintains(tmp_path, caplog):
 @pytest.mark.parametrize(
     ("doc", "reason"),
     [
-        ("{not json", "is not JSON"),
+        ("{not json", "is not UTF-8 JSON"),
         ("[]", "not a JSON object but list"),
         (_handoff(version=2), "version 2 is not 1"),
         (_handoff(version="1"), "version '1' is not 1"),
         (_handoff(coin=""), "coin must be a symbol"),
+        (_handoff(coin=7), "coin must be a symbol"),
         (_handoff(as_of_ms="1773532800000"), "as_of_ms must be a whole number"),
         (_handoff(as_of_ms=True), "as_of_ms must be a whole number"),
+        (_handoff(as_of_ms=10**22), "is not an instant"),
+        # 9999-12-31 decodes; the day AFTER it does not exist, and that is
+        # caught at construction rather than inside check_applicable, where an
+        # OverflowError would escape the StaleTarget net.
+        (_handoff(as_of_ms=MAX_EPOCH_MS), "has no day after it"),
         (_handoff(perp="short"), "perp block must be an object"),
         (_handoff(perp={"side": "long", "margin_pct": 30}), "perp.side must be one of"),
+        (_handoff(perp={"side": None, "margin_pct": 30}), "perp.side must be one of"),
         (_handoff(perp={"side": "short", "margin_pct": 0}), "contradicts perp.margin_pct 0"),
         (_handoff(perp={"side": "flat", "margin_pct": 30}), "contradicts perp.margin_pct 30"),
         (_handoff(perp={"side": "short", "margin_pct": 130}), "within 0..100"),
@@ -230,30 +341,60 @@ def test_an_unreadable_or_contradictory_document_maintains_by_name(tmp_path, cap
     _assert_maintains(parsed, caplog, reason)
 
 
-def test_read_target_names_the_file_in_its_refusals(tmp_path):
-    with pytest.raises(StaleTarget, match="absent.json"):
-        read_target(tmp_path / "absent.json")
-    with pytest.raises(StaleTarget, match="is not JSON"):
-        read_target(_write(tmp_path, "{"))
-
-
 def test_a_path_that_is_not_a_readable_file_is_stale_not_a_crash(tmp_path, caplog):
-    # A directory where the file should be (a mount that came up empty, a
-    # typo'd target_path) is an OSError on read: the same maintain-and-warn
-    # as a missing file, never a traceback out of request_decision.
+    # A directory where the file should be (a mount that came up empty) is an
+    # OSError on read: the same maintain-and-warn as a missing file, never a
+    # traceback out of request_decision.
     provider = _provider(tmp_path)  # the directory itself
     with caplog.at_level(logging.WARNING, logger=_LOGGER):
         parsed = _ask(provider)
     _assert_maintains(parsed, caplog, "cannot read")
 
 
-def test_an_as_of_beyond_the_epoch_range_is_stale_not_a_crash(tmp_path, caplog):
-    # ``from_epoch_ms`` overflows on a value no instant answers to; the reader
-    # turns that into a reason rather than letting it escape.
-    provider = _provider(_write(tmp_path, _handoff(as_of_ms=10**22)))
-    with caplog.at_level(logging.WARNING, logger=_LOGGER):
-        parsed = _ask(provider)
-    _assert_maintains(parsed, caplog, "is not an instant")
+def test_read_document_names_the_file_in_its_refusals(tmp_path):
+    with pytest.raises(StaleTarget, match="absent.json"):
+        read_document(tmp_path / "absent.json")
+    with pytest.raises(StaleTarget, match="is not UTF-8 JSON"):
+        read_document(_write(tmp_path, "{"))
+
+
+# --------------------------------------------------------------------------
+# the type holds its invariants, however it was built
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "reason"),
+    [
+        # The one rule only a direct construction can break (the decoder's
+        # from_epoch_ms is always aware) ...
+        ({"as_of": datetime(2026, 3, 15)}, "must be timezone-aware"),
+        # ... and one shared with the document path, to pin that the rules
+        # live on the dataclass: the parametrize above reaches them through it.
+        ({"side": "long", "margin_pct": 30}, "perp.side must be one of"),
+    ],
+)
+def test_a_file_target_built_directly_is_held_to_the_same_rules(kwargs, reason):
+    # A caller that bypasses target_from_document cannot hand decision_text a
+    # long perp: the dataclass refuses, not the decoder.
+    fields = {"coin": "BTC", "as_of": BOUNDARY, "side": "short", "margin_pct": 30, "action": None}
+    fields.update(kwargs)
+    with pytest.raises(StaleTarget, match=reason):
+        FileTarget(**fields)
+
+
+def test_the_market_context_base_cannot_be_built_half_finished():
+    # Abstract: a provider that forgets _model or request_decision fails at
+    # construction, not after its first payload write.
+    with pytest.raises(TypeError, match="abstract"):
+        object.__new__(MarketContextProvider)
+
+    class Forgetful(MarketContextProvider):
+        def request_decision(self, decision_input):
+            return None
+
+    with pytest.raises(TypeError, match="_model"):
+        object.__new__(Forgetful)
 
 
 # --------------------------------------------------------------------------
@@ -296,6 +437,7 @@ def test_build_input_records_the_file_target_marker_as_the_model(tmp_path, monke
     decision_input = provider.build_input(coin="BTC", as_of=as_of)
 
     assert decision_input.model == FILE_TARGET_MODEL == "file-target"
+    assert provider._cycle_at == as_of  # the clock request_decision windows by
     # The same artifact every provider writes: the replay refusal keys on the
     # ROW's model, and the payload stays self-describing.
     with open(decision_input.input_payload_path, encoding="utf-8") as fh:
@@ -320,22 +462,49 @@ def _factory_kwargs(tmp_path: Path) -> dict:
     }
 
 
-def test_the_factory_builds_the_file_provider_without_touching_the_engine(tmp_path, monkeypatch):
+def _file_target_config(path: Path) -> dict:
+    return {"decision_source": {"provider": "file_target", "target_path": str(path)}}
+
+
+def test_the_factory_builds_the_file_provider_without_touching_the_engine(
+    tmp_path, monkeypatch, caplog
+):
     import contrib.hyperliquid_perp.engine_bridge as bridge_mod
 
     def _no_engine(config):
         raise AssertionError("a file_target run must not build the engine config")
 
     monkeypatch.setattr(bridge_mod, "_build_engine_config", _no_engine)
-    config = {
-        "decision_source": {"provider": "file_target", "target_path": str(tmp_path / "h.json")}
-    }
-    provider = build_decision_provider(config, **_factory_kwargs(tmp_path))
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        provider = build_decision_provider(
+            _file_target_config(tmp_path / "h.json"), **_factory_kwargs(tmp_path)
+        )
     assert isinstance(provider, FileTargetDecisionProvider)
     assert provider._target_path == tmp_path / "h.json"
     assert provider._model == FILE_TARGET_MODEL
     # The real __init__ ran: the position section's pricing is derived here too.
     assert provider._max_pct == 60
+    # The directory exists and the file does not yet: said once, not refused.
+    assert len(caplog.records) == 1
+    assert "does not exist yet" in caplog.records[0].getMessage()
+
+
+def test_a_target_path_in_a_missing_directory_is_refused_at_construction(tmp_path):
+    # A typo'd path would otherwise look exactly like a coordinator that never
+    # ran; the refusal is an EngineConfigError, so the CLIs' startup handling
+    # (exit 1 fresh, protection-only over live work) applies unchanged.
+    path = tmp_path / "no-such-dir" / "h.json"
+    with pytest.raises(FileTargetConfigError, match="does not exist") as excinfo:
+        build_decision_provider(_file_target_config(path), **_factory_kwargs(tmp_path))
+    assert isinstance(excinfo.value, EngineConfigError)
+    assert str(path.parent) in str(excinfo.value)
+
+
+def test_an_existing_target_file_is_built_quietly(tmp_path, caplog):
+    path = _write(tmp_path, _handoff())
+    with caplog.at_level(logging.INFO, logger=_LOGGER):
+        build_decision_provider(_file_target_config(path), **_factory_kwargs(tmp_path))
+    assert not caplog.records
 
 
 def test_the_factory_defaults_to_the_engine_provider(tmp_path, monkeypatch):

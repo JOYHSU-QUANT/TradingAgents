@@ -108,11 +108,15 @@ decision:
 # TradingAgents engine behind an LLM, as every run so far. file_target reads
 # the carry coordinator's handoff (python -m contrib.carry signal --out <path>)
 # and asks no model, so the run needs no OPENROUTER_API_KEY. The targets apply
-# while as_of <= now < as_of + 1 day; outside that window — and with no file,
-# another coin, another version — every cycle maintains the current position
-# with a WARNING (both legs hold: plan D5). Keep the coordinator's --margin-pct
-# on the decision: grid above, or every cycle fails closed off-grid. Changing
-# the provider mid-run is config drift, warned on resume.
+# while as_of <= cycle clock < as_of + 1 day; outside that window — and with no
+# file, another coin, another version — every cycle maintains the current
+# position with a WARNING (both legs hold: plan D5); a cycle in the minutes
+# before midnight that already sees tomorrow's document maintains at INFO
+# ("pending", not a fault). The document a cycle acted on is kept beside its
+# payload as <payload>.handoff.json. Keep the coordinator's --margin-pct on the
+# decision: grid above, or every cycle fails closed off-grid. The path's
+# directory must exist at startup (the file itself may not yet). Changing the
+# provider mid-run is config drift, warned on resume.
 # decision_source:
 #   provider: file_target
 #   target_path: /srv/carry/handoff-ETH.json

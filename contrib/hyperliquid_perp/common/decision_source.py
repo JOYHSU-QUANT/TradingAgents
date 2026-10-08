@@ -57,7 +57,10 @@ class DecisionSourceConfig:
     exists is not checked here: the coordinator writes it from its own
     schedule, and switching the provider on before its first run is the
     normal order; a missing file is a stale target at cycle time (a WARNING
-    and a maintained position, plan §2 D5), not a load error.
+    and a maintained position, plan §2 D5), not a load error. The provider
+    does refuse a path whose DIRECTORY does not exist when it is built — a
+    typo'd path would otherwise look exactly like a coordinator that never
+    ran — but that is the daemon's startup, not the config load.
     """
 
     provider: str = ENGINE_PROVIDER

@@ -13,18 +13,20 @@ Breaking changes within the 0.x line are called out explicitly.
 - **The env-overlay tests no longer leave their last `TRADINGAGENTS_*`
   overlay in the process-wide `DEFAULT_CONFIG`** (`tests/conftest.py`,
   `tests/test_env_overrides.py`, `tests/test_llm_max_tokens.py`,
-  `tests/test_llm_max_retries.py`, issue #346). Each of the three files
-  reloaded `tradingagents.default_config` under a patched env and never
-  reloaded it back, so whichever test ran last won: after `tests/` the
-  module carried `max_tokens="8192"`, and a perp CLI test that expects the
-  16384 default (`test_build_engine_config_completion_cap_never_uncapped`)
-  failed whenever the two suites shared one pytest process, as the local
-  pre-commit run does (CI collects only `tests/`, so it stayed green). The
-  three private helpers are replaced by one `reload_default_config` fixture
-  that snapshots the env at setup and, on teardown, restores it and
-  reloads the module once more. Two self-contained tests pin the teardown:
-  one drives `restore()` after an overlay, one with a sibling `monkeypatch`
-  that outlives the fixture. Test-only change.
+  `tests/test_llm_max_retries.py`, issue #346). The `_reload_with_env`
+  helper in each of the three files reloaded `tradingagents.default_config`
+  under a patched env and never reloaded it back, so whichever test ran
+  last won: after `tests/` the module carried `max_tokens="8192"`, and a
+  perp CLI test that expects the 16384 default
+  (`test_build_engine_config_completion_cap_never_uncapped`) failed whenever
+  the two suites shared one pytest process, as the local pre-commit run
+  does when a contrib change makes it run both (CI collects only `tests/`,
+  so it stayed green). The three helpers are replaced by one
+  `reload_default_config` fixture that snapshots the env at setup and, on
+  teardown, restores it and reloads the module once more. Two
+  self-contained tests pin the teardown: one drives `restore()` after an
+  overlay, one with a sibling `monkeypatch` that outlives the fixture (one
+  var set before the reload call, one after). Test-only change.
 
 - **The Bedrock client no longer lets langchain-aws force a `tool_choice` the
   Claude 5.5 generation rejects** (`tradingagents/llm_clients/bedrock_client.py`,

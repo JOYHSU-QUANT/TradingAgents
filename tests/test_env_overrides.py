@@ -121,10 +121,16 @@ def test_reload_fixture_restore_undoes_the_overlay(reload_default_config):
 def test_reload_fixture_restore_ignores_a_sibling_monkeypatch(
     monkeypatch, reload_default_config
 ):
-    """An env var set by a ``monkeypatch`` that outlives this fixture is not baked in."""
+    """Env vars a ``monkeypatch`` that outlives this fixture sets are not baked in.
+
+    One is set before the reload call: a restore that only undid the
+    fixture's own edits would put the popped value back and reload with it.
+    One is set after: a restore with no env undo at all would reload with it.
+    """
     before = dict(default_config_module.DEFAULT_CONFIG)
     monkeypatch.setenv("TRADINGAGENTS_MAX_TOKENS", "8192")
     reload_default_config()
+    monkeypatch.setenv("TRADINGAGENTS_LLM_MAX_RETRIES", "8")
 
     reload_default_config.restore()
     assert before == default_config_module.DEFAULT_CONFIG

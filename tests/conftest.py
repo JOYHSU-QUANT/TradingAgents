@@ -79,7 +79,10 @@ class _DefaultConfigReloader:
     than by undoing only this object's own edits: a test's ``monkeypatch``
     fixture may tear down *after* this one, so a ``TRADINGAGENTS_*`` value it
     set would otherwise still be in the env at the restoring reload and get
-    baked into the process-wide ``DEFAULT_CONFIG``.
+    baked into the process-wide ``DEFAULT_CONFIG``. The snapshot is taken at
+    fixture setup, so a ``TRADINGAGENTS_*`` value set by a fixture that runs
+    *before* this one is inside it and would be baked in the same way: list
+    ``reload_default_config`` first, or set such vars only in the test body.
     """
 
     def __init__(self):

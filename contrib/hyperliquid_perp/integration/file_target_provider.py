@@ -180,7 +180,8 @@ class FileTarget:
         if self.as_of.tzinfo is None:
             raise StaleTarget(f"as_of {self.as_of.isoformat()} must be timezone-aware")
         try:
-            _ = self.expires_at  # the addition IS the check
+            # Both ends: ``check_applicable`` also looks one window BEFORE as_of.
+            _ = self.expires_at, self.as_of - HANDOFF_WINDOW
         except OverflowError:
             raise StaleTarget(f"as_of {self.as_of.isoformat()} has no day after it") from None
         try:
@@ -386,13 +387,30 @@ class FileTargetDecisionProvider(MarketContextProvider):
             on_blocking_read=on_blocking_read,
             position_source=position_source,
         )
-        if not target_path.parent.is_dir():
+        # ``Path.is_dir``/``exists`` swallow only ENOENT-class errors; a dead
+        # mount (ENOTCONN, ESTALE, EIO) or EACCES raises, and a raw OSError out
+        # of a constructor would skip the CLIs' protection-only fork and end
+        # the process over a live position. Every OSError here is the same
+        # operator-fixable startup fault as a missing directory.
+        try:
+            if not target_path.parent.is_dir():
+                raise FileTargetConfigError(
+                    f"decision_source.target_path {target_path}: its directory "
+                    f"{target_path.parent} does not exist, so the carry coordinator could never "
+                    "write the handoff there — fix the path (or create the directory) and restart"
+                )
+            if target_path.is_dir():
+                raise FileTargetConfigError(
+                    f"decision_source.target_path {target_path} is a directory, not a file the "
+                    "carry coordinator could write — fix the path and restart"
+                )
+            absent = not target_path.exists()
+        except OSError as exc:
             raise FileTargetConfigError(
-                f"decision_source.target_path {target_path}: its directory "
-                f"{target_path.parent} does not exist, so the carry coordinator could never "
-                "write the handoff there — fix the path (or create the directory) and restart"
-            )
-        if not target_path.exists():
+                f"decision_source.target_path {target_path} cannot be checked: "
+                f"{exc.strerror or exc} — is its filesystem mounted? fix it and restart"
+            ) from exc
+        if absent:
             logger.warning(
                 "file target %s does not exist yet: every cycle maintains the current position "
                 "until the carry coordinator writes it",

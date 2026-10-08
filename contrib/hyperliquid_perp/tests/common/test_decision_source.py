@@ -64,7 +64,7 @@ def test_a_non_string_provider_is_refused_as_a_type_not_looked_up(value):
     # ``str_from_yaml`` refuses before the vocabulary check: YAML ``true``
     # must not reach ``check_enum`` as the string "True", and a list must
     # not turn the membership test into a TypeError.
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="expected a string"):
         DecisionSourceConfig.from_dict({"provider": value})
 
 

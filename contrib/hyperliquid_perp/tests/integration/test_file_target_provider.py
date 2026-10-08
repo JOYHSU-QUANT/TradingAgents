@@ -15,6 +15,7 @@ from contrib.hyperliquid_perp.common.constants import (
     FILE_TARGET_PENDING_PREFIX,
     FILE_TARGET_UNUSABLE_PREFIX,
     MAX_EPOCH_MS,
+    MIN_EPOCH_MS,
 )
 from contrib.hyperliquid_perp.common.digest import payload_digest
 from contrib.hyperliquid_perp.common.sidecar import sidecar_path
@@ -337,6 +338,7 @@ def test_another_coins_handoff_maintains(tmp_path, caplog):
         # caught at construction rather than inside check_applicable, where an
         # OverflowError would escape the StaleTarget net.
         (_handoff(as_of_ms=MAX_EPOCH_MS), "has no day after it"),
+        (_handoff(as_of_ms=MIN_EPOCH_MS), "has no day after it"),  # nor a day before it
         (_handoff(perp="short"), "perp block must be an object"),
         (_handoff(perp={"side": "long", "margin_pct": 30}), "perp.side must be one of"),
         (_handoff(perp={"side": None, "margin_pct": 30}), "perp.side must be one of"),
@@ -428,12 +430,18 @@ def test_an_off_grid_margin_fails_closed_through_the_parsers_own_tag(tmp_path, c
     decision = DecisionConfig(ai_target_margin_max_pct=100, target_margin_step_pct=5)
     doc = _handoff(perp={"side": "short", "margin_pct": 33})
     doc["params"]["margin_pct"] = 33
+    payload = tmp_path / "payloads" / "p.json"
+    payload.parent.mkdir()
+    payload.write_bytes(b"{}")
     with caplog.at_level(logging.WARNING, logger=_LOGGER):
-        parsed = _ask(_provider(_write(tmp_path, doc), decision))
+        parsed = _ask(_provider(_write(tmp_path, doc), decision), payload_path=str(payload))
     assert not parsed.is_valid
     assert parsed.invalid_reason == "margin_off_step_grid"
     assert parsed.decision == TargetDecision.fail_closed()
     assert not caplog.records  # the file was fine; the grid said no
+    # The document applied, so it is kept — presence means "read and
+    # applicable", not "traded" (module docstring).
+    assert sidecar_path(payload, HANDOFF_SIDECAR_SUFFIX).exists()
 
 
 # --------------------------------------------------------------------------
@@ -517,6 +525,36 @@ def test_a_target_path_in_a_missing_directory_is_refused_at_construction(tmp_pat
         build_decision_provider(_file_target_config(path), **_factory_kwargs(tmp_path))
     assert isinstance(excinfo.value, EngineConfigError)
     assert str(path.parent) in str(excinfo.value)
+
+
+def test_a_target_path_that_is_a_directory_is_refused_at_construction(tmp_path):
+    # exists() is true and the parent is a directory, yet the coordinator could
+    # never write it — without this check every cycle would warn "cannot read",
+    # the very symptom the directory check exists to catch early.
+    target = tmp_path / "handoff-BTC.json"
+    target.mkdir()
+    with pytest.raises(FileTargetConfigError, match="is a directory"):
+        build_decision_provider(_file_target_config(target), **_factory_kwargs(tmp_path))
+
+
+def test_a_filesystem_error_while_checking_the_path_is_the_same_startup_fault(
+    tmp_path, monkeypatch
+):
+    # Path.is_dir()/exists() swallow only ENOENT-class errors; a dead mount
+    # raises. A raw OSError out of the constructor would skip the CLIs'
+    # EngineConfigError fork (protection-only over live work) and exit 2.
+    import errno
+
+    def _dead_mount(self):
+        raise OSError(errno.ENOTCONN, "Transport endpoint is not connected")
+
+    monkeypatch.setattr(Path, "is_dir", _dead_mount)
+    with pytest.raises(FileTargetConfigError, match="cannot be checked") as excinfo:
+        build_decision_provider(
+            _file_target_config(tmp_path / "h.json"), **_factory_kwargs(tmp_path)
+        )
+    assert isinstance(excinfo.value, EngineConfigError)
+    assert "not connected" in str(excinfo.value)
 
 
 def test_an_existing_target_file_is_built_quietly(tmp_path, caplog):

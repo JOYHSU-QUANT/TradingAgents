@@ -1,6 +1,13 @@
-"""The production decision provider: the TradingAgents engine behind ``ports.DecisionProvider``.
+"""The daemons' decision providers: the market-context half, and the engine behind it.
 
-Built through :func:`build_decision_provider`.
+:class:`MarketContextProvider` is the ``build_input`` half every
+:class:`~..ports.DecisionProvider` shares — the market fetch, the pre-LLM
+guards, the payload file and the ``ai_inputs`` facts — and
+:class:`EngineDecisionProvider` is the production provider on top of it:
+the TradingAgents engine. The other provider, the carry coordinator's
+handoff file (:mod:`.file_target_provider`), shares the base and asks no
+model. Which one a run gets is the ``decision_source:`` block's say
+(``common.decision_source``), resolved by :func:`build_decision_provider`.
 """
 
 from __future__ import annotations
@@ -10,40 +17,38 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-# The one in-package import this module takes at load time: ``common`` sits at
-# the bottom of the graph and imports nothing, so it costs no closure. Every
-# other in-package import here stays function-local: ``cli/paper`` and
+# The only in-package imports this module takes at load time are ``common``'s:
+# it sits at the bottom of the graph and imports nothing, so they cost no
+# closure. Every other in-package import here stays function-local: ``cli/paper`` and
 # ``cli/live_loop`` import this module at load time for
 # :func:`build_decision_provider`.
+from ..common.decision_source import FILE_TARGET_PROVIDER, decision_source
 from ..common.prompt_regime import PROMPT_VERSION, position_section_omitted, prompt_regime_line
 
 if TYPE_CHECKING:  # annotation-only: the heavy in-package imports stay function-local
+    from ..ports import DecisionProvider
     from ..runtime.position_facts import BookFacts, BookSource
 
 logger = logging.getLogger(__name__)
 
 
-class EngineDecisionProvider:
-    """Production :class:`~..ports.DecisionProvider`: the TradingAgents engine.
+class MarketContextProvider:
+    """The ``build_input`` half of a :class:`~..ports.DecisionProvider`.
 
-    ``build_input`` fetches market data and persists the full payload JSON
-    (phase2-data §5: SQLite keeps summary + path + hash); ``request_decision``
-    drives the unmodified engine to a parsed structured target through
-    :mod:`.engine_drive`. External failures are classified into the §6.2
-    retry vocabulary and raised as
-    :class:`RetryableDecisionError`; contract violations are NOT errors — they
-    come back as an invalid ``ParsedDecision`` (fail-closed downstream).
+    Fetches market data, runs the pre-LLM context guards, persists the full
+    payload JSON (phase2-data §5: SQLite keeps summary + path + hash) and
+    hands the driver a :class:`DecisionInput` — the same row and the same
+    artifact whichever provider answers, so ``validate``, ``export`` and the
+    scorecard read every run alike. A subclass supplies ``request_decision``
+    and ``_model``: the ``ai_inputs.model`` it records, a model id for the
+    engine and ``FILE_TARGET_MODEL`` for a provider that asked none. The
+    payload keeps the format block too, under whichever provider: it is what
+    the contract an answer is parsed against looked like for this run.
 
-    NOT a pure function of its argument (Phase 3 PR 6 hazard): ``request_decision``
-    reads ``_context_text`` / ``_format_text`` that the LAST ``build_input``
-    call stashed on the instance, not fields of ``decision_input`` — and the
-    one shared instance is handed to both the background worker thread and the
-    main-thread driver. Today this is safe only because the driver's busy-gate
-    serializes ``build_input() → submit()`` strictly. Any future re-send path
-    (a within-cycle retry ladder, a replay harness) MUST re-run ``build_input``
-    immediately before each ``request_decision`` — or first fold the prompt
-    texts into the decision-input type — else it sends a STALE cycle's prompt
-    while the audit trail records the fresh input.
+    NOT a pure function of its argument (Phase 3 PR 6 hazard): ``build_input``
+    stashes ``_context_text`` / ``_format_text`` on the instance for the
+    engine's ``request_decision`` to read, not on ``decision_input`` — see
+    :class:`EngineDecisionProvider` for the serialization this relies on.
     """
 
     # Class-level defaults so an instance built without __init__ (the tests use
@@ -57,6 +62,11 @@ class EngineDecisionProvider:
     # instance logged (issue #163); ``None`` until the first prompt is built.
     _logged_regime = None
 
+    @property
+    def _model(self) -> str:
+        """What the ``ai_inputs.model`` column records for this provider's cycles."""
+        raise NotImplementedError("a decision provider names the model it records")
+
     def __init__(
         self,
         config: dict,
@@ -69,7 +79,6 @@ class EngineDecisionProvider:
     ) -> None:
         from ..domains.perp import risk_gate
         from ..domains.perp.marginal_cost import PositionPricing
-        from ..engine_bridge import _build_engine_config
 
         self._config = config
         self._decision = decision_cfg
@@ -124,7 +133,6 @@ class EngineDecisionProvider:
             taker_fee_rate=execution.taker_fee_rate,
             slippage_bps=execution.fill_model.slippage_bps,
         )
-        self._engine_config, self._analysts = _build_engine_config(config)
 
     def _read_books(self) -> BookFacts | None:
         """This cycle's books — the ONE read behind the prompt and the audit row.
@@ -323,9 +331,62 @@ class EngineDecisionProvider:
             prompt_version=PROMPT_VERSION,
             context_shape=shape,
             format_fingerprint=fingerprint,
-            model=self._engine_config["deep_think_llm"],
+            model=self._model,
             books=books,
         )
+
+
+class EngineDecisionProvider(MarketContextProvider):
+    """Production :class:`~..ports.DecisionProvider`: the TradingAgents engine.
+
+    ``build_input`` is the base's (market data, guards, payload);
+    ``request_decision`` drives the unmodified engine to a parsed structured
+    target through :mod:`.engine_drive`, on the prompt texts that call
+    stashed. External failures are classified into the §6.2
+    retry vocabulary and raised as
+    :class:`RetryableDecisionError`; contract violations are NOT errors — they
+    come back as an invalid ``ParsedDecision`` (fail-closed downstream).
+
+    NOT a pure function of its argument (Phase 3 PR 6 hazard): ``request_decision``
+    reads ``_context_text`` / ``_format_text`` that the LAST ``build_input``
+    call stashed on the instance, not fields of ``decision_input`` — and the
+    one shared instance is handed to both the background worker thread and the
+    main-thread driver. Today this is safe only because the driver's busy-gate
+    serializes ``build_input() → submit()`` strictly. Any future re-send path
+    (a within-cycle retry ladder, a replay harness) MUST re-run ``build_input``
+    immediately before each ``request_decision`` — or first fold the prompt
+    texts into the decision-input type — else it sends a STALE cycle's prompt
+    while the audit trail records the fresh input.
+    """
+
+    def __init__(
+        self,
+        config: dict,
+        *,
+        risk_cfg,
+        decision_cfg,
+        payload_dir: Path,
+        on_blocking_read=None,
+        position_source: BookSource,
+    ) -> None:
+        super().__init__(
+            config,
+            risk_cfg=risk_cfg,
+            decision_cfg=decision_cfg,
+            payload_dir=payload_dir,
+            on_blocking_read=on_blocking_read,
+            position_source=position_source,
+        )
+        # Last, after the base has priced the position section: the process's
+        # first tradingagents import, and the bridge's startup gates with it.
+        from ..engine_bridge import _build_engine_config
+
+        self._engine_config, self._analysts = _build_engine_config(config)
+
+    @property
+    def _model(self) -> str:
+        """The deep-think model id, as the ``ai_inputs`` row records it."""
+        return self._engine_config["deep_think_llm"]
 
     def request_decision(self, decision_input):
         from ..runtime.decision import RetryableDecisionError
@@ -398,8 +459,15 @@ def build_decision_provider(
     decision_cfg,
     payload_dir: Path,
     on_blocking_read=None,
-) -> EngineDecisionProvider:
+) -> DecisionProvider:
     """The provider a daemon runs, reading the books of ``run_id`` in ``db``.
+
+    Which one is the ``decision_source:`` block's say (``common.decision_source``):
+    the engine by default, the carry handoff file
+    (:class:`.file_target_provider.FileTargetDecisionProvider`) when the
+    block names it — that module is imported only then, so a run that asks
+    no model never loads the engine and an engine run never loads the file
+    reader.
 
     The books are bound now and read in each ``build_input``, so a provider built
     before ``initialize_run`` seeds them (the paper lane's fresh-run
@@ -411,11 +479,26 @@ def build_decision_provider(
 
     from ..runtime.position_facts import read_books
 
+    source = decision_source(config)
+    position_source = partial(read_books, db, run_id, coin)
+    if source.provider == FILE_TARGET_PROVIDER:
+        from .file_target_provider import FileTargetDecisionProvider
+
+        assert source.target_path is not None  # the block's own invariant
+        return FileTargetDecisionProvider(
+            config,
+            risk_cfg=risk_cfg,
+            decision_cfg=decision_cfg,
+            payload_dir=payload_dir,
+            on_blocking_read=on_blocking_read,
+            position_source=position_source,
+            target_path=Path(source.target_path),
+        )
     return EngineDecisionProvider(
         config,
         risk_cfg=risk_cfg,
         decision_cfg=decision_cfg,
         payload_dir=payload_dir,
         on_blocking_read=on_blocking_read,
-        position_source=partial(read_books, db, run_id, coin),
+        position_source=position_source,
     )

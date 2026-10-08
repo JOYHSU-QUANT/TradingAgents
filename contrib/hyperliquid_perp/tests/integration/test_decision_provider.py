@@ -48,8 +48,12 @@ def _perp_ctx(as_of: datetime, coin: str = "BTC") -> PerpMarketContext:
     )
 
 
-def _stub_provider(**attrs):
+def _stub_provider(cls=EngineDecisionProvider, **attrs):
     """A provider built past ``__init__`` (which imports the engine), pre-fed.
+
+    ``cls`` is the provider class to build: the engine's by default, and the
+    file-target sibling for its tests (``test_file_target_provider``), which
+    share the base's ``build_input`` and so this stub.
 
     Skips ``__init__`` (which imports the engine) and presets what the
     build-through path reads: ``_decision`` for the format block, ``_max_pct``
@@ -71,7 +75,7 @@ def _stub_provider(**attrs):
     from contrib.hyperliquid_perp.paper.config import PaperExecutionConfig
 
     execution = PaperExecutionConfig()
-    provider = object.__new__(EngineDecisionProvider)
+    provider = object.__new__(cls)
     provider._config = {}
     provider._on_blocking_read = None
     provider._decision = DecisionConfig()

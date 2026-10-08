@@ -14,6 +14,7 @@ __all__ = [
     "CYCLE_INTERVAL",
     "ERROR_TYPES",
     "EXCHANGE_MIN_ORDER_NOTIONAL_USDC",
+    "FILE_TARGET_MODEL",
     "HOLDING_COST_HOURS",
     "LEGAL_NETWORKS",
     "MACRO_FAST_PERIOD",
@@ -214,6 +215,15 @@ ERROR_TYPES = frozenset(
         "interrupted",
     }
 )
+
+# The ``ai_inputs.model`` a run decided from a FILE records in place of a
+# model id (carry plan §3.3): ``integration/file_target_provider`` reads the
+# carry coordinator's handoff document and asks no model, and
+# ``contrib.replay`` refuses a run whose rows carry this word — there was no
+# prompt, so there is no question to put to another model. Here, at the
+# bottom of the graph, because the writer and that reader must agree on the
+# exact spelling without importing each other, as with the error classes above.
+FILE_TARGET_MODEL = "file-target"
 
 # The horizon the prompt's position section states holding cost over. Funding
 # on Hyperliquid is charged hourly; 8h is one conventional funding "period",

@@ -357,6 +357,57 @@ def test_load_config_rejects_non_mapping_block(tmp_path, text):
         load_config(bad)
 
 
+def test_load_config_accepts_a_file_target_decision_source(tmp_path):
+    cfg = tmp_path / "carry.yaml"
+    cfg.write_text(
+        "decision_source:\n  provider: file_target\n  target_path: /srv/carry/handoff-ETH.json\n",
+        encoding="utf-8",
+    )
+    config = load_config(cfg)
+    # The block is validated, not rewritten: the genesis snapshot and the
+    # drift check compare the plain YAML.
+    assert config["decision_source"] == {
+        "provider": "file_target",
+        "target_path": "/srv/carry/handoff-ETH.json",
+    }
+
+
+@pytest.mark.parametrize(
+    ("text", "match"),
+    [
+        ("decision_source:\n  provider: llm\n", "decision_source.provider must be one of"),
+        ("decision_source:\n  provider: file_target\n", "target_path must name the handoff file"),
+        (
+            "decision_source:\n  provider: engine\n  target_path: /srv/h.json\n",
+            "read only by the 'file_target' provider",
+        ),
+        ("decision_source:\n  target: /srv/h.json\n", "unknown config key"),
+        ("decision_source: file_target\n", "expected a mapping"),
+    ],
+)
+def test_load_config_rejects_a_bad_decision_source_by_name(tmp_path, text, match):
+    # A typo'd provider must not fall back to the engine with no signal — the
+    # run would then demand a key and ask a model the operator meant to bypass.
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid decision_source: config") as excinfo:
+        load_config(bad)
+    assert match in str(excinfo.value)
+
+
+def test_the_example_yaml_ships_the_engine_provider():
+    # The block is commented out in the example: every run before it existed
+    # was an engine run, and the paper-BTC run must not change provider on a
+    # config copy (carry plan §5).
+    from contrib.hyperliquid_perp.common.decision_source import decision_source
+    from contrib.hyperliquid_perp.config import _EXAMPLE
+
+    config = load_config(_EXAMPLE)
+    assert "decision_source" not in config
+    assert decision_source(config).drives_engine
+    assert "decision_source:" in _EXAMPLE.read_text(encoding="utf-8")  # documented, off
+
+
 def test_load_config_drops_blank_top_level_keys(tmp_path):
     # ``market_data:`` with nothing after it (a normal state when an operator
     # comments out a block's contents) parses to None, not a missing key. It is

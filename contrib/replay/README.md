@@ -40,6 +40,9 @@ python -m contrib.replay score --db paper_trading.db --run-id paper-BTC-7 \
 成績單量的是決策的判斷力，帳戶層面的損益是 `/paper-review` 的事）。以 `migrate=False` 開 store
 （report-only 指令不升級 daemon 可能持有的 store），所以落後 schema 的 store 會在開檔時被拒絕、
 不會被誤讀。
+`ai_inputs.model` 記的是 `file-target` 的 run（perp 的檔案目標 provider：carry 交接檔決定、沒問過任何模型，
+carry 計畫 PR 2）整個 run 具名拒絕——沒有題目，成績單與考古題都不成立；中途換過 provider 的 run 也拒絕，哪一半
+要算是操作的人按 run 決定的事。
 
 ### 定義（寫死在 `score.py`，改了就是改分數的意義）
 

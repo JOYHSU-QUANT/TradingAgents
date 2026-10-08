@@ -15,6 +15,7 @@ import yaml
 
 from .common.config_coercion import bool_from_yaml, int_from_yaml
 from .common.constants import LEGAL_NETWORKS
+from .common.decision_source import DecisionSourceConfig
 from .common.enum_guard import check_enum
 from .domains.perp.indicator_vocab import REGIME_INDICATORS, supported_indicators
 from .domains.perp.market_data_config import MarketDataConfig
@@ -76,6 +77,7 @@ _ALLOWED_TOP_LEVEL_KEYS = frozenset(
         "engine",
         "risk",
         "decision",
+        "decision_source",
         "paper_trading",
         "live",
     }
@@ -229,6 +231,15 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
         val = config.get(key)
         if val is not None and not isinstance(val, dict):
             raise ValueError(f"{key!r} must be a mapping, got {val!r}")
+    # The ``decision_source:`` block decides whether the run asks a model at
+    # all (``common.decision_source``), so both daemons read it before they
+    # demand an API key; validated on every load for the market_data reason —
+    # a typo'd provider must not fall back to the engine with no signal. The
+    # parser refuses a scalar block itself, so it is not in the loop above.
+    try:
+        DecisionSourceConfig.from_dict(config.get("decision_source"))
+    except ValueError as exc:
+        raise ValueError(f"invalid decision_source: config — {exc}") from None
     # The ``market_data:`` block is parsed on every load — unknown keys, wrong
     # types and out-of-band values all fail here, named. It is the block whose
     # mistakes are otherwise the quietest: a typo'd key fell back to its

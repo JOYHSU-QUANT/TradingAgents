@@ -44,6 +44,7 @@ from typing import Final, TypeVar
 
 from .score import Answer, Question, ScoreError
 from .upstream import (
+    FILE_TARGET_MODEL,
     TERMINAL_ATTEMPT_STATUSES,
     CostModel,
     Database,
@@ -421,7 +422,8 @@ def load_decisions(
 
     An attempt with an input and no output is a question nobody answered
     (``api_failed`` after the last try) and comes back as a question only;
-    one not yet terminal is counted and left out. With ``reports_root``,
+    one not yet terminal is counted and left out. A run whose rows record
+    ``FILE_TARGET_MODEL`` is refused whole (see the end of the body). With ``reports_root``,
     each question also says whether a ``.reports.json`` sits beside its
     payload (looked up by file NAME under that root, so a store copied away
     from its host still counts them).
@@ -464,6 +466,19 @@ def load_decisions(
         inputs[str(row["input_id"])] = _input_facts(row)
         if row["output_id"] is not None:
             answers.append(answer_from_row(row))
+    # A run the carry coordinator's handoff decided (perp
+    # ``integration/file_target_provider``) records no model: nobody was asked
+    # a question, so there is nothing to score for judgement and nothing to
+    # put to another model. Refused whole, a run that switched provider
+    # midway included — its rows are two different kinds of thing under one
+    # run id, and which half the operator meant is theirs to say by run.
+    from_file = sum(1 for q in questions if q.model == FILE_TARGET_MODEL)
+    if from_file:
+        raise ScoreError(
+            f"run {run_id!r} was decided from a file target, not a prompt "
+            f"({from_file} of {len(questions)} questions record model {FILE_TARGET_MODEL!r}): "
+            "no model was asked, so it is not a question set to score or replay (carry plan §3.3)"
+        )
     return Decisions(questions, answers, without_input, in_progress, retried, extra_tries, inputs)
 
 

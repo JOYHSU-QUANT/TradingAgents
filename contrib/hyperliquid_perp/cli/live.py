@@ -247,8 +247,9 @@ def _cmd_live(argv: list[str]) -> int:
         # gateable, with no named error anywhere. _cmd_paper has always checked
         # this; the live path did not (added 2026-07-30). After the config
         # validation, so a typo in risk:/decision: still reports as the config
-        # error it is rather than being masked by a missing key.
-        if not _require_api_key():
+        # error it is rather than being masked by a missing key. A
+        # ``file_target`` run asks no model and passes (``_api_key_satisfied``).
+        if not _require_api_key(config):
             return 1
 
     # A top-level ``network:`` that disagrees with ``live.network`` is legal —

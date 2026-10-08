@@ -9,7 +9,12 @@ The *entire* integration surface is one file (``docs/INTEGRATION.md``):
 - :mod:`.completion_usage` — the per-run completion measurement and its
   ``<payload>.usage.json`` sidecar (issue #182).
 - :mod:`.decision_provider` — the daemons' :class:`~..ports.DecisionProvider`:
-  builds each cycle's input payload and drives the engine to a parsed target.
+  the market-context half every provider shares (each cycle's input payload)
+  and the engine provider that drives the engine to a parsed target, plus the
+  factory that picks a provider from the ``decision_source:`` block.
+- :mod:`.file_target_provider` — the other provider: the carry coordinator's
+  handoff file as the perp leg's target, parsed through the same decision
+  contract and never shown to a model (carry plan PR 2).
 - :mod:`.engine_drive` — one engine run, from the assembled prompt to a parsed
   target; the daemons' provider and the one-shot ``main.run_engine`` both run
   the engine through it.

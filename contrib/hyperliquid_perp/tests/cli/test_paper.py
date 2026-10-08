@@ -127,6 +127,54 @@ def test_paper_key_check_satisfied_by_dotenv(tmp_path, monkeypatch, paper_seams)
     assert os.environ["OPENROUTER_API_KEY"] == "sk-or-from-dotenv"
 
 
+def _file_target_yaml(tmp_path) -> str:
+    """A ``decision_source:`` block naming a handoff under ``tmp_path`` (the file need not exist)."""
+    return (
+        "decision_source:\n  provider: file_target\n"
+        f"  target_path: {(tmp_path / 'handoff-BTC.json').as_posix()}\n"
+    )
+
+
+def test_paper_fresh_file_target_run_needs_no_api_key(tmp_path, monkeypatch, paper_seams):
+    # Carry plan PR 2: a ``decision_source: file_target`` run reads the handoff
+    # and asks no model, so the fresh-run key check is not made of it — the
+    # run reaches initialize_run keyless, with the REAL file provider built
+    # (no engine import: _build_engine_config is never reached).
+    import contrib.hyperliquid_perp.engine_bridge as bridge_mod
+    from contrib.hyperliquid_perp.integration.file_target_provider import (
+        FileTargetDecisionProvider,
+    )
+
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    paper_seams.write_text(_file_target_yaml(tmp_path), encoding="utf-8")
+    monkeypatch.setattr(
+        bridge_mod,
+        "_build_engine_config",
+        lambda config: pytest.fail("a file_target run must not build the engine"),
+    )
+    built: list = []
+    real_init = FileTargetDecisionProvider.__init__
+
+    def _spy_init(self, *args, **kwargs):
+        real_init(self, *args, **kwargs)
+        built.append(self)
+
+    monkeypatch.setattr(FileTargetDecisionProvider, "__init__", _spy_init)
+    reached = []
+
+    def _stop(*args, **kwargs):
+        reached.append(True)
+        raise RuntimeError("stop right after the provider pre-flight")
+
+    monkeypatch.setattr(accounting, "initialize_run", _stop)
+    rc = cli_main(paper_argv(tmp_path / "new.db", run_id="carry", config=paper_seams, create=True))
+
+    assert reached == [True]  # past the key check, past the provider pre-flight
+    assert rc == 2  # the sentinel, mapped as unexpected by the top-level wrapper
+    assert len(built) == 1
+    assert built[0]._target_path == tmp_path / "handoff-BTC.json"
+
+
 def test_paper_fresh_run_off_coin_seed_exits_1(tmp_path, capsys, paper_seams):
     # The engine manages exactly the run coin: an off-coin seed would sit in
     # the store all run, excluded from equity/SL-TP/funding — so a fresh run
@@ -244,6 +292,31 @@ def test_paper_healthy_restart_missing_api_key_exits_1(tmp_path, capsys, monkeyp
     rc = cli_main(paper_argv(path, run_id="r", config=paper_seams))
     assert rc == 1
     assert "OPENROUTER_API_KEY" in capsys.readouterr().err
+
+
+def test_paper_keyless_healthy_restart_of_a_file_target_run_trades(tmp_path, monkeypatch, paper_seams):
+    # The restart lane's companion to the fresh-run exemption: a flat healthy
+    # restart of a ``file_target`` run has its prerequisite by construction, so
+    # a missing OPENROUTER_API_KEY is neither an exit nor protection-only — the
+    # scheduler is built, over the REAL file provider.
+    from contrib.hyperliquid_perp.integration.file_target_provider import (
+        FileTargetDecisionProvider,
+    )
+
+    path, db = seed_db(tmp_path)
+    db.close()
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    paper_seams.write_text(_file_target_yaml(tmp_path), encoding="utf-8")
+    seen: dict = {}
+
+    def stop_loop(db_, run_id, engine, scheduler, *args, **kwargs):
+        seen["scheduler"] = scheduler
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(paper_mod, "_paper_loop", stop_loop)
+    assert cli_main(paper_argv(path, run_id="r", config=paper_seams)) == 0
+    assert seen["scheduler"] is not None  # trading, not protection-only
+    assert isinstance(seen["scheduler"]._provider, FileTargetDecisionProvider)
 
 
 def test_paper_keyless_healthy_restart_with_live_work_enters_protection_only(

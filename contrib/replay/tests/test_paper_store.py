@@ -19,6 +19,7 @@ from contrib.replay.paper_store import (
 )
 from contrib.replay.score import ScoreError
 from contrib.replay.upstream import (
+    FILE_TARGET_MODEL,
     CostModel,
     Database,
     FillRole,
@@ -401,6 +402,25 @@ def test_a_finished_attempt_without_an_output_is_refused_not_read_as_unanswered(
         )
     with Database(store, migrate=False) as db, pytest.raises(ScoreError, match="att-torn: status 'completed'"):
         load_decisions(db, RUN_ID)
+
+
+def test_a_run_decided_from_a_file_target_is_refused_whole(store):
+    # Carry plan §3.3: the perp file-target provider records FILE_TARGET_MODEL
+    # in ``ai_inputs.model``; no model was asked, so there is no question to
+    # score or replay. One such row refuses the run — a provider switched
+    # midway is two kinds of thing under one run id.
+    with Database(store) as db, db.transaction() as conn:
+        conn.execute(
+            "UPDATE ai_inputs SET model = ? WHERE input_id = ?",
+            (FILE_TARGET_MODEL, input_id(2)),
+        )
+    with Database(store, migrate=False) as db, pytest.raises(ScoreError) as excinfo:
+        load_decisions(db, RUN_ID)
+    message = str(excinfo.value)
+    assert RUN_ID in message
+    assert "file target" in message
+    assert "1 of" in message and FILE_TARGET_MODEL in message
+    assert "not a question set" in message
 
 
 def test_an_attempt_naming_an_output_the_store_lacks_is_refused(store):

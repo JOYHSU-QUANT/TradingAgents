@@ -288,7 +288,7 @@ def _install_host(tmp_path: Path) -> tuple[Path, str, str]:
     _git("push", "--quiet", "origin", "HEAD:main", cwd=source)
     ssh = tmp_path / "bin" / "ssh-stub"
     ssh.parent.mkdir()
-    ssh.write_text(_SSH_STUB.format(origin=origin.as_posix()), encoding="ascii")
+    ssh.write_text(_SSH_STUB.format(origin=origin.as_posix()), encoding="ascii", newline="\n")
     ssh.chmod(0o755)
     deploy_key = f'sh "{ssh.as_posix()}"'
     _git("remote", "set-url", "origin", _ORIGIN_URL, cwd=source)
@@ -301,9 +301,10 @@ def _install_host(tmp_path: Path) -> tuple[Path, str, str]:
         "\n".join(definitions)
         + '\nSOURCE=$1\nCHECKOUT=$2\nDATA=$3\nas_trader "$4"\n',
         encoding="ascii",
+        newline="\n",
     )
     stub = tmp_path / "bin" / "python3"
-    stub.write_text(_PYTHON3_STUB, encoding="ascii")
+    stub.write_text(_PYTHON3_STUB, encoding="ascii", newline="\n")
     stub.chmod(0o755)
     return trader_half, commit, deploy_key
 

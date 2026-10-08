@@ -37,7 +37,7 @@ SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 # credential, or none.
 deploy_key() {
     if [ "$1" = "$(git -C "$SOURCE" remote get-url origin 2>/dev/null)" ]; then
-        git -C "$SOURCE" config --get core.sshCommand || true
+        git -C "$SOURCE" config --local --get core.sshCommand || true
     fi
 }
 
@@ -60,7 +60,7 @@ as_trader() {
     # A checkout from before the key travelled gets it at the upgrade; one set
     # by hand is left as it is.
     ssh_command=$(deploy_key "$(git remote get-url origin)")
-    if [ -n "$ssh_command" ] && ! git config --get core.sshCommand >/dev/null; then
+    if [ -n "$ssh_command" ] && ! git config --local --get core.sshCommand >/dev/null; then
         git config core.sshCommand "$ssh_command"
         echo "core.sshCommand set from the Hyperliquid checkout"
     fi

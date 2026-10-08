@@ -2,24 +2,13 @@
 
 from __future__ import annotations
 
-import importlib
-
 import pytest
 
 import tradingagents.default_config as default_config_module
 
 
-def _reload_with_env(monkeypatch, **overrides):
-    """Set/clear env vars then reload default_config to re-evaluate DEFAULT_CONFIG."""
-    for key in list(default_config_module._ENV_OVERRIDES):
-        monkeypatch.delenv(key, raising=False)
-    for key, val in overrides.items():
-        monkeypatch.setenv(key, val)
-    return importlib.reload(default_config_module)
-
-
-def test_no_env_uses_built_in_defaults(monkeypatch):
-    dc = _reload_with_env(monkeypatch)
+def test_no_env_uses_built_in_defaults(reload_default_config):
+    dc = reload_default_config()
     assert dc.DEFAULT_CONFIG["llm_provider"] == "openai"
     assert dc.DEFAULT_CONFIG["deep_think_llm"] == "gpt-5.6"
     assert dc.DEFAULT_CONFIG["quick_think_llm"] == "gpt-5.6-luna"
@@ -28,9 +17,8 @@ def test_no_env_uses_built_in_defaults(monkeypatch):
     assert dc.DEFAULT_CONFIG["checkpoint_enabled"] is False
 
 
-def test_string_overrides(monkeypatch):
-    dc = _reload_with_env(
-        monkeypatch,
+def test_string_overrides(reload_default_config):
+    dc = reload_default_config(
         TRADINGAGENTS_LLM_PROVIDER="google",
         TRADINGAGENTS_DEEP_THINK_LLM="gemini-3-pro-preview",
         TRADINGAGENTS_QUICK_THINK_LLM="gemini-3-flash-preview",
@@ -44,9 +32,8 @@ def test_string_overrides(monkeypatch):
     assert dc.DEFAULT_CONFIG["output_language"] == "Chinese"
 
 
-def test_int_coercion(monkeypatch):
-    dc = _reload_with_env(
-        monkeypatch,
+def test_int_coercion(reload_default_config):
+    dc = reload_default_config(
         TRADINGAGENTS_MAX_DEBATE_ROUNDS="3",
         TRADINGAGENTS_MAX_RISK_ROUNDS="2",
     )
@@ -63,15 +50,14 @@ def test_int_coercion(monkeypatch):
         ("false", False), ("False", False), ("0", False), ("no", False), ("off", False),
     ],
 )
-def test_bool_coercion(monkeypatch, raw, expected):
-    dc = _reload_with_env(monkeypatch, TRADINGAGENTS_CHECKPOINT_ENABLED=raw)
+def test_bool_coercion(reload_default_config, raw, expected):
+    dc = reload_default_config(TRADINGAGENTS_CHECKPOINT_ENABLED=raw)
     assert dc.DEFAULT_CONFIG["checkpoint_enabled"] is expected
 
 
-def test_reasoning_thinking_overrides(monkeypatch):
+def test_reasoning_thinking_overrides(reload_default_config):
     """The provider reasoning/thinking knobs are env-configurable (non-interactive runs)."""
-    dc = _reload_with_env(
-        monkeypatch,
+    dc = reload_default_config(
         TRADINGAGENTS_OPENAI_REASONING_EFFORT="high",
         TRADINGAGENTS_GOOGLE_THINKING_LEVEL="minimal",
         TRADINGAGENTS_ANTHROPIC_EFFORT="low",
@@ -81,18 +67,17 @@ def test_reasoning_thinking_overrides(monkeypatch):
     assert dc.DEFAULT_CONFIG["anthropic_effort"] == "low"
 
 
-def test_reasoning_effort_defaults_to_none(monkeypatch):
+def test_reasoning_effort_defaults_to_none(reload_default_config):
     """Unset reasoning/thinking knobs stay None so each provider uses its own default."""
-    dc = _reload_with_env(monkeypatch)
+    dc = reload_default_config()
     assert dc.DEFAULT_CONFIG["openai_reasoning_effort"] is None
     assert dc.DEFAULT_CONFIG["google_thinking_level"] is None
     assert dc.DEFAULT_CONFIG["anthropic_effort"] is None
 
 
-def test_empty_env_value_is_passthrough(monkeypatch):
+def test_empty_env_value_is_passthrough(reload_default_config):
     """Empty TRADINGAGENTS_* values must not clobber the built-in default."""
-    dc = _reload_with_env(
-        monkeypatch,
+    dc = reload_default_config(
         TRADINGAGENTS_LLM_PROVIDER="",
         TRADINGAGENTS_MAX_DEBATE_ROUNDS="",
     )
@@ -100,30 +85,52 @@ def test_empty_env_value_is_passthrough(monkeypatch):
     assert dc.DEFAULT_CONFIG["max_debate_rounds"] == 1
 
 
-def test_invalid_int_raises(monkeypatch):
+def test_invalid_int_raises(reload_default_config):
     """Garbage int values should surface a ValueError at import, not silently misconfigure."""
-    monkeypatch.setenv("TRADINGAGENTS_MAX_DEBATE_ROUNDS", "not-a-number")
     with pytest.raises(ValueError, match="TRADINGAGENTS_MAX_DEBATE_ROUNDS"):
-        importlib.reload(default_config_module)
-    # Restore module state for subsequent tests in this process
-    monkeypatch.delenv("TRADINGAGENTS_MAX_DEBATE_ROUNDS", raising=False)
-    importlib.reload(default_config_module)
+        reload_default_config(TRADINGAGENTS_MAX_DEBATE_ROUNDS="not-a-number")
 
 
 @pytest.mark.parametrize("bad", ["treu", "flase", "maybe", "2", "enabled"])
-def test_invalid_bool_raises(monkeypatch, bad):
+def test_invalid_bool_raises(reload_default_config, bad):
     """A misspelled boolean must fail loudly (like ints) instead of silently False."""
-    monkeypatch.setenv("TRADINGAGENTS_CHECKPOINT_ENABLED", bad)
     with pytest.raises(ValueError, match="TRADINGAGENTS_CHECKPOINT_ENABLED"):
-        importlib.reload(default_config_module)
-    monkeypatch.delenv("TRADINGAGENTS_CHECKPOINT_ENABLED", raising=False)
-    importlib.reload(default_config_module)
+        reload_default_config(TRADINGAGENTS_CHECKPOINT_ENABLED=bad)
 
 
-def test_unknown_env_var_is_ignored(monkeypatch):
+def test_unknown_env_var_is_ignored(reload_default_config):
     """Env vars outside _ENV_OVERRIDES must not bleed into DEFAULT_CONFIG."""
-    dc = _reload_with_env(
-        monkeypatch,
+    dc = reload_default_config(
         TRADINGAGENTS_NONEXISTENT_KEY="oops",
     )
     assert "nonexistent_key" not in dc.DEFAULT_CONFIG
+
+
+# --- the reload must not leak past its test (#346) ----------------------------
+
+
+def test_reload_fixture_restore_undoes_the_overlay(reload_default_config):
+    """``restore()`` (what teardown runs) puts ``DEFAULT_CONFIG`` back as it was (#346)."""
+    before = dict(default_config_module.DEFAULT_CONFIG)
+    reload_default_config(TRADINGAGENTS_MAX_TOKENS="8192")
+
+    reload_default_config.restore()
+    assert before == default_config_module.DEFAULT_CONFIG
+
+
+def test_reload_fixture_restore_ignores_a_sibling_monkeypatch(
+    monkeypatch, reload_default_config
+):
+    """Env vars a ``monkeypatch`` that outlives this fixture sets are not baked in.
+
+    One is set before the reload call: a restore that only undid the
+    fixture's own edits would put the popped value back and reload with it.
+    One is set after: a restore with no env undo at all would reload with it.
+    """
+    before = dict(default_config_module.DEFAULT_CONFIG)
+    monkeypatch.setenv("TRADINGAGENTS_MAX_TOKENS", "8192")
+    reload_default_config()
+    monkeypatch.setenv("TRADINGAGENTS_LLM_MAX_RETRIES", "8")
+
+    reload_default_config.restore()
+    assert before == default_config_module.DEFAULT_CONFIG

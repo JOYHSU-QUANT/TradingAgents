@@ -3,7 +3,7 @@
 Uniswap v3 現貨的執行架構：策略只回答「目標比例是多少」，引擎負責把目標變成 swap。
 同一個引擎換接線，就能跑歷史回測、紙上交易，之後是主網分叉沙盒與實盤。
 
-這個套件**不決定策略**：策略只透過 `Strategy` port 進來。內建三個：
+這個套件**不決定策略**：策略只透過 `Strategy` port 進來。內建四個：
 
 - `fixed_weights`：佔位策略（固定比例＋偏離帶），用途是驅動引擎與測試；它不讀價格走勢、不做預測。
 - `trend_vol_weights`：規則策略。代幣收盤在均線之上才持有，持有比例照波動率目標配置，其餘留在計價代幣。
@@ -14,10 +14,16 @@ Uniswap v3 現貨的執行架構：策略只回答「目標比例是多少」，
   所以每個代幣的目標永遠 ≤ 規則的目標。band 沿用規則的：判斷把目標砍到持倉 band 以內（例如小持倉收到 Sell）要等下次
   再平衡才一起賣。設定檔要有 `verdicts` 區塊，沒有的話第一根就 `failed: the strategy refused the bar at …`。
   政策與參數的定義在 `strategies/ai_gated_weights.py` 的 docstring。
+- `external_weights`：外部目標策略（carry sleeve 的現貨腿）。不預測，持有 carry 協調者（`contrib/carry`）在這根 bar
+  設定的比例（store 的 `targets`，見下；由 `target` 指令從交接檔寫入），餘額留在計價代幣，偏離超過 `band` 才再平衡。
+  這根 bar 沒有目標就 `Hold`、什麼都不動（計畫 D5：交接檔缺檔或陳舊時兩腿都維持現狀；visit 會在 stderr 警告）；
+  只有部分交易代幣有目標、或目標總和超過 1，拒絕那根（run 停下，`failed: the strategy refused the bar at …`）。
+  設定檔要有 `targets` 區塊；carry run 只交易交接檔指名的那個代幣（`tokens: [USDC, WETH]`、一個池）。
+  政策與參數的定義在 `strategies/external_weights.py` 的 docstring。
 
 它與 `contrib/hyperliquid_perp`、`contrib/autoresearch`、`contrib/replay`、`contrib/carry` 完全隔離：
 互不 import（`tests/test_isolation.py` 釘住；`contrib/carry` 只用 `sqlite3` 唯讀這裡的 store 取 run 的 equity，
-不 import 任何模組），store 是自己的 SQLite 檔，也不碰
+不 import 任何模組；這裡只讀它寫的交接檔，`handoff.py`），store 是自己的 SQLite 檔，也不碰
 `deploy/paper` 的部署。上游的 `tradingagents` 引擎只有 `agent/` 這一層會 import（測試除外；同一個測試釘住），
 而且是用到時才載入：`verdict` 以外的指令都不等它的相依。
 
@@ -114,18 +120,19 @@ backtest 與 paper 沒有私鑰、不簽交易。會簽名的只有 `ChainExecut
 
 ```
 contrib/uniswap_v3/
-  cli.py, __main__.py   python -m contrib.uniswap_v3 <backfill|status|backtest|paper|fork|report|verdict>
+  cli.py, __main__.py   python -m contrib.uniswap_v3 <backfill|status|backtest|paper|fork|report|verdict|target>
   config.py             讀 YAML（凍結 dataclass）；run 會存一份設定快照
   constants.py          以 chain ID 分表的代幣、池子、QuoterV2 與 SwapRouter02 地址
   ports.py              上表的 Protocol
-  domain/               純邏輯：價格換算、bar、路徑、帳本、紀錄、績效（只 import 標準函式庫）
+  domain/               純邏輯：價格換算、bar、路徑、帳本、紀錄、績效、判斷與目標的型別（只 import 標準函式庫）
   strategies/           registry、佔位策略 fixed_weights、規則策略 trend_vol_weights、AI 閘門策略 ai_gated_weights、
-                        三者共用的 rebalance（參數集檢查、band、權重位數、再平衡觸發）
+                        外部目標策略 external_weights、四者共用的 rebalance（參數集檢查、band、權重位數、再平衡觸發）
   engine/               step、回測迴圈 replay、兩個 executor
   chain/                web3 讀取：區塊、池子價格與 TWAP、QuoterV2、base fee；
                         分叉防線與開發帳戶（fork.py）、簽名送出（transactions.py）、ChainExecutor（swaps.py）、
                         fork run 的錢包（wallet.py）
-  store/                SQLite schema（含版本號與 migration）與讀寫；bar 與判斷（verdict）的載入
+  store/                SQLite schema（含版本號與 migration）與讀寫；bar、判斷（verdict）與目標（target）的載入
+  handoff.py            讀 carry 協調者的交接檔（只讀 spot 那塊；檔案就是契約，不 import contrib/carry）
   agent/                問 TradingAgents 要判斷的那一層（唯一 import 上游引擎的地方，測試除外）：設定（agent 區塊）、
                         代幣→ticker、現貨脈絡、judge（上游 graph 的包裝＋不打模型的 fake）、sidecar 與列的寫入、
                         一次 visit 的問法
@@ -158,6 +165,15 @@ contrib/uniswap_v3/
 以設定的 `verdicts.source` 寫列，judge 的原文（最終決策、各分析師與辯論的報告、給它看的現貨脈絡、模型、耗時）另存成
 sidecar `verdicts/<source>/<代幣>-<bar 時間>.json`，放在 store 檔的同一個目錄下（列裡存相對路徑與檔案 digest，
 store 與 sidecar 要一起搬）。同一（source、代幣、bar）問過就不再問；`--fake-rating` 寫的列 `model=fake`、沒有 sidecar。
+`targets` 是外部目標：某個 source 要某代幣在某根 bar 持有的比例（0–1）＋寫入時間與交接檔位元組的 sha256
+（schema v7）；形狀與規則同 `verdicts`：不屬於任何 run、同一（source、代幣、bar）寫一次不改。設定檔有 `targets.source` 的 run，
+策略拿到的 view 帶該 source 對交易代幣的目標（只到被決策的那根為止）。讀目標的策略是 `external_weights`；寫目標的是 `target` 指令：
+讀 carry 協調者的交接檔（`contrib/carry/README.md`「交接檔」），把 `spot.weight` 寫在 `as_of` 那根 bar。交接檔的陳舊判準是它自己的
+（`as_of ≤ now < as_of＋1 天`才寫；邊界還沒到或已過一天就結束碼 3 什麼都不寫，讓下一次 visit 再試）。一列只落在一根 bar，所以讀目標的 run
+只能是日線（有 `targets` 區塊而 `bars.interval_seconds` 不是一天的設定，任何指令都拒絕），而且只交易交接檔指名的那個代幣（設定多一個代幣也拒絕：策略會對「部分代幣有目標」
+的 bar 拒絕決策，列又不可改寫，那根就永遠決策不了）。decision **不**另記目標的 digest（不像 `verdict_digests`），replay 也不數目標事後有沒有變：
+「這根有 targets 列」＝「決策看到了它」靠排程保證——PR 4 的 visit 腳本先跑 `target` 再跑 `paper`，`target` 結束碼非 0 就停在那步、那根留到下一個
+attempt 或隔天的 visit 連同當天一起補決策（Hold），D5 的警告那時才印、中間 `status --run-id` 顯示 behind。手動先跑 `paper` 再跑 `target` 會打破這點。
 舊版的 store 會在任何指令第一次打開時自動升級。
 
 ---
@@ -170,21 +186,22 @@ store 與 sidecar 要一起搬）。同一（source、代幣、bar）問過就�
 | 指令 | 做什麼 | 讀鏈 |
 |---|---|---|
 | `backfill --config C --db D --from 2022-01-01 [--to …] [--dry-run]` | 把一段 bar 讀進 store；可重複執行，已有的不重讀 | 是（archive） |
-| `status --config C --db D [--bars N] [--run-id R]` | store 的範圍與最近 N 根 bar；設定檔有 `verdicts` 區塊時另印最近 N 根有判斷的覆蓋率；加 `--run-id` 再印該 run 的持倉、價值、報酬與最近 N 筆決策（含決策時間，讀判斷的 run 附每筆看到每個交易代幣的評等：`WBTC=none, WETH=Buy`，store 裡的判斷與決策看到的不同——事後補進、改了或刪了——印 `changed`）；paper run 另印跟不跟得上時鐘 | 否 |
+| `status --config C --db D [--bars N] [--run-id R]` | store 的範圍與最近 N 根 bar；設定檔有 `verdicts`／`targets` 區塊時各印一行最近 N 根有判斷／目標的覆蓋率；加 `--run-id` 再印該 run 的持倉、價值、報酬與最近 N 筆決策（含決策時間，讀判斷的 run 附每筆看到每個交易代幣的評等：`WBTC=none, WETH=Buy`，store 裡的判斷與決策看到的不同——事後補進、改了或刪了——印 `changed`）；paper run 另印跟不跟得上時鐘 | 否 |
 | `backtest --config C --db D --run-id R --from … [--to …] [--fills model\|quoter] [--balance USDC=10000 … --gas-eth 0.5]` | 用 store 的 bar 跑回測；新 run 要給起始餘額 | 只有 `--fills quoter` |
-| `paper --config C --db D --run-id R [--balance … --gas-eth …]` | paper 的一次 visit：補讀上次之後的 bar 並逐根決策；讀判斷的 run 這次決策的 bar 裡有代幣沒評等（沒判斷或 `REVIEW`）時 stderr 警告一行（replay 的 summary 數的，回測不警告） | 是 |
+| `paper --config C --db D --run-id R [--balance … --gas-eth …]` | paper 的一次 visit：補讀上次之後的 bar 並逐根決策；讀判斷的 run 這次決策的 bar 裡有代幣沒評等（沒判斷或 `REVIEW`）時 stderr 警告一行；讀目標的 run 這次決策的 bar 裡有代幣沒目標（持倉不動）時也警告一行（都是 replay 的 summary 數的，回測不警告） | 是 |
 | `fork --config C --db D --run-id R --from … [--to …] [--fork-url http://127.0.0.1:8545] [--balance … --gas-eth …]` | 用 store 的 bar 跑 fork run：每根要交易的 bar 在本機 anvil 分叉上簽名送出，前後對帳；有未結 send 時印出對照、結束碼 1 | 只讀分叉（分叉向 archive 節點取狀態） |
 | `report --db D --run-id R` | 報酬、最大回撤、周轉、成本拆解，並列「起始持倉不動」與「全放 USDC」兩個對照組；讀判斷的 run 另印幾根決策看到每個交易代幣的判斷、幾根只看到部分、幾根沒看到（`REVIEW` 算看到） | 否 |
 | `verdict --config C --db D [--at 2024-01-01] [--fake-rating Buy]` | 對設定交易的每個代幣問 judge（TradingAgents graph）在**最近一個已過邊界**那根 bar 的判斷並寫進 store；問過的不再問；bar 還沒進 store 就結束碼 3。judge 讀的資料到問的那天為止，所以只問最新一根才誠實：`--at` 指更早的邊界只能配 `--fake-rating`（不打模型、直接寫該評等，只准用在沒有真判斷的 store）；邊界過了超過 `agent.ask_within_seconds`（預設 4 小時、最低 1 小時）才問的話，還沒問的代幣不問、結束碼 0、那根沒判斷，已寫進的判斷照用（judge 讀到被問的那一刻，太晚問會比成交多看好幾個小時） | 否（打 LLM；`agent` 區塊的供應商要有 key，見下） |
+| `target --config C --db D --handoff H` | 讀 carry 協調者寫的交接檔 H，把 `spot.weight` 以設定的 `targets.source` 寫在交接檔 `as_of` 那根 bar；寫過就不改（交接檔的 weight 與 store 不同時 stderr 警告一行、照 store）。bar 不必在 store 裡。交接檔還沒有、`as_of` 還沒到、或已過一天以上→結束碼 3、什麼都不寫；設定不是日線、交易的代幣不是恰好交接檔那一個、交接檔讀不懂、版本不對、weight 不在 0–1、`as_of` 不是 UTC 日邊界或超前一天以上→結束碼 1 | 否 |
 
 結束碼：
 
 | 碼 | 意思 | 排程該怎麼做 |
 |---|---|---|
-| 0 | 跑完了（含「這根已經決策過」、成交被拒、邊界沒答案；後兩者 stderr 有警告；`verdict` 的「問過了」、bar 是 suspect 所以沒問、邊界過了 `agent.ask_within_seconds` 所以沒問、judge 回 `REVIEW`——後兩者 stderr 有警告） | 不用動 |
-| 1 | 跑不下去，原樣重跑也不會好：設定、store、範圍、節點設定、時鐘落後於 run；fork 的錢包與帳本不符、run 有未結 send；`verdict` 的設定沒有 `verdicts` 區塊、代幣沒有 ticker、judge 建不起來（沒有 key）、供應商拒絕或引擎自己出錯（模型名打錯的 4xx、KeyError 之類）、`--at` 指舊邊界卻沒配 `--fake-rating`、`--fake-rating` 遇到有真判斷的 store、sidecar 寫不進去 | 看 log、修好 |
+| 0 | 跑完了（含「這根已經決策過」、成交被拒、邊界沒答案；後兩者 stderr 有警告；`verdict` 的「問過了」、bar 是 suspect 所以沒問、邊界過了 `agent.ask_within_seconds` 所以沒問、judge 回 `REVIEW`——後兩者 stderr 有警告；`target` 的「寫過了」） | 不用動 |
+| 1 | 跑不下去，原樣重跑也不會好：設定、store、範圍、節點設定、時鐘落後於 run；fork 的錢包與帳本不符、run 有未結 send；`verdict` 的設定沒有 `verdicts` 區塊、代幣沒有 ticker、judge 建不起來（沒有 key）、供應商拒絕或引擎自己出錯（模型名打錯的 4xx、KeyError 之類）、`--at` 指舊邊界卻沒配 `--fake-rating`、`--fake-rating` 遇到有真判斷的 store、sidecar 寫不進去；`target` 的設定沒有 `targets` 區塊、不是日線、交易的代幣不是恰好交接檔那一個、交接檔讀不懂或不是這個版本、weight 不在 0–1、`as_of` 不是 UTC 日邊界或超前一天以上 | 看 log、修好 |
 | 2 | 命令列打錯（argparse） | 修排程的指令 |
-| 3 | 稍後再跑可能就好：節點連不上、落後（還沒到邊界或成交區塊）、回了錯誤，或 store 被別的程式鎖住；`verdict` 的 bar 還沒進 store、judge 沒答而原因可能會過（閘道／網路／額度：402、408、429、5xx 或連線逾時；分析師的資料源被限流或掛了；已答的代幣保留，下次只問剩下的） | 稍後再跑（排程一天三次就是為了這個） |
+| 3 | 稍後再跑可能就好：節點連不上、落後（還沒到邊界或成交區塊）、回了錯誤，或 store 被別的程式鎖住；`verdict` 的 bar 還沒進 store、judge 沒答而原因可能會過（閘道／網路／額度：402、408、429、5xx 或連線逾時；分析師的資料源被限流或掛了；已答的代幣保留，下次只問剩下的）；`target` 的交接檔還沒有、`as_of` 還沒到或已過一天以上（協調者還沒寫、或今天沒跑） | 稍後再跑（排程一天三次就是為了這個） |
 | 4 | 只有排程的 visit 腳本（`schedule/paper-visit.sh`、`.cmd`）會給：進不了 repo 目錄、寫不了 log，或 `PYTHON` 的路徑不存在，visit 沒有跑；或 log 在 visit 中途變成寫不了，前面幾步跑了、後面沒跑 | 看 RUNBOOK §5（Windows：附錄 B.2） |
 
 ---

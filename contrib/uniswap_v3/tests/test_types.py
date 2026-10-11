@@ -6,6 +6,7 @@ from decimal import Decimal, localcontext
 
 import pytest
 
+from contrib.uniswap_v3.domain.targets import Target
 from contrib.uniswap_v3.domain.types import (
     Bar,
     Fill,
@@ -370,3 +371,77 @@ def test_a_view_names_the_source_of_the_verdicts_it_carries():
         MarketView((_bar(100),), {100: {"A": _verdict()}})
     with pytest.raises(ValueError, match="verdict_source must be letters"):
         MarketView((_bar(100),), verdict_source="two words")
+
+
+# --- targets in the view ----------------------------------------------------
+
+
+def _target(symbol: str = "A", time: int = 100, source: str = "coordinator") -> Target:
+    return Target(source=source, symbol=symbol, time=time, weight=D("0.3"))
+
+
+def test_a_market_view_carries_targets_at_its_bars_and_tells_the_latest():
+    bars = tuple(_bar(time, prices=_PRICED) for time in (100, 200, 300))
+    first, latest_a, latest_b = _target(), _target(time=300), _target("B", 300)
+    view = MarketView(
+        bars,
+        targets={100: {"A": first}, 300: {"A": latest_a, "B": latest_b}},
+        target_source="coordinator",
+    )
+    assert view.latest_targets == {"A": latest_a, "B": latest_b}
+    assert view.target_source == "coordinator"
+    assert dict(view.targets[100]) == {"A": first}
+    # The two kinds are carried side by side, each under its own source.
+    both = MarketView(
+        bars,
+        {100: {"A": _verdict()}},
+        "judge",
+        {300: {"A": latest_a}},
+        "coordinator",
+    )
+    assert (both.latest_verdicts, both.latest_targets) == ({}, {"A": latest_a})
+    # Cut before the latest target, the view does not carry it.
+    cut = MarketView(bars[:2], targets={100: {"A": first}}, target_source="coordinator")
+    assert cut.latest_targets == {}
+    plain = MarketView(bars)
+    assert (plain.targets, plain.latest_targets, plain.target_source) == ({}, {}, None)
+    # A view for a run that reads a source the source set nothing for.
+    silent = MarketView(bars, target_source="coordinator")
+    assert (silent.targets, silent.latest_targets, silent.target_source) == ({}, {}, "coordinator")
+    with pytest.raises(TypeError):
+        view.targets[200] = {}  # type: ignore[index]
+    with pytest.raises(TypeError):
+        view.targets[100]["B"] = latest_b  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    ("targets", "match"),
+    [
+        ("A: 0.3", "targets must map a bar time"),
+        ({150: {"A": _target(time=150)}}, "holds no bar at 150 to carry targets"),
+        ({100: {}}, "the targets at 100 must be a non-empty mapping"),
+        ({100: {"A": D("0.3")}}, "the targets at 100 hold Target values"),
+        ({100: {"A": _verdict()}}, "the targets at 100 hold Target values"),
+        ({100: {"B": _target("B")}}, "the bar at 100 does not price 'B', so a target"),
+        ({100: {"B": _target()}}, "the target filed under 'B' at 100 is of 'A' at 100"),
+        ({200: {"A": _target()}}, "the target filed under 'A' at 200 is of 'A' at 100"),
+        (
+            {200: {"A": _target(time=200, source="other")}},
+            "the target on A at 200 is of source 'other', and the view carries those of "
+            "'coordinator'",
+        ),
+    ],
+)
+def test_a_view_whose_targets_do_not_fit_its_bars_or_source_is_refused(targets, match):
+    with pytest.raises(ValueError, match=match):
+        MarketView((_bar(100), _bar(200)), targets=targets, target_source="coordinator")
+
+
+def test_a_view_names_the_source_of_the_targets_it_carries():
+    with pytest.raises(ValueError, match="carries targets and names no source"):
+        MarketView((_bar(100),), targets={100: {"A": _target()}})
+    with pytest.raises(ValueError, match="target_source must be letters"):
+        MarketView((_bar(100),), target_source="two words")
+    # The verdicts' source does not stand in for the targets'.
+    with pytest.raises(ValueError, match="carries targets and names no source"):
+        MarketView((_bar(100),), verdict_source="judge", targets={100: {"A": _target()}})

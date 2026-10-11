@@ -35,6 +35,7 @@ __all__ = [
     "Verdict",
     "VerdictRecord",
     "VerdictSettings",
+    "bytes_digest",
     "require_count",
     "require_digest",
     "require_source",
@@ -71,6 +72,16 @@ _SOURCE: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _DIGEST: Final = re.compile(r"[0-9a-f]{64}")
 
 
+def bytes_digest(raw: bytes) -> str:
+    """The SHA-256 digest of ``raw``, as 64 hex digits: the shape every stored digest has.
+
+    A target names the handoff file it was read from by it.
+    """
+    if not isinstance(raw, bytes):
+        raise ValueError(f"a digest is taken of bytes, got {raw!r}")
+    return hashlib.sha256(raw).hexdigest()
+
+
 def text_digest(text: str) -> str:
     """The SHA-256 digest of ``text``, UTF-8 encoded, as 64 hex digits.
 
@@ -79,7 +90,7 @@ def text_digest(text: str) -> str:
     """
     if not isinstance(text, str):
         raise ValueError(f"a digest is taken of a string, got {text!r}")
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return bytes_digest(text.encode("utf-8"))
 
 
 def require_text(value: object, what: str) -> None:

@@ -32,6 +32,8 @@
       url_env: ETH_RPC_URL
     verdicts:                   # optional
       source: tradingagents-rating-v1
+    targets:                    # optional
+      source: carry-eth-v1
     agent:                      # optional, and so is each key in it
       llm_provider: openrouter
       deep_think_llm: "anthropic/claude-sonnet-5.5"
@@ -73,6 +75,12 @@ verdicts, and, as with ``fork``, its snapshot has no ``verdicts`` key; a
 config with the section is another snapshot, so a run reads verdicts from
 its first bar or not at all.
 
+``targets`` is read into a :class:`~.domain.targets.TargetSettings` the
+same way: the one source whose stored targets the run's view carries
+(:mod:`.store.target_source`), written by the ``target`` command from the
+carry coordinator's handoff. Left out, the run reads none, and its snapshot
+has no ``targets`` key.
+
 ``agent`` is read into an :class:`~.agent.settings.AgentSettings`: which
 judge the ``verdict`` command asks, and how. Only that command reads it,
 and it is not part of the snapshot: the verdicts a run reads are data in
@@ -103,6 +111,7 @@ from .domain.bars import BarSettings
 from .domain.decimal_context import parse_decimal, plain
 from .domain.execution import ExecutionSettings, ForkSettings
 from .domain.routing import find_route
+from .domain.targets import DAY_SECONDS, TargetSettings
 from .domain.types import Pool, Token
 from .domain.verdicts import VerdictSettings
 
@@ -117,7 +126,15 @@ __all__ = [
 ]
 
 _REQUIRED_KEYS: Final = frozenset({"chain_id", "quote_token", "tokens", "pools", "strategy"})
-_KEYS: Final = _REQUIRED_KEYS | {"agent", "bars", "execution", "fork", "rpc", "verdicts"}
+_KEYS: Final = _REQUIRED_KEYS | {
+    "agent",
+    "bars",
+    "execution",
+    "fork",
+    "rpc",
+    "targets",
+    "verdicts",
+}
 _AGENT_KEYS: Final = frozenset(
     {
         "llm_provider",
@@ -129,7 +146,8 @@ _AGENT_KEYS: Final = frozenset(
     }
 )
 _FORK_KEYS: Final = frozenset({"account", "deadline_seconds"})
-_VERDICT_KEYS: Final = frozenset({"source"})
+# The ``verdicts`` and ``targets`` sections: each names one source.
+_SOURCE_KEYS: Final = frozenset({"source"})
 _STRATEGY_KEYS: Final = frozenset({"name", "params"})
 _BARS_INTEGERS: Final = frozenset({"interval_seconds", "twap_window_seconds"})
 _BARS_DECIMALS: Final = frozenset({"max_twap_deviation", "max_move"})
@@ -214,6 +232,8 @@ class UniswapConfig:
     verdicts: VerdictSettings | None = None
     # Which judge ``verdict`` asks; the defaults when the config says nothing.
     agent: AgentSettings = AgentSettings()
+    # Whose targets the run's view carries; ``None`` when it carries none.
+    targets: TargetSettings | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -238,6 +258,16 @@ class UniswapConfig:
             )
         if not isinstance(self.agent, AgentSettings):
             raise ConfigError(f"agent must be an AgentSettings, got {self.agent!r}")
+        if self.targets is not None and not isinstance(self.targets, TargetSettings):
+            raise ConfigError(f"targets must be a TargetSettings or None, got {self.targets!r}")
+        # A target is for a day and lands on one bar: with shorter bars a strategy
+        # that reads targets would hold, and warn, at every bar but the boundary's
+        # while the coordinator's intent stands.
+        if self.targets is not None and self.bars.interval_seconds != DAY_SECONDS:
+            raise ConfigError(
+                f"a config that reads targets takes daily bars: bars.interval_seconds is "
+                f"{self.bars.interval_seconds}, and a target is for one day ({DAY_SECONDS} seconds)"
+            )
         if self.rpc_url_env is not None and (
             not isinstance(self.rpc_url_env, str) or not _ENV_NAME.fullmatch(self.rpc_url_env)
         ):
@@ -374,16 +404,17 @@ def _fork_settings(document: dict[Any, Any]) -> ForkSettings | None:
         raise ConfigError(f"fork: {exc}") from exc
 
 
-def _verdict_settings(document: dict[Any, Any]) -> VerdictSettings | None:
-    if "verdicts" not in document:
+def _source_settings(document: dict[Any, Any], key: str, settings: type[_T]) -> _T | None:
+    """The section ``key`` (``verdicts``, ``targets``) read into ``settings``, which names one source; ``None`` without the section."""
+    if key not in document:
         return None
-    section = _section(document, "verdicts", _VERDICT_KEYS)
+    section = _section(document, key, _SOURCE_KEYS)
     if "source" not in section:
-        raise ConfigError("verdicts: the section names a source, and has none")
+        raise ConfigError(f"{key}: the section names a source, and has none")
     try:
-        return VerdictSettings(**section)
+        return settings(**section)
     except ValueError as exc:
-        raise ConfigError(f"verdicts: {exc}") from exc
+        raise ConfigError(f"{key}: {exc}") from exc
 
 
 def _agent_settings(document: dict[Any, Any]) -> AgentSettings:
@@ -434,8 +465,9 @@ def config_snapshot(config: UniswapConfig) -> str:
     node's URL comes from is left out: it changes no decision, and so is
     the ``agent`` section: which judge is asked next changes none already
     made, and the verdicts read are data that name their model. So are the
-    ``fork`` and ``verdicts`` sections when the config has none, which keeps
-    the snapshot of every config written before each section existed as it was.
+    ``fork``, ``verdicts`` and ``targets`` sections when the config has none,
+    which keeps the snapshot of every config written before each section
+    existed as it was.
     """
     document: dict[str, object] = {
         "chain_id": config.chain_id,
@@ -453,6 +485,8 @@ def config_snapshot(config: UniswapConfig) -> str:
         document["fork"] = asdict(config.fork)
     if config.verdicts is not None:
         document["verdicts"] = asdict(config.verdicts)
+    if config.targets is not None:
+        document["targets"] = asdict(config.targets)
     try:
         return json.dumps(
             document,
@@ -513,8 +547,9 @@ def parse_config(document: object) -> UniswapConfig:
         execution=_execution_settings(document),
         rpc_url_env=_section(document, "rpc", _RPC_KEYS).get("url_env"),
         fork=_fork_settings(document),
-        verdicts=_verdict_settings(document),
+        verdicts=_source_settings(document, "verdicts", VerdictSettings),
         agent=_agent_settings(document),
+        targets=_source_settings(document, "targets", TargetSettings),
     )
 
 

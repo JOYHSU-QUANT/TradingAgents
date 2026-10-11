@@ -45,6 +45,14 @@
   names an older boundary only together with
   ``--fake-rating``, which records that rating without asking any judge,
   for a rehearsal on a store that holds no real verdicts.
+- ``target`` reads the carry coordinator's handoff file (``--handoff``) and
+  writes the spot weight it names into the store's ``targets`` table under
+  the config's ``targets.source``, at the boundary the handoff is for. It
+  reads no chain, and the bar need not be in the store: the row belongs to
+  no run, and the ``external_weights`` strategy reads it when the bar is
+  decided. A target the store already holds is not rewritten. The handoff
+  applies while its boundary is at most a day behind the clock; one whose
+  boundary is ahead, or a day or more behind, is not acted on.
 
 ``backfill``, ``paper`` and ``backtest --fills quoter`` take the node's URL
 from the environment variable the config names (``ETH_RPC_URL`` unless it
@@ -102,6 +110,18 @@ refusal of the provider's, such as a model it does not serve, or an error
 inside the engine), when the sidecar cannot be written, when ``--at`` names
 an older bar than the latest without ``--fake-rating``, and when
 ``--fake-rating`` meets a store that holds real verdicts of the source.
+A ``target`` exits 0 once the handoff's target is in the store, written by
+this visit or found there (a stored weight that differs from the handoff's
+is warned of on stderr, and stands). It exits 3, writing nothing, when the
+handoff is not there yet, or is for a boundary the clock has not reached or
+left a day or more ago: a later visit may find it in its window, or
+replaced. It exits 1 when the config reads no targets or trades any token
+but the handoff's, when the file cannot be read or is not the handoff this
+reader speaks (not JSON, another version, a weight outside 0 to 1, a boundary
+that is not a UTC day's), when its boundary lies more than a day ahead, and
+when the store does not exist. (A config that reads targets and has bars
+that are not a day long is refused by every command, as the config's own
+rule.)
 """
 
 from __future__ import annotations
@@ -127,14 +147,23 @@ from .domain.execution import ForkSettings
 from .domain.ledger import Ledger
 from .domain.metrics import Curve, MetricsError, RunMetrics, measurable, run_metrics
 from .domain.records import Decision, FillRecord, Outcome, RunRecord, Valuation
+from .domain.targets import Target, TargetRecord
 from .domain.times import utc_text
 from .domain.types import RunMode
-from .domain.verdicts import RATINGS, Rating
+from .domain.verdicts import RATINGS, Rating, bytes_digest
 from .engine.backtest import BacktestRangeError, BacktestSummary, run_backtest
 from .engine.executors import QuoteExecutor
 from .engine.step import EngineError, UnsettledSend, holdings_text
+from .handoff import (
+    HandoffError,
+    HandoffNotApplicable,
+    check_applicable,
+    read_handoff,
+    target_from_document,
+)
 from .store.bar_source import load_bar
 from .store.repository import Store, StoreBusy, StoreError, open_store
+from .store.target_source import load_targets
 from .store.verdict_source import load_verdicts
 
 if TYPE_CHECKING:
@@ -359,6 +388,14 @@ def _parser() -> argparse.ArgumentParser:
         "holds no real verdicts of the source",
     )
 
+    target = add("target", "Record the carry handoff's spot target at the boundary it is for.")
+    target.add_argument(
+        "--handoff",
+        type=Path,
+        required=True,
+        help="the handoff file the carry coordinator writes (contrib/carry signal --out)",
+    )
+
     report = commands.add_parser(
         "report", help=_REPORT_SUMMARY, description=_REPORT_SUMMARY
     )
@@ -461,27 +498,33 @@ def _backfill(args: argparse.Namespace, out: Callable[[str], None], now: Callabl
 
 
 def _coverage_lines(store: Store, config: UniswapConfig, times: Sequence[int]) -> list[str]:
-    """How many of the bars at ``times`` have a verdict from the config's source for every token, and how many each token has.
+    """How many of the bars at ``times`` have a verdict, and a target, from the config's sources for every token, and how many each token has.
 
-    ``times`` are the boundaries that make a bar: one that lacks a pool's
-    reading is never decided, so a verdict missing there is nothing missing.
+    One line per source the config reads. ``times`` are the boundaries that
+    make a bar: one that lacks a pool's reading is never decided, so a
+    verdict or a target missing there is nothing missing.
     """
-    settings = config.verdicts
-    if settings is None:
-        return []
-    per_token = dict.fromkeys(sorted(config.traded_symbols), 0)
-    complete = 0
-    for time in times:
-        # Already cut to the traded tokens, so every one is a token counted here.
-        said = load_verdicts(store, config, time)
-        for symbol in said:
-            per_token[symbol] += 1
-        complete += len(said) == len(per_token)
-    counts = ", ".join(f"{symbol} {count}" for symbol, count in per_token.items())
-    return [
-        f"verdicts from {settings.source}: {complete} of the latest {len(times)} bar(s) have "
-        f"one for every token ({counts})"
-    ]
+    lines = []
+    for settings, load, what in (
+        (config.verdicts, load_verdicts, "verdicts"),
+        (config.targets, load_targets, "targets"),
+    ):
+        if settings is None:
+            continue
+        per_token = dict.fromkeys(sorted(config.traded_symbols), 0)
+        complete = 0
+        for time in times:
+            # Already cut to the traded tokens, so every one is a token counted here.
+            said = load(store, config, time)
+            for symbol in said:
+                per_token[symbol] += 1
+            complete += len(said) == len(per_token)
+        counts = ", ".join(f"{symbol} {count}" for symbol, count in per_token.items())
+        lines.append(
+            f"{what} from {settings.source}: {complete} of the latest {len(times)} bar(s) have "
+            f"one for every token ({counts})"
+        )
+    return lines
 
 
 def _status_lines(store: Store, config: UniswapConfig, bars: int) -> list[str]:
@@ -835,6 +878,13 @@ def _replayed(
             f"{_iso(summary.unrated[-1])}, saw no rating (no verdict, or a REVIEW) on some "
             f"traded token; status --run-id shows which"
         )
+    if summary.untargeted and paper:
+        warnings.append(
+            f"{len(summary.untargeted)} bar(s) decided now, from {_iso(summary.untargeted[0])} "
+            f"to {_iso(summary.untargeted[-1])}, had no target on some traded token, and the "
+            f"portfolio was held as it was (carry plan D5); the target command writes one from "
+            f"the handoff"
+        )
     if summary.gas_rejected:
         warnings.append(
             f"{len(summary.gas_rejected)} rebalance(s) were rejected because the gas balance "
@@ -1103,6 +1153,68 @@ def _verdict(args: argparse.Namespace, out: Callable[[str], None], now: Callable
     return EXIT_OK
 
 
+def _target(args: argparse.Namespace, out: Callable[[str], None], now: Callable[[], float]) -> int:
+    config = _config(args)
+    settings = config.targets
+    if settings is None:
+        raise ConfigError(
+            "target writes under the source the config's targets section names, and the config "
+            "has no targets section"
+        )
+    raw, doc = read_handoff(args.handoff)
+    found = target_from_document(doc)
+    # Refused HERE, before the irrevocable write: the strategy refuses a bar with a
+    # target on some traded tokens and not others, the row is never rewritten, and
+    # dropping the other token from the config is another snapshot the run cannot
+    # go on under, so the bar could never be decided. (The config itself holds
+    # that a run reading targets takes daily bars, so the handoff's day boundary
+    # is a bar boundary.)
+    if config.traded_symbols != {found.token}:
+        raise ConfigError(
+            f"the config trades {sorted(config.traded_symbols)} and the handoff sizes "
+            f"{found.token!r} alone; a run that reads targets trades the handoff's token and "
+            f"no other"
+        )
+    present = int(now())
+    check_applicable(found, now=present)
+    record = TargetRecord(
+        target=Target(
+            source=settings.source, symbol=found.token, time=found.as_of, weight=found.weight
+        ),
+        written_at=present,
+        digest=bytes_digest(raw),
+    )
+    did = f", {_one_ascii_line(found.action)}" if found.action else ""
+    with open_store(args.db, create=False) as store:
+        out(
+            f"target of {_one_ascii_line(settings.source)} at {_iso(found.as_of)} from "
+            f"{_one_ascii_line(args.handoff.name)} ({_one_ascii_line(found.coin)}{did}):"
+        )
+        # The insert is the check: a row already there, by an earlier visit or one
+        # running beside this, is refused by the store and read back.
+        try:
+            store.insert_target(record)
+        except StoreError:
+            held = store.target(settings.source, found.token, found.as_of)
+            if held is None:
+                raise
+        else:
+            out(f"{found.token}: {plain(found.weight)} written")
+            return EXIT_OK
+    out(
+        f"{found.token}: already stored: {plain(held.target.weight)}, written "
+        f"{_iso(held.written_at)}"
+    )
+    if held.target.weight != found.weight:
+        print(
+            f"warning: the handoff says {plain(found.weight)} for {found.token} at "
+            f"{_iso(found.as_of)}, and the store holds {plain(held.target.weight)}; a target is "
+            f"never rewritten, and the run decides on what the store holds",
+            file=sys.stderr,
+        )
+    return EXIT_OK
+
+
 def _curve_line(name: str, curve: Curve) -> str:
     change = _fixed(curve.total_return * 100, signed=True) + "%"
     fall = _fixed(curve.max_drawdown * 100) + "%"
@@ -1205,13 +1317,23 @@ def main(
             return _report(args, out)
         if args.command == "verdict":
             return _verdict(args, out, now)
+        if args.command == "target":
+            return _target(args, out, now)
         return _status(args, out, now)
-    except (TransientChainError, RpcRejected, StoreBusy, BarNotStored, JudgeUnavailable) as exc:
+    except (
+        TransientChainError,
+        RpcRejected,
+        StoreBusy,
+        BarNotStored,
+        JudgeUnavailable,
+        HandoffNotApplicable,
+    ) as exc:
         # A node that answers a read with an error is as likely to be having
         # a bad moment as to be broken, and a store another program holds is
         # let go of; the run stopped, and a later one asks. A bar not yet in
-        # the store, and a judge that did not answer for a reason that may
-        # pass, are the same: a later visit asks.
+        # the store, a judge that did not answer for a reason that may pass,
+        # and a handoff not yet written or not yet in its window, are the
+        # same: a later visit asks.
         print(f"try again later: {_one_ascii_line(exc)}", file=sys.stderr)
         return EXIT_RETRY
     except (
@@ -1220,6 +1342,7 @@ def main(
         ChainError,
         ConfigError,
         EngineError,
+        HandoffError,
         MetricsError,
         OSError,
         StoreError,

@@ -22,6 +22,7 @@ from contrib.uniswap_v3.config import (
 from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS, TOKENS
 from contrib.uniswap_v3.domain.bars import BarSettings
 from contrib.uniswap_v3.domain.execution import ExecutionSettings, ForkSettings
+from contrib.uniswap_v3.domain.targets import TargetSettings
 from contrib.uniswap_v3.domain.types import Pool, Token
 from contrib.uniswap_v3.domain.verdicts import VerdictSettings
 from contrib.uniswap_v3.strategies.fixed_weights import FixedWeights
@@ -600,3 +601,63 @@ def test_a_config_built_by_hand_checks_its_verdicts():
     assert _config(verdicts=VerdictSettings(source="judge-1")).verdicts.source == "judge-1"
     with pytest.raises(ConfigError, match="verdicts must be a VerdictSettings or None"):
         _config(verdicts="judge-1")
+
+
+# --- targets -----------------------------------------------------------------
+
+
+def test_the_targets_section_names_a_source_and_none_without_it():
+    assert parse_config(_document()).targets is None
+    assert load_config(EXAMPLE).targets is None
+    read = parse_config(_document(targets={"source": "carry-eth-v1"}))
+    assert read.targets == TargetSettings(source="carry-eth-v1")
+    # The two sections are read apart: one does not stand in for the other.
+    assert read.verdicts is None
+    both = parse_config(_document(targets={"source": "carry-eth-v1"}, verdicts={"source": "j"}))
+    assert (both.targets.source, both.verdicts.source) == ("carry-eth-v1", "j")
+
+
+@pytest.mark.parametrize(
+    ("targets", "match"),
+    [
+        ({}, r"targets: the section names a source, and has none"),
+        ({"source": "two words"}, r"targets: source must be letters"),
+        ({"source": ""}, r"targets: source must be letters"),
+        ({"source": "x", "path": "y"}, r"targets must be a mapping with keys from \['source'\]"),
+        ("carry", r"targets must be a mapping"),
+    ],
+)
+def test_a_malformed_targets_section_is_refused_by_name(targets, match):
+    with pytest.raises(ConfigError, match=match):
+        parse_config(_document(targets=targets))
+
+
+def test_a_snapshot_names_the_targets_section_only_when_the_config_has_one():
+    snapshot = config_snapshot(parse_config(_document()))
+    assert "targets" not in json.loads(snapshot)
+    reading = config_snapshot(parse_config(_document(targets={"source": "carry-1"})))
+    assert reading != snapshot
+    assert json.loads(reading)["targets"] == {"source": "carry-1"}
+    assert config_from_snapshot(reading).targets == TargetSettings(source="carry-1")
+    assert config_snapshot(config_from_snapshot(reading)) == reading
+
+
+def test_a_config_built_by_hand_checks_its_targets():
+    assert _config(targets=TargetSettings(source="carry-1")).targets.source == "carry-1"
+    with pytest.raises(ConfigError, match="targets must be a TargetSettings or None"):
+        _config(targets="carry-1")
+
+
+def test_a_config_that_reads_targets_takes_daily_bars():
+    hourly = {"interval_seconds": 3600}
+    assert parse_config(_document(bars=hourly)).bars.interval_seconds == 3600
+    with pytest.raises(
+        ConfigError,
+        match=r"a config that reads targets takes daily bars: bars.interval_seconds is 3600, "
+        r"and a target is for one day \(86400 seconds\)",
+    ):
+        parse_config(_document(bars=hourly, targets={"source": "carry-1"}))
+    # By hand as well, and whichever way the config is reached.
+    with pytest.raises(ConfigError, match="takes daily bars"):
+        _config(targets=TargetSettings(source="carry-1"), bars=BarSettings(interval_seconds=3600))
+    assert parse_config(_document(bars={"interval_seconds": 86400}, targets={"source": "c"})).targets

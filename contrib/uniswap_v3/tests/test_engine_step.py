@@ -49,6 +49,11 @@ from contrib.uniswap_v3.tests.fakes.engine import (
     ledger as _ledger,
     weights,
 )
+from contrib.uniswap_v3.tests.fakes.targets import (
+    SOURCE as TARGET_SOURCE,
+    config as _target_config,
+    target,
+)
 from contrib.uniswap_v3.tests.fakes.verdicts import (
     SOURCE,
     config as _verdict_config,
@@ -744,3 +749,46 @@ def test_a_view_that_carries_verdicts_for_a_run_that_reads_none_stops_the_run(st
     assert store.decision(_RUN, FIRST_DAY) is None
     # A view that carries none is what such a run is handed, and it keeps none.
     assert engine.step(MarketView((bar(0),))).decision.verdicts is None
+
+
+# --- targets -----------------------------------------------------------------
+
+
+def test_a_view_whose_targets_are_not_the_ones_the_run_reads_stops_the_run(store):
+    engine = _engine(store, ScriptedStrategy({}), config=_target_config())
+    other = target("WETH", 0, source="another-coordinator")
+    with pytest.raises(
+        EngineError,
+        match="reads the targets of 'test-coordinator', and the view at .* carries the targets "
+        "of 'another-coordinator'",
+    ):
+        engine.step(
+            MarketView(
+                (bar(0),), targets={FIRST_DAY: {"WETH": other}}, target_source="another-coordinator"
+            )
+        )
+    with pytest.raises(
+        EngineError,
+        match="reads the targets of 'test-coordinator', and the view at .* carries no targets",
+    ):
+        engine.step(MarketView((bar(0),)))
+    assert store.decision(_RUN, FIRST_DAY) is None
+    # The view it is built for: the targets' source named, whether or not it set anything.
+    decided = engine.step(MarketView((bar(0),), target_source=TARGET_SOURCE)).decision
+    assert decided.outcome is Outcome.HOLD and decided.verdicts is None
+
+
+def test_a_view_that_carries_targets_for_a_run_that_reads_none_stops_the_run(store):
+    engine = _engine(store, ScriptedStrategy({}))
+    with pytest.raises(
+        EngineError,
+        match="reads no targets, and the view at .* carries the targets of 'test-coordinator'",
+    ):
+        engine.step(
+            MarketView(
+                (bar(0),),
+                targets={FIRST_DAY: {"WETH": target("WETH", 0)}},
+                target_source=TARGET_SOURCE,
+            )
+        )
+    assert store.decision(_RUN, FIRST_DAY) is None

@@ -18,9 +18,10 @@ from decimal import Decimal
 from enum import Enum
 from fractions import Fraction
 from types import MappingProxyType
-from typing import Final
+from typing import Any, Final
 
 from .decimal_context import DECIMAL_CONTEXT, MAX_MAGNITUDE
+from .targets import Target
 from .verdicts import Verdict, require_source
 
 __all__ = [
@@ -230,6 +231,7 @@ class Bar:
 
 
 _NO_VERDICTS: Final[Mapping[str, Verdict]] = MappingProxyType({})
+_NO_TARGETS: Final[Mapping[str, Target]] = MappingProxyType({})
 
 
 @dataclass(frozen=True)
@@ -249,11 +251,17 @@ class MarketView:
     in view. Every boundary in it is one of the view's bars, so a verdict is
     seen no earlier than its bar; every token in it is one that bar prices,
     so a strategy could act on it; and every verdict is the named source's.
+
+    ``target_source`` and ``targets`` are the same for the targets an
+    outside coordinator set (:class:`~.targets.Target`): by the boundary of
+    the bar each is for and then by token, under the same rules.
     """
 
     bars: tuple[Bar, ...]
     verdicts: Mapping[int, Mapping[str, Verdict]] = MappingProxyType({})
     verdict_source: str | None = None
+    targets: Mapping[int, Mapping[str, Target]] = MappingProxyType({})
+    target_source: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.bars, tuple) or not self.bars:
@@ -273,46 +281,19 @@ class MarketView:
                 )
         if self.verdict_source is not None:
             require_source(self.verdict_source, "verdict_source")
-        object.__setattr__(self, "verdicts", self._frozen_verdicts())
-
-    def _frozen_verdicts(self) -> Mapping[int, Mapping[str, Verdict]]:
-        """A read-only copy of ``verdicts``, every entry checked against the bars and the source."""
-        if not isinstance(self.verdicts, Mapping):
-            raise ValueError(
-                f"verdicts must map a bar time to the verdicts at it, got {self.verdicts!r}"
-            )
-        if self.verdicts and self.verdict_source is None:
-            raise ValueError("the view carries verdicts and names no source for them")
+        if self.target_source is not None:
+            require_source(self.target_source, "target_source")
         priced = {bar.time: bar.prices for bar in self.bars}
-        frozen: dict[int, Mapping[str, Verdict]] = {}
-        for time, at_time in self.verdicts.items():
-            if time not in priced:
-                raise ValueError(f"the view holds no bar at {time!r} to carry verdicts at")
-            if not isinstance(at_time, Mapping) or not at_time:
-                raise ValueError(
-                    f"the verdicts at {time} must be a non-empty mapping of token symbol to "
-                    f"Verdict, got {at_time!r}"
-                )
-            for symbol, verdict in at_time.items():
-                if not isinstance(verdict, Verdict):
-                    raise ValueError(f"the verdicts at {time} hold Verdict values, got {verdict!r}")
-                if verdict.symbol != symbol or verdict.time != time:
-                    raise ValueError(
-                        f"the verdict filed under {symbol!r} at {time} is of {verdict.symbol!r} "
-                        f"at {verdict.time}"
-                    )
-                if symbol not in priced[time]:
-                    raise ValueError(
-                        f"the bar at {time} does not price {symbol!r}, so a verdict on it is "
-                        f"not carried"
-                    )
-                if verdict.source != self.verdict_source:
-                    raise ValueError(
-                        f"the verdict on {symbol} at {time} is of source {verdict.source!r}, and "
-                        f"the view carries those of {self.verdict_source!r}"
-                    )
-            frozen[time] = MappingProxyType(dict(at_time))
-        return MappingProxyType(frozen)
+        object.__setattr__(
+            self,
+            "verdicts",
+            _frozen_at_bars(self.verdicts, self.verdict_source, Verdict, "verdict", priced),
+        )
+        object.__setattr__(
+            self,
+            "targets",
+            _frozen_at_bars(self.targets, self.target_source, Target, "target", priced),
+        )
 
     @property
     def latest(self) -> Bar:
@@ -320,9 +301,65 @@ class MarketView:
         return self.bars[-1]
 
     @property
+    def latest_targets(self) -> Mapping[str, Target]:
+        """The targets at the bar being decided, by token; empty when there are none."""
+        return self.targets.get(self.latest.time, _NO_TARGETS)
+
+    @property
     def latest_verdicts(self) -> Mapping[str, Verdict]:
         """The verdicts at the bar being decided, by token; empty when there are none."""
         return self.verdicts.get(self.latest.time, _NO_VERDICTS)
+
+
+def _frozen_at_bars(
+    carried: object,
+    source: str | None,
+    kind: type,
+    what: str,
+    priced: Mapping[int, Mapping[str, Decimal]],
+) -> Mapping[int, Mapping[str, Any]]:
+    """A read-only copy of ``carried``, every entry checked against the bars and ``source``.
+
+    ``carried`` maps a bar time to a mapping of token symbol to a value of
+    ``kind`` (a verdict or a target, called ``what`` in a message), each of
+    which names its own source, symbol and time; ``priced`` is what each of
+    the view's bars prices, by boundary.
+    """
+    if not isinstance(carried, Mapping):
+        raise ValueError(f"{what}s must map a bar time to the {what}s at it, got {carried!r}")
+    if not carried:
+        return MappingProxyType({})
+    if source is None:
+        raise ValueError(f"the view carries {what}s and names no source for them")
+    frozen: dict[int, Mapping[str, Any]] = {}
+    for time, at_time in carried.items():
+        if time not in priced:
+            raise ValueError(f"the view holds no bar at {time!r} to carry {what}s at")
+        if not isinstance(at_time, Mapping) or not at_time:
+            raise ValueError(
+                f"the {what}s at {time} must be a non-empty mapping of token symbol to "
+                f"{kind.__name__}, got {at_time!r}"
+            )
+        for symbol, said in at_time.items():
+            if not isinstance(said, kind):
+                raise ValueError(f"the {what}s at {time} hold {kind.__name__} values, got {said!r}")
+            if said.symbol != symbol or said.time != time:
+                raise ValueError(
+                    f"the {what} filed under {symbol!r} at {time} is of {said.symbol!r} "
+                    f"at {said.time}"
+                )
+            if symbol not in priced[time]:
+                raise ValueError(
+                    f"the bar at {time} does not price {symbol!r}, so a {what} on it is "
+                    f"not carried"
+                )
+            if said.source != source:
+                raise ValueError(
+                    f"the {what} on {symbol} at {time} is of source {said.source!r}, and "
+                    f"the view carries those of {source!r}"
+                )
+        frozen[time] = MappingProxyType(dict(at_time))
+    return MappingProxyType(frozen)
 
 
 @dataclass(frozen=True)

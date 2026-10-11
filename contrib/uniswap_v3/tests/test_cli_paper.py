@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,11 @@ from contrib.uniswap_v3.tests.fakes.node import (
     sqrt_price_at,
 )
 from contrib.uniswap_v3.tests.fakes.rpc import block_hash, rpc_over
+from contrib.uniswap_v3.tests.fakes.targets import (
+    handoff_document,
+    targeted_config,
+    write_handoff,
+)
 from contrib.uniswap_v3.tests.fakes.verdicts import judged_config, record as _record
 
 _EXAMPLE = Path(__file__).resolve().parents[1] / "configs" / "uniswap_v3.example.yaml"
@@ -598,6 +604,44 @@ def test_paper_of_a_run_that_reads_no_verdicts_does_not_warn_of_no_rating(node, 
     db = tmp_path / "store.db"
     assert _paper(node, db, *_OPENING)[0] == cli.EXIT_OK
     assert "saw no rating" not in capsys.readouterr().err
+    assert "had no target" not in capsys.readouterr().err
+
+
+# A carry run, reading targets: what a visit warns of, and what a target changes.
+
+_NO_TARGET = (
+    "had no target on some traded token, and the portfolio was held as it was (carry plan D5); "
+    "the target command writes one from the handoff"
+)
+
+
+def test_paper_warns_of_a_bar_decided_with_no_target_and_follows_one_when_set(
+    node, tmp_path, capsys
+):
+    db, carry = tmp_path / "store.db", targeted_config(tmp_path)
+    assert _paper(node, db, *_OPENING, config=carry)[0] == cli.EXIT_OK
+    assert (
+        f"warning: 1 bar(s) decided now, from 2024-01-01T00:00:00Z to 2024-01-01T00:00:00Z, "
+        f"{_NO_TARGET}"
+    ) in capsys.readouterr().err
+    # The next day the coordinator's handoff is written before the visit: no warning, and
+    # the run follows the target.
+    later = _TEN_PAST + DAY
+    handoff = tmp_path / "handoff-eth.json"
+    write_handoff(handoff, handoff_document(as_of=FIRST_DAY + DAY, weight="0.4"))
+    on = ("--config", str(carry), "--db", str(db))
+    assert _run(node, "target", *on, "--handoff", str(handoff), now=later)[0] == cli.EXIT_OK
+    capsys.readouterr()
+    code, lines = _paper(node, db, config=carry, now=later)
+    assert code == cli.EXIT_OK
+    assert "had no target" not in capsys.readouterr().err
+    assert lines[-1].startswith("the bar at 2024-01-02T00:00:00Z is decided: filled")
+    with open_store(db) as store:
+        decision = store.decision("p", FIRST_DAY + DAY)
+    assert decision.target.weights == {"USDC": Decimal("0.6"), "WETH": Decimal("0.4")}
+    # A visit that finds the bar decided decides nothing, and warns of nothing.
+    assert _paper(node, db, config=carry, now=later + 600)[0] == cli.EXIT_OK
+    assert "had no target" not in capsys.readouterr().err
 
 
 def test_report_counts_the_bars_that_saw_a_verdict_on_every_traded_token(node, tmp_path):

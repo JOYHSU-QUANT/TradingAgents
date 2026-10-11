@@ -17,7 +17,8 @@ is the engine's :class:`~..ports.Journal`.
 
 A ``verdicts`` row is one :class:`~..domain.verdicts.VerdictRecord`. It
 belongs to no run and is written once: inserting a row whose key is already
-there raises, as a bar's does, and nothing updates one.
+there raises, as a bar's does, and nothing updates one. A ``targets`` row
+is one :class:`~..domain.targets.TargetRecord`, under the same rules.
 
 The database is kept in SQLite's write-ahead log mode, which
 :func:`open_store` turns on and the file then keeps: beside ``store.db``
@@ -49,6 +50,7 @@ from ..domain.records import (
     StepRecord,
     Valuation,
 )
+from ..domain.targets import Target, TargetRecord
 from ..domain.types import Fill, RunMode, TargetWeights
 from ..domain.verdicts import Rating, Verdict, VerdictRecord
 from .schema import SchemaError, migrate, transaction
@@ -234,6 +236,8 @@ _VERDICT_COLUMNS: Final = (
     "sidecar_digest",
 )
 _SELECT_VERDICT: Final = f"SELECT {', '.join(_VERDICT_COLUMNS)} FROM verdicts"
+_TARGET_COLUMNS: Final = ("source", "symbol", "time", "weight", "written_at", "digest")
+_SELECT_TARGET: Final = f"SELECT {', '.join(_TARGET_COLUMNS)} FROM targets"
 
 
 def _digests_text(digests: Mapping[str, str]) -> str:
@@ -269,6 +273,28 @@ def _verdict_record(row: Sequence[Any]) -> VerdictRecord:
         asked_at=asked_at,
         sidecar_path=path,
         sidecar_digest=path_digest,
+    )
+
+
+def _target_row(record: TargetRecord) -> tuple[Any, ...]:
+    target = record.target
+    return (
+        target.source,
+        target.symbol,
+        target.time,
+        str(target.weight),
+        record.written_at,
+        record.digest,
+    )
+
+
+def _target_record(row: Sequence[Any]) -> TargetRecord:
+    """A row of :data:`_TARGET_COLUMNS` read back."""
+    source, symbol, time, weight, written_at, digest = row
+    return TargetRecord(
+        target=Target(source=source, symbol=symbol, time=time, weight=Decimal(weight)),
+        written_at=written_at,
+        digest=digest,
     )
 
 
@@ -544,6 +570,54 @@ class Store:
                 "SELECT DISTINCT model FROM verdicts WHERE source = ? ORDER BY model", (source,)
             ).fetchall()
         return [model for (model,) in rows]
+
+    def insert_target(self, record: TargetRecord) -> None:
+        """Write ``record``; a target of its source, token and bar that is already stored raises.
+
+        A target is never rewritten: :class:`StoreError`, and nothing changes.
+        """
+        placeholders = ", ".join("?" for _ in _TARGET_COLUMNS)
+        with _sqlite_errors("writing a target"):
+            try:
+                with transaction(self._connection):
+                    self._connection.execute(
+                        f"INSERT INTO targets ({', '.join(_TARGET_COLUMNS)}) "
+                        f"VALUES ({placeholders})",
+                        _target_row(record),
+                    )
+            except sqlite3.IntegrityError as exc:
+                if "UNIQUE constraint failed" not in str(exc):
+                    raise
+                target = record.target
+                raise StoreError(
+                    f"the target of {target.source!r} on {target.symbol} at {target.time} "
+                    f"is already stored, and a target is never rewritten"
+                ) from exc
+
+    def target(self, source: str, symbol: str, time: int) -> TargetRecord | None:
+        """What ``source`` said to hold of ``symbol`` at the bar ``time``, when it said anything."""
+        with _sqlite_errors("reading a target"):
+            row = self._connection.execute(
+                f"{_SELECT_TARGET} WHERE source = ? AND symbol = ? AND time = ?",
+                (source, symbol, time),
+            ).fetchone()
+        if row is None:
+            return None
+        with _stored(f"target of {source!r} on {symbol} at {time}"):
+            return _target_record(row)
+
+    def targets_at(self, source: str, time: int) -> list[TargetRecord]:
+        """Every target of ``source`` at the bar ``time``, by token symbol."""
+        with _sqlite_errors("reading targets"):
+            rows = self._connection.execute(
+                f"{_SELECT_TARGET} WHERE source = ? AND time = ? ORDER BY symbol",
+                (source, time),
+            ).fetchall()
+        records = []
+        for row in rows:
+            with _stored(f"target of {source!r} on {row[1]} at {time}"):
+                records.append(_target_record(row))
+        return records
 
     def insert_run(self, run: RunRecord) -> None:
         """Start ``run``; a run with its id that is already stored raises :class:`StoreError`."""

@@ -51,7 +51,7 @@
   reads no chain, and the bar need not be in the store: the row belongs to
   no run, and the ``external_weights`` strategy reads it when the bar is
   decided. A target the store already holds is not rewritten. The handoff
-  applies while its boundary is at most a day behind the clock; one whose
+  applies while its boundary is less than a day behind the clock; one whose
   boundary is ahead, or a day or more behind, is not acted on.
 
 ``backfill``, ``paper`` and ``backtest --fills quoter`` take the node's URL

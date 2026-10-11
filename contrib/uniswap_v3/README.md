@@ -100,7 +100,7 @@ backtest 與 paper 沒有私鑰、不簽交易。會簽名的只有 `ChainExecut
 
 | Port | 做什麼 | 實作 |
 |---|---|---|
-| `Strategy` | `decide(view, portfolio) -> TargetWeights \| Hold`。**策略進入系統的唯一入口** | `strategies/fixed_weights.py`、`strategies/trend_vol_weights.py`、`strategies/ai_gated_weights.py` |
+| `Strategy` | `decide(view, portfolio) -> TargetWeights \| Hold`。**策略進入系統的唯一入口** | `strategies/fixed_weights.py`、`strategies/trend_vol_weights.py`、`strategies/ai_gated_weights.py`、`strategies/external_weights.py` |
 | `Executor` | `execute(swap, bar) -> Fill \| Rejection`，並宣告成交來源 | `engine/executors.py` 的 `ModelExecutor`、`QuoteExecutor`；`chain/swaps.py` 的 `ChainExecutor`（分叉上簽名） |
 | `Wallet` | `prepare(bar, ledger)`、`holdings()`：會簽名的 executor 從哪個錢包交易，引擎拿它對帳 | `chain/wallet.py` 的 `ForkWallet` |
 | `Journal` | run、decision、帳本、send 的讀寫 | `store/repository.py` 的 `Store` |

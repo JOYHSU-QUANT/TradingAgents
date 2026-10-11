@@ -646,6 +646,23 @@ def _saw(store: Store, config: UniswapConfig, decision: Decision) -> str:
     return f"  verdicts: {', '.join(seen)}"
 
 
+def _aimed(store: Store, config: UniswapConfig, decision: Decision) -> str:
+    """The targets the store holds NOW at the decision's bar, as ``<token>=<weight>``; nothing for a run that reads none.
+
+    "Now", not "saw": a decision keeps no target digest, so a target
+    written after the bar was decided reads the same as one it followed.
+    A token with no target reads ``none``.
+    """
+    if config.targets is None:
+        return ""
+    held = load_targets(store, config, decision.time)
+    now = [
+        f"{symbol}={plain(held[symbol].weight) if symbol in held else 'none'}"
+        for symbol in sorted(config.traded_symbols)
+    ]
+    return f"  targets now: {', '.join(now)}"
+
+
 def _why(decision: Decision) -> str:
     """A rejected or a skipped decision's reason, as `` (<reason>)``; nothing for another."""
     return "" if decision.reason is None else f" ({_one_ascii_line(decision.reason)})"
@@ -730,6 +747,7 @@ def _run_status_lines(store: Store, run_id: str, latest: int, now: int) -> list[
         lines.append(
             f"{_iso(decision.time)}  {decision.outcome.value}  {when}"
             f"{_saw(store, config, decision)}"
+            f"{_aimed(store, config, decision)}"
             f"{_why(decision)}"
         )
     return lines
@@ -826,9 +844,10 @@ def _replayed(
     """Print what a replay did, and warn on stderr of what a reader should know of it.
 
     A paper visit, ``paper``, is watched by its exit code and stderr alone, and so is
-    warned of a rebalance the executor rejected, of a bar skipped as suspect and, for
+    warned of a rebalance the executor rejected, of a bar skipped as suspect, for
     a run that reads verdicts, of a bar decided with no rating on some traded token,
-    which in a backtest are counted and no more. It is not warned of bars decided on readings
+    and, for a run that reads targets, of a bar decided with no target on some traded
+    token, which in a backtest are counted and no more. It is not warned of bars decided on readings
     that were not final: a visit made on time always decides its latest bar on one.
     A run whose swaps are signed, ``signs``, is warned of rejected rebalances as well,
     and of those left partial, which hold a wallet half rebalanced.
@@ -881,9 +900,9 @@ def _replayed(
     if summary.untargeted and paper:
         warnings.append(
             f"{len(summary.untargeted)} bar(s) decided now, from {_iso(summary.untargeted[0])} "
-            f"to {_iso(summary.untargeted[-1])}, had no target on some traded token, and the "
-            f"portfolio was held as it was (carry plan D5); the target command writes one from "
-            f"the handoff"
+            f"to {_iso(summary.untargeted[-1])}, had no target on some traded token; a strategy "
+            f"that reads targets holds there (carry plan D5), and the target command writes one "
+            f"from the handoff"
         )
     if summary.gas_rejected:
         warnings.append(
@@ -1200,6 +1219,16 @@ def _target(args: argparse.Namespace, out: Callable[[str], None], now: Callable[
                 raise
         else:
             out(f"{found.token}: {plain(found.weight)} written")
+            decided = store.runs_decided_at(found.as_of)
+            if decided:
+                # The one ordering the schedule rules out (target before paper): said
+                # here, since the row changes nothing a decision already made.
+                print(
+                    f"warning: {len(decided)} run(s) have already decided the bar at "
+                    f"{_iso(found.as_of)} ({', '.join(map(_one_ascii_line, decided))}); the "
+                    f"target written now does not change those decisions",
+                    file=sys.stderr,
+                )
             return EXIT_OK
     out(
         f"{found.token}: already stored: {plain(held.target.weight)}, written "

@@ -16,6 +16,7 @@ Uniswap v3 現貨的執行架構：策略只回答「目標比例是多少」，
   政策與參數的定義在 `strategies/ai_gated_weights.py` 的 docstring。
 - `external_weights`：外部目標策略（carry sleeve 的現貨腿）。不預測，持有 carry 協調者（`contrib/carry`）在這根 bar
   設定的比例（store 的 `targets`，見下；由 `target` 指令從交接檔寫入），餘額留在計價代幣，偏離超過 `band` 才再平衡。
+  進場（沒持有→目標 > 0）與出場（有持有→目標 0）不看 band、一律交易，否則目標 ≤ band 的進場永遠不會發生、出場會留零頭。
   這根 bar 沒有目標就 `Hold`、什麼都不動（計畫 D5：交接檔缺檔或陳舊時兩腿都維持現狀；visit 會在 stderr 警告）；
   只有部分交易代幣有目標、或目標總和超過 1，拒絕那根（run 停下，`failed: the strategy refused the bar at …`）。
   設定檔要有 `targets` 區塊；carry run 只交易交接檔指名的那個代幣（`tokens: [USDC, WETH]`、一個池）。
@@ -165,15 +166,17 @@ contrib/uniswap_v3/
 以設定的 `verdicts.source` 寫列，judge 的原文（最終決策、各分析師與辯論的報告、給它看的現貨脈絡、模型、耗時）另存成
 sidecar `verdicts/<source>/<代幣>-<bar 時間>.json`，放在 store 檔的同一個目錄下（列裡存相對路徑與檔案 digest，
 store 與 sidecar 要一起搬）。同一（source、代幣、bar）問過就不再問；`--fake-rating` 寫的列 `model=fake`、沒有 sidecar。
-`targets` 是外部目標：某個 source 要某代幣在某根 bar 持有的比例（0–1）＋寫入時間與交接檔位元組的 sha256
-（schema v7）；形狀與規則同 `verdicts`：不屬於任何 run、同一（source、代幣、bar）寫一次不改。設定檔有 `targets.source` 的 run，
+`targets` 是外部目標：某個 source 要某代幣在某根 bar 持有的比例（0–1；**0 也是目標**——出場日或空手日，不是「沒有目標」）＋寫入時間與交接檔位元組的 sha256
+（schema v7；交接檔的 `action` 刻意不存，那是協調者自己的狀態，在 perp sidecar 與 `carry history` 裡）；形狀與規則同 `verdicts`：不屬於任何 run、同一（source、代幣、bar）寫一次不改。設定檔有 `targets.source` 的 run，
 策略拿到的 view 帶該 source 對交易代幣的目標（只到被決策的那根為止）。讀目標的策略是 `external_weights`；寫目標的是 `target` 指令：
 讀 carry 協調者的交接檔（`contrib/carry/README.md`「交接檔」），把 `spot.weight` 寫在 `as_of` 那根 bar。交接檔的陳舊判準是它自己的
 （`as_of ≤ now < as_of＋1 天`才寫；邊界還沒到或已過一天就結束碼 3 什麼都不寫，讓下一次 visit 再試）。一列只落在一根 bar，所以讀目標的 run
 只能是日線（有 `targets` 區塊而 `bars.interval_seconds` 不是一天的設定，任何指令都拒絕），而且只交易交接檔指名的那個代幣（設定多一個代幣也拒絕：策略會對「部分代幣有目標」
 的 bar 拒絕決策，列又不可改寫，那根就永遠決策不了）。decision **不**另記目標的 digest（不像 `verdict_digests`），replay 也不數目標事後有沒有變：
 「這根有 targets 列」＝「決策看到了它」靠排程保證——PR 4 的 visit 腳本先跑 `target` 再跑 `paper`，`target` 結束碼非 0 就停在那步、那根留到下一個
-attempt 或隔天的 visit 連同當天一起補決策（Hold），D5 的警告那時才印、中間 `status --run-id` 顯示 behind。手動先跑 `paper` 再跑 `target` 會打破這點。
+attempt 或隔天的 visit 連同當天一起補決策（Hold），D5 的警告那時才印、中間 `status --run-id` 顯示 behind。手動先跑 `paper` 再跑 `target` 會打破這點——
+`target` 寫列時若有 run 已決策那根 bar，stderr 會警告「不改既有決策」；`status --run-id` 每筆決策附 `targets now: WETH=0.4`／`WETH=none`，印的是 store **現在**的值。
+`backtest`／`fork` 跑 `external_weights` 的設定也會讀 `targets`，但 `target` 只寫今天的交接檔（過期的結束碼 3），歷史目標要另外寫進去才有東西可回測。
 舊版的 store 會在任何指令第一次打開時自動升級。
 
 ---

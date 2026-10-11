@@ -8,7 +8,13 @@ traded token at the weight the coordinator set, cut to four decimal places
 as every strategy's weights are, and what they leave to the quote token.
 The target is answered only when some token's share has drifted more than
 ``band`` from it (:func:`.rebalance.rebalance_or_hold`), as the other
-strategies do.
+strategies do, with one exception: a token the portfolio does not hold
+whose target is above zero, or one it holds whose target is zero, is
+traded whatever the band. Those are the coordinator's entry and exit, and
+a band would swallow them: an entry weight at or below the band (a spot
+run several times the perp run's equity gets there) would never be bought
+from nothing, leaving the perp leg short beside no spot at all, and an
+exit would leave a sliver of the token behind for good.
 
 A bar with no target is held as it is: ``Hold``, which is the spot leg's
 half of the plan's D5 (a handoff that is missing or stale leaves BOTH legs
@@ -75,7 +81,7 @@ class ExternalWeights:
         return cls(band=parse_decimal(params["band"], "band"))
 
     def decide(self, view: MarketView, portfolio: Portfolio) -> TargetWeights | Hold:
-        """The coordinator's target when some token has drifted out of the band, else ``Hold``.
+        """The coordinator's target when a token enters or exits, or some share has drifted out of the band; else ``Hold``.
 
         A bar the coordinator set no target at is held whatever the
         portfolio holds (module docstring). The engine hands a portfolio
@@ -85,6 +91,13 @@ class ExternalWeights:
         target = self.target_for(view, portfolio.quote)
         if target is None:
             return Hold()
+        if portfolio.total_value != 0 and any(
+            (portfolio.balances[symbol] == 0) != (weight == 0)
+            for symbol, weight in target.weights.items()
+            if symbol != portfolio.quote
+        ):
+            # An entry from nothing, or an exit to nothing: the band does not apply.
+            return target
         return rebalance_or_hold(portfolio, target, self.band)
 
     def target_for(self, view: MarketView, quote: str) -> TargetWeights | None:

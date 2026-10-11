@@ -160,7 +160,8 @@ strategy:
 # read by the targets section above, which this strategy needs (uncomment it,
 # or the run fails on its first bar). At a bar with a target on every traded
 # token the target is the coordinator's weights, the rest to the quote token,
-# answered when some share has drifted more than `band`; at a bar with no
+# answered when some share has drifted more than `band` (an entry from nothing
+# and an exit to nothing are traded whatever the band); at a bar with no
 # target the portfolio is held as it is (the carry plan's D5: a missing or
 # stale handoff leaves both legs where they are), and the visit warns. A
 # carry run trades the one token the handoff names: tokens [USDC, WETH] and

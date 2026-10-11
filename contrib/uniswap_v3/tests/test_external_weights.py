@@ -150,6 +150,23 @@ def test_a_portfolio_inside_the_band_is_held():
     assert STRATEGY.decide(view, _portfolio(view, "640", "0.18", "0")) == weights("0.7", "0.3", "0")
 
 
+def test_an_entry_from_nothing_is_traded_whatever_the_band():
+    # A weight at or below the band (0.03 with a 0.05 band): the coordinator's entry,
+    # which a band alone would never answer from an all-quote portfolio.
+    view = _view({"WETH": "0.03", "WBTC": "0"})
+    assert STRATEGY.decide(view, _portfolio(view, "1000", "0", "0")) == weights("0.97", "0.03", "0")
+    # Held already, inside the band: nothing to do.
+    assert STRATEGY.decide(view, _portfolio(view, "970", "0.015", "0")) == Hold()
+
+
+def test_an_exit_to_nothing_is_traded_whatever_the_band():
+    # A sliver below the band is still sold when the target is zero: the exit.
+    view = _view({"WETH": "0", "WBTC": "0"})
+    assert STRATEGY.decide(view, _portfolio(view, "980", "0.01", "0")) == ALL_QUOTE
+    # Nothing held and nothing targeted (a stay-out day): nothing to do.
+    assert STRATEGY.decide(view, _portfolio(view, "1000", "0", "0")) == Hold()
+
+
 def test_a_portfolio_worth_nothing_is_held():
     view = _view({"WETH": "0.3", "WBTC": "0"})
     assert STRATEGY.decide(view, _portfolio(view, "0", "0", "0")) == Hold()

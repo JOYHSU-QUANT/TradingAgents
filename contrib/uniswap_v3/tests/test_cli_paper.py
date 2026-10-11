@@ -603,15 +603,16 @@ def test_paper_warns_once_of_the_bars_it_caught_up_on_without_a_rating(node, tmp
 def test_paper_of_a_run_that_reads_no_verdicts_does_not_warn_of_no_rating(node, tmp_path, capsys):
     db = tmp_path / "store.db"
     assert _paper(node, db, *_OPENING)[0] == cli.EXIT_OK
-    assert "saw no rating" not in capsys.readouterr().err
-    assert "had no target" not in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "saw no rating" not in err
+    assert "had no target" not in err
 
 
 # A carry run, reading targets: what a visit warns of, and what a target changes.
 
 _NO_TARGET = (
-    "had no target on some traded token, and the portfolio was held as it was (carry plan D5); "
-    "the target command writes one from the handoff"
+    "had no target on some traded token; a strategy that reads targets holds there (carry plan "
+    "D5), and the target command writes one from the handoff"
 )
 
 
@@ -642,6 +643,20 @@ def test_paper_warns_of_a_bar_decided_with_no_target_and_follows_one_when_set(
     # A visit that finds the bar decided decides nothing, and warns of nothing.
     assert _paper(node, db, config=carry, now=later + 600)[0] == cli.EXIT_OK
     assert "had no target" not in capsys.readouterr().err
+    # status shows, per decision, what the store holds now: none for the first day.
+    code, lines = _run(node, "status", *on, "--run-id", "p", now=later + 600)
+    assert code == cli.EXIT_OK
+    assert lines[-2].endswith("  targets now: WETH=none")
+    assert lines[-1].endswith("  targets now: WETH=0.4")
+    assert not any("verdicts:" in line for line in lines)
+    # A target written for the first day now, after it was decided, is warned of.
+    write_handoff(handoff, handoff_document(as_of=FIRST_DAY, weight="0.2"))
+    code, _ = _run(node, "target", *on, "--handoff", str(handoff), now=FIRST_DAY + 7_200)
+    assert code == cli.EXIT_OK
+    assert (
+        "warning: 1 run(s) have already decided the bar at 2024-01-01T00:00:00Z (p); the target "
+        "written now does not change those decisions"
+    ) in capsys.readouterr().err
 
 
 def test_report_counts_the_bars_that_saw_a_verdict_on_every_traded_token(node, tmp_path):

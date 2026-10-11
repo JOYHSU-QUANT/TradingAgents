@@ -18,7 +18,7 @@ from decimal import Decimal
 from enum import Enum
 from fractions import Fraction
 from types import MappingProxyType
-from typing import Any, Final
+from typing import Final, Protocol, TypeVar
 
 from .decimal_context import DECIMAL_CONTEXT, MAX_MAGNITUDE
 from .targets import Target
@@ -311,13 +311,29 @@ class MarketView:
         return self.verdicts.get(self.latest.time, _NO_VERDICTS)
 
 
+class _SaidAtBar(Protocol):
+    """What a view carries at a bar about a token: a verdict or a target, each naming its source, token and bar."""
+
+    @property
+    def source(self) -> str: ...
+
+    @property
+    def symbol(self) -> str: ...
+
+    @property
+    def time(self) -> int: ...
+
+
+_Said = TypeVar("_Said", bound=_SaidAtBar)
+
+
 def _frozen_at_bars(
     carried: object,
     source: str | None,
-    kind: type,
+    kind: type[_Said],
     what: str,
     priced: Mapping[int, Mapping[str, Decimal]],
-) -> Mapping[int, Mapping[str, Any]]:
+) -> Mapping[int, Mapping[str, _Said]]:
     """A read-only copy of ``carried``, every entry checked against the bars and ``source``.
 
     ``carried`` maps a bar time to a mapping of token symbol to a value of
@@ -331,7 +347,7 @@ def _frozen_at_bars(
         return MappingProxyType({})
     if source is None:
         raise ValueError(f"the view carries {what}s and names no source for them")
-    frozen: dict[int, Mapping[str, Any]] = {}
+    frozen: dict[int, Mapping[str, _Said]] = {}
     for time, at_time in carried.items():
         if time not in priced:
             raise ValueError(f"the view holds no bar at {time!r} to carry {what}s at")

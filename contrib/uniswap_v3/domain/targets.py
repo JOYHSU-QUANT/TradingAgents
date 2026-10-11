@@ -66,8 +66,8 @@ class TargetRecord:
 
     ``written_at`` is when the ``target`` command wrote the row, in epoch
     seconds. ``digest`` is the SHA-256 of the handoff file's bytes, as 64
-    hex digits (:func:`~.verdicts.text_digest`'s shape), the one fact about
-    the file as written that survives the coordinator's daily overwrite.
+    hex digits (:func:`~.verdicts.bytes_digest`), the one fact about the
+    file as written that survives the coordinator's daily overwrite.
     """
 
     target: Target

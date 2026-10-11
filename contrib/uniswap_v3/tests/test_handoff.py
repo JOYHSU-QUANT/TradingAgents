@@ -89,6 +89,9 @@ def test_an_action_may_be_null_and_is_otherwise_a_string():
         ({"as_of_ms": True}, "as_of_ms must be a non-negative integer"),
         ({"as_of_ms": 1704067200500}, "is not a whole second"),
         ({"as_of_ms": -1000}, "as_of_ms must be a non-negative integer"),
+        # A whole number no calendar reaches, on a day boundary and off one.
+        ({"as_of_ms": 10**25 * 86_400_000}, "is not an instant this host can spell"),
+        ({"as_of_ms": 10**25 * 86_400_000 + 1_000}, "is not an instant this host can spell"),
         (
             {"as_of_ms": (FIRST_DAY + 3_600) * 1_000},
             "as_of 2024-01-01T01:00:00Z is not a UTC day boundary",

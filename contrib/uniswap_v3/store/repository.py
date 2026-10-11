@@ -619,6 +619,14 @@ class Store:
                 records.append(_target_record(row))
         return records
 
+    def runs_decided_at(self, time: int) -> list[str]:
+        """Every run that has decided the bar at ``time``, sorted; empty when none has."""
+        with _sqlite_errors("reading decisions"):
+            rows = self._connection.execute(
+                "SELECT run_id FROM decisions WHERE time = ? ORDER BY run_id", (time,)
+            ).fetchall()
+        return [run_id for (run_id,) in rows]
+
     def insert_run(self, run: RunRecord) -> None:
         """Start ``run``; a run with its id that is already stored raises :class:`StoreError`."""
         with _sqlite_errors("starting a run"):

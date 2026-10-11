@@ -75,8 +75,13 @@ class HandoffTarget:
 
     The values are judged HERE, whatever built the target: ``as_of`` is the
     boundary the target is for, in epoch seconds, a UTC day boundary (the
-    document carries milliseconds); ``action`` is the coordinator's word for
-    what the boundary did, for the log alone.
+    document carries milliseconds) that this host can spell as a date;
+    ``token`` is spelled as the config spells it (the coordinator writes the
+    same spelling; nothing is folded); ``action`` is the coordinator's word
+    for what the boundary did, for the log alone, and deliberately not
+    stored: the ``targets`` row holds what this leg was told to hold, and
+    the coordinator's own state (enter, hold, exit, stay out) is its
+    business, recorded in the perp leg's sidecar and in ``carry history``.
     """
 
     coin: str
@@ -93,10 +98,16 @@ class HandoffTarget:
             require_weight(self.weight, "spot.weight")
         except ValueError as exc:
             raise HandoffError(str(exc)) from None
+        try:
+            spelled = utc_text(self.as_of)
+        except (OverflowError, OSError, ValueError):
+            # An integer no calendar reaches: every later message spells the
+            # boundary, so it is refused here, once, as the document's fault.
+            raise HandoffError(f"as_of {self.as_of} is not an instant this host can spell") from None
         if self.as_of % DAY_SECONDS:
             raise HandoffError(
-                f"as_of {utc_text(self.as_of)} is not a UTC day boundary, and a handoff's "
-                f"targets are for one day"
+                f"as_of {spelled} is not a UTC day boundary, and a handoff's targets are for one "
+                f"day"
             )
         if self.action is not None and not isinstance(self.action, str):
             raise HandoffError(f"action must be a string or None, got {self.action!r}")
@@ -105,7 +116,7 @@ class HandoffTarget:
 def read_handoff(path: Path) -> tuple[bytes, object]:
     """The handoff file at ``path`` as its bytes and the JSON they decode to.
 
-    The bytes come back too, for :func:`handoff_digest`. A file that is not
+    The bytes come back too, for :func:`~.domain.verdicts.bytes_digest`. A file that is not
     there is :class:`HandoffNotApplicable` (the coordinator has not written
     it yet); one that cannot be read, or is not UTF-8 JSON, is
     :class:`HandoffError`.
@@ -144,16 +155,19 @@ def target_from_document(doc: object) -> HandoffTarget:
     if not isinstance(weight, str):
         # Decimals travel as strings in the document, so no digit is lost in a float.
         raise HandoffError(f"spot.weight must be a decimal string, got {weight!r}")
+    as_of_ms = top.get("as_of_ms")
     try:
-        require_count(top.get("as_of_ms"), "as_of_ms")
+        require_count(as_of_ms, "as_of_ms")
         parsed = parse_decimal(weight, "spot.weight")
     except ValueError as exc:
         raise HandoffError(str(exc)) from None
-    as_of, remainder = divmod(top["as_of_ms"], 1_000)
+    if type(as_of_ms) is not int:  # what ``require_count`` just held, spelled for the type checker
+        raise HandoffError(f"as_of_ms must be a non-negative integer, got {as_of_ms!r}")
+    as_of, remainder = divmod(as_of_ms, 1_000)
     if remainder:
-        raise HandoffError(
-            f"as_of_ms {top['as_of_ms']} is not a whole second, and a boundary is one"
-        )
+        raise HandoffError(f"as_of_ms {as_of_ms} is not a whole second, and a boundary is one")
+    # The raw values go in as read: ``HandoffTarget.__post_init__`` judges every
+    # one of them and turns a refusal into a ``HandoffError``.
     return HandoffTarget(
         coin=top.get("coin"),  # type: ignore[arg-type]
         as_of=as_of,
@@ -170,7 +184,10 @@ def check_applicable(target: HandoffTarget, *, now: int) -> None:
     day's document, already written) and for one a day or more behind;
     :class:`HandoffError` for a boundary more than a day ahead, which no
     coordinator on its schedule writes: a clock that is off, or a
-    hand-written ``--as-of``.
+    hand-written ``--as-of``. The check is made before the store is looked
+    at, on purpose: a stale handoff whose row was stored yesterday is still
+    "try again later" today, so the visit script stops there and `paper` is
+    not run on a day the coordinator missed.
     """
     if now < target.as_of - HANDOFF_WINDOW_SECONDS:
         raise HandoffError(

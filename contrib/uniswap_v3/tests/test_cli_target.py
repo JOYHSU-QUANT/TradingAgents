@@ -132,6 +132,24 @@ def test_a_store_that_refuses_the_write_for_another_reason_fails(
     )
 
 
+def test_a_look_at_the_decisions_that_fails_does_not_fail_the_write(
+    config, db, handoff, monkeypatch, capsys
+):
+    def refuse(self, time):
+        raise StoreError("the store failed while reading decisions (disk gone)")
+
+    monkeypatch.setattr(Store, "runs_decided_at", refuse)
+    code, lines = _target(config, db, handoff)
+    assert code == cli.EXIT_OK and lines[1] == "WETH: 0.3 written"
+    assert (
+        "warning: the target is written, and whether a run reading carry-eth-v1 had already "
+        "decided the bar at 2024-01-03T00:00:00Z could not be told (the store failed while "
+        "reading decisions (disk gone))"
+    ) in capsys.readouterr().err
+    with open_store(db, create=False) as store:
+        assert store.target("carry-eth-v1", "WETH", _DAY2) is not None
+
+
 def test_a_handoff_without_an_action_is_headed_by_its_coin_alone(config, db, tmp_path):
     path = tmp_path / "handoff-eth.json"
     write_handoff(path, handoff_document(as_of=_DAY2, action=None))

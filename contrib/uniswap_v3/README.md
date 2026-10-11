@@ -175,7 +175,7 @@ store 與 sidecar 要一起搬）。同一（source、代幣、bar）問過就�
 的 bar 拒絕決策，列又不可改寫，那根就永遠決策不了）。decision **不**另記目標的 digest（不像 `verdict_digests`），replay 也不數目標事後有沒有變：
 「這根有 targets 列」＝「決策看到了它」靠排程保證——PR 4 的 visit 腳本先跑 `target` 再跑 `paper`，`target` 結束碼非 0 就停在那步、那根留到下一個
 attempt 或隔天的 visit 連同當天一起補決策（Hold），D5 的警告那時才印、中間 `status --run-id` 顯示 behind。手動先跑 `paper` 再跑 `target` 會打破這點——
-`target` 寫列時若有 run 已決策那根 bar，stderr 會警告「不改既有決策」；`status --run-id` 每筆決策附 `targets now: WETH=0.4`／`WETH=none`，印的是 store **現在**的值。
+`target` 寫列時若有讀同一個 source 的 run 已決策那根 bar，stderr 會警告「不改既有決策」（同一個 store 裡不讀目標的 run 不算；這個查核只是提醒，查不到也不會讓寫入失敗）；`status --run-id` 每筆決策附 `targets now: WETH=0.4`／`WETH=none`，印的是 store **現在**的值。
 `backtest`／`fork` 跑 `external_weights` 的設定也會讀 `targets`，但 `target` 只寫今天的交接檔（過期的結束碼 3），歷史目標要另外寫進去才有東西可回測。
 舊版的 store 會在任何指令第一次打開時自動升級。
 

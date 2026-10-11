@@ -1172,6 +1172,21 @@ def _verdict(args: argparse.Namespace, out: Callable[[str], None], now: Callable
     return EXIT_OK
 
 
+def _runs_reading(store: Store, source: str, time: int) -> list[str]:
+    """The runs that read the targets of ``source`` and have decided the bar at ``time``, sorted.
+
+    Read off each run's config snapshot: a store is shared by runs that read
+    no targets (the control and AI runs decide the same bars before the
+    carry run's visit), and those are not told anything by a target.
+    """
+    return [
+        run_id
+        for run_id in store.runs_decided_at(time)
+        if (reads := config_from_snapshot(_stored_run(store, run_id).config).targets) is not None
+        and reads.source == source
+    ]
+
+
 def _target(args: argparse.Namespace, out: Callable[[str], None], now: Callable[[], float]) -> int:
     config = _config(args)
     settings = config.targets
@@ -1219,16 +1234,27 @@ def _target(args: argparse.Namespace, out: Callable[[str], None], now: Callable[
                 raise
         else:
             out(f"{found.token}: {plain(found.weight)} written")
-            decided = store.runs_decided_at(found.as_of)
-            if decided:
-                # The one ordering the schedule rules out (target before paper): said
-                # here, since the row changes nothing a decision already made.
+            # The one ordering the schedule rules out (target before paper): said
+            # here, since the row changes nothing a decision already made. Advisory:
+            # the row is in, so a look that fails is said and does not fail the write.
+            try:
+                decided = _runs_reading(store, settings.source, found.as_of)
+            except (ConfigError, StoreError) as exc:
                 print(
-                    f"warning: {len(decided)} run(s) have already decided the bar at "
-                    f"{_iso(found.as_of)} ({', '.join(map(_one_ascii_line, decided))}); the "
-                    f"target written now does not change those decisions",
+                    f"warning: the target is written, and whether a run reading "
+                    f"{settings.source} had already decided the bar at {_iso(found.as_of)} "
+                    f"could not be told ({_one_ascii_line(exc)})",
                     file=sys.stderr,
                 )
+            else:
+                if decided:
+                    print(
+                        f"warning: {len(decided)} run(s) reading {settings.source} have already "
+                        f"decided the bar at {_iso(found.as_of)} "
+                        f"({', '.join(map(_one_ascii_line, decided))}); the target written now "
+                        f"does not change those decisions",
+                        file=sys.stderr,
+                    )
             return EXIT_OK
     out(
         f"{found.token}: already stored: {plain(held.target.weight)}, written "

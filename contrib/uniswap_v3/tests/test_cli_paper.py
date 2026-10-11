@@ -649,13 +649,16 @@ def test_paper_warns_of_a_bar_decided_with_no_target_and_follows_one_when_set(
     assert lines[-2].endswith("  targets now: WETH=none")
     assert lines[-1].endswith("  targets now: WETH=0.4")
     assert not any("verdicts:" in line for line in lines)
-    # A target written for the first day now, after it was decided, is warned of.
+    # A target written for the first day now, after it was decided, is warned of; a run
+    # in the same store that reads no targets (the control run) decided that bar too,
+    # and is not named: a target tells it nothing.
+    assert _paper(node, db, *_OPENING, run_id="control")[0] == cli.EXIT_OK
     write_handoff(handoff, handoff_document(as_of=FIRST_DAY, weight="0.2"))
     code, _ = _run(node, "target", *on, "--handoff", str(handoff), now=FIRST_DAY + 7_200)
     assert code == cli.EXIT_OK
     assert (
-        "warning: 1 run(s) have already decided the bar at 2024-01-01T00:00:00Z (p); the target "
-        "written now does not change those decisions"
+        "warning: 1 run(s) reading test-coordinator have already decided the bar at "
+        "2024-01-01T00:00:00Z (p); the target written now does not change those decisions"
     ) in capsys.readouterr().err
 
 

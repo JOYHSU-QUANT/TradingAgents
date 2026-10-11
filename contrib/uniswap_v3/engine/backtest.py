@@ -16,7 +16,9 @@ from, and a bar stored later than the one being decided cannot reach its
 decision. A config that reads verdicts (a ``verdicts`` section) has the
 view carry, at each of those bars, what its source said of the traded
 tokens there (:func:`~..store.verdict_source.load_verdicts`); a verdict
-stored at a later bar cannot reach the decision either.
+stored at a later bar cannot reach the decision either. A config that reads
+targets (a ``targets`` section) has the view carry what its coordinator set
+the same way (:func:`~..store.target_source.load_targets`).
 
 A boundary of the range that lacks the reading of a configured pool has no
 bar: it is not decided, the view simply does not hold it, and the summary
@@ -54,11 +56,13 @@ from ..config import UniswapConfig
 from ..domain.bars import Finality
 from ..domain.ledger import Ledger
 from ..domain.records import Decision, Outcome, RejectionCode
+from ..domain.targets import Target
 from ..domain.types import Bar, MarketView, RunMode
 from ..domain.verdicts import Verdict, usable_rating
 from ..ports import Executor, Wallet
 from ..store.bar_source import StoredBar, load_bar
 from ..store.repository import Store
+from ..store.target_source import load_targets
 from ..store.verdict_source import load_verdicts
 from .executors import ModelExecutor
 from .step import EngineError, open_engine, start_or_continue_run
@@ -91,8 +95,10 @@ class BacktestSummary:
     decided earlier on other verdicts than the store holds for them now (a
     verdict recorded after the bar was decided, most often), and ``unrated``
     were decided by this call, by a run that reads verdicts, with no rating
-    on some traded token: no verdict at the bar, or a ``REVIEW``. A bar
-    skipped as suspect is not among them: nothing was decided on it.
+    on some traded token: no verdict at the bar, or a ``REVIEW``, and
+    ``untargeted`` were decided by this call, by a run that reads targets,
+    with no target on some traded token. A bar skipped as suspect is not
+    among them: nothing was decided on it.
     """
 
     start: int
@@ -112,6 +118,9 @@ class BacktestSummary:
     # Boundaries this call decided on which some traded token had no rating. A
     # strategy that reads verdicts takes no new risk on such a token there.
     unrated: tuple[int, ...] = ()
+    # Boundaries this call decided on which some traded token had no target. A
+    # strategy that reads targets holds the portfolio as it is there.
+    untargeted: tuple[int, ...] = ()
 
     @property
     def boundaries(self) -> int:
@@ -156,6 +165,11 @@ def _judged_differently(decision: Decision, said: Mapping[str, Verdict]) -> bool
 def _unrated(config: UniswapConfig, said: Mapping[str, Verdict]) -> bool:
     """Whether some traded token has no rating in ``said``, by the strategies' own rule."""
     return any(usable_rating(said.get(symbol)) is None for symbol in config.traded_symbols)
+
+
+def _untargeted(config: UniswapConfig, aimed: Mapping[str, Target]) -> bool:
+    """Whether some traded token has no target in ``aimed``."""
+    return any(symbol not in aimed for symbol in config.traded_symbols)
 
 
 def run_backtest(
@@ -262,10 +276,14 @@ def replay(
     # What the config's source said at each bar so far, for bars it said anything at.
     verdicts: dict[int, Mapping[str, Verdict]] = {}
     source = None if config.verdicts is None else config.verdicts.source
+    # And what the config's coordinator set at each bar so far, likewise.
+    targets: dict[int, Mapping[str, Target]] = {}
+    target_source = None if config.targets is None else config.targets.source
     decided = already_decided = on_pending = 0
     changed: list[int] = []
     verdicts_changed: list[int] = []
     unrated: list[int] = []
+    untargeted: list[int] = []
     gas_rejected: list[int] = []
     executor_rejected: list[int] = []
     skipped: list[int] = []
@@ -279,6 +297,9 @@ def replay(
         said = load_verdicts(store, config, time)
         if said:
             verdicts[time] = said
+        aimed = load_targets(store, config, time)
+        if aimed:
+            targets[time] = aimed
         if time < start:
             continue
         # Asked here as well as in the step, so that a bar already decided costs no view.
@@ -291,7 +312,7 @@ def replay(
                 verdicts_changed.append(time)
         else:
             try:
-                view = MarketView(tuple(bars), verdicts, source)
+                view = MarketView(tuple(bars), verdicts, source, targets, target_source)
             except ValueError as exc:
                 raise EngineError(
                     f"the stored bars up to {time} do not make a view ({exc})"
@@ -300,6 +321,8 @@ def replay(
             decided += 1
             if source is not None and not loaded.bar.suspect and _unrated(config, said):
                 unrated.append(time)
+            if target_source is not None and not loaded.bar.suspect and _untargeted(config, aimed):
+                untargeted.append(time)
             # A suspect bar is skipped whatever its finality: nothing was decided on it.
             on_pending += loaded.finality is Finality.PENDING and not loaded.bar.suspect
         outcomes[decision.outcome] += 1
@@ -325,4 +348,5 @@ def replay(
         outcomes=MappingProxyType(dict(outcomes)),
         verdicts_changed=tuple(verdicts_changed),
         unrated=tuple(unrated),
+        untargeted=tuple(untargeted),
     )

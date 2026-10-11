@@ -51,8 +51,9 @@ that does not hold exactly the configured tokens; swaps that cannot be
 planned, or that sell more than the ledger holds; a ``seen`` that describes
 another block than the bar's; a ``suspicion`` of a bar that is not suspect,
 or a suspect bar with a ``seen`` and no ``suspicion``; a view whose
-``verdict_source`` is not the one the config reads (none, for a config
-that reads no verdicts); a bar before the latest one the run has decided.
+``verdict_source`` or ``target_source`` is not the one the config reads
+(none, for a config that reads no verdicts, or no targets); a bar before
+the latest one the run has decided.
 The bar is left undecided, so it can be decided once the cause is fixed.
 
 A run whose config reads verdicts keeps, with every decision, the digest of
@@ -170,9 +171,9 @@ def _hashes(exc: BaseException) -> tuple[str, ...]:
     return ()
 
 
-def _verdicts_of(source: str | None) -> str:
-    """``source``'s verdicts in words, for a message: ``no verdicts`` when there is no source."""
-    return "no verdicts" if source is None else f"the verdicts of {source!r}"
+def _said_by(source: str | None, what: str) -> str:
+    """``source``'s ``what`` (verdicts, targets) in words, for a message: ``no <what>`` without a source."""
+    return f"no {what}" if source is None else f"the {what} of {source!r}"
 
 
 def _unsettled(run_id: str, send: OpenSend) -> UnsettledSend:
@@ -355,19 +356,24 @@ class Engine:
         return self._record(view, seen, Outcome.FILLED, after, target=answer, fills=tuple(fills))
 
     def _require_reads(self, view: MarketView) -> None:
-        """Refuse a view whose verdicts are not the ones the run's config reads.
+        """Refuse a view whose verdicts, or targets, are not the ones the run's config reads.
 
         A config that reads no verdicts is handed a view that names no
         source; one that reads a source is handed a view naming that
         source, whether or not it said anything at the bar. Anything else
-        was not built for this run.
+        was not built for this run. The same holds of the targets.
         """
-        reads = None if self.config.verdicts is None else self.config.verdicts.source
-        if view.verdict_source != reads:
-            raise EngineError(
-                f"the run {self.run_id!r} reads {_verdicts_of(reads)}, and the view at "
-                f"{view.latest.time} carries {_verdicts_of(view.verdict_source)}"
-            )
+        settings = self.config
+        for carried, reads, what in (
+            (view.verdict_source, settings.verdicts, "verdicts"),
+            (view.target_source, settings.targets, "targets"),
+        ):
+            source = None if reads is None else reads.source
+            if carried != source:
+                raise EngineError(
+                    f"the run {self.run_id!r} reads {_said_by(source, what)}, and the view at "
+                    f"{view.latest.time} carries {_said_by(carried, what)}"
+                )
 
     def _execute(self, leg: int, swap: SwapIntent, bar: Bar) -> object:
         """What the executor answers to ``swap``, leg ``leg`` of the bar's rebalance, unchecked."""

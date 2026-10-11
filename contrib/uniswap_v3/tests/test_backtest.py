@@ -36,6 +36,12 @@ from contrib.uniswap_v3.tests.fakes.node import (
     pool_bar,
     put_day as _put,
 )
+from contrib.uniswap_v3.tests.fakes.targets import (
+    SOURCE as TARGET_SOURCE,
+    config as _target_config,
+    record as target_record,
+    target,
+)
 from contrib.uniswap_v3.tests.fakes.verdicts import (
     SOURCE,
     config as _verdict_config,
@@ -513,3 +519,64 @@ def test_a_verdict_recorded_after_its_bar_was_decided_is_seen_later_and_changes_
     # The decided bar is counted as judged differently now, as a changed reading would be.
     assert (first.verdicts_changed, again.verdicts_changed) == ((), (_day(0),))
     assert _backtest(store, config=_verdict_config()).verdicts_changed == (_day(0),)
+
+
+# --- targets -----------------------------------------------------------------
+
+
+def test_the_strategy_sees_the_targets_up_to_the_bar_decided_and_none_after(store, monkeypatch):
+    strategy = _recorder(monkeypatch)
+    _put_days(store, [DEFAULT_TICK] * 4)
+    for aimed in (
+        target_record("WETH", 0),
+        target_record("WBTC", 0, "0.2"),
+        target_record("WETH", 2, "0.5"),
+        target_record("WETH", 3, "0"),
+        # Another source's, and one on a token the config does not trade: not carried.
+        target_record("WETH", 1, source="another-coordinator"),
+        target_record("LINK", 1),
+    ):
+        store.insert_target(aimed)
+
+    summary = _backtest(store, config=_target_config(), end=_day(2))
+
+    assert summary.decided == 3
+    views = [view for view, _ in strategy.calls]
+    assert [sorted(view.targets) for view in views] == [[_day(0)], [_day(0)], [_day(0), _day(2)]]
+    assert views[0].latest_targets == {"WETH": target("WETH", 0), "WBTC": target("WBTC", 0, "0.2")}
+    assert views[1].latest_targets == {}
+    assert views[2].latest_targets == {"WETH": target("WETH", 2, "0.5")}
+    assert {view.target_source for view in views} == {TARGET_SOURCE}
+    # A run that reads targets and no verdicts: the views carry none, the decisions keep None.
+    assert {view.verdict_source for view in views} == {None}
+    assert [decision.verdicts for decision in store.decisions(_RUN)] == [None] * 3
+    # Day 1 had no target; day 2 had one on WETH alone.
+    assert summary.untargeted == (_day(1), _day(2))
+
+
+def test_a_replay_counts_the_bars_it_decided_with_no_target_on_some_token(store, monkeypatch):
+    _recorder(monkeypatch)
+    _put_days(store, [DEFAULT_TICK] * 3)
+    store.insert_target(target_record("WETH", 0))
+    store.insert_target(target_record("WBTC", 0, "0.2"))
+    # Day 3 is suspect: skipped, so nothing was decided on it, targeted or not.
+    _put(store, 3, twap_tick=BTC_TICK + 600)
+
+    summary = _backtest(store, config=_target_config())
+
+    assert summary.untargeted == (_day(1), _day(2))
+    assert summary.skipped == (_day(3),)
+    # Decided earlier: not this call's, so not counted again.
+    assert _backtest(store, config=_target_config()).untargeted == ()
+
+
+def test_a_run_that_reads_no_targets_is_handed_none(store, monkeypatch):
+    strategy = _recorder(monkeypatch)
+    _put_days(store, [DEFAULT_TICK] * 2)
+    store.insert_target(target_record("WETH", 0))
+
+    summary = _backtest(store)
+
+    assert [dict(view.targets) for view, _ in strategy.calls] == [{}, {}]
+    assert {view.target_source for view, _ in strategy.calls} == {None}
+    assert summary.untargeted == ()

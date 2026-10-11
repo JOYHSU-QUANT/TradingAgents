@@ -8,13 +8,16 @@ which adapters are wired behind :mod:`.ports`.
 The package is isolated: it imports no other package under ``contrib/`` and
 none of them imports it (``tests/test_isolation.py`` reads the sources to
 hold that). It is also strategy-agnostic: a strategy enters only through
-:class:`~.ports.Strategy`. Three ship here: ``fixed_weights``, a placeholder
+:class:`~.ports.Strategy`. Four ship here: ``fixed_weights``, a placeholder
 that drives the engine and its tests, ``trend_vol_weights``, a rule
 strategy that holds a token while it trends, sized to a volatility target,
-and ``ai_gated_weights``, which holds the rule's weights cut by what an
-outside judge said of each token at the bar. The judge is the
-``tradingagents`` engine itself, asked through :mod:`.agent`, the one
-layer that imports it, and lazily.
+``ai_gated_weights``, which holds the rule's weights cut by what an
+outside judge said of each token at the bar, and ``external_weights``,
+which holds what an outside coordinator set at the bar and holds still
+when it set nothing. The judge is the ``tradingagents`` engine itself,
+asked through :mod:`.agent`, the one layer that imports it, and lazily;
+the coordinator is ``contrib/carry``, which hands this package a daily
+handoff file and nothing else (:mod:`.handoff`).
 
 What exists so far is the skeleton, the chain reader, the bar store, the
 engine's step, the backtest and the paper run: the value types, the pool price conversion,
@@ -23,19 +26,22 @@ the address tables
 (:mod:`.constants`), the config loader, the strategy registry, reads of
 blocks, pool prices, quotes and the base fee from a node (:mod:`.chain`), an
 SQLite store of each pool's reading at every bar boundary, of what an
-outside judge said of each token there (verdicts, which a config may have
-the strategy's view carry) and of what each run decided (:mod:`.store`),
+outside judge said of each token there (verdicts) and what an outside
+coordinator set (targets), either of which a config may have the
+strategy's view carry, and of what each run decided (:mod:`.store`),
 the step that decides one bar, an executor
 that fills from the bar alone, one that fills from the pools' quotes, and
 the loop that replays stored bars through the step (:mod:`.engine`), a
 paper run's visit (:mod:`.paper`), the asking of the judge (:mod:`.agent`),
-and seven commands (:mod:`.cli`):
+the reading of the coordinator's handoff (:mod:`.handoff`), and eight
+commands (:mod:`.cli`):
 ``backfill`` fills the store from an archive node, ``status`` prints what
 it holds, ``backtest`` replays stored bars through the engine, ``paper``
 reads and decides the bars the chain has closed since a run's last,
 ``fork`` replays stored bars signing each swap on a local anvil fork,
 ``verdict`` asks the judge about every traded token at the latest bar and
-records what it said, and
+records what it said, ``target`` records the handoff's spot weight at the
+boundary it is for, and
 ``report`` prints a run's return, drawdown and costs. Only a fork run
 signs, and only with anvil's development accounts on a fork it has
 checked (:mod:`.chain`); nothing here holds a key of its own.

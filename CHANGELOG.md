@@ -951,6 +951,39 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **uniswap_v3: carry targets and the `external_weights` strategy (carry
+  plan PR 3).** The spot leg of the carry sleeve. A `targets` table (schema
+  v7) holds what an outside coordinator said to hold of a token at a bar,
+  keyed and governed like `verdicts` (belongs to no run, written once, never
+  rewritten) with the weight as decimal text, when it was written and the
+  SHA-256 of the handoff file it came from; a `0` weight is a target (an
+  exit or a stay-out day), and the handoff's `action` is deliberately not
+  stored. A `targets: {source}` config section, part of the snapshot, has
+  the strategy's view carry that source's targets (`MarketView.targets`,
+  `target_source`, `latest_targets`; one shared checker with the verdicts,
+  typed through a Protocol) and binds the run to daily bars, since a
+  target lands on one bar. The `target` command reads the coordinator's
+  handoff (`contrib/carry`'s JSON: version 1, unknown keys ignored, the
+  weight checked to lie in 0–1 and not sized again, the boundary a UTC
+  day's) and writes the spot weight at the boundary it is for, only while
+  `as_of <= now < as_of + 1 day`: no file yet, a boundary not reached, or
+  one a day or more old exit 3 so the visit tries again later and does not
+  run `paper` on a day the coordinator missed; an unreadable document, or a
+  config that trades any token but the handoff's (the row could never be
+  taken back and the strategy would refuse the bar for good), exits 1
+  before anything is written. The insert is the check: a row already there
+  is reported as such, a differing weight warned of and left standing, and
+  a run reading the same source that had already decided the bar is named
+  on stderr. The `external_weights` strategy holds the coordinator's
+  weights at a bar that has them (an entry from nothing and an exit to
+  nothing are traded whatever the band, so a weight at or below the band
+  is not swallowed), holds still at a bar without any (the plan's D5: a
+  missing or stale handoff leaves both legs where they are, and the paper
+  visit warns of each such bar), and refuses a bar with targets on some
+  traded tokens and not others. `status` prints the targets' coverage
+  beside the verdicts' and, per decision, the targets the store holds now.
+  (#349)
+
 - **hyperliquid_perp: the file-target decision provider (carry plan PR 2).**
   A new top-level `decision_source:` config block picks the provider a run
   asks each 4h cycle: `engine` (the TradingAgents engine behind an LLM; the

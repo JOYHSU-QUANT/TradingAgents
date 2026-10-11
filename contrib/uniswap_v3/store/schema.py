@@ -34,6 +34,12 @@ seek; like ``bars`` it belongs to no run, and a row is never rewritten. ``rating
 reason as ``outcome``. ``decisions.verdict_digests`` is JSON text of the
 verdict digests the decision saw, by symbol, and NULL for a run that reads
 no verdicts or a decision stored before the column existed.
+
+``targets`` is what an outside coordinator said to hold of a token at a
+bar: the same shape and the same rules as ``verdicts`` (keyed by (source,
+time, symbol), belonging to no run, never rewritten), with the weight as
+decimal text, when the row was written, and the digest of the handoff
+document it was read from.
 """
 
 from __future__ import annotations
@@ -189,6 +195,20 @@ _MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (
         )
         """,
         "ALTER TABLE decisions ADD COLUMN verdict_digests TEXT",
+    ),
+    # Targets: what an outside coordinator said to hold of a token at a bar.
+    (
+        """
+        CREATE TABLE targets (
+            source TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            time INTEGER NOT NULL,
+            weight TEXT NOT NULL,
+            written_at INTEGER NOT NULL,
+            digest TEXT NOT NULL,
+            PRIMARY KEY (source, time, symbol)
+        )
+        """,
     ),
 )
 

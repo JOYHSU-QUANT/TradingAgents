@@ -66,6 +66,15 @@ rpc:
 # verdicts:
 #   source: tradingagents-rating-v1
 
+# Targets: the share of the portfolio an outside coordinator (contrib/carry)
+# said to hold in each traded token at each bar, read from the store's targets
+# table by source and carried in the strategy's view. Left out, the run reads
+# none. Adding the section changes the config's snapshot, as verdicts does. The
+# target command writes under this source from the coordinator's handoff file,
+# so a config that both writes and reads names it once.
+# targets:
+#   source: carry-eth-v1
+
 # The judge the verdict command asks: the TradingAgents graph, over this LLM
 # provider and these models (the provider's API key comes from the environment
 # variable the engine names for it, OPENROUTER_API_KEY here, never from this
@@ -146,3 +155,20 @@ strategy:
 #       Hold: "0.5"
 #       Underweight: "0.25"
 #       Sell: "0"
+
+# external_weights holds what the carry coordinator set: the view's targets,
+# read by the targets section above, which this strategy needs (uncomment it,
+# or the run fails on its first bar). At a bar with a target on every traded
+# token the target is the coordinator's weights, the rest to the quote token,
+# answered when some share has drifted more than `band` (an entry from nothing
+# and an exit to nothing are traded whatever the band); at a bar with no
+# target the portfolio is held as it is (the carry plan's D5: a missing or
+# stale handoff leaves both legs where they are), and the visit warns. A
+# carry run trades the one token the handoff names: tokens [USDC, WETH] and
+# the USDC/WETH-500 pool alone. The policy is defined in
+# strategies/external_weights.py.
+#
+# strategy:
+#   name: external_weights
+#   params:
+#     band: "0.05"

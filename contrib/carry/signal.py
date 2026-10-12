@@ -37,7 +37,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Final
 
@@ -47,7 +47,9 @@ from .upstream import (
     MS_PER_DAY,
     FundingPoint,
     SpecError,
+    epoch_ms,
     funding_zscore,
+    parse_instant,
     require_number,
 )
 
@@ -64,7 +66,9 @@ __all__ = [
     "SignalError",
     "advance",
     "decide",
+    "decimal",
     "finite",
+    "instant_ms",
     "read",
     "whole",
 ]
@@ -98,11 +102,39 @@ def whole(
     return value
 
 
-def finite(value: object, what: str, *, error: type[ValueError] = SignalError) -> float:
+def finite(value: object, what: str, *, error: type[Exception] = SignalError) -> float:
     """``value`` as a finite float, by the research package's one numeric guard."""
     try:
         return require_number(value, what)
     except SpecError as exc:
+        raise error(str(exc)) from None
+
+
+def decimal(value: object, what: str, *, error: type[Exception] = SignalError) -> Decimal:
+    """``value``, a decimal string, as a finite :class:`Decimal`; ``error`` names the failure.
+
+    A string and nothing else: the handoff document and the two stores
+    both spell a decimal as text, and a JSON number or a float would be a
+    writer this package does not know.
+    """
+    if not isinstance(value, str):
+        raise error(f"{what} must be a decimal string, got {value!r}")
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation:
+        raise error(f"{what} is not a decimal: {value!r}") from None
+    if not parsed.is_finite():
+        raise error(f"{what} must be finite, got {value!r}")
+    return parsed
+
+
+def instant_ms(value: object, what: str, *, error: type[Exception] = SignalError) -> int:
+    """An ISO-8601 instant as the perp package spells one, as epoch ms; ``error`` names the failure."""
+    if not isinstance(value, str):
+        raise error(f"{what} must be an instant, got {value!r}")
+    try:
+        return epoch_ms(parse_instant(value), what=what)
+    except ValueError as exc:
         raise error(str(exc)) from None
 
 

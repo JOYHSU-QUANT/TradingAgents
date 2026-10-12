@@ -82,6 +82,7 @@ from ..common.constants import (
     FILE_TARGET_MODEL,
     FILE_TARGET_PENDING_PREFIX,
     FILE_TARGET_UNUSABLE_PREFIX,
+    HANDOFF_SIDECAR_SUFFIX,
 )
 from ..common.digest import payload_digest
 from ..common.enum_guard import check_enum
@@ -128,8 +129,6 @@ PERP_SIDES: Final = (TargetSide.SHORT.value, TargetSide.FLAT.value)
 # A rule has no doubt to report: the gate's confidence bars exist to filter a
 # model's weak calls, and a target the coordinator decided passes them whole.
 FILE_TARGET_CONFIDENCE: Final = Decimal(1)
-# The sidecar a cycle that acted writes beside its payload (module docstring).
-HANDOFF_SIDECAR_SUFFIX: Final = ".handoff.json"
 
 
 class StaleTarget(Exception):

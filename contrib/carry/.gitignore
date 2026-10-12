@@ -1,0 +1,4 @@
+# The settings of the scheduled coordinator on this machine (schedule/carry-signal.sh).
+*.local.sh
+# What the scheduled coordinator keeps on this machine: the handoff, its research store and its log.
+data/

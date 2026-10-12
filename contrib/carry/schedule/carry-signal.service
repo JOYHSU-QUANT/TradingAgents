@@ -1,0 +1,33 @@
+# The carry coordinator's daily run on the Lightsail host, as
+# carry-signal.timer beside this file schedules it (23:50 UTC). The RUNBOOK
+# installs both into /etc/systemd/system; the paths are the host's: the
+# Hyperliquid checkout the perp and research packages are imported from, and
+# the trader user that owns it, the handoff and the log.
+[Unit]
+Description=contrib/carry coordinator: the daily carry signal
+After=network-online.target
+Wants=network-online.target
+# One retry, five minutes on (the plan's 23:55 retry), and no more in the
+# hour: a second failure is the operator's, and both legs hold meanwhile
+# (carry plan D5). The retry decides the same boundary: a run within six
+# hours after a midnight is a late run for that midnight.
+StartLimitIntervalSec=1h
+StartLimitBurst=2
+
+[Service]
+Type=oneshot
+User=trader
+WorkingDirectory=/home/trader/TradingAgents
+ExecStart=/home/trader/TradingAgents/contrib/carry/schedule/carry-signal.sh
+Restart=on-failure
+RestartSec=5min
+# A settings error (the script's exit 4: a bad PYTHON, a run id without its
+# store, a log that cannot be written) is not retried: nothing changes in
+# five minutes, and the retry would only spend the start limit the operator
+# needs for the manual start after the fix.
+RestartPreventExitStatus=4
+# Two pages of funding and a few reads: a run past this is stuck, not slow.
+TimeoutStartSec=8min
+# Short of memory, the kernel takes this run (retried, then the operator's),
+# not the paper daemons beside it.
+OOMScoreAdjust=500

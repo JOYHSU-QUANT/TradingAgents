@@ -37,8 +37,10 @@ ETH_ROWS = json.loads((FIXTURES / "cftc_cot_eth.json").read_text(encoding="utf-8
 BTC = cftc_cot.CONTRACTS["BTC"]
 ETH = cftc_cot.CONTRACTS["ETH"]
 
-# A Tuesday, one week after the newest fixture report: that report (as of
-# 09-15) was published about 09-19, and the 09-22 report is not in the series.
+# A Tuesday, one week after the newest Bitcoin fixture report: that report
+# (as of 09-15) was published about 09-19, and the 09-22 report is not in the
+# Bitcoin fixture. The Ether fixture holds it and two later ones, none
+# published by 09-22, so both fixtures serve the 09-15 report on this date.
 NOW = datetime(2026, 9, 22, 12, tzinfo=timezone.utc)
 TODAY = "2026-09-22"
 
@@ -243,6 +245,13 @@ class TestRequest:
     def test_a_json_object_is_the_wrong_shape(self, monkeypatch):
         _serve(monkeypatch, body={"rows": []})
         with pytest.raises(cftc_cot.CftcError, match="expected an array"):
+            cftc_cot._request(BTC)
+
+    def test_rows_of_another_contract_are_refused(self, monkeypatch):
+        # The host answered the Bitcoin query with Ether rows: parsed, they
+        # would be stamped 133741 and served as Bitcoin's positioning.
+        _serve(monkeypatch, body=[ROWS[0]] + ETH_ROWS[:2])
+        with pytest.raises(cftc_cot.CftcError, match="rows of contract 146021 for a query on"):
             cftc_cot._request(BTC)
 
     def test_a_runaway_answer_is_refused(self, monkeypatch):

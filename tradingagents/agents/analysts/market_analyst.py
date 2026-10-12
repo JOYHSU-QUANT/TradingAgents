@@ -51,8 +51,8 @@ def _futures_basis_message() -> str:
     return (
         "\n\nSince this is a crypto asset, also call get_futures_basis(asset, curr_date) for "
         "the CME front-month futures basis (Bitcoin or Ether, each its own contract): what "
-        "the regulated future trades at over "
-        "spot, as a nominal percentage and annualized by the contract's days to expiry. "
+        "the regulated future trades at over spot, as a nominal percentage and annualized by "
+        "the contract's days to expiry. "
         f"{cme_basis.SAWTOOTH_NOTE}: a nominal basis that falls late in the month is the "
         f"calendar, not demand. {cme_basis.CARRY_NOTE}. So do not read the sign alone, and do "
         "not state that a widening basis predicts a rise or a narrowing one a fall. What "

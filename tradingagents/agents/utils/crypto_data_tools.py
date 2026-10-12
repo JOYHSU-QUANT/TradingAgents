@@ -272,9 +272,9 @@ def get_futures_basis(
     """
     Retrieve the CME Bitcoin or Ether front-month futures basis: what the
     regulated future (Yahoo BTC=F or ETH=F) trades at over spot (Yahoo BTC-USD
-    or ETH-USD), one contract per asset. Reported as a
-    nominal percentage — the median over the latest 24 hours in which both
-    traded, matched on the same UTC hour, because the two DAILY closes are
+    or ETH-USD), one contract per asset. Reported as a nominal percentage —
+    the median over the latest 24 hours in which both traded, matched on the
+    same UTC hour, because the two DAILY closes are
     hours apart and their difference is mostly clock mismatch — and annualized
     by the front contract's days to expiry, with a 7-day annualized median and
     the change against the reading 7 days earlier. The nominal basis decays
@@ -330,8 +330,8 @@ def get_futures_positioning(
     a mid-week date sees the previous week's report, as a reader on that day
     did. The publication date is derived and can be later than shown when a
     US holiday delays the release. Only the standard contract is read (5 BTC,
-    50 ETH); the Micro contracts are separate series. A Scale line says what size of
-    weekly change is ordinary for each headline category and where its net
+    50 ETH); the Micro contracts are separate series. A Scale line says what
+    size of weekly change is ordinary for each headline category and where its net
     has ranged over the trailing year, computed from the series itself. A
     leveraged-fund short is usually the futures leg of a cash-and-carry trade
     against spot or ETF holdings — the carry the futures basis pays — not a

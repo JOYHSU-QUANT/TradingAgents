@@ -90,7 +90,7 @@ DATASET_URL = "https://publicreporting.cftc.gov/resource/gpe5-46if.json"
 
 
 class Contract(NamedTuple):
-    """One CME crypto future as the CFTC codes it, and where its series is cached."""
+    """One CME crypto future as the CFTC codes it; its cache file is named from ``coin``."""
 
     coin: str
     # The product name as CME lists it, for the report's title.
@@ -267,6 +267,18 @@ def _request(contract: Contract) -> list:
         raise CftcError(f"{VENDOR} returned a JSON {type(payload).__name__}, expected an array")
     if len(payload) >= MAX_ROWS:
         raise CftcError(f"{VENDOR} returned {len(payload)} rows for one contract; refusing to read")
+    # The rows' own code, not the query's: with two series of one shape, a
+    # filter the host ignored or mangled would otherwise be parsed, stamped
+    # as this contract and served under its title.
+    foreign = sorted(
+        {str(row.get("cftc_contract_market_code")) for row in payload if isinstance(row, dict)}
+        - {contract.code}
+    )
+    if foreign:
+        raise CftcError(
+            f"{VENDOR} returned rows of contract {', '.join(foreign)} for a query on "
+            f"{contract.code} ({contract.coin}); refusing to read"
+        )
     return payload
 
 
@@ -529,8 +541,8 @@ def _scale_line(published: list[Report]) -> str:
     ``SCALE_REPORTS`` of them: the median and upper-quartile absolute change
     in net between consecutive reports, and the range of net as a share of
     open interest. Without it a model reads "+1,538" with only its priors to
-    say whether that is large — over the year to 2026-09-15 the leveraged-fund
-    median was about 660 contracts, so it was.
+    say whether that is large — over the year to 2026-09-15 the Bitcoin
+    series' leveraged-fund median was about 660 contracts, so it was.
     """
     # The reports BEFORE the one served: its own change is the thing being
     # judged, and a baseline that included it would be that much easier to

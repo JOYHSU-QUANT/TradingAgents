@@ -332,8 +332,9 @@ def _fetch_hourly(symbol: str, start: date, end: date, *, traded: bool = False) 
     if frame is None or frame.empty or "Close" not in frame.columns:
         # Not raised: an empty answer is one more way of having too few hours,
         # and ``get_futures_basis`` answers that with a notice naming the
-        # series that fell short. The no-data sentinel would say "BTC ... may
-        # be invalid, delisted" to the analyst that also reads BTC's prices.
+        # series that fell short. The no-data sentinel would say the symbol
+        # "may be invalid, delisted" to the analyst that also reads the coin's
+        # prices.
         logger.warning("Yahoo Finance returned no hourly rows for %s", symbol)
         return pd.DataFrame(
             {"Close": [], "Volume": []}, index=pd.DatetimeIndex([], tz="UTC"), dtype="float64"
@@ -485,8 +486,8 @@ def get_futures_basis(asset: str, curr_date: str) -> str:
         newest one is more than ``MAX_STALENESS_DAYS`` old, the same withheld
         notice instead, saying what each series had. Returned rather than
         raised as no-data: the router's no-data sentence says the SYMBOL "may
-        be invalid, delisted" — about BTC, to the analyst that also reads
-        BTC's prices — and could only ever name one of the two series.
+        be invalid, delisted" — about the coin, to the analyst that also reads
+        its prices — and could only ever name one of the two series.
 
     Raises:
         VendorError: a throttle or an outage, typed by the yfinance boundary,
@@ -587,8 +588,9 @@ def get_futures_basis(asset: str, curr_date: str) -> str:
     )
     lines = [
         f"## CME {contract.name} Futures Basis — {coin}",
-        f"- CME front-month future (Yahoo {contract.futures}) against spot (Yahoo {contract.spot}), "
-        f"hourly closes matched on the same UTC hour | newest hour {_stamp(current.last)} UTC "
+        f"- CME front-month future (Yahoo {contract.futures}) against spot "
+        f"(Yahoo {contract.spot}), hourly closes matched on the same UTC hour | newest hour "
+        f"{_stamp(current.last)} UTC "
         f"| analysis date {curr_date}",
     ]
     lag = data_lag_note(

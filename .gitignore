@@ -245,3 +245,9 @@ __marimo__/
 # Enterprise env file (secrets) and generated run reports
 .env.enterprise
 reports/
+
+# Venue payloads the CLIs write beside a relative --db (clearinghouse
+# snapshots, unmapped fills): real account activity. Unanchored like *.db, since
+# the CLI can run from any directory, so no test fixture directory may be named
+# `payloads` (tests build theirs under tmp_path).
+payloads/

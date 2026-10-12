@@ -1,0 +1,13 @@
+# Reviewed false positives, one fingerprint (<commit>:<path>:<rule>:<line>)
+# each. Before adding a line, confirm the value is not a real credential --
+# compare it against the real .env without printing either -- and say what it
+# is here.
+
+# A placeholder key the chain-RPC tests prove stays out of error messages.
+6db940dfedb302764ed525ba20b91bd574bbeb5c:contrib/uniswap_v3/tests/test_chain_rpc.py:generic-api-key:48
+# The vendor-key-redaction tests' sentinel keys (an 18-character placeholder
+# and a sequential-hex dummy FRED key, neither equal to any value in .env).
+b20c8e60a462b82f3f5bdd21d4f2896acf9a9d69:tests/test_alpha_vantage_hardening.py:generic-api-key:144
+b20c8e60a462b82f3f5bdd21d4f2896acf9a9d69:tests/test_fred.py:generic-api-key:239
+# A variable name (`daily_key`) in an argument list, not a value.
+8a387921dba133cbf04fea716f149d9ea246b386:contrib/autoresearch/evaluator.py:generic-api-key:1061

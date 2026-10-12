@@ -1,0 +1,44 @@
+# Secret scanning (gitleaks, version pinned in .github/workflows/ci.yml). CI's
+# `secrets` job scans every commit of the history with this file; a local
+# pre-commit hook can run the same rules on the staged diff
+# (`gitleaks git --pre-commit --staged --redact`). Known false
+# positives are pinned one by one, by fingerprint, in .gitleaksignore -- never
+# by a path or regex allowlist here, which would also hide a real key that
+# later lands in the same file.
+
+title = "TradingAgents secret scan"
+
+[extend]
+useDefault = true
+
+# The default rules know vendor key formats (OpenAI, Anthropic, AWS, ...) but
+# not a bare 32-byte hex private key, which is what a Hyperliquid agent key or
+# an EVM wallet key is. A bare 64-hex rule would fire on every block and
+# transaction hash in the Uniswap fixtures, so this one needs the value to be
+# assigned to a field whose name says what it is. .github/gitleaks_selftest.py
+# pins what it must and must not flag.
+[[rules]]
+id = "hex-private-key-assignment"
+description = "A 32-byte hex value assigned to a private/secret field, or an agent/wallet/signer key field"
+regex = '''(?i)(?:(?:private|secret)[a-z0-9_.-]*|(?:agent|wallet|signer)[a-z0-9_.-]*key[a-z0-9_.-]*)["']?(?:\s*:\s*[a-z_][a-z0-9_.\[\], |]*?)?\s*(?:=|:=|:)\s*["']?((?:0x)?[0-9a-f]{64})\b'''
+secretGroup = 1
+keywords = ["key", "secret", "private"]
+
+# Two credentials this repo's .env.example names that the default rules miss
+# (checked 2026-10-12 against the real local .env, values never printed).
+[[rules]]
+id = "openrouter-api-key"
+description = "OpenRouter API key"
+regex = '''\b(sk-or-v1-[0-9a-f]{64})\b'''
+secretGroup = 1
+keywords = ["sk-or-v1-"]
+
+# A node provider's key rides in the RPC URL's path, so a pasted ETH_RPC_URL is
+# a credential even though nothing about it is named "key". The websocket
+# endpoints (wss://, Infura's /ws/v3/) carry the same key.
+[[rules]]
+id = "rpc-url-with-key"
+description = "An Alchemy or Infura JSON-RPC or websocket URL carrying its API key in the path"
+regex = '''(?i)(?:https?|wss?)://[a-z0-9.-]*(?:alchemy\.com/v2|infura\.io/(?:ws/)?v3)/([a-z0-9_-]{16,})'''
+secretGroup = 1
+keywords = ["alchemy.com", "infura.io"]

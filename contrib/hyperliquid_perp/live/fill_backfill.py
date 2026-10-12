@@ -38,7 +38,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from ..common.instants import Seconds, epoch_ms, seconds_span
+from contrib.core.instants import Seconds, epoch_ms, seconds_span
+
 from ..common.seam_guard import require_seam
 from ..exchanges.hyperliquid.errors import MalformedResponseError
 from ..ports import Clock

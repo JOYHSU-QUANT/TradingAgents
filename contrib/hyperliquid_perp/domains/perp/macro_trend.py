@@ -60,9 +60,10 @@ from datetime import date
 from decimal import Decimal, localcontext
 from typing import Final
 
+from contrib.core.decimal_context import DECIMAL_CONTEXT
+from contrib.core.instants import from_epoch_ms, gap_label
+
 from ...common.constants import MACRO_FAST_PERIOD, MIN_MACRO_TREND_LOOKBACK
-from ...common.decimal_context import DECIMAL_CONTEXT
-from ...common.instants import from_epoch_ms, gap_label
 from .schema import Candle, CandleInterval, MacroTrend, derive_macro_alignment
 
 logger = logging.getLogger(__name__)

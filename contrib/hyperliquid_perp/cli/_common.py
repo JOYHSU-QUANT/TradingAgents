@@ -123,7 +123,8 @@ def _migrate_owned_store(db: Database, *, run_id: str, now: datetime) -> bool:
     migrated under after all — bounded harm, since every migration is one
     ``BEGIN IMMEDIATE`` step that only ADDs columns and tables.
     """
-    from ..common.instants import parse_instant
+    from contrib.core.instants import parse_instant
+
     from ..persistence import repository as repo
     from ..runtime.run_lock import LOCK_STALE_SECONDS, lease_age_label
 

@@ -7,10 +7,11 @@ Two sites, two shapes:
   result fields, the ``LEGAL_NETWORKS`` tuple). The caller names the field;
   the sentence is ``<name> must be one of [<sorted>]``.
 - :class:`VocabEnum` — the base for the ``str`` enums that ARE a vocabulary
-  (:mod:`..domains.perp.schema`'s market regime, profile shape, position side
-  and candle interval; the persistence layer's fill :class:`Side`, and its
-  storage-vocabulary enums, which are read by member while their stored
-  strings go through :func:`check_enum`; the live submitter's
+  (:mod:`contrib.hyperliquid_perp.domains.perp.schema`'s market regime,
+  profile shape, position side and candle interval; the persistence
+  layer's fill :class:`Side`, and its storage-vocabulary enums, which are
+  read by member while their stored strings go through :func:`check_enum`;
+  the live submitter's
   :class:`SubmitOutcomeKind`). Looking a member up by an unknown value
   fails with ``unsupported <noun> 'X'; choose from [<members>]``
   wherever the lookup is written (issue #166); ``Enum``'s own "'X' is not a
@@ -38,10 +39,11 @@ that is the VENUE's side vocabulary on a wire payload, raised as a
 ``MalformedResponseError``, not a ``ValueError`` over a local table.
 
 Extracted here (a neutral, dependency-free shared module) so the persistence
-write boundary (:mod:`..persistence.repository`), the paper accounting result
-dataclasses (:class:`..paper.accounting.FundingResult`) and the DTO module
-validate the same way — without any of them reaching into another's private
-helpers.
+write boundary (:mod:`contrib.hyperliquid_perp.persistence.repository`), the
+paper accounting result dataclasses
+(:class:`contrib.hyperliquid_perp.paper.accounting.FundingResult`) and the DTO
+module validate the same way — without any of them reaching into another's
+private helpers.
 
 Pure: no I/O, no clock, no domain knowledge of *which* values are allowed
 (each caller owns its own collection; each enum declares its own members).

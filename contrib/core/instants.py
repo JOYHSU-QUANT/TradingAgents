@@ -82,6 +82,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 __all__ = [
+    "MAX_EPOCH_MS",
+    "MIN_EPOCH_MS",
     "Seconds",
     "delta_ms",
     "epoch_ms",
@@ -102,6 +104,15 @@ Seconds = float | Decimal
 _HOUR = timedelta(hours=1)
 _ONE_MS = timedelta(milliseconds=1)
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+# The epoch-millisecond range :func:`from_epoch_ms` can decode: exactly the
+# stamps that land inside ``datetime``'s own range. DERIVED from
+# ``datetime.min`` / ``datetime.max`` and the decoder's own epoch, never
+# transcribed — the decoder is ``_EPOCH + timedelta(milliseconds=ms)``, and a
+# hand-copied literal would be a second, silently forkable statement of what
+# ``datetime`` accepts.
+MIN_EPOCH_MS = (datetime.min.replace(tzinfo=timezone.utc) - _EPOCH) // _ONE_MS
+MAX_EPOCH_MS = (datetime.max.replace(tzinfo=timezone.utc) - _EPOCH) // _ONE_MS
 
 
 def parse_instant(text: str) -> datetime:
@@ -299,15 +310,16 @@ def from_epoch_ms(ms: int) -> datetime:
     not for bad data. An out-of-range value raises ``OverflowError`` from
     ``timedelta`` itself, as the float route did from ``fromtimestamp``.
 
-    That range is published as ``constants.MIN_EPOCH_MS`` /
-    ``constants.MAX_EPOCH_MS`` for the callers that must refuse an undecodable
+    That range is published as :data:`MIN_EPOCH_MS` /
+    :data:`MAX_EPOCH_MS` for the callers that must refuse an undecodable
     stamp BEFORE it reaches here: ``OverflowError`` is neither an
     ``ExchangeError`` nor a ``ValueError``, so it slips through every
     venue-failure and malformed-row handler between the wire and this call and
     ends the run (issue #191). ``domains/perp/schema``'s two venue-stamp DTOs
-    hold the bound at construction; a drift pin in ``tests/common/test_instants``
-    keeps the published range equal to what this function actually accepts, so
-    the two can never disagree about where the edge is.
+    hold the bound at construction. The range is derived beside this
+    function and pinned against it in ``tests/test_instants.py``, from both
+    sides of both edges, so the two can never disagree about where the edge
+    is.
     """
     if isinstance(ms, bool) or not isinstance(ms, int):
         raise TypeError(f"epoch milliseconds must be an int, got {type(ms).__name__}")

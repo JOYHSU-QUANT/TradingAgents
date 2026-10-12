@@ -41,12 +41,13 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal, localcontext
 
+from contrib.core.decimal_context import DECIMAL_CONTEXT
+
 from ...common.constants import (
     MIN_VOLUME_PROFILE_WINDOW as MIN_WINDOW_CANDLES,
     VALUE_AREA_FRACTION,
     VOLUME_PROFILE_BUCKET_COUNT as BUCKET_COUNT,
 )
-from ...common.decimal_context import DECIMAL_CONTEXT
 from .schema import Candle, VolumeProfile, derive_profile_shape
 
 logger = logging.getLogger(__name__)

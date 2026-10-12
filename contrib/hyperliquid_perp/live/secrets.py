@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import os
 
+from contrib.core.enum_guard import check_enum
+
 from ..common.constants import LEGAL_NETWORKS
-from ..common.enum_guard import check_enum
 
 __all__ = [
     "AGENT_KEY_ENV_VARS",

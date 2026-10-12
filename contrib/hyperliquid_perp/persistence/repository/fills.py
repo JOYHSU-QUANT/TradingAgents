@@ -6,7 +6,8 @@ import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal, localcontext
 
-from ...common.enum_guard import check_enum
+from contrib.core.enum_guard import check_enum
+
 from ..models import DECIMAL_CONTEXT, Side
 from ._base import _insert
 from ._vocab import _FLIP_LEGS, _LIQUIDITY_TYPES, _MODES, LIVE_LIQUIDITY_ROLES

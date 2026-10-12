@@ -39,7 +39,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
-from ..common.instants import parse_instant
+from contrib.core.instants import parse_instant
+
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from ..ports import FundingSource

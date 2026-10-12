@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from contrib.hyperliquid_perp.common.enum_guard import VocabEnum, check_enum
+from contrib.core.enum_guard import VocabEnum, check_enum
 
 
 @pytest.mark.parametrize(

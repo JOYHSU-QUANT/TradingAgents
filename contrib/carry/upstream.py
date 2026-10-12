@@ -54,14 +54,14 @@ from contrib.autoresearch.fetch import StopReason, backfill_funding, render_fetc
 from contrib.autoresearch.ports import HistoryMarketData
 from contrib.autoresearch.store import ResearchStore, StoreError
 from contrib.autoresearch.vocabulary import SpecError, require_number
-from contrib.hyperliquid_perp.common.atomic_io import atomic_write_text
+from contrib.core.atomic_io import atomic_write_text
+from contrib.core.instants import epoch_ms, from_epoch_ms, parse_instant
 from contrib.hyperliquid_perp.common.constants import (
     FILE_TARGET_MODEL,
     FILE_TARGET_PENDING_PREFIX,
     FILE_TARGET_UNUSABLE_PREFIX,
     HANDOFF_SIDECAR_SUFFIX,
 )
-from contrib.hyperliquid_perp.common.instants import epoch_ms, from_epoch_ms, parse_instant
 from contrib.hyperliquid_perp.common.store_layout import payload_dir
 from contrib.hyperliquid_perp.domains.perp.context_builder import (
     MIN_FUNDING_SAMPLES,
@@ -108,7 +108,11 @@ __all__ = [
 
 # The packages this one may name at all. The reverse edge (any package under
 # ``contrib/`` naming this one) is held shut by ``tests/test_upstream.py``.
-UPSTREAM_PACKAGES: tuple[str, ...] = ("contrib.hyperliquid_perp", "contrib.autoresearch")
+UPSTREAM_PACKAGES: tuple[str, ...] = (
+    "contrib.core",
+    "contrib.hyperliquid_perp",
+    "contrib.autoresearch",
+)
 
 # Every borrow as ``(dotted module, attribute)`` — the audit list, and the
 # sequence the pin test walks. ``tests/test_upstream.py`` holds it equal to
@@ -124,14 +128,14 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.store", "StoreError"),
     ("contrib.autoresearch.vocabulary", "SpecError"),
     ("contrib.autoresearch.vocabulary", "require_number"),
-    ("contrib.hyperliquid_perp.common.atomic_io", "atomic_write_text"),
+    ("contrib.core.atomic_io", "atomic_write_text"),
+    ("contrib.core.instants", "epoch_ms"),
+    ("contrib.core.instants", "from_epoch_ms"),
+    ("contrib.core.instants", "parse_instant"),
     ("contrib.hyperliquid_perp.common.constants", "FILE_TARGET_MODEL"),
     ("contrib.hyperliquid_perp.common.constants", "FILE_TARGET_PENDING_PREFIX"),
     ("contrib.hyperliquid_perp.common.constants", "FILE_TARGET_UNUSABLE_PREFIX"),
     ("contrib.hyperliquid_perp.common.constants", "HANDOFF_SIDECAR_SUFFIX"),
-    ("contrib.hyperliquid_perp.common.instants", "epoch_ms"),
-    ("contrib.hyperliquid_perp.common.instants", "from_epoch_ms"),
-    ("contrib.hyperliquid_perp.common.instants", "parse_instant"),
     ("contrib.hyperliquid_perp.common.store_layout", "payload_dir"),
     ("contrib.hyperliquid_perp.domains.perp.context_builder", "MIN_FUNDING_SAMPLES"),
     ("contrib.hyperliquid_perp.domains.perp.context_builder", "funding_zscore"),

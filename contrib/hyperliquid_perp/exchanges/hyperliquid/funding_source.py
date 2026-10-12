@@ -9,7 +9,8 @@ import logging
 import time
 from datetime import datetime, timezone
 
-from ...common.instants import from_epoch_ms
+from contrib.core.instants import from_epoch_ms
+
 from .errors import ExchangeError
 
 logger = logging.getLogger(__name__)

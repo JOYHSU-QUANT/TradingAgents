@@ -12,7 +12,7 @@ snapshot time from these ledgers plus a mark, never stored raw here.
 storage form of the ``fills.side`` / ``orders.side`` columns. It mirrors the
 codebase's enum convention (``TargetSide``, ``DecisionMode``, ...) so a typo like
 ``"Buy"`` is rejected at the write boundary, not deep inside the fill math — and,
-as a :class:`~..common.enum_guard.VocabEnum`, refused with a sentence that names
+as a :class:`~contrib.core.enum_guard.VocabEnum`, refused with a sentence that names
 the two legal spellings wherever the lookup is written (issue #226).
 """
 
@@ -22,13 +22,13 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 # The persistence layer's import path for the ONE decimal context — the
-# canonical definition (and rationale) lives in common/decimal_context.py.
+# canonical definition (and rationale) lives in contrib/core/decimal_context.py.
 # This re-export is kept, not slated for removal like the domains/perp compat
 # shims were (issue #78): the paper/live engines and the rest of the
 # persistence layer read it from here, and tests/common/test_layering.py
 # pins it to the common object.
-from ..common.decimal_context import DECIMAL_CONTEXT
-from ..common.enum_guard import VocabEnum
+from contrib.core.decimal_context import DECIMAL_CONTEXT
+from contrib.core.enum_guard import VocabEnum
 
 __all__ = ["AccountLedger", "DECIMAL_CONTEXT", "PositionState", "Side"]
 

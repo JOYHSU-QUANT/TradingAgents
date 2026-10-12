@@ -31,7 +31,8 @@ import json
 import logging
 from pathlib import Path
 
-from ...common.instants import gap_label
+from contrib.core.instants import gap_label
+
 from .schema import ResearchSignal, interval_to_ms
 
 logger = logging.getLogger(__name__)

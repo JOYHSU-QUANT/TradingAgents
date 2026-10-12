@@ -114,8 +114,9 @@ import json
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from contrib.core.instants import delta_ms, gap_label, whole_hours_label
+
 from ..common.constants import CYCLE_INTERVAL
-from ..common.instants import delta_ms, gap_label, whole_hours_label
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from ..runtime.no_decision import NO_DECISION_STREAK_THRESHOLD, no_decision_shortfall

@@ -8,9 +8,8 @@ from decimal import Decimal
 
 import pytest
 
+from contrib.core.instants import MAX_EPOCH_MS, MIN_EPOCH_MS
 from contrib.hyperliquid_perp.common.constants import (
-    MAX_EPOCH_MS,
-    MIN_EPOCH_MS,
     MIN_MACRO_TREND_LOOKBACK,
     MIN_VOLUME_PROFILE_WINDOW,
     VOLUME_PROFILE_BUCKET_COUNT,
@@ -353,8 +352,8 @@ def test_every_vocabulary_enum_names_its_vocabulary_on_an_unknown_value(enum, se
     # other three fell through to ``Enum``'s "'nonsense' is not a valid
     # MarketRegime", which names neither the vocabulary nor the fix — and a
     # reader seeing one enum self-describe and three not had to guess whether
-    # that was deliberate. All four now inherit ``common.enum_guard.VocabEnum``
-    # (``tests/common/test_enum_guard.py`` pins the mechanism on a synthetic
+    # that was deliberate. All four now inherit ``contrib.core.enum_guard.VocabEnum``
+    # (``contrib/core/tests/test_enum_guard.py`` pins the mechanism on a synthetic
     # enum); pinned here per enum is the whole sentence — its noun and its
     # members in DECLARATION order — so a renamed noun or a re-sorted list
     # shows up by name.

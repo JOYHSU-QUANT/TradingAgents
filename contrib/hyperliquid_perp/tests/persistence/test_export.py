@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from contrib.hyperliquid_perp.common import atomic_io
+from contrib.core import atomic_io
 from contrib.hyperliquid_perp.paper import accounting as paper_accounting
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.export import (

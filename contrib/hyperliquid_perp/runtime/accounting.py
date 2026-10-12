@@ -39,7 +39,8 @@ from decimal import Decimal, localcontext
 from types import MappingProxyType
 from typing import NamedTuple
 
-from ..common.enum_guard import check_enum
+from contrib.core.enum_guard import check_enum
+
 from ..domains.perp.margin import (
     MarginSchedule,
     account_equity,

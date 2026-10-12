@@ -7,7 +7,8 @@ from collections.abc import Iterable
 from datetime import datetime, timezone
 from typing import Any, NamedTuple
 
-from ...common.enum_guard import check_enum
+from contrib.core.enum_guard import check_enum
+
 from ._base import _UNSET, _encode, _insert, _iso_utc, _Unset
 from ._vocab import (
     _ATTEMPT_STATUSES,

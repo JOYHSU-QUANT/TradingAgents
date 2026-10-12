@@ -30,7 +30,7 @@ under that reason (:data:`Reason`), never guessed:
 - ``unreadable``: the file cannot be read (permissions), is not JSON, or
   carries no string ``format_instructions`` — each logged with its cause.
 - ``unverified``: the file's bytes do not hash to the row's own
-  ``input_payload_hash`` (``common.digest.payload_digest``) — edited,
+  ``input_payload_hash`` (``contrib.core.digest.payload_digest``) — edited,
   truncated, restored from elsewhere — or the row recorded no hash. The row
   describes THAT artifact; anything else is not evidence of what the model
   was shown.
@@ -56,7 +56,7 @@ from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Literal, NamedTuple, get_args
 
-from ..common.digest import payload_digest
+from contrib.core.digest import payload_digest
 
 logger = logging.getLogger(__name__)
 

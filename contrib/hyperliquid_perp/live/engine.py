@@ -46,7 +46,8 @@ from decimal import Decimal, localcontext
 from enum import Enum
 from typing import Protocol
 
-from ..common.decimal_context import DECIMAL_CONTEXT
+from contrib.core.decimal_context import DECIMAL_CONTEXT
+
 from ..domains.perp.risk_gate import (
     NO_ORDER_ZERO_DELTA,
     CurrentPositionState,

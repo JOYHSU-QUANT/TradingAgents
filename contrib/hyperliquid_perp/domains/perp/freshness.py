@@ -25,9 +25,10 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from contrib.core.enum_guard import check_enum
+from contrib.core.instants import delta_ms, whole_hours_label
+
 from ...common.constants import CYCLE_INTERVAL, ERROR_TYPES, STALE_MARKET_DATA_ERROR
-from ...common.enum_guard import check_enum
-from ...common.instants import delta_ms, whole_hours_label
 from .schema import PerpMarketContext, interval_to_ms
 
 __all__ = [
@@ -70,7 +71,7 @@ def _utc_stamp(moment: datetime) -> str:
 
 
 # For the ``timedelta`` span below (the decision cycle) in ms; instant
-# subtraction goes through ``common.instants.delta_ms``.
+# subtraction goes through ``contrib.core.instants.delta_ms``.
 _ONE_MS = timedelta(milliseconds=1)
 
 

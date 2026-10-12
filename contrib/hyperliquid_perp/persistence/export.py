@@ -30,7 +30,8 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..common.atomic_io import atomic_write_text
+from contrib.core.atomic_io import atomic_write_text
+
 from .db import Database
 from .repository import get_run
 
@@ -290,7 +291,7 @@ def _write_csv_atomic(path: Path, header: tuple[str, ...], rows: list[tuple]) ->
         writer.writerow(header)
         writer.writerows(rows)
 
-    # The §1.1 tmp-then-replace dance lives in common.atomic_io; ``newline=""``
+    # The §1.1 tmp-then-replace dance lives in contrib.core.atomic_io; ``newline=""``
     # so the csv module owns the line endings.
     atomic_write_text(path, body, newline="")
 

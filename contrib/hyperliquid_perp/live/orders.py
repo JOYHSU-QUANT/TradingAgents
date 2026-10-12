@@ -43,7 +43,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from ..common.enum_guard import VocabEnum, check_enum
+from contrib.core.enum_guard import VocabEnum, check_enum
+
 from ..exchanges.hyperliquid.errors import (
     ExchangeError,
     MalformedResponseError,

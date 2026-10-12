@@ -32,7 +32,7 @@ from decimal import Decimal, localcontext
 # from its original home for importers deliberately left on this path:
 # paper/engine stays untouched under the phase3-spec §2.1 freeze, and
 # out-of-tree consumers may still read it from here.
-from ...common.decimal_context import DECIMAL_CONTEXT
+from contrib.core.decimal_context import DECIMAL_CONTEXT
 
 __all__ = [
     "DECIMAL_CONTEXT",

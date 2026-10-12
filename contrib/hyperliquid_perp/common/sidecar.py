@@ -21,9 +21,10 @@ module IS that contract, so a fourth sidecar cannot drift from it:
   keys happen to be present. A ``.usage.json`` with NO ``schema`` key is one
   written before the stamp shipped (every paper-BTC run up to and including
   6, the run live when this landed): same shape as schema 1 minus the stamp;
-- atomic (:func:`.atomic_io.atomic_write_bytes`): a service restart landing
-  mid-write — a deploy push while a cycle is finishing — must not leave a
-  truncated file at the final path for a later reader to choke on;
+- atomic (:func:`contrib.core.atomic_io.atomic_write_bytes`): a service
+  restart landing mid-write — a deploy push while a cycle is finishing —
+  must not leave a truncated file at the final path for a later reader to
+  choke on;
 - never raises: a recording failure must not cost the decision the engine
   already paid for. It is logged with its traceback and the cycle goes on —
   and the record is BUILT inside that protection too (``build`` is called
@@ -38,8 +39,8 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-from .atomic_io import atomic_write_bytes
-from .digest import json_bytes
+from contrib.core.atomic_io import atomic_write_bytes
+from contrib.core.digest import json_bytes
 
 logger = logging.getLogger(__name__)
 

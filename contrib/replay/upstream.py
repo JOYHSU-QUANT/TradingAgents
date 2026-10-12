@@ -82,10 +82,10 @@ from contrib.autoresearch.guardrail import (
 from contrib.autoresearch.split import SegmentName, Split, SplitError
 from contrib.autoresearch.store import ResearchStore, StoreError
 from contrib.autoresearch.vocabulary import SpecError, require_number
+from contrib.core.decimal_context import DECIMAL_CONTEXT
+from contrib.core.digest import payload_digest
+from contrib.core.instants import epoch_ms, from_epoch_ms, parse_instant
 from contrib.hyperliquid_perp.common.constants import FILE_TARGET_MODEL
-from contrib.hyperliquid_perp.common.decimal_context import DECIMAL_CONTEXT
-from contrib.hyperliquid_perp.common.digest import payload_digest
-from contrib.hyperliquid_perp.common.instants import epoch_ms, from_epoch_ms, parse_instant
 from contrib.hyperliquid_perp.common.sidecar import sidecar_path
 from contrib.hyperliquid_perp.common.store_layout import payload_dir
 from contrib.hyperliquid_perp.domains.perp.market_data_config import MarketDataConfig
@@ -165,7 +165,11 @@ __all__ = [
 # The packages this one may name at all. Both, and only these two: the
 # reverse edge (either of them naming this package) is held shut by
 # ``tests/test_upstream.py``.
-UPSTREAM_PACKAGES: tuple[str, ...] = ("contrib.hyperliquid_perp", "contrib.autoresearch")
+UPSTREAM_PACKAGES: tuple[str, ...] = (
+    "contrib.core",
+    "contrib.hyperliquid_perp",
+    "contrib.autoresearch",
+)
 
 # Every borrow as ``(dotted module, attribute)`` — the audit list, and the
 # sequence the pin test walks. ``tests/test_upstream.py`` holds it equal to
@@ -189,12 +193,12 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.store", "StoreError"),
     ("contrib.autoresearch.vocabulary", "SpecError"),
     ("contrib.autoresearch.vocabulary", "require_number"),
+    ("contrib.core.decimal_context", "DECIMAL_CONTEXT"),
+    ("contrib.core.digest", "payload_digest"),
+    ("contrib.core.instants", "epoch_ms"),
+    ("contrib.core.instants", "from_epoch_ms"),
+    ("contrib.core.instants", "parse_instant"),
     ("contrib.hyperliquid_perp.common.constants", "FILE_TARGET_MODEL"),
-    ("contrib.hyperliquid_perp.common.decimal_context", "DECIMAL_CONTEXT"),
-    ("contrib.hyperliquid_perp.common.digest", "payload_digest"),
-    ("contrib.hyperliquid_perp.common.instants", "epoch_ms"),
-    ("contrib.hyperliquid_perp.common.instants", "from_epoch_ms"),
-    ("contrib.hyperliquid_perp.common.instants", "parse_instant"),
     ("contrib.hyperliquid_perp.common.sidecar", "sidecar_path"),
     ("contrib.hyperliquid_perp.common.store_layout", "payload_dir"),
     ("contrib.hyperliquid_perp.domains.perp.market_data_config", "MarketDataConfig"),

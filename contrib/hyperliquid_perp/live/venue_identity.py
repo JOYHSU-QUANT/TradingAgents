@@ -52,7 +52,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from ..common.enum_guard import check_enum
+from contrib.core.enum_guard import check_enum
+
 from ..common.seam_guard import require_seam
 from ..exchanges.hyperliquid.errors import MalformedResponseError
 from ..persistence import repository as repo

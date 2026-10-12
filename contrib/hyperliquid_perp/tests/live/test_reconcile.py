@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from contrib.hyperliquid_perp.common.instants import whole_hours_label
+from contrib.core.instants import whole_hours_label
 from contrib.hyperliquid_perp.live import (
     reconcile as reconcile_mod,
     reconcile_fills,

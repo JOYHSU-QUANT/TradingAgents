@@ -13,9 +13,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from contrib.core.instants import parse_instant
 from contrib.hyperliquid_perp.common import store_layout
 from contrib.hyperliquid_perp.common.inflight import inflight_ids
-from contrib.hyperliquid_perp.common.instants import parse_instant
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.ids import decision_attempt_id as derive_attempt_id
 
@@ -549,7 +549,7 @@ def write_payload(path: Path, body) -> tuple[str, str]:
     with its own formula, or wrote in text mode, would pin a reader against
     rows the daemon never writes.
     """
-    from contrib.hyperliquid_perp.common.digest import json_bytes, payload_digest
+    from contrib.core.digest import json_bytes, payload_digest
 
     raw = body if isinstance(body, bytes) else json_bytes(body)
     path.parent.mkdir(parents=True, exist_ok=True)

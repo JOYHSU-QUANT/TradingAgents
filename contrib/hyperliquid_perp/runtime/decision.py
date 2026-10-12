@@ -14,8 +14,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+from contrib.core.enum_guard import check_enum
+
 from ..common.constants import ERROR_TYPES
-from ..common.enum_guard import check_enum
 from ..domains.perp.schema import PerpMarketContext
 from .position_facts import BookFacts
 

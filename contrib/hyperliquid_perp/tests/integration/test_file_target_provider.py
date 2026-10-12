@@ -10,14 +10,13 @@ from pathlib import Path
 
 import pytest
 
+from contrib.core.digest import payload_digest
+from contrib.core.instants import MAX_EPOCH_MS, MIN_EPOCH_MS
 from contrib.hyperliquid_perp.common.constants import (
     FILE_TARGET_MODEL,
     FILE_TARGET_PENDING_PREFIX,
     FILE_TARGET_UNUSABLE_PREFIX,
-    MAX_EPOCH_MS,
-    MIN_EPOCH_MS,
 )
-from contrib.hyperliquid_perp.common.digest import payload_digest
 from contrib.hyperliquid_perp.common.sidecar import sidecar_path
 from contrib.hyperliquid_perp.domains.perp.risk_gate import DecisionConfig, RiskConfig
 from contrib.hyperliquid_perp.domains.perp.target_decision import (

@@ -37,7 +37,8 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from ..common.enum_guard import check_enum
+from contrib.core.enum_guard import check_enum
+
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from ..ports import Clock

@@ -84,6 +84,8 @@ from datetime import datetime, timedelta
 from decimal import Decimal, localcontext
 from enum import Enum
 
+from contrib.core.instants import parse_instant
+
 from ..common.constants import CYCLE_INTERVAL
 from ..common.inflight import (
     InFlightDecision,
@@ -91,7 +93,6 @@ from ..common.inflight import (
     non_retryable_message,
     parse_stored_response,
 )
-from ..common.instants import parse_instant
 from ..domains.perp.risk_gate import RiskConfig
 from ..domains.perp.target_decision import DecisionConfig, ParsedDecision, parse_target_decision
 from ..persistence import audit_rows, repository as repo
@@ -118,7 +119,7 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 # The rolling decision interval (spec §3) is ``common.constants.CYCLE_INTERVAL``
-# and the store's timestamp decoder is ``common.instants.parse_instant``; both
+# and the store's timestamp decoder is ``contrib.core.instants.parse_instant``; both
 # stay in ``__all__`` for the callers that always imported them from here
 # (issue #122 moved the definitions down so the freshness guard and the
 # no-decision policy could read them without importing this module — and, with

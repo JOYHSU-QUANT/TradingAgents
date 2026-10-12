@@ -28,8 +28,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..common.atomic_io import atomic_write_text
-from ..common.instants import epoch_ms
+from contrib.core.atomic_io import atomic_write_text
+from contrib.core.instants import epoch_ms
 
 if TYPE_CHECKING:
     # Type-only imports (annotations are strings under ``from __future__``) so the

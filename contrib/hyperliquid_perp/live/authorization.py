@@ -18,7 +18,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
-from ..common.instants import from_epoch_ms
+from contrib.core.instants import from_epoch_ms
+
 from ..exchanges.hyperliquid.sdk_client import account_from_agent_key, call_sdk
 
 if TYPE_CHECKING:

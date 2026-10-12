@@ -23,8 +23,9 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 
+from contrib.core.instants import parse_instant, whole_hours
+
 from ..common.constants import CYCLE_INTERVAL, STALE_MARKET_DATA_ERROR
-from ..common.instants import parse_instant, whole_hours
 
 __all__ = [
     "NO_DECISION_STREAK_THRESHOLD",

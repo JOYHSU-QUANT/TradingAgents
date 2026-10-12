@@ -25,7 +25,8 @@ from datetime import datetime, timezone
 from decimal import Decimal, localcontext
 from typing import TYPE_CHECKING
 
-from ..common.enum_guard import check_enum
+from contrib.core.enum_guard import check_enum
+
 from ..domains.perp.margin import unrealized_pnl
 from ..persistence import repository as repo
 from ..persistence.db import Database

@@ -46,7 +46,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, localcontext
 
-from ..common.instants import parse_instant
+from contrib.core.instants import parse_instant
+
 from ..common.prompt_regime import prompt_regime_line
 from ..persistence import repository as repo
 from ..persistence.db import Database

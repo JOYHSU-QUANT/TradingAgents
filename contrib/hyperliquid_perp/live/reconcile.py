@@ -40,7 +40,8 @@ from decimal import Decimal, localcontext
 from pathlib import Path
 from typing import Any
 
-from ..common.enum_guard import check_enum
+from contrib.core.enum_guard import check_enum
+
 from ..common.seam_guard import require_object_seam, require_seam
 from ..domains.perp.schema import AccountSnapshot, PerpPosition
 from ..exchanges.hyperliquid.mapper import (

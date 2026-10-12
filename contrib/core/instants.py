@@ -317,9 +317,9 @@ def from_epoch_ms(ms: int) -> datetime:
     venue-failure and malformed-row handler between the wire and this call and
     ends the run (issue #191). ``domains/perp/schema``'s two venue-stamp DTOs
     hold the bound at construction. The range is derived beside this
-    function and pinned against it in ``tests/test_instants.py``, from both
-    sides of both edges, so the two can never disagree about where the edge
-    is.
+    function and pinned against it in ``contrib/core/tests/test_instants.py``,
+    from both sides of both edges, so the two can never disagree about where
+    the edge is.
     """
     if isinstance(ms, bool) or not isinstance(ms, int):
         raise TypeError(f"epoch milliseconds must be an int, got {type(ms).__name__}")

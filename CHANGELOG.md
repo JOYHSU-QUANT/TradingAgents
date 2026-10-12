@@ -227,7 +227,12 @@ Breaking changes within the 0.x line are called out explicitly.
   library only, and which perp subpackages each other package reaches into
   is frozen as of 2026-10-12 and can only shrink. CI's autoresearch job and
   `deploy.yml` now also run `contrib/core/tests` and `contrib/tests`, and
-  mypy checks `contrib/core`.
+  mypy checks `contrib/core`. The perp RUNBOOK, RUNBOOK-live and SETUP test
+  gates also run those two directories. Left as they are, by decision:
+  autoresearch, replay and carry still reach `contrib.core` through their
+  `upstream.py` funnel (to be revisited when the exporter package arrives),
+  `paper.scheduler` still re-exports `parse_instant` for its two test
+  callers, and the graph test is not a required check.
 
 - **The CME futures-basis and CFTC positioning tools serve Ether beside
   Bitcoin** (`tradingagents/dataflows/cme_basis.py`,

@@ -82,6 +82,12 @@ _YAHOO_SAFE = re.compile(r"^[A-Za-z0-9._\-\^=]+$")
 # match before the ``USD`` substring.
 _CRYPTO_QUOTES = ("USDT", "USDC", "USD")
 
+# Quotes that make a crypto pair a cross: another crypto base or a non-USD fiat
+# currency. A deny-list rather than "anything but USD", so venue suffixes and
+# stablecoin quotes outside ``_CRYPTO_QUOTES`` (PERP, SWAP, DAI) keep resolving
+# to their base in ``classify_crypto_asset``.
+_CROSS_QUOTES = (CRYPTO_BASES | _FOREX_CURRENCIES) - {"USD"}
+
 
 def crypto_base(raw: str) -> str | None:
     """Return the crypto base (e.g. ``BTC``) for a known USD/USDT/USDC-quoted
@@ -161,9 +167,11 @@ def classify_crypto_asset(
     * a symbol whose base is in ``native`` is served its own data;
     * any other recognized crypto *risk* asset (``CRYPTO_BASES``) is served
       ``proxy_to``'s data, flagged as a market-wide proxy;
-    * anything else — a stablecoin, a quote-only, an unrecognized symbol —
-      gets ``(None, False)``: a stablecoin has no risk character to proxy,
-      so there is no signal to serve.
+    * anything else — a stablecoin, a quote-only, an unrecognized symbol, or
+      a cross quoted in another crypto asset or a non-USD fiat currency
+      (``ETH-BTC``, ``BTC/EUR``) — gets ``(None, False)``: a stablecoin has
+      no risk character to proxy, and a cross asks for the base priced in
+      something else, which no vendor's USD-denominated report answers (#351).
 
     Delegates to ``normalize_symbol`` so pair forms and crypto-base
     recognition match the rest of the system (``BTC``, ``ETH-USD``,
@@ -181,7 +189,9 @@ def classify_crypto_asset(
         # breakage and says so by type: the router would otherwise read it as
         # that vendor's library failing and report it as text (#219).
         raise WiringGapError("native must be a collection of base symbols, not a bare string")
-    base = normalize_symbol((asset or "").replace("/", "-")).split("-")[0]
+    base, _, quote = normalize_symbol((asset or "").replace("/", "-")).partition("-")
+    if quote.partition("-")[0] in _CROSS_QUOTES:
+        return None, False
     if base in native:
         return base, False
     if base in CRYPTO_BASES:

@@ -53,6 +53,21 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **A crypto cross such as `ETH-BTC` or `BTC-EUR` now gets a no-signal answer
+  instead of its base's USD report** (`tradingagents/dataflows/symbol_utils.py`,
+  issue #351). `classify_crypto_asset` took the base before the dash and
+  ignored the quote, so `get_futures_basis("ETH-BTC", …)` served CME Ether's
+  basis against `ETH-USD`, and the ETF-flow, treasury, Deribit, whale and
+  CFTC vendors did the same through the shared classifier (PR #350 widened
+  this to ETH crosses). A quote that is another crypto base or a non-USD fiat
+  currency now makes the pair a cross, answered `(None, False)` and never
+  proxied. The rule is a deny-list, so venue suffixes and stablecoin quotes
+  (`BTC-PERP`, `ETH-USD-SWAP`, `ETH-DAI`) still resolve to their base, and
+  undashed crosses (`ETHBTC`) stay no-signal as before. The no-signal text of
+  the deribit, farside, sosovalue, treasury and whale vendors now lists a
+  cross among its reasons next to a stablecoin and an unrecognized symbol.
+  The live runs pass `BTC`, `BTC-USD` and `ETH-USD` and see no change.
+
 - **The env-overlay tests no longer leave their last `TRADINGAGENTS_*`
   overlay in the process-wide `DEFAULT_CONFIG`** (`tests/conftest.py`,
   `tests/test_env_overrides.py`, `tests/test_llm_max_tokens.py`,

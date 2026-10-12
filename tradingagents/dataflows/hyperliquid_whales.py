@@ -1381,9 +1381,9 @@ def get_whale_positions_data(asset: str, curr_date: str) -> str:
     Args:
         asset: The crypto asset to read positioning for — "BTC", or a pair form
             like "BTC-USD". Any recognized crypto risk asset is served its own
-            coin; a stablecoin or an unrecognized symbol gets a no-signal
-            message, since there is no other coin whose positioning would
-            answer the question.
+            coin; a stablecoin, an unrecognized symbol or a cross such as
+            "ETH-BTC" gets a no-signal message, since there is no other
+            coin whose positioning would answer the question.
         curr_date: The analysis date (yyyy-mm-dd). Both endpoints are
             live-only, so this does not select a historical state: a date
             BEFORE today is answered with a withheld notice carrying no
@@ -1426,8 +1426,9 @@ def get_whale_positions_data(asset: str, curr_date: str) -> str:
         # why nothing is being shown instead of a degraded-category sentinel.
         return (
             f"There is no whale-positioning signal for {quoted}: it is not a recognized "
-            f"crypto risk asset with a Hyperliquid perpetual market (a stablecoin or an "
-            f"unrecognized symbol). Do not substitute another coin's positioning."
+            f"crypto risk asset with a Hyperliquid perpetual market (a stablecoin, an "
+            f"unrecognized symbol, or a cross priced in another asset such as ETH-BTC). "
+            f"Do not substitute another coin's positioning."
         )
 
     # Ahead of the fetch, not after it: on a past date there is nothing this

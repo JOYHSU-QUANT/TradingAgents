@@ -83,6 +83,23 @@ class TestClassifyCryptoAsset(unittest.TestCase):
         self.assertEqual(classify_crypto_asset("SOL", {"BTC", "ETH"}), ("BTC", True))
         self.assertEqual(classify_crypto_asset("USDT", {"BTC", "ETH"}), (None, False))
 
+    def test_usd_stablecoin_and_venue_suffixes_are_native(self):
+        # Only a crypto or non-USD fiat quote makes a cross; a venue suffix or a
+        # stablecoin outside normalize_symbol's quote list is not one.
+        for asset in (
+            "ETH-USD", "ETHUSD", "ETHUSDT", "ETH-USDC", "ETH/USD",
+            "ETH-PERP", "ETH-USD-SWAP", "ETH-DAI",
+        ):
+            with self.subTest(asset=asset):
+                self.assertEqual(classify_crypto_asset(asset, {"BTC", "ETH"}), ("ETH", False))
+
+    def test_non_usd_crosses_are_no_signal(self):
+        # The base alone is recognized, but every vendor's report is USD-priced,
+        # so a cross must not be served the base's USD data (#351) — nor proxied.
+        for asset in ("ETH-BTC", "BTC-EUR", "ETH/BTC", "SOL-ETH", "ETH-BTC-PERP", "ETHBTC"):
+            with self.subTest(asset=asset):
+                self.assertEqual(classify_crypto_asset(asset, {"BTC", "ETH"}), (None, False))
+
 
 @pytest.mark.unit
 class TestIsYahooSafe(unittest.TestCase):

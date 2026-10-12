@@ -637,8 +637,9 @@ class TestAnsweredWithoutAFetch:
         out = cme_basis.get_futures_basis("BTC", "2026-13-01")
         assert out.startswith("INVALID_CURR_DATE: ") and "futures basis cannot be bounded" in out
 
-    # WETH is the wrapped token, a look-alike the classifier lets fall through.
-    @pytest.mark.parametrize("asset", ["SOL-USD", "USDT", "AAPL", "", "WETH"])
+    # WETH is the wrapped token, a look-alike the classifier lets fall through;
+    # ETH-BTC is a cross the USD-priced CME contract cannot answer (#351).
+    @pytest.mark.parametrize("asset", ["SOL-USD", "USDT", "AAPL", "", "WETH", "ETH-BTC"])
     def test_anything_but_btc_or_eth_is_no_signal_and_not_a_proxy(self, asset):
         out = cme_basis.get_futures_basis(asset, TODAY)
         assert out.startswith("There is no futures-basis signal for ")

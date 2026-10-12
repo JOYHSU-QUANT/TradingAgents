@@ -787,8 +787,9 @@ def _classify_asset(asset: str) -> tuple[str | None, bool]:
       own (SOL, XRP, ...): BTC spot-ETF flows are the market's risk-on/off proxy,
       so serve those, flagged as market-wide.
     * ``(None, False)`` — not a recognized crypto risk asset: a stablecoin
-      (USDT/USDC/DAI), a quote-only, or an unrecognized symbol. A stablecoin has
-      no risk-on/off flow character to proxy, so there is no signal to serve.
+      (USDT/USDC/DAI), a quote-only, an unrecognized symbol, or a cross such as
+      ``ETH-BTC``. A stablecoin has no risk-on/off flow character to proxy, and
+      a cross asks for a non-USD price, so there is no signal to serve.
 
     Delegates to the shared ``normalize_symbol`` so quote-suffix stripping
     (USD/USDT/USDC) and crypto-base recognition match the rest of the system:
@@ -913,8 +914,8 @@ def get_etf_flow_data(
         return (
             f"There is no spot-ETF flow signal for {quoted}: it has no US spot ETF of "
             f"its own and is not a recognized crypto risk asset for which BTC flows serve "
-            f"as a market-wide proxy (e.g. a stablecoin or an unrecognized symbol). Do "
-            f"not substitute BTC or ETH flows."
+            f"as a market-wide proxy (e.g. a stablecoin, an unrecognized symbol, or a cross "
+            f"priced in another asset such as ETH-BTC). Do not substitute BTC or ETH flows."
         )
 
     snapshot = _load_flows(asset_key)

@@ -1,7 +1,25 @@
-# Reviewed false positives, one fingerprint (<commit>:<path>:<rule>:<line>)
-# each. Before adding a line, confirm the value is not a real credential --
-# compare it against the real .env without printing either -- and say what it
-# is here.
+# Reviewed findings, one fingerprint (<commit>:<path>:<rule>:<line>) each.
+# CI logs are redacted, so get the fingerprint from a local run:
+#   gitleaks git . --redact --report-format json --report-path -
+#
+# A false positive: confirm the value is not a real credential -- compare it
+# against the real .env without printing either -- and say what it is here.
+# Better still, write test placeholders in a shape no rule matches (low
+# entropy, e.g. "test-key"), so nothing needs pinning. PRs are squash-merged:
+# a fingerprint names a commit, so one pinned on a branch commit no longer
+# matches once develop holds the squashed commit; after the merge, add the
+# squash commit's fingerprint in a follow-up.
+#
+# A real leak: the key is already public. Revoke and rotate it FIRST (the
+# Hyperliquid agent key, OpenRouter, Alchemy/Infura, the deploy SSH key -- any
+# of them), then pin its fingerprint here with "rotated on <YYYY-MM-DD>". Do
+# not rewrite history or force-push develop: GitHub keeps PR refs and cached
+# commit views reachable anyway, and every worktree would break.
+#
+# The two b20c8e60 entries are upstream (TauricResearch) commits: CI's clone
+# of this fork does not carry them, but a local scan with the upstream remote
+# fetched does, and so will develop after an upstream sync. Expect to pin
+# upstream's own false positives the same way after each sync.
 
 # A placeholder key the chain-RPC tests prove stays out of error messages.
 6db940dfedb302764ed525ba20b91bd574bbeb5c:contrib/uniswap_v3/tests/test_chain_rpc.py:generic-api-key:48

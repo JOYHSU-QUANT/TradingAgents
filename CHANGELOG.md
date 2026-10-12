@@ -10,22 +10,27 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
-- **Secret scanning.** A new CI job, `secrets`, runs gitleaks 8.30.1 (the
-  release binary, checksum-verified) over every commit of the history with
-  `--redact`. `.gitleaks.toml` keeps gitleaks' default rules and adds the
-  three credential shapes this repo holds that they miss: a 32-byte hex key
-  assigned to a private/secret field or an agent/wallet/signer key field (the
-  Hyperliquid agent key), an OpenRouter key, and an Alchemy or Infura RPC or
-  websocket URL with its key in the path. Before the scan, the job runs
-  `.github/gitleaks_selftest.py`, which checks that each custom rule flags a
-  freshly generated fake credential of its shape and leaves block and
-  transaction hashes alone. The four findings the default rules raise on the
-  existing history are reviewed false positives (test placeholders and a
-  variable name), pinned one by one by fingerprint in `.gitleaksignore`. The
-  repo installs no local hook; to scan before each commit, add a
-  `.git/hooks/pre-commit` that runs
-  `gitleaks git --pre-commit --staged --redact` (gitleaks on PATH, the version
-  `ci.yml` pins). `payloads/` is now gitignored.
+- **Secret scanning.** A new workflow, `secrets.yml`, runs gitleaks 8.30.1
+  (the release binary, checksum-verified) over every commit of the history
+  with `--redact`, on a push to any branch and on every PR. It does not gate
+  `deploy.yml`. Its job, `gitleaks (every commit)`, is a required status check
+  on `develop` and `main`. `.gitleaks.toml` keeps gitleaks' default rules and
+  adds the three credential shapes this repo holds that they miss: a 32-byte
+  hex key assigned to a private/secret field or an agent/wallet/signer key
+  field (the Hyperliquid agent key), an OpenRouter key, and an Alchemy or
+  Infura RPC or websocket URL with its key in the path. Before the scan, the
+  job runs `.github/gitleaks_selftest.py`, which checks by rule id that each
+  custom rule flags a freshly generated fake credential of its shape, that
+  two canaries only the default rules know (a GitHub token, an AWS key id)
+  are still flagged, and that block and transaction hashes are not. The four
+  findings the default rules raise on the history, two of them in upstream
+  commits this fork's CI never fetches, are reviewed false positives (test
+  placeholders and a variable name), pinned one by one by fingerprint in
+  `.gitleaksignore`, whose header also says what to do about a real leak
+  (rotate first, then pin) and about squash merges. The repo installs no
+  local hook; to scan before each commit, add a `.git/hooks/pre-commit` that
+  runs `gitleaks git --pre-commit --staged --redact` (gitleaks on PATH, the
+  version `secrets.yml` pins). `payloads/` is now gitignored.
 
 - **`contrib/carry report`, the sleeve's schedule, and the deployment (carry
   plan PR 4).** The last of the four. `python -m contrib.carry report --coin

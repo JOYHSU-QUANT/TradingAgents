@@ -1,10 +1,16 @@
-# Secret scanning (gitleaks, version pinned in .github/workflows/ci.yml). CI's
-# `secrets` job scans every commit of the history with this file; a local
+# Secret scanning (gitleaks, version pinned in .github/workflows/secrets.yml).
+# That workflow scans every commit of the history with this file; a local
 # pre-commit hook can run the same rules on the staged diff
 # (`gitleaks git --pre-commit --staged --redact`). Known false
 # positives are pinned one by one, by fingerprint, in .gitleaksignore -- never
 # by a path or regex allowlist here, which would also hide a real key that
 # later lands in the same file.
+#
+# `useDefault` also brings in gitleaks' own global path allowlist: lock files
+# (go.sum, package-lock.json, poetry.lock), node_modules/, binary and media
+# extensions (.pdf, .svg, .jpg, .bin, ...), and any path ending in
+# gitleaks.toml -- this file included. None of those may hold a credential.
+# Binary blobs in a diff are not text-scanned either (*.db is gitignored).
 
 title = "TradingAgents secret scan"
 

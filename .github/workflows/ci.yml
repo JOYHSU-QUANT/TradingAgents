@@ -45,38 +45,6 @@ jobs:
           # install must import the package and the CLI module.
           python -c "import tradingagents, cli.main; print('clean-install import OK')"
 
-  secrets:
-    name: gitleaks (every commit)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # The whole history, not the merge commit alone: a key committed in
-          # one commit and deleted in the next is still published.
-          fetch-depth: 0
-      - name: Install gitleaks (pinned, checksum-verified)
-        # The release binary straight from GitHub, checked against the hash
-        # its checksums.txt lists, rather than a third-party action. Bump the
-        # version and the hash together.
-        env:
-          GITLEAKS_VERSION: "8.30.1"
-          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
-        run: |
-          cd "$RUNNER_TEMP"
-          curl -sSfL -o gitleaks.tar.gz \
-            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
-          tar -xzf gitleaks.tar.gz gitleaks
-      - name: Self-test the custom rules
-        run: python3 .github/gitleaks_selftest.py "$RUNNER_TEMP/gitleaks"
-      - name: Scan
-        # .gitleaks.toml and .gitleaksignore at the repo root are picked up
-        # by default. --redact keeps a found value out of the public log.
-        # With no --log-opts gitleaks walks every ref the checkout fetched
-        # (all branches and tags), on purpose: anything pushed to GitHub is
-        # public, so a key on a stale branch should fail this job too.
-        run: '"$RUNNER_TEMP/gitleaks" git . --redact --no-banner --verbose'
-
   lint:
     name: ruff (strict, full repo)
     runs-on: ubuntu-latest

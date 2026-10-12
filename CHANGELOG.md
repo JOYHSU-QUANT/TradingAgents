@@ -26,7 +26,7 @@ Breaking changes within the 0.x line are called out explicitly.
   when a leg maintained for want of a usable document three days running
   (a `pending` cycle is the schedule, not a fault), `one-legged`,
   `different documents` (the spot target's digest is not among the day's
-  sidecar digests), `no sidecar`, `silent day` (neither leg left a trace)
+  sidecar digests), `no sidecar`, `silent day` (neither leg acted on a document)
   and `sidecar not read`. A file-target cycle the decision contract refused
   (an off-grid margin, stored as `invalid_output`) counts as applied and
   refused by the gate, and the gate's word is read through the perp

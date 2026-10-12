@@ -266,10 +266,20 @@ class PerpSnapshot:
 # the decision contract refused (a file target with an off-grid margin fails
 # closed THERE, after the sidecar was written), so it is an applied cycle the
 # gate refused, not a cycle that decided nothing.
-_DECIDED: Final = frozenset({AttemptStatus.COMPLETED.value, AttemptStatus.INVALID_OUTPUT.value})
+_DECIDED: Final = frozenset({AttemptStatus.COMPLETED, AttemptStatus.INVALID_OUTPUT})
 
 
-def _kind(status: object, model: object, reason: object) -> CycleKind:
+def _attempt_status(value: object, path: Path, *, what: str) -> AttemptStatus:
+    """The attempt's status through its own vocabulary; a status this package does not know is refused."""
+    try:
+        return AttemptStatus(value)
+    except ValueError:
+        raise StoreReadError(
+            f"perp store {path}: {what}: status {value!r} is not an attempt status"
+        ) from None
+
+
+def _kind(status: AttemptStatus, model: object, reason: object) -> CycleKind:
     if status not in _DECIDED or reason is None:
         # No answer row at all is missing evidence: it fails toward the alarm.
         return CycleKind.NO_DECISION
@@ -313,15 +323,19 @@ def perp_cycles(path: Path, run_id: str) -> list[PerpCycle]:
         leg="perp",
     )
     what = f"run {run_id!r}: a cycle's scheduled_at"
-    return [
-        PerpCycle(
-            _perp_ms(scheduled, path, what=what),
-            _kind(status, model, reason),
-            _risk_action(action, path, what=f"run {run_id!r}: a cycle's output"),
+    cycles = []
+    for scheduled, raw_status, model, reason, action in rows:
+        status = _attempt_status(raw_status, path, what=f"run {run_id!r}: a cycle")
+        if status is AttemptStatus.IN_PROGRESS:
+            continue
+        cycles.append(
+            PerpCycle(
+                _perp_ms(scheduled, path, what=what),
+                _kind(status, model, reason),
+                _risk_action(action, path, what=f"run {run_id!r}: a cycle's output"),
+            )
         )
-        for scheduled, status, model, reason, action in rows
-        if status != AttemptStatus.IN_PROGRESS.value
-    ]
+    return cycles
 
 
 def perp_funding(path: Path, run_id: str, coin: str) -> list[tuple[int, Decimal]]:

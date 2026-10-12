@@ -455,9 +455,63 @@ def test_days_held_by_d5_light_the_escalation_only_in_a_row(tmp_path: Path):
     assert _kinds(d5(alerts(rows, delta_alert_pct=10, d5_days=3))) == [("2026-02-14", "held by D5")]
     # A fine day in between breaks the streak.
     assert d5(alerts([perp_held, fine, spot_held], delta_alert_pct=10, d5_days=2)) == []
+    # A silent day in between (the daemon down inside the coordinator's outage)
+    # carries it: the escalation must not restart from the outage within the outage.
+    (silent_between,) = _rows(since_ms=day(43))
+    carried = d5(alerts([perp_held, silent_between, still_held], delta_alert_pct=10, d5_days=2))
+    assert _kinds(carried) == [("2026-02-14", "held by D5")]
+    assert "2 days in a row" in carried[0].text
     # A pending cycle alone is the schedule, not a fault.
     pending = _row(day(42), cycles=[PerpCycle(day(42), CycleKind.PENDING, None)], targets=[])
     assert pending.perp_held_by_d5 is False
+
+
+def test_a_leg_without_a_reading_keeps_its_last_known_holding(tmp_path: Path):
+    # Day 42: the coordinator failed, the spot visit refused at target, so the
+    # bar was never decided and has no valuation; the spot ledger still holds
+    # the 0.9 of day 41. The delta must not read the unobserved leg as empty.
+    payloads = tmp_path / "payloads"
+    rows = _rows(
+        since_ms=day(41),
+        until_ms=day(42),
+        snapshots=[
+            _snapshot(day(41) + MS_PER_HOUR, "10000", "-0.9", "3000"),
+            _snapshot(day(42) + MS_PER_HOUR, "10000", "-0.9", "3000"),
+        ],
+        cycles=[
+            PerpCycle(day(41) + 5 * MINUTE, CycleKind.APPLIED, RiskAction.APPROVED),
+            PerpCycle(day(42) + 5 * MINUTE, CycleKind.UNUSABLE, None),
+        ],
+        sidecars=[_sidecar_for(payloads, day(41), stem="in1", digest=A, hours=0)],
+        decisions=[(day(41), "hold")],
+        valuations=[_valuation(day(41), {"WETH": "0.9"}, {"WETH": "3000"}, "2700")],
+        targets=[SpotTarget(day(41), Decimal("0.3"), A)],
+    )
+    yesterday, today = rows
+    assert not yesterday.spot_carried and not yesterday.perp_carried
+    assert today.spot_carried and not today.perp_carried
+    assert today.spot_qty == Decimal("0.9") and today.delta == (Decimal(0), Decimal(0))
+    assert today.perp_held_by_d5 and not today.silent
+    found = alerts(rows, delta_alert_pct=10, d5_days=1)
+    assert _kinds(found) == [("2026-02-12", "held by D5")]
+    lines = format_report(rows, found, [], coin=COIN, delta_alert_pct=10, d5_days=1)
+    assert "spot 0.9000 WETH @ 3000.00 (as of 2026-02-11)  delta 0.0000 (0.00%)" in lines[5]
+    assert "(as of" not in lines[2]
+    # The perp side carries the same way, and a span that starts after the
+    # last reading is seeded from it.
+    (later,) = _rows(
+        since_ms=day(43),
+        snapshots=[_snapshot(day(42) + MS_PER_HOUR, "10000", "-0.9", "3000")],
+        valuations=[_valuation(day(42), {"WETH": "0.9"}, {"WETH": "3000"}, "2700")],
+        decisions=[(day(42), "hold")],
+    )
+    assert later.perp_carried and later.spot_carried and later.silent
+    assert later.delta == (Decimal(0), Decimal(0)) and later.perp_equity == Decimal(10000)
+    lines = format_report([later], [], [], coin=COIN, delta_alert_pct=10, d5_days=3)
+    assert (
+        "perp -0.9000 ETH @ 3000.00 (as of 2026-02-12)  spot 0.9000 WETH @ 3000.00 "
+        "(as of 2026-02-12)"
+    ) in lines[2]
 
 
 # --- the weeks ------------------------------------------------------------------
@@ -595,6 +649,14 @@ def test_the_stores_read_as_the_report_needs_them(tmp_path: Path):
     with sqlite3.connect(perp) as conn:
         conn.execute("UPDATE ai_outputs SET risk_action = 'waved_through' WHERE output_id = 'out0'")
     with pytest.raises(StoreReadError, match="'waved_through' is not a gate action"):
+        perp_cycles(perp, PERP_RUN)
+    # So is an attempt status it does not know.
+    with sqlite3.connect(perp) as conn:
+        conn.execute("UPDATE ai_outputs SET risk_action = 'approved' WHERE output_id = 'out0'")
+        conn.execute(
+            "UPDATE decision_attempts SET status = 'parked' WHERE decision_attempt_id = 'attempt1'"
+        )
+    with pytest.raises(StoreReadError, match="'parked' is not an attempt status"):
         perp_cycles(perp, PERP_RUN)
     run = spot_run(spot, SPOT_RUN)
     assert (run.quote, run.tokens, run.target_source) == ("USDC", ("USDC", "WETH"), "carry-eth-v1")

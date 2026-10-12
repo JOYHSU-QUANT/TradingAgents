@@ -27,14 +27,21 @@ The lights (plan §2 D5 and D7, in these words):
   more than the threshold (10% of the larger leg, D7) on a day either leg
   holds anything — an exit that took on one leg only is the naked book the
   plan fears, whatever the day's intent was, and a perp long, which the
-  hedge never asks for, adds to the spot instead of cancelling it.
+  hedge never asks for, adds to the spot instead of cancelling it. A leg
+  with no reading on the day (no snapshot, no valuation: the daemon was
+  down, the bar was never decided) keeps its last known one, said on the
+  line as ``as of <day>``: an unobserved leg is not an empty one, and the
+  outage days D5 is for must not light the delta as well.
 - **held by D5** — a day a leg maintained for want of a usable document:
   the perp leg when no cycle applied a document and at least one found it
   unusable (a cycle that merely sat before the next boundary, ``pending``,
   is the normal schedule and does not count); the spot leg when its bar
   was decided with no target in the store. Such days in a row, as many as
   the threshold (3, D5), light the escalation on that day and on every day
-  the streak goes on: a human steps in.
+  the streak goes on: a human steps in. A day with no document evidence
+  either way (a silent day: the daemon down, every cycle without a
+  decision) neither extends nor resets the streak; only a day a leg acted
+  on a document ends it.
 - **one-legged** — a day one leg acted on a document and the other had
   none to act on: the spot bar decided on a target while no perp cycle
   applied one, or the reverse.
@@ -186,10 +193,13 @@ class BookDay:
     """One UTC day of the hedged book.
 
     The perp leg is its first and last cycle-end snapshot of the day, the
-    spot leg its bar's valuation; the readings the lights and the lines
-    need are derived from those. A cost of ``None`` is one the day's
-    valuation could not price. ``sidecars`` are the perp cycles' records of
-    the day's document (as_of = this day).
+    spot leg its bar's valuation; ``perp_state`` and ``spot_state`` are the
+    last snapshot at or before the day's end and the last valuation at or
+    before the day's bar — the day's own when it has one, else carried
+    from the last day that had one — and the holdings the lights read
+    come from those. A cost of ``None`` is one the day's valuation could
+    not price. ``sidecars`` are the perp cycles' records of the day's
+    document (as_of = this day).
     """
 
     boundary_ms: int
@@ -199,12 +209,14 @@ class BookDay:
     perp_fees: Decimal
     perp_first: PerpSnapshot | None
     perp_last: PerpSnapshot | None
+    perp_state: PerpSnapshot | None
     cycles: Mapping[CycleKind, int]
     refused: int
     sidecars: tuple[Sidecar, ...]
     spot_outcome: str | None
     spot_target: SpotTarget | None
     spot_valuation: SpotValuation | None
+    spot_state: SpotValuation | None
     spot_swap_cost: Decimal | None
     spot_gas_eth: Decimal
     spot_gas_cost: Decimal | None
@@ -216,22 +228,36 @@ class BookDay:
             raise ValueError("a decided spot bar carries its valuation, an undecided one none")
         if self.refused > self.applied:
             raise ValueError("the gate refuses applied cycles only")
+        if self.perp_last is not None and self.perp_state != self.perp_last:
+            raise ValueError("a day with a perp snapshot is in the state of its last one")
+        if self.spot_valuation is not None and self.spot_state != self.spot_valuation:
+            raise ValueError("a day with a spot valuation is in the state of that one")
 
     @property
     def boundary(self) -> date:
         return from_epoch_ms(self.boundary_ms).date()
 
     @property
+    def perp_carried(self) -> bool:
+        """The perp reading is an earlier day's: no snapshot was written this day."""
+        return self.perp_last is None and self.perp_state is not None
+
+    @property
+    def spot_carried(self) -> bool:
+        """The spot reading is an earlier bar's: this bar was not decided."""
+        return self.spot_valuation is None and self.spot_state is not None
+
+    @property
     def perp_equity(self) -> Decimal | None:
-        return None if self.perp_last is None else self.perp_last.equity
+        return None if self.perp_state is None else self.perp_state.equity
 
     @property
     def _perp_position(self) -> PerpPosition | None:
-        return None if self.perp_last is None else self.perp_last.position
+        return None if self.perp_state is None else self.perp_state.position
 
     @property
     def perp_size(self) -> Decimal:
-        """The signed position at the day's end: negative short, zero flat or without a snapshot."""
+        """The signed position last known at the day's end: negative short, zero flat or never seen."""
         return _ZERO if self._perp_position is None else self._perp_position.size
 
     @property
@@ -240,18 +266,18 @@ class BookDay:
 
     @property
     def spot_equity(self) -> Decimal | None:
-        return None if self.spot_valuation is None else self.spot_valuation.total
+        return None if self.spot_state is None else self.spot_state.total
 
     @property
     def spot_qty(self) -> Decimal:
-        """The token held at the day's bar; zero without a valuation."""
-        if self.spot_valuation is None:
+        """The token last known held at the day's bar; zero when never valued."""
+        if self.spot_state is None:
             return _ZERO
-        return self.spot_valuation.balances.get(self.token, _ZERO)
+        return self.spot_state.balances.get(self.token, _ZERO)
 
     @property
     def spot_price(self) -> Decimal | None:
-        return None if self.spot_valuation is None else self.spot_valuation.prices.get(self.token)
+        return None if self.spot_state is None else self.spot_state.prices.get(self.token)
 
     @property
     def applied(self) -> int:
@@ -418,12 +444,23 @@ def build_rows(
     valuation_at = {valuation.at_ms: valuation for valuation in valuations}
     target_at = {target.at_ms: target for target in targets}
 
+    # The last reading before the span seeds what the first days carry.
+    perp_state = max(
+        (s for s in snapshots if s.at_ms < since_ms), key=lambda s: s.at_ms, default=None
+    )
+    spot_state = max(
+        (v for v in valuations if v.at_ms < since_ms), key=lambda v: v.at_ms, default=None
+    )
     rows = []
     for day in range(since_ms, until_ms + MS_PER_DAY, MS_PER_DAY):
         day_snapshots = snapshots_by_day.get(day, [])
         day_cycles = cycles_by_day.get(day, [])
         day_fills = fills_at.get(day, [])
         valuation = valuation_at.get(day)
+        if day_snapshots:
+            perp_state = day_snapshots[-1]
+        if valuation is not None:
+            spot_state = valuation
         rows.append(
             BookDay(
                 boundary_ms=day,
@@ -433,6 +470,7 @@ def build_rows(
                 perp_fees=fees_by_day.get(day, _ZERO),
                 perp_first=day_snapshots[0] if day_snapshots else None,
                 perp_last=day_snapshots[-1] if day_snapshots else None,
+                perp_state=perp_state,
                 cycles=Counter(cycle.kind for cycle in day_cycles),
                 refused=sum(
                     1
@@ -443,6 +481,7 @@ def build_rows(
                 spot_outcome=outcome_at.get(day),
                 spot_target=target_at.get(day),
                 spot_valuation=valuation,
+                spot_state=spot_state,
                 spot_swap_cost=_priced_sum([_swap_cost(f, valuation, quote) for f in day_fills]),
                 spot_gas_eth=sum((fill.gas_eth for fill in day_fills), _ZERO),
                 spot_gas_cost=_priced_sum([_gas_cost(fill, valuation) for fill in day_fills]),
@@ -547,9 +586,15 @@ def alerts(rows: Sequence[BookDay], *, delta_alert_pct: int, d5_days: int) -> li
                     f"{row.spot_outcome or 'not decided'}",
                 )
             )
-        streak = streak + 1 if row.held_by_d5 else 0
-        # Lit on the day the streak reaches the threshold and on every day it
-        # goes on: the newest day's lines must show it while it lasts.
+        # A held day extends the streak; a day a leg acted on a document ends
+        # it; a day with no document evidence either way (silent) carries it,
+        # so a daemon outage inside a coordinator outage cannot restart the
+        # count. Lit on the day the streak reaches the threshold and on every
+        # day it goes on: the newest day's lines must show it while it lasts.
+        if row.held_by_d5:
+            streak += 1
+        elif not row.silent:
+            streak = 0
         if streak >= d5_days:
             legs = [
                 leg
@@ -643,6 +688,11 @@ def _signed_pct(value: Decimal | None) -> str:
     return "n/a" if value is None else f"{value * 100:+.2f}%"
 
 
+def _as_of(at_ms: int) -> str:
+    """The day a carried reading was last seen, as the line says it."""
+    return f" (as of {iso_utc(at_ms)[:10]})"
+
+
 def _cycles(cycles: Mapping[CycleKind, int]) -> str:
     total = sum(cycles.values())
     parts = [f"{kind.value} {count}" for kind, count in cycles.items() if count]
@@ -671,6 +721,8 @@ def _day_lines(row: BookDay, coin: str) -> list[str]:
     )
     pending = f" ({row.perp_funding_pending} pending)" if row.perp_funding_pending else ""
     refused = f", {row.refused} refused by the gate" if row.refused else ""
+    perp_as_of = _as_of(row.perp_state.at_ms) if row.perp_carried and row.perp_state else ""
+    spot_as_of = _as_of(row.spot_state.at_ms) if row.spot_carried and row.spot_state else ""
     return [
         (
             f"{row.boundary.isoformat()}  {_STANCE[row.intent_in]}  "
@@ -678,8 +730,8 @@ def _day_lines(row: BookDay, coin: str) -> list[str]:
             f"spot swaps {_money(row.spot_swap_cost)}  gas {gas}  net {_money(row.net)}"
         ),
         (
-            f"    perp {_qty(row.perp_size)} {coin} @ {_price(row.perp_mark)}  "
-            f"spot {_qty(row.spot_qty)} {row.token} @ {_price(row.spot_price)}  "
+            f"    perp {_qty(row.perp_size)} {coin} @ {_price(row.perp_mark)}{perp_as_of}  "
+            f"spot {_qty(row.spot_qty)} {row.token} @ {_price(row.spot_price)}{spot_as_of}  "
             f"delta {_qty(net)} ({pct(share)})  basis {_signed_pct(row.basis)} "
             f"(spot close vs perp mark {first})"
         ),

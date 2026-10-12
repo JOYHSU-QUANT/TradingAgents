@@ -720,8 +720,9 @@ class TestAnsweredWithoutAFetch:
         assert out.startswith("INVALID_CURR_DATE: ")
         assert "futures positioning cannot be bounded" in out
 
-    # WETH is the wrapped token, a look-alike the classifier lets fall through.
-    @pytest.mark.parametrize("asset", ["SOL-USD", "USDT", "AAPL", "", "WETH"])
+    # WETH is the wrapped token, a look-alike the classifier lets fall through;
+    # ETH-BTC is a cross the USD-priced CME contract cannot answer (#351).
+    @pytest.mark.parametrize("asset", ["SOL-USD", "USDT", "AAPL", "", "WETH", "ETH-BTC"])
     def test_anything_but_btc_or_eth_is_no_signal_and_not_a_proxy(self, asset):
         out = cftc_cot.get_futures_positioning(asset, TODAY)
         assert out.startswith("There is no futures-positioning signal for ")

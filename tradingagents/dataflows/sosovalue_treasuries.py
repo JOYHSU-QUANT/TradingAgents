@@ -55,7 +55,8 @@ request so the emergency-disable flip stays immediate.
 Asset scope: the module serves BTC only (that is the product). ``BTC`` gets
 the native report; another recognized crypto risk asset (including ETH, which
 has no treasuries module here) gets the same data labelled as a market-wide
-demand proxy; a stablecoin or unrecognized symbol gets a no-signal note —
+demand proxy; a stablecoin, an unrecognized symbol or a cross (``ETH-BTC``)
+gets a no-signal note —
 mirroring the ETF module's classification, with ETH on the proxy side this
 time.
 
@@ -746,8 +747,8 @@ def _classify_asset(asset: str) -> tuple[str | None, bool]:
     Mirrors the ETF module's classifier with BTC as the only native asset:
     the treasuries product tracks BTC holdings, so every other recognized
     crypto risk asset — ETH included — is served the BTC data as a labelled
-    market-wide demand proxy, and a stablecoin or unrecognized symbol gets a
-    no-signal note.
+    market-wide demand proxy, and a stablecoin, an unrecognized symbol or a
+    cross such as ``ETH-BTC`` gets a no-signal note.
     """
     return classify_crypto_asset(asset, SUPPORTED_ASSETS)
 
@@ -917,8 +918,8 @@ def get_btc_treasury_data(
         return (
             f"There is no corporate BTC-treasury signal for {quoted}: it is not a "
             f"recognized crypto risk asset for which BTC treasury flows serve as a "
-            f"market-wide demand proxy (e.g. a stablecoin or an unrecognized symbol). "
-            f"Do not substitute BTC figures."
+            f"market-wide demand proxy (e.g. a stablecoin, an unrecognized symbol, or a "
+            f"cross priced in another asset such as ETH-BTC). Do not substitute BTC figures."
         )
 
     snapshot = _load_snapshot()

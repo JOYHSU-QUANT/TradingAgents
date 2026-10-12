@@ -877,8 +877,8 @@ def _classify_asset(asset: str) -> tuple[str | None, bool]:
 
     Mirrors the Farside vendor exactly so switching vendors never changes
     which assets get a native report, a BTC market-wide proxy (recognized
-    risk assets without their own spot ETF), or a no-signal note (stablecoins
-    and unrecognized symbols).
+    risk assets without their own spot ETF), or a no-signal note (stablecoins,
+    unrecognized symbols and crosses such as ``ETH-BTC``).
     """
     return classify_crypto_asset(asset, SUPPORTED_ASSETS)
 
@@ -1001,8 +1001,8 @@ def get_etf_flow_data(
         return (
             f"There is no spot-ETF flow signal for {quoted}: it has no US spot ETF of "
             f"its own and is not a recognized crypto risk asset for which BTC flows serve "
-            f"as a market-wide proxy (e.g. a stablecoin or an unrecognized symbol). Do "
-            f"not substitute BTC or ETH flows."
+            f"as a market-wide proxy (e.g. a stablecoin, an unrecognized symbol, or a cross "
+            f"priced in another asset such as ETH-BTC). Do not substitute BTC or ETH flows."
         )
 
     snapshot = _load_snapshot(asset_key)

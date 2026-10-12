@@ -54,8 +54,9 @@ is served as a market-wide crypto-vol proxy, labelled as such — but its skew i
 not: crypto volatility moves together, which is what makes BTC's index the
 benchmark, whereas a 25-delta risk reversal measures how much more traders will
 pay for downside in one specific underlying and does not carry across. A
-stablecoin or an unrecognized symbol gets a no-signal note. No rendered line
-claims Deribit itself lists nothing for those symbols — see SUPPORTED_CURRENCIES.
+stablecoin, an unrecognized symbol or a cross (``ETH-BTC``) gets a no-signal
+note. No rendered line claims Deribit itself lists nothing for those symbols —
+see SUPPORTED_CURRENCIES.
 
 Uncached by design: a tool call costs two GETs (one where the chain is withheld)
 against endpoints with no rate-limit concern at this volume, and both halves are
@@ -1666,8 +1667,10 @@ def _classify_asset(asset: str) -> tuple[str | None, bool]:
       benchmark, so it is served as a market-wide proxy. Its skew is not — see the
       withholding rule in ``get_options_market_data``.
     * ``(None, False)`` — not a recognized crypto risk asset (a stablecoin, a
-      quote-only, or an unrecognized symbol). A stablecoin has no crypto-vol
-      character to proxy, so there is no signal to serve.
+      quote-only, an unrecognized symbol, or a cross such as ``ETH-BTC``). A
+      stablecoin has no crypto-vol character to proxy, so there is no signal
+      to serve; a cross asks for a non-USD price no USD-denominated report
+      answers.
 
     Delegates to the shared ``normalize_symbol`` so pair forms and crypto-base
     recognition match the rest of the system — the same classification farside
@@ -2709,8 +2712,9 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
         return (
             f"This vendor reads Deribit options for {' and '.join(SUPPORTED_CURRENCIES)} only, "
             f"and {quoted} is not a recognized crypto risk asset for which BTC's DVOL level "
-            f"serves as a market-wide proxy (e.g. a stablecoin or an unrecognized symbol). Do "
-            f"not substitute BTC or ETH implied volatility for it."
+            f"serves as a market-wide proxy (e.g. a stablecoin, an unrecognized symbol, or a "
+            f"cross priced in another asset such as ETH-BTC). Do not substitute BTC or ETH "
+            f"implied volatility for it."
         )
 
     now = _utc_now()

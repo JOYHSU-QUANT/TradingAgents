@@ -7,8 +7,9 @@ composing exchange reads into engine inputs. This module owns the verdict —
 :func:`~.context_guards.context_refusal` calls it as the last of the four
 pre-LLM guards.
 
-SDK-free and persistence-free on purpose: it imports only :mod:`.schema` (for
-the context type and :func:`~.schema.interval_to_ms`) and ``common``. A
+SDK-free and persistence-free on purpose: from this package it imports only
+:mod:`.schema` (for the context type and :func:`~.schema.interval_to_ms`)
+and ``common``, and beyond it only the stdlib-only floor ``contrib.core``. A
 domain module that reached into the exchange adapter or the store would
 invert the package's layering; staying below both is also what lets
 :class:`ContextRefusal` validate its class against

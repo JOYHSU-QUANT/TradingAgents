@@ -10,7 +10,8 @@ config switch defaulting to off (plan §7). That sentence is the package's
 scope test: a change that needs it softened is out of scope, not a bigger
 feature.
 
-What this package may borrow from ``contrib.hyperliquid_perp`` is listed —
+What this package may borrow from outside itself (``contrib.hyperliquid_perp``,
+the shared floor ``contrib.core`` and ``tradingagents``) is listed —
 once, in one place — by :mod:`~contrib.autoresearch.upstream`, and every
 other module here imports from THAT rather than reaching upstream itself
 (``tests/test_upstream.py`` enforces it by reading the sources). The borrow

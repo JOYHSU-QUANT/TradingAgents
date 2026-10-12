@@ -26,7 +26,7 @@ from decimal import Decimal
 # This re-export is kept, not slated for removal like the domains/perp compat
 # shims were (issue #78): the paper/live engines and the rest of the
 # persistence layer read it from here, and tests/common/test_layering.py
-# pins it to the common object.
+# pins it to the core object.
 from contrib.core.decimal_context import DECIMAL_CONTEXT
 from contrib.core.enum_guard import VocabEnum
 

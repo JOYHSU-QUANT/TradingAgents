@@ -38,8 +38,8 @@
 訊號是**一個數字、算一次**，兩條腿必須在**同一個邊界讀到同一個數字**。各自在兩邊套件裡算一份遲早漂移，而且
 uniswap 那邊根本看不到 funding（計畫 §2 D1）。
 
-借用照 `contrib/replay` 的作法，全列在 `upstream.py`：`hyperliquid_perp` 提供 `FundingPoint`、`funding_zscore`、
-instants（含解 perp 快照時戳的 `parse_instant`）、原子寫檔、SQLite URI 拼法（`Path.as_uri` 碰到 UNC 與相對路徑都錯）、
+借用照 `contrib/replay` 的作法，全列在 `upstream.py`：共用地板 `core` 提供 instants（含解 perp 快照時戳的
+`parse_instant`）與原子寫檔；`hyperliquid_perp` 提供 `FundingPoint`、`funding_zscore`、SQLite URI 拼法（`Path.as_uri` 碰到 UNC 與相對路徑都錯）、
 venue 錯誤型別，以及 `report` 要的三個 file-target 拼法（`ai_inputs.model` 的 `file-target`、兩個 rationale 前綴）與
 payload 目錄的規則（sidecar 住在 payload 旁邊，規則是 perp 套件的、不另抄一份）；`autoresearch` 提供 research store 與它的
 funding 分頁回補（`backfill_funding`，venue 端點一次最多 500 筆，往前走才不漏）、回補結束的原因（`StopReason`，沒走到底就不做決定）、

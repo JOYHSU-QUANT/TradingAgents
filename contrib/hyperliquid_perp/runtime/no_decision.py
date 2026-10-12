@@ -12,8 +12,8 @@ docstring is true of every function in it.
 In ``runtime/``: both lanes consume it — both validators, both running
 loops — and neither owns it (issue #122), and it reads ``decision_attempts``
 through plain ``sqlite3``, a table shape ``common/`` may not know. From
-``common`` it needs only the cadence and the timestamp decoder; importing it
-loads neither engine.
+``common`` it needs only the cadence, and from ``contrib.core`` only the
+timestamp decoder; importing it loads neither engine.
 """
 
 from __future__ import annotations

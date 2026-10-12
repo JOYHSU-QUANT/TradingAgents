@@ -1,9 +1,11 @@
 """The ONE place this package names a package outside itself.
 
-Two of them: ``contrib.hyperliquid_perp``, whose domain types and analytics
-make a research figure comparable with what the paper trader saw, and
-``tradingagents``, whose LLM client factory the hypothesis loop asks for a
-hypothesis through (plan §3.2 lists it as a Phase B borrow).
+Three of them: ``contrib.hyperliquid_perp``, whose domain types and
+analytics make a research figure comparable with what the paper trader
+saw; ``contrib.core``, the stdlib-only floor that package's vocabulary
+base and epoch-ms conversions moved to; and ``tradingagents``, whose LLM
+client factory the hypothesis loop asks for a hypothesis through (plan
+§3.2 lists it as a Phase B borrow).
 
 Two reasons the borrow is funnelled through a single module rather than
 spelled at each use site:

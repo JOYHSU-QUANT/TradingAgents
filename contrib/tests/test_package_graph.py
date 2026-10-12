@@ -10,7 +10,8 @@ that graph (dashboard plan PR 1, §2):
 - every cross-package import points down an edge in :data:`ALLOWED`, and
   :data:`ALLOWED` itself has no cycle — a package found on disk without a
   row fails, so the next package (the dashboard) declares where it sits
-  before it can import anything;
+  before it can import anything, and a directory of sources without an
+  ``__init__.py`` fails too, rather than go unseen;
 - ``contrib.core``, the floor, imports the standard library only;
 - how far each package reaches INTO the perp package — which of its
   subpackages it imports, from its sources and from its tests — is frozen
@@ -183,6 +184,22 @@ def test_every_package_on_disk_declares_where_it_sits():
         "give each package under contrib/ a row in ALLOWED (and drop the row of one "
         f"that is gone): on disk {_packages_on_disk()}, declared {sorted(ALLOWED)}"
     )
+
+
+def test_every_directory_with_sources_is_a_package():
+    # The scan finds packages by their ``__init__.py``, as the packages' own
+    # neighbour discovery does. A directory of sources without one would be
+    # importable as a namespace package and invisible to every check here, so
+    # it is refused by name instead. This directory is the one exception.
+    unpackaged = sorted(
+        p.name
+        for p in _CONTRIB.iterdir()
+        if p.is_dir()
+        and p.name not in {"tests", "__pycache__"}
+        and not (p / "__init__.py").is_file()
+        and any(p.rglob("*.py"))
+    )
+    assert unpackaged == [], f"give these contrib/ directories an __init__.py: {unpackaged}"
 
 
 def test_the_declared_graph_has_no_cycle():

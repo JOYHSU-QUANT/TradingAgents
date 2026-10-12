@@ -2,7 +2,8 @@
 
 The same parsed-import scan ``contrib.replay`` and ``contrib.autoresearch``
 run, with this package's own rules (carry plan §1.2): it may import its two
-upstream packages and no other package under ``contrib/``; NO package under
+neighbours and the shared floor ``contrib.core`` (the three entries of
+``UPSTREAM_PACKAGES``) and no other package under ``contrib/``; NO package under
 ``contrib/`` — nor any package's tests — may import ``contrib.carry``; and
 ``contrib.uniswap_v3`` is never imported, not even by a test, because the
 spot leg is reached through its store and the handoff alone. Read from the

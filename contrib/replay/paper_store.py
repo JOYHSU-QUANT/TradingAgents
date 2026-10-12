@@ -28,7 +28,8 @@ retried, and how many extra tries they took, is counted too (decided
 Values cross the seam the way the store wrote them: prices and margins as
 ``TEXT`` decimals (decoded through ``Decimal``, then to the float the
 scorecard's statistics are computed in), instants as ISO-8601 UTC (decoded
-by the perp package's own ``parse_instant`` / ``epoch_ms``), enum text
+by ``contrib.core``'s ``parse_instant`` / ``epoch_ms``, the pair the perp
+store encodes with), enum text
 through the vocabulary that wrote it, each refused by row and column.
 """
 

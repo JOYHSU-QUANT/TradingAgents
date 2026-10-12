@@ -218,8 +218,9 @@ Breaking changes within the 0.x line are called out explicitly.
   derived beside the decoder it describes: the second spelling of the epoch
   existed only because the config loader's import closure could not reach
   `instants`, and core sits outside that closure. The values are unchanged,
-  and so is the moved code, so this is not a segment point for any paper run. A new test, `contrib/tests/test_package_graph.py`,
-  holds the graph between the packages: each package may import only the
+  and so is the moved code, so this is not a segment point for any paper
+  run. A new test, `contrib/tests/test_package_graph.py`, holds the graph
+  between the packages: each package may import only the
   packages its row in `ALLOWED` names, `contrib.core` imports the standard
   library only, and which perp subpackages each other package reaches into
   is frozen as of 2026-10-12 and can only shrink. CI's autoresearch job and

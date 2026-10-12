@@ -1,4 +1,4 @@
-"""What this package borrows from its two neighbours — in one place, read-only.
+"""What this package borrows from its two neighbours and the floor — in one place.
 
 The same funnel ``contrib.replay`` and ``contrib.autoresearch`` keep: every
 module here imports from THIS module, ``BORROWED`` is the audit list, and
@@ -13,12 +13,9 @@ What is borrowed and why:
 - from the perp package: ``FundingPoint`` (the settlement record the venue
   reader and the research store both speak), ``funding_zscore`` and its
   sample floor (so the number this package acts on is the number the perp
-  prompt prints — one definition, not a copy), the instants (so a boundary
-  is encoded by the same integer arithmetic the stores use, and a perp
-  snapshot's timestamp is decoded by the decoder paired with its encoder), the
-  atomic writer (a half-written handoff must never be readable), the SQLite
-  URI spelling (``Path.as_uri`` is wrong for a UNC share and a relative
-  path; the perp store opens through this one, so the carry read must too),
+  prompt prints — one definition, not a copy), the SQLite URI spelling
+  (``Path.as_uri`` is wrong for a UNC share and a relative path; the perp
+  store opens through this one, so the carry read must too),
   and the venue error type (a fetch the venue refused is reported, not
   tracebacked); and, for the report, the file-target run's spellings
   (``FILE_TARGET_MODEL`` on ``ai_inputs.model`` says the run decided from the
@@ -30,6 +27,10 @@ What is borrowed and why:
   two vocabularies the report classifies cycles by (``AttemptStatus`` for
   how a cycle ended, ``RiskAction`` for what the gate did), so a member
   added upstream is not a word this package silently fails to know;
+- from the shared floor ``contrib.core``: the instants (so a boundary is
+  encoded by the same integer arithmetic the stores use, and a perp
+  snapshot's timestamp is decoded by the decoder paired with its encoder)
+  and the atomic writer (a half-written handoff must never be readable);
 - from the research package: the research store and its funding walk
   (``backfill_funding`` pages the venue's capped endpoint forwards and
   loses nothing; ``StopReason`` says how it ended, and only a walk that

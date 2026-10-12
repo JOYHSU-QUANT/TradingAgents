@@ -2,8 +2,9 @@
 
 The same parsed-import scan ``contrib.autoresearch.tests.test_upstream``
 runs, extended with the one rule this package adds to the layering
-(replay plan §3-1): ``contrib.replay`` may import both neighbours, and
-NEITHER neighbour — nor either's tests — may import ``contrib.replay``.
+(replay plan §3-1): ``contrib.replay`` may import both neighbours (and the
+shared floor ``contrib.core``), and NEITHER neighbour — nor either's
+tests — may import ``contrib.replay``.
 Read from the import graph, not searched for as a string, so the prose
 that discusses the packages does not trip it and a real import cannot hide
 behind a relative spelling.

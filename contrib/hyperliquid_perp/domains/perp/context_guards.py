@@ -12,7 +12,8 @@ composes exchange reads into engine inputs, while the §6.2 class they write
 (:data:`UNUSABLE_CONTEXT_ERROR`) lived in ``freshness``, which never used it.
 Here the whole family sits below the SDK, the persistence package and both
 engines: this module's load-time import closure is ``domains.perp`` and
-``common`` only, and ``tests/common/test_layering.py`` pins that. (The
+``common`` only within the package (plus the stdlib-only floor
+``contrib.core``), and ``tests/common/test_layering.py`` pins that. (The
 ``--context-only`` path itself still loads the SDK — it fetches live candles
 through ``engine_bridge._build_context`` — so this is a property of the
 guards, not of that command.)

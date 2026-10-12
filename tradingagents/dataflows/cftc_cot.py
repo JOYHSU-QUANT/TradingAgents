@@ -1,7 +1,7 @@
-"""CFTC Commitments of Traders positioning in CME Bitcoin futures.
+"""CFTC Commitments of Traders positioning in CME Bitcoin and Ether futures.
 
 The weekly Traders in Financial Futures report is the one free, official
-breakdown of WHO holds the regulated Bitcoin future: dealers, asset managers,
+breakdown of WHO holds a regulated crypto future: dealers, asset managers,
 leveraged funds (hedge funds and CTAs), other reportables and the small
 non-reportable accounts. It is the institution-side positioning read that the
 venue-side one (Hyperliquid's leaderboard) and the price-side one (the CME
@@ -32,18 +32,20 @@ is later than the derived date and a backtest of that window sees a report
 a few days early; the dataset carries no release-date column to do better
 with, and the report's "derived" label is the disclosure.
 
-One contract only: the 5-BTC standard future (code 133741). The Micro
-contract is a separate series with a different holder mix and is not
-merged in; the report says so.
+One contract per asset: the 5-BTC standard Bitcoin future (code 133741) and
+the 50-ETH standard Ether future (146021). The Micro contracts are separate
+series with a different holder mix and are not merged in; the report says so.
+Neither asset's series stands in for another's.
 
-The whole BTC series is small (441 weekly rows on 2026-09-21, back to
-2018-04), so one fetch serves every question: it is cached as a rolling JSON
-snapshot through the family's skeleton
-(``sosovalue_common.load_rolling_snapshot``), refreshed daily, served stale
-for up to ``MAX_STALE_DAYS`` when the fetch fails, and never written on a
-failed fetch. Holding the series also pays for the scale: the report says
-what size of weekly change is ordinary and where each net level sits in its
-own trailing year, computed from the rows it already has.
+Each series is small (444 Bitcoin rows back to 2018-04 and 288 Ether rows
+back to 2021-04 on 2026-10-12, neither with a missing week), so one fetch per
+asset serves every question: each is cached as its own rolling JSON snapshot
+through the family's skeleton (``sosovalue_common.load_rolling_snapshot``),
+refreshed daily, served stale for up to ``MAX_STALE_DAYS`` when the fetch
+fails, and never written on a failed fetch. Holding the series also pays for
+the scale: the report says what size of weekly change is ordinary and where
+each net level sits in its own trailing year, computed from the rows it
+already has.
 """
 
 from __future__ import annotations
@@ -81,13 +83,32 @@ logger = logging.getLogger(__name__)
 VENDOR = "CFTC"
 
 # Traders in Financial Futures, futures only. Checked 2026-09-21: the dataset
-# id, the contract code and every column below were read back from a live
-# query. A Socrata dataset id is an assignment, not a promise.
+# id, the Bitcoin contract code and every column below were read back from a
+# live query; the Ether code on 2026-10-12. A Socrata dataset id is an
+# assignment, not a promise.
 DATASET_URL = "https://publicreporting.cftc.gov/resource/gpe5-46if.json"
-# "BITCOIN - CHICAGO MERCANTILE EXCHANGE", the 5-BTC contract. The Micro
-# (133742) and the Coinbase nano contracts are other series.
-CONTRACT_CODE = "133741"
-CONTRACT_UNITS = "5 BTC"
+
+
+class Contract(NamedTuple):
+    """One CME crypto future as the CFTC codes it; its cache file is named from ``coin``."""
+
+    coin: str
+    # The product name as CME lists it, for the report's title.
+    name: str
+    code: str
+    units: str
+
+
+# The standard contracts: "BITCOIN - CHICAGO MERCANTILE EXCHANGE" (5 BTC) and
+# "ETHER CASH SETTLED - CHICAGO MERCANTILE EXCHANGE" (50 ETH). The Micro
+# contracts (133742, 146022) and the Coinbase nano contracts are other series.
+CONTRACTS = {
+    c.coin: c
+    for c in (
+        Contract("BTC", "Bitcoin", "133741", "5 BTC"),
+        Contract("ETH", "Ether", "146021", "50 ETH"),
+    )
+}
 
 REQUEST_TIMEOUT = 30
 # Socrata pages at 1000 rows by default; the series has a few hundred, and a
@@ -103,7 +124,7 @@ PUBLICATION_WEEKDAY = 5  # Saturday, in ``date.weekday()`` terms
 # The change columns compare against the reports this many places back in
 # the published series, and the columns are labelled with the comparison
 # report's date rather than with "weeks": the CFTC has never skipped a week
-# in 441 rows (it shifts the report day to Monday around holidays instead),
+# in either series (it shifts the report day to Monday around holidays instead),
 # but a row this module could not read would leave a gap, and "1-week"
 # over a gap is a lie the label would tell on its own.
 TREND_REPORTS = 4
@@ -138,21 +159,33 @@ MAX_STALENESS_DAYS = 21
 CACHE_TTL_HOURS = 24
 # A fetch that failed keeps serving the cache for this long.
 MAX_STALE_DAYS = 21
-CACHE_SCHEMA = 1
+# 2: the payload names its contract code, so a file holding the other
+# series' rows (a copied or renamed cache) is rejected rather than served
+# under this asset's title. A schema-1 cache is rejected and refetched once
+# — unless an older build sharing the cache directory keeps rewriting it
+# (the CHANGELOG's deploy note).
+CACHE_SCHEMA = 2
 
 # What the report says the leveraged-fund short usually is. In the report's
 # Method line and in the news analyst's hint, both read from here so the two
-# cannot drift apart. Supported by the series: leveraged funds were net short
-# in 52 of the last 52 reports to 2026-09-15 (dealers were net LONG in all
-# 52, which is why the report no longer calls them "the sell side").
+# cannot drift apart. Supported by both series: leveraged funds were net short
+# in 52 of the last 52 Bitcoin reports to 2026-09-15 and 52 of 52 Ether
+# reports to 2026-10-06 (dealers were net LONG in all 52 of each, which is why
+# the report no longer calls them "the sell side").
 CARRY_NOTE = (
     "A large leveraged-fund short is usually the futures leg of a cash-and-carry trade "
     "against spot or ETF holdings — the carry the futures basis pays — not a bearish view"
 )
 
-# CME lists Bitcoin and Ether futures; only Bitcoin is wired, and another
-# asset's positioning is its own contract's, not a proxy of this one.
-SUPPORTED_ASSETS = frozenset({"BTC"})
+# CME lists Bitcoin and Ether futures, and both are wired; another asset's
+# positioning is its own contract's, not a proxy of either.
+SUPPORTED_ASSETS = frozenset(CONTRACTS)
+# "the CME Bitcoin and Ether futures only (BTC, ETH)": the no-signal
+# sentence, read off the table so a row added there is named here.
+_COVERAGE = (
+    f"the CME {' and '.join(c.name for c in CONTRACTS.values())} futures only "
+    f"({', '.join(CONTRACTS)})"
+)
 
 
 class CftcError(VendorError):
@@ -205,14 +238,14 @@ def _rate_limited(_response) -> None:
     raise CftcRateLimitError(f"{VENDOR} is rate limiting this client (HTTP 429)")
 
 
-def _request() -> list:
-    """GET the whole BTC series, newest first, or raise a typed failure.
+def _request(contract: Contract) -> list:
+    """GET the whole series of ``contract``, newest first, or raise a typed failure.
 
     A 404 is the dataset id having moved, and is said so: a "not found" from
     a Socrata host is that, never a symbol the vendor does not cover.
     """
     params = {
-        "$where": f"cftc_contract_market_code='{CONTRACT_CODE}'",
+        "$where": f"cftc_contract_market_code='{contract.code}'",
         "$order": "report_date_as_yyyy_mm_dd DESC",
         "$limit": str(MAX_ROWS),
     }
@@ -236,6 +269,22 @@ def _request() -> list:
         raise CftcError(f"{VENDOR} returned a JSON {type(payload).__name__}, expected an array")
     if len(payload) >= MAX_ROWS:
         raise CftcError(f"{VENDOR} returned {len(payload)} rows for one contract; refusing to read")
+    # The rows' own code, not the query's: with two series of one shape, a
+    # filter the host ignored or mangled would otherwise be parsed, stamped
+    # as this contract and served under its title.
+    foreign = sorted(
+        {
+            str(row.get("cftc_contract_market_code", "(no code)"))
+            for row in payload
+            if isinstance(row, dict)
+        }
+        - {contract.code}
+    )
+    if foreign:
+        raise CftcError(
+            f"{VENDOR} returned rows of contract {', '.join(foreign)} for a query on "
+            f"{contract.code} ({contract.coin}); refusing to read"
+        )
     return payload
 
 
@@ -312,8 +361,13 @@ def _parse_rows(payload: list) -> tuple[list[dict], list[str]]:
     return [rows[k] for k in sorted(rows, reverse=True)], sorted(dropped, reverse=True)
 
 
-def _cache_path() -> str:
-    return os.path.join(_cache_dir(), "cftc_cot_btc.json")
+def _cache_path(contract: Contract) -> str:
+    return os.path.join(_cache_dir(), f"cftc_cot_{contract.coin.lower()}.json")
+
+
+def _cache_name(contract: Contract) -> str:
+    """The one display name of a contract's cache, in the rejecter's and the loader's logs."""
+    return f"{VENDOR} COT {contract.coin} cache"
 
 
 def _valid_row(row: object) -> bool:
@@ -339,14 +393,23 @@ def _valid_row(row: object) -> bool:
     return True
 
 
-def _read_cache(path: str) -> dict | None:
-    """A fully validated cached payload, or None: a rejected cache costs one fetch."""
-    reject = _cache_rejecter(path, cache_name=f"{VENDOR} COT cache", log=logger)
+def _read_cache(path: str, contract: Contract) -> dict | None:
+    """A fully validated cached payload of ``contract``'s series, or None.
+
+    A rejected cache costs one fetch. The contract check is the one that
+    cannot be read off the rows: Bitcoin's and Ether's reports have the same
+    shape, so only the stamped code says which series a file holds.
+    """
+    reject = _cache_rejecter(path, cache_name=_cache_name(contract), log=logger)
     payload = _read_cache_preamble(path, reject=reject)
     if payload is None:
         return None
     if payload.get("schema") != CACHE_SCHEMA:
         return reject(f"schema {payload.get('schema')!r} is not {CACHE_SCHEMA}")
+    if payload.get("contract") != contract.code:
+        return reject(
+            f"contract {payload.get('contract')!r} is not {contract.code} ({contract.coin})"
+        )
     if not isinstance(payload.get("fetched_at"), str):
         return reject("'fetched_at' is missing")
     rows = payload.get("rows")
@@ -363,10 +426,10 @@ def _read_cache(path: str) -> dict | None:
     return payload
 
 
-def _fetch_all(_cached: dict | None) -> dict:
+def _fetch_all(contract: Contract) -> dict:
     # ``fetched_at`` is the skeleton's to stamp, on its own clock.
-    rows, dropped = _parse_rows(_request())
-    return {"schema": CACHE_SCHEMA, "rows": rows, "dropped": dropped}
+    rows, dropped = _parse_rows(_request(contract))
+    return {"schema": CACHE_SCHEMA, "contract": contract.code, "rows": rows, "dropped": dropped}
 
 
 class _Snapshot(NamedTuple):
@@ -396,14 +459,16 @@ def _to_report(row: dict) -> Report:
     )
 
 
-def _load_snapshot() -> _Snapshot:
+def _load_snapshot(contract: Contract) -> _Snapshot:
     payload, fetched_at, stale, _refetched = load_rolling_snapshot(
-        path=_cache_path(),
-        read_cache=_read_cache,
-        fetch_all=_fetch_all,
+        path=_cache_path(contract),
+        read_cache=lambda path: _read_cache(path, contract),
+        fetch_all=lambda _cached: _fetch_all(contract),
         ttl_hours=lambda _cached: CACHE_TTL_HOURS,
-        label="COT",
-        cache_name=f"{VENDOR} COT cache",
+        # The coin in both names: the loader's stale and failed logs, and the
+        # error past the stale cap, otherwise could not say which series.
+        label=f"COT {contract.coin}",
+        cache_name=_cache_name(contract),
         max_stale_hours=MAX_STALE_DAYS * 24,
         log=logger,
         vendor=VENDOR,
@@ -427,11 +492,11 @@ def _signed(value: int) -> str:
     return f"{value:+,d}"
 
 
-def _withheld(coin: str, curr_date: str, why: str) -> str:
+def _withheld(contract: Contract, curr_date: str, why: str) -> str:
     return (
-        f"## CFTC Commitments of Traders — CME Bitcoin futures ({coin})\n"
+        f"## CFTC Commitments of Traders — CME {contract.name} futures ({contract.coin})\n"
         f"- Withheld for {curr_date}\n"
-        f"\nThe positioning report is withheld for this date. {why} Treat {coin} "
+        f"\nThe positioning report is withheld for this date. {why} Treat {contract.coin} "
         f"futures positioning as unavailable for {curr_date}; do not infer it from "
         f"another report."
     )
@@ -482,8 +547,8 @@ def _scale_line(published: list[Report]) -> str:
     ``SCALE_REPORTS`` of them: the median and upper-quartile absolute change
     in net between consecutive reports, and the range of net as a share of
     open interest. Without it a model reads "+1,538" with only its priors to
-    say whether that is large — over the year to 2026-09-15 the leveraged-fund
-    median was about 660 contracts, so it was.
+    say whether that is large — over the year to 2026-09-15 the Bitcoin
+    series' leveraged-fund median was about 660 contracts, so it was.
     """
     # The reports BEFORE the one served: its own change is the thing being
     # judged, and a baseline that included it would be that much easier to
@@ -515,12 +580,12 @@ def _scale_line(published: list[Report]) -> str:
 
 
 def get_futures_positioning(asset: str, curr_date: str) -> str:
-    """Fetch CFTC COT positioning in CME Bitcoin futures as a markdown report.
+    """Fetch CFTC COT positioning in the CME Bitcoin or Ether future as a markdown report.
 
     Args:
-        asset: "BTC", or a pair form like "BTC-USD". Any other symbol gets a
-            no-signal sentence: the report covers one contract, and another
-            asset's positioning is not a proxy of it.
+        asset: "BTC" or "ETH", or a pair form like "BTC-USD". Any other symbol
+            gets a no-signal sentence: each report covers one contract, and
+            another asset's positioning is not a proxy of it.
         curr_date: The analysis date (yyyy-mm-dd). The report served is the
             newest one whose derived publication date — the first Saturday
             after its report date — is on or before it, so a mid-week date
@@ -559,15 +624,16 @@ def get_futures_positioning(asset: str, curr_date: str) -> str:
     if coin is None or is_proxy:
         return (
             f"There is no futures-positioning signal for {quote_argument(asset)}: the CFTC "
-            f"report this tool reads covers the CME Bitcoin future only. Do not substitute "
-            f"BTC's positioning for another asset's."
+            f"reports this tool reads cover {_COVERAGE}. Do not substitute either positioning "
+            f"for another asset's."
         )
+    contract = CONTRACTS[coin]
 
-    snapshot = _load_snapshot()
+    snapshot = _load_snapshot(contract)
     published = _as_of(snapshot.reports, curr_day)
     if not published:
         return _withheld(
-            coin,
+            contract,
             curr_date,
             f"No report in the series had been published by {curr_date} (the oldest report "
             f"is as of {snapshot.reports[-1].report_date.isoformat()}).",
@@ -578,7 +644,7 @@ def get_futures_positioning(asset: str, curr_date: str) -> str:
     stale_days = (curr_day - current.published).days
     if stale_days > MAX_STALENESS_DAYS:
         return _withheld(
-            coin,
+            contract,
             curr_date,
             f"The newest report published by {curr_date} is as of "
             f"{current.report_date.isoformat()} (published about "
@@ -601,12 +667,12 @@ def get_futures_positioning(asset: str, curr_date: str) -> str:
     ]
 
     lines = [
-        f"## CFTC Commitments of Traders — CME Bitcoin futures ({coin})",
+        f"## CFTC Commitments of Traders — CME {contract.name} futures ({coin})",
         f"- Report as of {current.report_date.isoformat()} "
         f"({current.report_date.strftime('%A')} close), published about "
         f"{current.published.isoformat()} (derived: the first Saturday after the report date) "
-        f"| analysis date {curr_date} | {CONTRACT_UNITS} standard contract only, code "
-        f"{CONTRACT_CODE}; the Micro contract is a separate series and is not included",
+        f"| analysis date {curr_date} | {contract.units} standard contract only, code "
+        f"{contract.code}; the Micro contract is a separate series and is not included",
     ]
     if missed_newer:
         lines.append(
@@ -696,7 +762,7 @@ def get_futures_positioning(asset: str, curr_date: str) -> str:
         for name in HEADLINE_CATEGORIES
     )
     lines.append(
-        f"_Reading: CME Bitcoin futures as of {current.report_date.isoformat()}, "
+        f"_Reading: CME {contract.name} futures as of {current.report_date.isoformat()}, "
         f"{current.open_interest:,d} contracts of open interest — {headline}. Positioning is "
         f"a slow-moving, weekly, institution-side input: read the direction of the changes "
         f"and the net levels against open interest"

@@ -344,9 +344,10 @@ DEFAULT_CONFIG = _apply_env_overrides({
         # is what a later paper review attributes a behaviour change to. Per
         # the note above, this default IS the perp deployment's live value.
         "whale_positioning": "none",         # Options: hyperliquid_stats (keyless), none
-        # CME Bitcoin front-month futures basis over spot (hourly Yahoo bars
-        # through the yfinance layer) and CFTC Commitments of Traders
-        # positioning in the same future (the CFTC's public Socrata API).
+        # CME Bitcoin or Ether front-month futures basis over spot (hourly
+        # Yahoo bars through the yfinance layer) and CFTC Commitments of
+        # Traders positioning in the same future (the CFTC's public Socrata
+        # API), one contract per asset.
         # Both keyless, both shipped OFF for whale_positioning's reason above,
         # and both cut over on 2026-09-22 in one dated flip — the two are one
         # market's price side and holder side, and their instructions refer
@@ -355,8 +356,8 @@ DEFAULT_CONFIG = _apply_env_overrides({
         # value: the first deploy carrying this commit is the dated
         # input-surface segmentation point, and switching either back off is
         # a code change, not a YAML edit.
-        "futures_basis": "yfinance",         # Options: yfinance (keyless, BTC only), none
-        "futures_positioning": "cftc",       # Options: cftc (keyless, BTC only), none
+        "futures_basis": "yfinance",         # Options: yfinance (keyless, BTC and ETH), none
+        "futures_positioning": "cftc",       # Options: cftc (keyless, BTC and ETH), none
     },
     # Tool-level configuration (takes precedence over category-level)
     "tool_vendors": {

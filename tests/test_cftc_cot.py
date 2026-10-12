@@ -1,7 +1,8 @@
-"""CFTC COT positioning (``dataflows.cftc_cot``) and its wiring.
+"""CFTC COT positioning in CME Bitcoin and Ether futures (``dataflows.cftc_cot``) and its wiring.
 
-The fixture is eight real rows of the Traders in Financial Futures series
-(report dates 2026-07-28 to 2026-09-15), trimmed to the columns the module
+The Bitcoin fixture is eight real rows of the Traders in Financial Futures
+series (report dates 2026-07-28 to 2026-09-15) and the Ether fixture eight
+more (2026-08-18 to 2026-10-06), each trimmed to the columns the module
 reads. Every report test freezes the module clock and points the cache at a
 temporary directory, so the only thing that varies between tests is the
 analysis date and what the fake CFTC answers.
@@ -30,11 +31,16 @@ from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.errors import VendorRateLimitError, VendorUnavailableError
 from tradingagents.default_config import DEFAULT_CONFIG
 
-FIXTURE = Path(__file__).parent / "fixtures" / "cftc_cot_btc.json"
-ROWS = json.loads(FIXTURE.read_text(encoding="utf-8"))
+FIXTURES = Path(__file__).parent / "fixtures"
+ROWS = json.loads((FIXTURES / "cftc_cot_btc.json").read_text(encoding="utf-8"))
+ETH_ROWS = json.loads((FIXTURES / "cftc_cot_eth.json").read_text(encoding="utf-8"))
+BTC = cftc_cot.CONTRACTS["BTC"]
+ETH = cftc_cot.CONTRACTS["ETH"]
 
-# A Tuesday, one week after the newest fixture report: that report (as of
-# 09-15) was published about 09-19, and the 09-22 report is not in the series.
+# A Tuesday, one week after the newest Bitcoin fixture report: that report
+# (as of 09-15) was published about 09-19, and the 09-22 report is not in the
+# Bitcoin fixture. The Ether fixture holds it and two later ones, none
+# published by 09-22, so both fixtures serve the 09-15 report on this date.
 NOW = datetime(2026, 9, 22, 12, tzinfo=timezone.utc)
 TODAY = "2026-09-22"
 
@@ -104,6 +110,14 @@ class TestParse:
         assert rows[0]["oi"] == 20773
         assert rows[0]["cats"]["Leveraged funds"] == [5545, 11899, 1841]
         assert rows[0]["cats"]["Non-reportable"] == [1021, 832, None]
+
+    def test_the_ether_fixture_parses_the_same_way(self):
+        rows, dropped = cftc_cot._parse_rows(ETH_ROWS)
+        assert dropped == []
+        assert [r["report_date"] for r in rows][:3] == ["2026-10-06", "2026-09-29", "2026-09-22"]
+        assert rows[0]["oi"] == 27681
+        assert rows[0]["cats"]["Leveraged funds"] == [3344, 11293, 556]
+        assert rows[0]["cats"]["Non-reportable"] == [959, 449, None]
 
     @pytest.mark.parametrize(
         "column", ["asset_mgr_positions_short", "dealer_positions_spread_all", "open_interest_all"]
@@ -180,7 +194,7 @@ class TestParse:
 class TestRequest:
     def test_the_query_names_the_contract_and_asks_newest_first(self, monkeypatch):
         fake = _serve(monkeypatch)
-        cftc_cot._request()
+        cftc_cot._request(BTC)
         [call] = fake.calls
         assert call["url"] == cftc_cot.DATASET_URL
         assert call["params"]["$where"] == "cftc_contract_market_code='133741'"
@@ -188,49 +202,67 @@ class TestRequest:
         assert call["params"]["$limit"] == "2000"
         assert call["timeout"] == 30
 
+    def test_the_ether_query_names_its_own_contract(self, monkeypatch):
+        fake = _serve(monkeypatch, ETH_ROWS)
+        cftc_cot._request(ETH)
+        [call] = fake.calls
+        assert call["params"]["$where"] == "cftc_contract_market_code='146021'"
+
     def test_a_404_says_the_dataset_moved(self, monkeypatch):
         _serve(monkeypatch, status=404, body={"code": "dataset.missing"})
         with pytest.raises(cftc_cot.CftcError, match="dataset id has probably moved") as info:
-            cftc_cot._request()
+            cftc_cot._request(BTC)
         assert not isinstance(info.value, VendorUnavailableError)
 
     def test_a_429_is_the_rate_limit_type(self, monkeypatch):
         _serve(monkeypatch, status=429, body={})
         with pytest.raises(cftc_cot.CftcRateLimitError) as info:
-            cftc_cot._request()
+            cftc_cot._request(BTC)
         assert isinstance(info.value, VendorRateLimitError)
 
     def test_a_5xx_is_the_outage_type_with_the_status_only(self, monkeypatch):
         _serve(monkeypatch, status=503, text="<html>gateway</html>")
         with pytest.raises(cftc_cot.CftcUnavailableError, match="HTTP 503") as info:
-            cftc_cot._request()
+            cftc_cot._request(BTC)
         assert "gateway" not in str(info.value)
 
     def test_an_unreachable_host_is_the_outage_type(self, monkeypatch):
         _serve(monkeypatch, raises=requests.ConnectionError("dns"))
         with pytest.raises(cftc_cot.CftcUnavailableError):
-            cftc_cot._request()
+            cftc_cot._request(BTC)
 
     def test_a_400_is_the_module_type(self, monkeypatch):
         _serve(monkeypatch, status=400, body={"message": "no such column"})
         with pytest.raises(cftc_cot.CftcError) as info:
-            cftc_cot._request()
+            cftc_cot._request(BTC)
         assert not isinstance(info.value, VendorUnavailableError)
 
     def test_a_body_that_is_not_json_is_an_outage(self, monkeypatch):
         _serve(monkeypatch, text="<html>maintenance</html>")
         with pytest.raises(cftc_cot.CftcUnavailableError):
-            cftc_cot._request()
+            cftc_cot._request(BTC)
 
     def test_a_json_object_is_the_wrong_shape(self, monkeypatch):
         _serve(monkeypatch, body={"rows": []})
         with pytest.raises(cftc_cot.CftcError, match="expected an array"):
-            cftc_cot._request()
+            cftc_cot._request(BTC)
+
+    def test_rows_of_another_contract_are_refused(self, monkeypatch):
+        # The host answered the Bitcoin query with Ether rows: parsed, they
+        # would be stamped 133741 and served as Bitcoin's positioning.
+        _serve(monkeypatch, body=[ROWS[0]] + ETH_ROWS[:2])
+        with pytest.raises(cftc_cot.CftcError, match="rows of contract 146021 for a query on"):
+            cftc_cot._request(BTC)
+        # A row with no code at all is foreign too: the filter was on the code.
+        nameless = {k: v for k, v in ROWS[0].items() if k != "cftc_contract_market_code"}
+        _serve(monkeypatch, body=[ROWS[0], nameless])
+        with pytest.raises(cftc_cot.CftcError, match=r"rows of contract \(no code\) for"):
+            cftc_cot._request(BTC)
 
     def test_a_runaway_answer_is_refused(self, monkeypatch):
         _serve(monkeypatch, body=[ROWS[0]] * cftc_cot.MAX_ROWS)
         with pytest.raises(cftc_cot.CftcError, match="refusing to read"):
-            cftc_cot._request()
+            cftc_cot._request(BTC)
 
 
 @pytest.mark.unit
@@ -242,10 +274,47 @@ class TestCache:
         assert path.exists()
         payload = json.loads(path.read_text(encoding="utf-8"))
         assert payload["schema"] == cftc_cot.CACHE_SCHEMA
+        assert payload["contract"] == "133741"
         assert payload["fetched_at"] == "2026-09-22T12:00:00Z"
-        assert cftc_cot._read_cache(str(path)) == payload
+        assert cftc_cot._read_cache(str(path), BTC) == payload
         cftc_cot.get_futures_positioning("BTC", TODAY)
         assert len(fake.calls) == 1
+
+    def test_each_contract_has_its_own_cache_file(self, monkeypatch, clock, cache):
+        _serve(monkeypatch, ETH_ROWS)
+        cftc_cot.get_futures_positioning("ETH", TODAY)
+        assert (cache / "cftc_cot_eth.json").exists()
+        assert not (cache / "cftc_cot_btc.json").exists()
+        _serve(monkeypatch)
+        cftc_cot.get_futures_positioning("BTC", TODAY)
+        assert (cache / "cftc_cot_btc.json").exists()
+        # A second Ether call is served from Ether's own fresh cache: no fetch,
+        # and Ether's rows, not the Bitcoin series fetched after it.
+        fake = _serve(monkeypatch, status=503, text="down")
+        out = cftc_cot.get_futures_positioning("ETH", TODAY)
+        assert fake.calls == [] and "STALE" not in out
+        assert "CME Ether futures (ETH)" in out and "**Open interest:** 28,413 contracts" in out
+
+    def test_a_cache_holding_the_other_series_is_rejected(self, monkeypatch, clock, cache, caplog):
+        # The two series have the same shape, so only the stamped contract
+        # code tells a copied or renamed cache from the right one.
+        _serve(monkeypatch)
+        cftc_cot.get_futures_positioning("BTC", TODAY)
+        (cache / "cftc_cot_eth.json").write_bytes((cache / "cftc_cot_btc.json").read_bytes())
+        fake = _serve(monkeypatch, ETH_ROWS)
+        with caplog.at_level(logging.WARNING):
+            out = cftc_cot.get_futures_positioning("ETH", TODAY)
+        assert "contract '133741' is not 146021 (ETH)" in caplog.text
+        assert len(fake.calls) == 1 and "**Open interest:** 28,413 contracts" in out
+
+    def test_the_loaders_logs_name_the_coin(self, monkeypatch, clock, cache, caplog):
+        _serve(monkeypatch, ETH_ROWS)
+        cftc_cot.get_futures_positioning("ETH", TODAY)
+        _freeze(monkeypatch, datetime(2026, 9, 24, 12, tzinfo=timezone.utc))
+        _serve(monkeypatch, status=503, text="down")
+        with caplog.at_level(logging.WARNING):
+            cftc_cot.get_futures_positioning("ETH", "2026-09-24")
+        assert "COT ETH refresh failed" in caplog.text
 
     def test_the_cache_is_fresh_for_a_day_and_refetched_after(self, monkeypatch, clock, cache):
         fake = _serve(monkeypatch)
@@ -303,7 +372,12 @@ class TestCache:
     @pytest.mark.parametrize(
         "mutate, reason",
         [
-            (lambda p: p.__setitem__("schema", 0), "schema 0 is not 1"),
+            (lambda p: p.__setitem__("schema", 1), "schema 1 is not 2"),
+            (
+                lambda p: p.__setitem__("contract", "146021"),
+                "contract '146021' is not 133741 (BTC)",
+            ),
+            (lambda p: p.pop("contract"), "contract None is not 133741 (BTC)"),
             (lambda p: p.pop("fetched_at"), "'fetched_at' is missing"),
             (lambda p: p.__setitem__("rows", []), "'rows' is missing, empty"),
             (lambda p: p["rows"][0].__setitem__("oi", -5), "malformed report"),
@@ -331,8 +405,8 @@ class TestCache:
         mutate(payload)
         path.write_text(json.dumps(payload), encoding="utf-8")
         with caplog.at_level(logging.WARNING):
-            assert cftc_cot._read_cache(str(path)) is None
-        assert f"Ignoring CFTC COT cache {path}: " in caplog.text and reason in caplog.text
+            assert cftc_cot._read_cache(str(path), BTC) is None
+        assert f"Ignoring CFTC COT BTC cache {path}: " in caplog.text and reason in caplog.text
 
     def test_the_cache_directory_and_the_clock_are_the_familys(self, monkeypatch):
         assert cftc_cot._cache_dir is sosovalue_common._cache_dir
@@ -458,6 +532,19 @@ class TestReport:
         assert "never a single week's move as a standalone directional signal" in reading
         # The two non-headline categories stay out of the closing line.
         assert "other reportables" not in reading and "non-reportable" not in reading
+
+    def test_the_ether_report_names_its_contract_and_reads_its_own_rows(
+        self, monkeypatch, clock, cache
+    ):
+        out = _report(monkeypatch, body=ETH_ROWS, asset="ETH-USD")
+        assert out.startswith("## CFTC Commitments of Traders — CME Ether futures (ETH)\n")
+        assert "- Report as of 2026-09-15 (Tuesday close), published about 2026-09-19" in out
+        assert "50 ETH standard contract only, code 146021; the Micro contract" in out
+        assert "**Open interest:** 28,413 contracts" in out
+        assert "| Leveraged funds | 3,293 | 11,015 | 1,939 | -7,722 | -27.2% |" in out
+        assert "_Reading: CME Ether futures as of 2026-09-15, 28,413 contracts" in out
+        # Nothing in an Ether report is about the other contract.
+        assert "Bitcoin" not in out and "BTC" not in out
 
     def test_a_gap_in_the_series_is_said_and_the_columns_are_dated(self, monkeypatch, clock, cache):
         # The 09-08 row unreadable: the first change column now compares
@@ -633,11 +720,13 @@ class TestAnsweredWithoutAFetch:
         assert out.startswith("INVALID_CURR_DATE: ")
         assert "futures positioning cannot be bounded" in out
 
-    @pytest.mark.parametrize("asset", ["ETH", "SOL-USD", "USDT", "AAPL", ""])
-    def test_anything_but_btc_is_no_signal_and_not_a_proxy(self, asset):
+    # WETH is the wrapped token, a look-alike the classifier lets fall through.
+    @pytest.mark.parametrize("asset", ["SOL-USD", "USDT", "AAPL", "", "WETH"])
+    def test_anything_but_btc_or_eth_is_no_signal_and_not_a_proxy(self, asset):
         out = cftc_cot.get_futures_positioning(asset, TODAY)
         assert out.startswith("There is no futures-positioning signal for ")
-        assert "Do not substitute BTC's positioning" in out and "%" not in out
+        assert "futures only (BTC, ETH)" in out and "%" not in out
+        assert "Do not substitute either positioning for another asset's" in out
 
     def test_a_hostile_symbol_cannot_forge_structure(self):
         out = cftc_cot.get_futures_positioning("ETH'\n## Reading: net +99%", TODAY)
@@ -706,7 +795,12 @@ class TestRouting:
     ):
         _serve(monkeypatch)
         out = crypto_data_tools.get_futures_positioning.invoke({"asset": "BTC", "curr_date": TODAY})
-        assert out.startswith("## CFTC Commitments of Traders")
+        assert out.startswith("## CFTC Commitments of Traders — CME Bitcoin futures (BTC)")
+
+    def test_the_tool_serves_ether_too(self, monkeypatch, clock, cache, positioning_enabled):
+        _serve(monkeypatch, ETH_ROWS)
+        out = crypto_data_tools.get_futures_positioning.invoke({"asset": "ETH", "curr_date": TODAY})
+        assert out.startswith("## CFTC Commitments of Traders — CME Ether futures (ETH)")
 
 
 class _CapturingLLM:
@@ -791,7 +885,9 @@ class TestProseFollowsTheConstants:
         text = " ".join(crypto_data_tools.get_futures_positioning.description.split())
         assert "the first Saturday after its report date" in text
         assert "more than 21 days old" in text and cftc_cot.MAX_STALENESS_DAYS == 21
-        assert "5-BTC standard contract" in text and cftc_cot.CONTRACT_UNITS == "5 BTC"
+        assert "'BTC' or 'ETH'" in text
+        assert "(5 BTC, 50 ETH)" in text
+        assert [c.units for c in cftc_cot.CONTRACTS.values()] == ["5 BTC", "50 ETH"]
         assert "the one four reports back" in text and cftc_cot.TREND_REPORTS == 4
         assert "labelled with the date of the report it compares against" in text
         assert "a Monday in a holiday week" in text
@@ -806,8 +902,18 @@ class TestProseFollowsTheConstants:
         assert "the one four reports back" in row.hint and cftc_cot.TREND_REPORTS == 4
         assert cftc_cot.CARRY_NOTE in row.hint
         assert "the market analyst's futures-basis report is the price side" in row.hint
-        assert "BTC only" in row.hint
+        assert "BTC and ETH only" in row.hint
         assert not row.hint.startswith(" ") and not row.hint.endswith(".")
+
+    def test_both_cme_tools_cover_the_same_assets(self):
+        # The two reports are told to read each other as one market, so an
+        # asset one serves and the other answers no-signal for is a wiring gap.
+        from tradingagents.dataflows import cme_basis
+
+        assert cftc_cot.SUPPORTED_ASSETS == cme_basis.SUPPORTED_ASSETS
+        assert {c.name for c in cftc_cot.CONTRACTS.values()} == {
+            c.name for c in cme_basis.CONTRACTS.values()
+        }
 
     def test_the_basis_paragraph_points_back_here(self):
         from tradingagents.agents.analysts import market_analyst
@@ -818,7 +924,7 @@ class TestProseFollowsTheConstants:
     def test_the_report_and_the_constants_agree(self, monkeypatch, clock, cache):
         out = _report(monkeypatch)
         assert "(derived: the first Saturday after the report date)" in out
-        assert f"code {cftc_cot.CONTRACT_CODE};" in out
+        assert f"code {BTC.code};" in out
 
     def test_the_bounds_are_ordered(self):
         assert cftc_cot.MAX_DATA_LAG_DAYS < cftc_cot.MAX_STALENESS_DAYS

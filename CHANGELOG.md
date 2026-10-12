@@ -123,6 +123,48 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **The CME futures-basis and CFTC positioning tools serve Ether beside
+  Bitcoin** (`tradingagents/dataflows/cme_basis.py`,
+  `tradingagents/dataflows/cftc_cot.py`, the two `crypto_data_tools`
+  wrappers, both analysts' hints, `interface.py`, `default_config.py`,
+  README). Each module now carries a `CONTRACTS` table with one contract per
+  asset — Yahoo `ETH=F`/`ETH-USD` beside `BTC=F`/`BTC-USD`, and the CFTC's
+  50-ETH standard Ether future (code 146021) beside the 5-BTC one — and
+  `SUPPORTED_ASSETS` is that table's keys, so `ETH` and its pair forms get
+  their own report (`## CME Ether Futures Basis — ETH`, `CME Ether futures
+  (ETH)`), any other symbol still gets the no-signal sentence, now naming
+  both, and neither asset is ever a proxy for the other. The method, the
+  bounds and the scale are shared on measurement rather than assumed: over
+  the same 729 days of hourly history (2026-10-12) Ether's basis rounds to
+  the same scale as Bitcoin's (a 7-day change under about 3 annualized
+  points on three days in four, a reading within about 1.5 points of its own
+  7-day median, the same pre-expiry drift), and in the CFTC series leveraged
+  funds were net short and dealers net long in 52 of the last 52 Ether
+  reports too, so `CARRY_NOTE` holds for both. The Ether COT series is
+  cached in its own `cftc_cot_eth.json`; a fixture of eight real Ether rows
+  pins the parse and the report; the cache payload now carries its contract
+  code (`CACHE_SCHEMA` 2), so a file holding the other series' rows is
+  rejected, a Socrata answer carrying another contract's rows is refused
+  before it is parsed, and the loader's logs and its `DATA_UNAVAILABLE`
+  sentinel name the coin (`CFTC COT BTC`, was `CFTC COT`). **Input-surface
+  change for the `uniswap_v3` AI judge**, which rates `ETH-USD` beside
+  `BTC-USD`: for ETH both analysts gain a report they used to be told was
+  BTC-only, so a paper run that reads this build starts a new input
+  segment. The hyperliquid paper-BTC run's reports are byte-identical, as
+  are the judge's BTC-USD ones; what their analysts do see change is
+  wording — the two tools' descriptions and argument texts (`'BTC' or
+  'ETH'`, `(5 BTC, 50 ETH)`), the two analyst hint sentences (`Bitcoin or
+  Ether`, `BTC and ETH only`) and the sentinel's coin — all outside
+  `PROMPT_VERSION`'s scope: a dated note for a later paper review, not a new
+  prompt version. Deploy note: the first positioning call after an upgrade
+  rejects the schema-1 `cftc_cot_btc.json` and refetches it (one Socrata
+  GET), with no stale fallback for that one call; and any old-build process
+  that reads BTC positioning through the same cache directory keeps
+  rejecting and rewriting the new build's file until it is upgraded too, so
+  upgrade such checkouts in the same window (the two paper services do not
+  share one: the uniswap judge keeps its cache beside its db, the
+  hyperliquid run uses the default `~/.tradingagents/cache`).
+
 - **The default deep-think model of both paper traders is Claude Sonnet 5.5,
   and the default completion cap is 16384** (`contrib/hyperliquid_perp`,
   `contrib/uniswap_v3`, `contrib/replay`, the CLI). `hyperliquid.example.yaml`

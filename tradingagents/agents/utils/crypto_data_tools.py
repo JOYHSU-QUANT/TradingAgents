@@ -263,20 +263,21 @@ def get_whale_positions(
 def get_futures_basis(
     asset: Annotated[
         str,
-        "Crypto asset whose CME futures basis to read: 'BTC' only (pair forms "
+        "Crypto asset whose CME futures basis to read: 'BTC' or 'ETH' (pair forms "
         "like 'BTC-USD' are accepted). Any other symbol returns a no-signal "
-        "note — BTC's basis does not stand in for another asset's.",
+        "note — neither basis stands in for another asset's.",
     ],
     curr_date: Annotated[str, "Current date in yyyy-mm-dd format; no later hour is read"],
 ) -> str:
     """
-    Retrieve the CME Bitcoin front-month futures basis: what the regulated
-    future (Yahoo BTC=F) trades at over spot (Yahoo BTC-USD). Reported as a
-    nominal percentage — the median over the latest 24 hours in which both
-    traded, matched on the same UTC hour, because the two DAILY closes are
-    hours apart and their difference is mostly clock mismatch — and annualized
-    by the front contract's days to expiry, with a 7-day annualized median and
-    the change against the reading 7 days earlier. The nominal basis decays
+    Retrieve the CME Bitcoin or Ether front-month futures basis: what the
+    regulated future (Yahoo BTC=F or ETH=F) trades at over spot (Yahoo BTC-USD
+    or ETH-USD), one contract per asset. Reported as a nominal percentage —
+    the median over the latest 24 hours in which both traded, matched on the
+    same UTC hour, because the two DAILY closes are hours apart and their
+    difference is mostly clock mismatch — and annualized by the front
+    contract's days to expiry, with a 7-day annualized median and the change
+    against the reading 7 days earlier. The nominal basis decays
     toward zero as the contract nears expiry and steps back up at the monthly
     roll, so annualized figures are the comparable ones. The annualized figure
     is withheld within 5 days of expiry, where it divides by almost nothing,
@@ -293,13 +294,13 @@ def get_futures_basis(
     signal. Uses the configured futures_basis vendor.
 
     Args:
-        asset (str): 'BTC'
+        asset (str): 'BTC' or 'ETH'
         curr_date (str): Current date in yyyy-mm-dd format
 
     Returns:
         str: A markdown report of the nominal and annualized basis — or a
             withheld notice carrying no figures, or for a symbol other than
-            BTC a plain no-signal sentence.
+            BTC or ETH a plain no-signal sentence.
     """
     return route_to_vendor("get_futures_basis", asset, curr_date)
 
@@ -309,16 +310,16 @@ def get_futures_basis(
 def get_futures_positioning(
     asset: Annotated[
         str,
-        "Crypto asset whose CME futures positioning to read: 'BTC' only (pair "
+        "Crypto asset whose CME futures positioning to read: 'BTC' or 'ETH' (pair "
         "forms like 'BTC-USD' are accepted). Any other symbol returns a no-signal "
-        "note — BTC's positioning does not stand in for another asset's.",
+        "note — neither positioning stands in for another asset's.",
     ],
     curr_date: Annotated[str, "Current date in yyyy-mm-dd format; no later report is read"],
 ) -> str:
     """
     Retrieve the CFTC Commitments of Traders (Traders in Financial Futures)
-    report for the CME Bitcoin future: open interest and, for each trader
-    category — dealers, asset managers, leveraged funds, other reportables,
+    report for the CME Bitcoin or Ether future: open interest and, for each
+    trader category — dealers, asset managers, leveraged funds, other reportables,
     non-reportables — the long, short and spreading positions, the net, its
     share of open interest, and the change against the previous published
     report and against the one four reports back, each change column
@@ -328,11 +329,11 @@ def get_futures_positioning(
     the first Saturday after its report date — is on or before curr_date, so
     a mid-week date sees the previous week's report, as a reader on that day
     did. The publication date is derived and can be later than shown when a
-    US holiday delays the release. Only the 5-BTC standard contract is read;
-    the Micro contract is a separate series. A Scale line says what size of
-    weekly change is ordinary for each headline category and where its net
-    has ranged over the trailing year, computed from the series itself. A
-    leveraged-fund short is usually the futures leg of a cash-and-carry trade
+    US holiday delays the release. Only the standard contract is read (5 BTC,
+    50 ETH); the Micro contracts are separate series. A Scale line says what
+    size of weekly change is ordinary for each headline category and where
+    its net has ranged over the trailing year, computed from the series
+    itself. A leveraged-fund short is usually the futures leg of a cash-and-carry trade
     against spot or ETF holdings — the carry the futures basis pays — not a
     bearish view, and the report says so. The whole report is withheld, with
     no figures, when no report had been published by curr_date or the newest
@@ -341,12 +342,12 @@ def get_futures_positioning(
     futures_positioning vendor.
 
     Args:
-        asset (str): 'BTC'
+        asset (str): 'BTC' or 'ETH'
         curr_date (str): Current date in yyyy-mm-dd format
 
     Returns:
         str: A markdown report of positioning by category — or a withheld
-            notice carrying no figures, or for a symbol other than BTC a
-            plain no-signal sentence.
+            notice carrying no figures, or for a symbol other than BTC or ETH
+            a plain no-signal sentence.
     """
     return route_to_vendor("get_futures_positioning", asset, curr_date)

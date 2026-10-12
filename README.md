@@ -485,9 +485,10 @@ config["data_vendors"]["whale_positioning"] = "hyperliquid_stats"  # the dated c
 ```
 
 A second crypto-only market-analyst tool, beside the Deribit options one, is the
-**CME Bitcoin futures basis** (`futures_basis`, vendor `yfinance`, keyless, BTC
-only): what the regulated front-month future (Yahoo `BTC=F`) trades at over
-spot (`BTC-USD`), as a nominal percentage and annualized by the contract's days
+**CME Bitcoin or Ether futures basis** (`futures_basis`, vendor `yfinance`,
+keyless, BTC and ETH, each its own contract): what the regulated front-month
+future (Yahoo `BTC=F` or `ETH=F`) trades at over spot (`BTC-USD` or
+`ETH-USD`), as a nominal percentage and annualized by the contract's days
 to expiry, with a 7-day annualized median and the change against the reading 7
 days earlier. It is the one USD-denominated, institution-facing price the other
 sources do not carry.
@@ -516,18 +517,19 @@ figures, for a date more than a day ahead of the UTC clock or more than 709
 days behind it (a reading needs 21 days of the 729 days of hourly history Yahoo
 serves), and when Yahoo served too few synchronous hours or none newer than 7
 days — a notice saying what each of the two series had, rather than the
-router's no-data sentence, which would tell the analyst that also reads BTC's
-prices that "BTC … may be invalid, delisted". CME closes for the weekend and a
-paper loop does not, so a reading whose newest hour ended more than 3 hours
-earlier says it is not a live one. The report also carries its own scale: on
-three days in four (measured over 492 days) the 7-day change was under about 3
+router's no-data sentence, which would tell the analyst that also reads the
+coin's prices that it "may be invalid, delisted". CME closes for the weekend
+and a paper loop does not, so a reading whose newest hour ended more than 3
+hours earlier says it is not a live one. The report also carries its own
+scale: on three days in four (measured over 492 days of Bitcoin; Ether,
+measured 2026-10-12 alongside a Bitcoin re-measurement over the same 729
+days, rounds to the same figures) the 7-day change was under about 3
 annualized points and a reading sat within about 1.5 points of its own 7-day
 median, and the annualized figure runs about a point high in the last days
 before it is withheld (5 to 7 days from expiry), because Yahoo's spot is an
 aggregate rather than the rate the contract settles to. The cost of the hourly
-method is two
-uncached Yahoo requests per call, through the same throttle latch as every
-other yfinance leaf.
+method is two uncached Yahoo requests per call, through the same throttle
+latch as every other yfinance leaf.
 
 Shipped disabled for the reason above and **cut over to `"yfinance"` on
 2026-09-22**, in the same dated flip as the CFTC positioning tool below. To
@@ -538,7 +540,8 @@ config["data_vendors"]["futures_basis"] = "none"
 ```
 
 A fifth news-analyst source is the **CFTC Commitments of Traders report on CME
-Bitcoin futures** (`futures_positioning`, vendor `cftc`, keyless, BTC only):
+Bitcoin or Ether futures** (`futures_positioning`, vendor `cftc`, keyless, BTC
+and ETH, each its own contract and series):
 open interest and, for each trader category — dealers, asset managers,
 leveraged funds, other reportables, non-reportables — the long, short and
 spreading positions, the net, its share of open interest, and the change
@@ -562,14 +565,15 @@ to the weekday so a holiday-week Monday report does not derive to Friday) and
 prints both dates. A release delayed past Saturday — a holiday Friday, the
 batch releases after the late-2025 shutdown — is still served early in a
 backtest of that window; the dataset has no release-date column, and the
-"derived" label is the disclosure. Only the 5-BTC standard contract (code
-133741) is read; the Micro contract is a separate series and the report says
-so. A Scale line, computed from the 52 changes between the 53 reports before
-the one served, says
-what size of weekly change is ordinary for each headline category
-and where its net has ranged as a share of open interest. The whole series is
-a few hundred rows, cached daily through the family's rolling snapshot on the
-family's clock (stale serves up to 21 days, failed fetches never written); a
+"derived" label is the disclosure. Only the standard contracts are read — 5
+BTC (code 133741) and 50 ETH (code 146021); the Micro contracts are separate
+series and the report says so. A Scale line, computed from the 52 changes
+between the 53 reports before the one served, says what size of weekly change
+is ordinary for each headline category and where its net has ranged as a
+share of open interest. Each series is a
+few hundred rows, cached daily in its own file, stamped with its contract
+code, through the family's rolling snapshot on the family's clock (stale
+serves up to 21 days, failed fetches never written); a
 row the parser cannot read is dropped and its date logged, and when the
 dropped row is newer than the report served the report says so. No report
 published by `curr_date`, or a newest one more than 21 days old, is withheld

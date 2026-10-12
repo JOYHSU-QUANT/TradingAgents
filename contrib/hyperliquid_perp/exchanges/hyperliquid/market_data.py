@@ -16,7 +16,8 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
-from ...common.instants import epoch_ms
+from contrib.core.instants import epoch_ms
+
 from ...domains.perp.margin import MarginSchedule
 from ...domains.perp.schema import (
     Candle,
@@ -33,7 +34,7 @@ logger = logging.getLogger(__name__)
 _MS_PER_DAY = 24 * 60 * 60_000
 # ``what`` for each windowed read's naive-``end`` refusal. The window ends are
 # compared against the exchange's own ``close_time`` stamps, so the conversion
-# must be exact — that argument lives on ``common.instants.epoch_ms``.
+# must be exact — that argument lives on ``contrib.core.instants.epoch_ms``.
 #
 # One string per read, not one shared: ``epoch_ms``'s ``what`` is required so
 # that no refusal is anonymous, yet the two reads' messages were still

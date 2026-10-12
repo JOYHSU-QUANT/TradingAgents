@@ -12,8 +12,8 @@ docstring is true of every function in it.
 In ``runtime/``: both lanes consume it — both validators, both running
 loops — and neither owns it (issue #122), and it reads ``decision_attempts``
 through plain ``sqlite3``, a table shape ``common/`` may not know. From
-``common`` it needs only the cadence and the timestamp decoder; importing it
-loads neither engine.
+``common`` it needs only the cadence, and from ``contrib.core`` only the
+timestamp decoder and the whole-hours guard; importing it loads neither engine.
 """
 
 from __future__ import annotations
@@ -23,8 +23,9 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 
+from contrib.core.instants import parse_instant, whole_hours
+
 from ..common.constants import CYCLE_INTERVAL, STALE_MARKET_DATA_ERROR
-from ..common.instants import parse_instant, whole_hours
 
 __all__ = [
     "NO_DECISION_STREAK_THRESHOLD",

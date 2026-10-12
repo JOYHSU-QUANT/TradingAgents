@@ -22,7 +22,8 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any, NamedTuple
 
-from ..common.instants import epoch_ms, whole_hours_label
+from contrib.core.instants import epoch_ms, whole_hours_label
+
 from ..persistence import repository as repo
 from ..persistence.ids import exchange_fill_key, usable_fill_tid
 from .fill_backfill import (

@@ -23,7 +23,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from ..common.instants import delta_ms, gap_label, parse_instant
+from contrib.core.instants import delta_ms, gap_label, parse_instant
+
 from ..persistence import repository as repo
 from ..persistence.db import Database
 

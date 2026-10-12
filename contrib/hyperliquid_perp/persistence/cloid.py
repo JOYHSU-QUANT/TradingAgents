@@ -27,7 +27,7 @@ from __future__ import annotations
 import hashlib
 import re
 
-from ..common.enum_guard import VocabEnum, check_enum
+from contrib.core.enum_guard import VocabEnum, check_enum
 
 __all__ = [
     "LIVE_ORDER_ROLES",

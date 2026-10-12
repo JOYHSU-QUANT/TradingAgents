@@ -32,7 +32,8 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any, Protocol
 
-from ..common.instants import Seconds, seconds_span
+from contrib.core.instants import Seconds, seconds_span
+
 from ..common.seam_guard import require_seam
 from ..ports import Clock
 from ..runtime.clock import WallClock

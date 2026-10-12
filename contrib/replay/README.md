@@ -14,8 +14,9 @@
 
 它是 `contrib/` 下**第一個**同時 import 兩個鄰居的套件（`contrib/carry` 之後照同一套做法）：`hyperliquid_perp` 提供決策詞彙
 （`DecisionMode`／`TargetSide`／`RiskAction`）、store 與 paper 的 fill model 參數，以及考古題用的
-parse seam、閘門（`parse_target_decision`／`evaluate`）、payload digest 與 `inject_perp_context`；
-`autoresearch` 提供 split（holdout 鎖）、`CostModel`、研究 store，以及護欄規則與它每一根的方向。這條邊是單向的：
+parse seam、閘門（`parse_target_decision`／`evaluate`）與 `inject_perp_context`；
+`autoresearch` 提供 split（holdout 鎖）、`CostModel`、研究 store，以及護欄規則與它每一根的方向；
+payload digest、instants 與 decimal context 來自共用地板 `core`（不算鄰居）。這條邊是單向的：
 兩個鄰居都不得 import `contrib.replay`，`tests/test_upstream.py` 直接讀兩邊的 source 守著。
 借了什麼一律列在 `upstream.py`：`BORROWED`（載入時就 import）與 `ENGINE_BORROWED`（引擎那一半，
 只在 `load_engine()` 裡 lazy import）；其他模組只從那裡 import。

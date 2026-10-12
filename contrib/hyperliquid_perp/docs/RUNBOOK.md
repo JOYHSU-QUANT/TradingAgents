@@ -14,7 +14,7 @@
 
 ```bash
 pip install -r requirements.txt
-python -m pytest contrib/hyperliquid_perp/tests/ -q   # 全綠才繼續
+python -m pytest contrib/core/tests/ contrib/hyperliquid_perp/tests/ contrib/tests/ -q   # 全綠才繼續
 ```
 
 ### 1.2 建 local config

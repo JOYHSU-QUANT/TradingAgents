@@ -33,8 +33,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, localcontext
 
+from contrib.core.decimal_context import DECIMAL_CONTEXT
+
 from ...common.constants import HOLDING_COST_HOURS
-from ...common.decimal_context import DECIMAL_CONTEXT
 from ...common.prompt_regime import position_section_omitted
 from .margin import account_equity, funding_cost, unrealized_pnl
 from .risk_gate import CurrentPositionState

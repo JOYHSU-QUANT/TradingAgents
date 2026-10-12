@@ -19,11 +19,12 @@ from decimal import Decimal
 from types import MappingProxyType
 from typing import Final
 
+from contrib.core.enum_guard import VocabEnum
+from contrib.core.instants import MAX_EPOCH_MS, MIN_EPOCH_MS
+
 from ...common.constants import (
     HOLDING_COST_HOURS,
     MACRO_FAST_PERIOD,
-    MAX_EPOCH_MS,
-    MIN_EPOCH_MS,
     MIN_MACRO_TREND_LOOKBACK,
     MIN_VOLUME_PROFILE_WINDOW,
     POC_LOWER_BAND,
@@ -33,7 +34,6 @@ from ...common.constants import (
     VALUE_AREA_FRACTION,
     VOLUME_PROFILE_BUCKET_COUNT,
 )
-from ...common.enum_guard import VocabEnum
 
 
 class MarketRegime(VocabEnum, noun="market regime"):
@@ -42,7 +42,7 @@ class MarketRegime(VocabEnum, noun="market regime"):
     Held as an enum (not a free string) so an unknown regime fails at context
     construction — where it is cheap to spot — rather than deep in an engine run
     where it would burn an LLM call before raising, and the refusal names the
-    vocabulary (:class:`~...common.enum_guard.VocabEnum`).
+    vocabulary (:class:`~contrib.core.enum_guard.VocabEnum`).
     """
 
     TRENDING = "trending"
@@ -467,7 +467,7 @@ class TopOfBook:
     (``best_bid < best_ask``): a crossed or locked book is a malformed
     snapshot, not a quote to join, and is refused at construction like every
     other price boundary in this module. ``time`` is the exchange's clock off
-    the same payload (tz-aware UTC, the form ``common.instants.from_epoch_ms``
+    the same payload (tz-aware UTC, the form ``contrib.core.instants.from_epoch_ms``
     returns), so a consumer ages the quote against the clock the freshness
     guard already trusts.
     """

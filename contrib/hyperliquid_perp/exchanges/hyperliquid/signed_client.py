@@ -45,9 +45,10 @@ from typing import Any
 from hyperliquid.exchange import Exchange
 from hyperliquid.utils.types import Cloid
 
+from contrib.core.enum_guard import check_enum
+from contrib.core.instants import epoch_ms, from_epoch_ms
+
 from ...common.constants import LEGAL_NETWORKS
-from ...common.enum_guard import check_enum
-from ...common.instants import epoch_ms, from_epoch_ms
 from ...ports import OrderGate
 from .errors import ExchangeError, ExchangeRequestError, MalformedResponseError
 from .mapper import hex_identity_matches, require_decimal

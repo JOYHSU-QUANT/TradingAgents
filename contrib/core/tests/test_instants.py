@@ -1,5 +1,5 @@
-"""``common.instants`` — the store's timestamp decoder, the span renderings, the span
-guards, epoch ms."""
+"""``contrib.core.instants`` — the store's timestamp decoder, the span renderings,
+the span guards, epoch ms."""
 
 from __future__ import annotations
 
@@ -8,8 +8,9 @@ from decimal import Decimal
 
 import pytest
 
-from contrib.hyperliquid_perp.common.constants import MAX_EPOCH_MS, MIN_EPOCH_MS
-from contrib.hyperliquid_perp.common.instants import (
+from contrib.core.instants import (
+    MAX_EPOCH_MS,
+    MIN_EPOCH_MS,
     delta_ms,
     epoch_ms,
     from_epoch_ms,
@@ -197,7 +198,8 @@ def test_epoch_ms_refuses_a_naive_instant_naming_what_was_handed_in():
     # caller's, REQUIRED (no anonymous refusal): each caller pins its own
     # wording through ``what``. The label below is this test's own sample, not
     # a live one — the two windowed reads now pass "candle window end" and
-    # "funding history window end" and pin those in ``test_market_data.py``.
+    # "funding history window end" and pin those in the perp package's
+    # ``tests/exchanges/test_market_data.py``.
     naive = datetime(2026, 8, 31, 8, 0)
     with pytest.raises(ValueError, match="^market data window end must be timezone-aware"):
         epoch_ms(naive, what="market data window end")
@@ -223,14 +225,13 @@ def test_from_epoch_ms_overflows_like_the_float_route_did():
 
 
 def test_the_published_epoch_ms_range_is_exactly_what_the_decoder_accepts():
-    # The DRIFT PIN behind ``constants.MIN_EPOCH_MS`` / ``MAX_EPOCH_MS``
+    # The DRIFT PIN behind ``MIN_EPOCH_MS`` / ``MAX_EPOCH_MS``
     # (issue #191). ``domains.perp.schema`` refuses a venue stamp outside that
     # range so an ``OverflowError`` — which is neither an ``ExchangeError`` nor
     # a ``ValueError``, and so escapes every handler between the wire and the
     # decode — can never be raised in production. That guard is only as good as
-    # the constants agreeing with the decoder, and the two are declared in
-    # different modules (``schema`` sits inside the config loader's locked
-    # import closure and cannot reach ``instants``).
+    # the bounds agreeing with the decoder. They are derived beside it from the
+    # same epoch, and this holds the derivation to what the decoder accepts.
     #
     # Both edges, from both sides: each bound decodes, and one millisecond
     # further out does not. A bound transcribed as a literal, or drifting a

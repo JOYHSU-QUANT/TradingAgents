@@ -1,9 +1,10 @@
 """The borrow from outside this package is one-way, read-only, and funnelled.
 
-Two packages are borrowed from - ``hyperliquid_perp`` for the domain types
-and the analytics, ``tradingagents`` for the LLM client factory the
-hypothesis loop asks a model through - and both are held to the same rule by
-the same scan, so a third one cannot be added by writing an import.
+Three packages are borrowed from - ``hyperliquid_perp`` for the domain types
+and the analytics, ``contrib.core`` for the vocabulary base and the epoch-ms
+conversions, ``tradingagents`` for the LLM client factory the hypothesis
+loop asks a model through - and all three are held to the same rule by the
+same scan, so a fourth one cannot be added by writing an import.
 
 Every check here reads the IMPORT GRAPH, parsed, rather than searching the
 sources for a string. The difference is the whole value of the file: these
@@ -159,7 +160,7 @@ def test_every_declared_borrow_is_inside_a_declared_package():
     """``UPSTREAM_PACKAGES`` bounds ``BORROWED``, not the other way round.
 
     Without this the two lists could drift apart in the direction that matters:
-    a name added to ``BORROWED`` under some third package would be "declared",
+    a name added to ``BORROWED`` under some undeclared package would be "declared",
     and the scan above - which only asks whether an import sits under a DECLARED
     package - would then wave it through.
     """

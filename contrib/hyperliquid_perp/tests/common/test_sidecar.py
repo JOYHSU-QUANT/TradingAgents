@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import logging
 
-from contrib.hyperliquid_perp.common import atomic_io, sidecar
+from contrib.core import atomic_io
+from contrib.hyperliquid_perp.common import sidecar
 from contrib.hyperliquid_perp.common.sidecar import SIDECAR_SCHEMA, sidecar_path, write_sidecar
 
 _LOGGER = "contrib.hyperliquid_perp.common.sidecar"

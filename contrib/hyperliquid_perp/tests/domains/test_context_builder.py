@@ -8,7 +8,7 @@ from decimal import Decimal
 
 import pytest
 
-from contrib.hyperliquid_perp.common.instants import epoch_ms, from_epoch_ms
+from contrib.core.instants import epoch_ms, from_epoch_ms
 from contrib.hyperliquid_perp.domains.perp.context_builder import (
     MIN_FUNDING_SAMPLES,
     build_market_context,

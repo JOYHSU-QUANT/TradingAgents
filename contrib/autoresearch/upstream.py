@@ -1,9 +1,11 @@
 """The ONE place this package names a package outside itself.
 
-Two of them: ``contrib.hyperliquid_perp``, whose domain types and analytics
-make a research figure comparable with what the paper trader saw, and
-``tradingagents``, whose LLM client factory the hypothesis loop asks for a
-hypothesis through (plan §3.2 lists it as a Phase B borrow).
+Three of them: ``contrib.hyperliquid_perp``, whose domain types and
+analytics make a research figure comparable with what the paper trader
+saw; ``contrib.core``, the stdlib-only floor that package's vocabulary
+base and epoch-ms conversions moved to; and ``tradingagents``, whose LLM
+client factory the hypothesis loop asks for a hypothesis through (plan
+§3.2 lists it as a Phase B borrow).
 
 Two reasons the borrow is funnelled through a single module rather than
 spelled at each use site:
@@ -20,10 +22,10 @@ spelled at each use site:
 
 Most of what is re-exported here is a *domain* import: value types, the two
 vocabularies, and the epoch-ms conversions. They cost nothing at import time
-— ``domains.perp.schema``, ``domains.perp.indicator_vocab``,
-``common.enum_guard`` and ``common.instants`` sit at the bottom of that
-package's graph. Two things are deliberately NOT among them, and both are
-built inside a call instead:
+— ``domains.perp.schema`` and ``domains.perp.indicator_vocab`` sit at the
+bottom of that package's graph, and ``contrib.core.enum_guard`` and
+``contrib.core.instants`` in the shared floor beneath it. Two things are
+deliberately NOT among them, and both are built inside a call instead:
 
 - the exchange READER, because reaching it pulls in the Hyperliquid SDK,
   which a store-only or gap-check invocation has no use for
@@ -45,8 +47,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from contrib.hyperliquid_perp.common.enum_guard import VocabEnum
-from contrib.hyperliquid_perp.common.instants import epoch_ms, from_epoch_ms
+from contrib.core.enum_guard import VocabEnum
+from contrib.core.instants import epoch_ms, from_epoch_ms
 from contrib.hyperliquid_perp.domains.perp.indicator_vocab import (
     REGIME_INDICATORS,
     required_candles,
@@ -109,16 +111,16 @@ __all__ = [
 # The packages this one is allowed to name at all. Everything under them is
 # declared below; anything outside them is not borrowed but vendored, and
 # ``tests/test_upstream.py`` reads the sources to hold both halves.
-UPSTREAM_PACKAGES: tuple[str, ...] = ("contrib.hyperliquid_perp", "tradingagents")
+UPSTREAM_PACKAGES: tuple[str, ...] = ("contrib.core", "contrib.hyperliquid_perp", "tradingagents")
 
 # What this package borrows, as ``(dotted module, attribute)`` pairs — the
 # audit list plan §3.2 asks for, and the sequence the pin tests walk. The
 # lazily-imported reader and chat model below are in it too: "not imported at
 # module scope" is a load-time choice, not an exemption from the audit.
 BORROWED: tuple[tuple[str, str], ...] = (
-    ("contrib.hyperliquid_perp.common.enum_guard", "VocabEnum"),
-    ("contrib.hyperliquid_perp.common.instants", "epoch_ms"),
-    ("contrib.hyperliquid_perp.common.instants", "from_epoch_ms"),
+    ("contrib.core.enum_guard", "VocabEnum"),
+    ("contrib.core.instants", "epoch_ms"),
+    ("contrib.core.instants", "from_epoch_ms"),
     ("contrib.hyperliquid_perp.domains.perp.context_builder", "classify_regime"),
     ("contrib.hyperliquid_perp.domains.perp.context_builder", "funding_zscore"),
     ("contrib.hyperliquid_perp.domains.perp.indicator_vocab", "REGIME_INDICATORS"),

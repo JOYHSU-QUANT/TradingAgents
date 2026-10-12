@@ -30,8 +30,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from contrib.core.enum_guard import check_enum
+
 from .config_coercion import config_overrides, str_from_yaml
-from .enum_guard import check_enum
 
 __all__ = [
     "ENGINE_PROVIDER",

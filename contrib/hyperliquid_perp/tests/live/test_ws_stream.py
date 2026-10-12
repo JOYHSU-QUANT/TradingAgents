@@ -196,7 +196,7 @@ def test_a_stream_threshold_that_is_not_a_span_is_refused_by_name(threshold, bad
     # a one-second threshold, NaN never compared greater than anything (so
     # the run was never stale), an infinity likewise. Converged through the
     # guard every ``*_seconds`` argument shares (issue #224), whose table is
-    # pinned in ``tests/common/test_instants.py``.
+    # pinned in ``contrib/core/tests/test_instants.py``.
     with pytest.raises((TypeError, ValueError), match=f"^{threshold} must be"):
         LiveWsStream(**{threshold: bad}, clock=ManualClock(_NOW))
 
@@ -859,7 +859,7 @@ def test_a_decimal_lookback_converges_to_a_span_at_construction():
     # PR #168, in ``_window_start`` before (issue #169). What the bare ``> 0``
     # check could not see is refused by name instead, through the guard every
     # ``*_seconds`` argument now shares (issue #224): the full table of what
-    # it refuses is pinned in ``tests/common/test_instants.py``; this pins
+    # it refuses is pinned in ``contrib/core/tests/test_instants.py``; this pins
     # that THIS argument goes through it, one case per refusal.
     bf = FillBackfiller(
         fetch=lambda s, e: [],

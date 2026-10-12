@@ -65,8 +65,8 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from ...common.constants import MAX_EPOCH_MS, MIN_EPOCH_MS
-from ...common.instants import from_epoch_ms
+from contrib.core.instants import MAX_EPOCH_MS, MIN_EPOCH_MS, from_epoch_ms
+
 from ...domains.perp.margin import MarginSchedule, MarginTier
 from ...domains.perp.schema import (
     AccountSnapshot,

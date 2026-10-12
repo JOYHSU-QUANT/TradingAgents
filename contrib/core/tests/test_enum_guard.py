@@ -1,8 +1,9 @@
 """Tests for the shared vocabulary base (issue #166).
 
-``check_enum``'s callers pin THAT they refuse through it (``tests/live/
-test_reconcile.py``, ``test_fills.py``), and the four ``schema`` enums pin
-their own sentences in ``tests/domains/test_schema.py``; this file pins the
+``check_enum``'s callers pin THAT they refuse through it (the perp package's
+``tests/live/test_reconcile.py`` and ``test_fills.py``), and the four
+``schema`` enums pin their own sentences in that package's
+``tests/domains/test_schema.py``; this file pins the
 ``VocabEnum`` base's own contract on a synthetic enum.
 """
 
@@ -10,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from contrib.hyperliquid_perp.common.enum_guard import VocabEnum, check_enum
+from contrib.core.enum_guard import VocabEnum, check_enum
 
 
 @pytest.mark.parametrize(

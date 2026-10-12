@@ -31,6 +31,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
+from contrib.core.instants import parse_instant
+
 from ..common.constants import CYCLE_INTERVAL
 from ..common.inflight import (
     InFlightDecision,
@@ -38,7 +40,6 @@ from ..common.inflight import (
     non_retryable_message,
     parse_stored_response,
 )
-from ..common.instants import parse_instant
 from ..domains.perp.risk_gate import RiskConfig
 from ..domains.perp.target_decision import (
     DecisionConfig,

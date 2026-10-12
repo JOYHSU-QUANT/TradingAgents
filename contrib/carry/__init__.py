@@ -16,8 +16,9 @@ computed once, and the two legs must read the SAME number at the SAME
 boundary — a rule copied into each venue's package would drift, and the
 spot package cannot see funding at all. The borrow is one-way and funnelled
 through :mod:`.upstream`: ``contrib.hyperliquid_perp`` for the funding
-types, the z-score and the instants, ``contrib.autoresearch`` for the
-funding walk and the research store that keeps the history. The spot
+types and the z-score, ``contrib.autoresearch`` for the funding walk and
+the research store that keeps the history, and the shared floor
+``contrib.core`` for the instants and the atomic writer. The spot
 package is never imported — its isolation test forbids it — so what this
 package knows of it is one table read with ``sqlite3`` and nothing else.
 """

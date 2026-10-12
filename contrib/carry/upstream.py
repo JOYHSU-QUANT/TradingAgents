@@ -1,4 +1,4 @@
-"""What this package borrows from its two neighbours — in one place, read-only.
+"""What this package borrows from its two neighbours and the floor — in one place.
 
 The same funnel ``contrib.replay`` and ``contrib.autoresearch`` keep: every
 module here imports from THIS module, ``BORROWED`` is the audit list, and
@@ -13,12 +13,9 @@ What is borrowed and why:
 - from the perp package: ``FundingPoint`` (the settlement record the venue
   reader and the research store both speak), ``funding_zscore`` and its
   sample floor (so the number this package acts on is the number the perp
-  prompt prints — one definition, not a copy), the instants (so a boundary
-  is encoded by the same integer arithmetic the stores use, and a perp
-  snapshot's timestamp is decoded by the decoder paired with its encoder), the
-  atomic writer (a half-written handoff must never be readable), the SQLite
-  URI spelling (``Path.as_uri`` is wrong for a UNC share and a relative
-  path; the perp store opens through this one, so the carry read must too),
+  prompt prints — one definition, not a copy), the SQLite URI spelling
+  (``Path.as_uri`` is wrong for a UNC share and a relative path; the perp
+  store opens through this one, so the carry read must too),
   and the venue error type (a fetch the venue refused is reported, not
   tracebacked); and, for the report, the file-target run's spellings
   (``FILE_TARGET_MODEL`` on ``ai_inputs.model`` says the run decided from the
@@ -30,6 +27,10 @@ What is borrowed and why:
   two vocabularies the report classifies cycles by (``AttemptStatus`` for
   how a cycle ended, ``RiskAction`` for what the gate did), so a member
   added upstream is not a word this package silently fails to know;
+- from the shared floor ``contrib.core``: the instants (so a boundary is
+  encoded by the same integer arithmetic the stores use, and a perp
+  snapshot's timestamp is decoded by the decoder paired with its encoder)
+  and the atomic writer (a half-written handoff must never be readable);
 - from the research package: the research store and its funding walk
   (``backfill_funding`` pages the venue's capped endpoint forwards and
   loses nothing; ``StopReason`` says how it ended, and only a walk that
@@ -54,14 +55,14 @@ from contrib.autoresearch.fetch import StopReason, backfill_funding, render_fetc
 from contrib.autoresearch.ports import HistoryMarketData
 from contrib.autoresearch.store import ResearchStore, StoreError
 from contrib.autoresearch.vocabulary import SpecError, require_number
-from contrib.hyperliquid_perp.common.atomic_io import atomic_write_text
+from contrib.core.atomic_io import atomic_write_text
+from contrib.core.instants import epoch_ms, from_epoch_ms, parse_instant
 from contrib.hyperliquid_perp.common.constants import (
     FILE_TARGET_MODEL,
     FILE_TARGET_PENDING_PREFIX,
     FILE_TARGET_UNUSABLE_PREFIX,
     HANDOFF_SIDECAR_SUFFIX,
 )
-from contrib.hyperliquid_perp.common.instants import epoch_ms, from_epoch_ms, parse_instant
 from contrib.hyperliquid_perp.common.store_layout import payload_dir
 from contrib.hyperliquid_perp.domains.perp.context_builder import (
     MIN_FUNDING_SAMPLES,
@@ -108,7 +109,11 @@ __all__ = [
 
 # The packages this one may name at all. The reverse edge (any package under
 # ``contrib/`` naming this one) is held shut by ``tests/test_upstream.py``.
-UPSTREAM_PACKAGES: tuple[str, ...] = ("contrib.hyperliquid_perp", "contrib.autoresearch")
+UPSTREAM_PACKAGES: tuple[str, ...] = (
+    "contrib.core",
+    "contrib.hyperliquid_perp",
+    "contrib.autoresearch",
+)
 
 # Every borrow as ``(dotted module, attribute)`` — the audit list, and the
 # sequence the pin test walks. ``tests/test_upstream.py`` holds it equal to
@@ -124,14 +129,14 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.store", "StoreError"),
     ("contrib.autoresearch.vocabulary", "SpecError"),
     ("contrib.autoresearch.vocabulary", "require_number"),
-    ("contrib.hyperliquid_perp.common.atomic_io", "atomic_write_text"),
+    ("contrib.core.atomic_io", "atomic_write_text"),
+    ("contrib.core.instants", "epoch_ms"),
+    ("contrib.core.instants", "from_epoch_ms"),
+    ("contrib.core.instants", "parse_instant"),
     ("contrib.hyperliquid_perp.common.constants", "FILE_TARGET_MODEL"),
     ("contrib.hyperliquid_perp.common.constants", "FILE_TARGET_PENDING_PREFIX"),
     ("contrib.hyperliquid_perp.common.constants", "FILE_TARGET_UNUSABLE_PREFIX"),
     ("contrib.hyperliquid_perp.common.constants", "HANDOFF_SIDECAR_SUFFIX"),
-    ("contrib.hyperliquid_perp.common.instants", "epoch_ms"),
-    ("contrib.hyperliquid_perp.common.instants", "from_epoch_ms"),
-    ("contrib.hyperliquid_perp.common.instants", "parse_instant"),
     ("contrib.hyperliquid_perp.common.store_layout", "payload_dir"),
     ("contrib.hyperliquid_perp.domains.perp.context_builder", "MIN_FUNDING_SAMPLES"),
     ("contrib.hyperliquid_perp.domains.perp.context_builder", "funding_zscore"),

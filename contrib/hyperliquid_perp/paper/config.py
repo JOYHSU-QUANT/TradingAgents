@@ -13,6 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from decimal import Decimal
 
+from contrib.core.enum_guard import check_enum
+
 from ..common.config_coercion import (
     config_overrides,
     decimal_from_yaml,
@@ -20,7 +22,6 @@ from ..common.config_coercion import (
     str_from_yaml,
 )
 from ..common.constants import EXCHANGE_MIN_ORDER_NOTIONAL_USDC
-from ..common.enum_guard import check_enum
 from .twap import PLAN_LIFETIME_SECONDS, SLICE_INTERVAL_SECONDS
 
 __all__ = [

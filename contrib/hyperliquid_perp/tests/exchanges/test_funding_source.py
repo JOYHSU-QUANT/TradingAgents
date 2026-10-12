@@ -77,7 +77,7 @@ def test_history_funding_source_buckets_points_by_the_hour_of_their_stamp():
     neighbour's rate. Pinned on stamps built by the same integer arithmetic
     the lookup decodes with — one at the hour, one at its last millisecond.
     """
-    from contrib.hyperliquid_perp.common.instants import epoch_ms
+    from contrib.core.instants import epoch_ms
 
     noon = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
     one_pm = noon + timedelta(hours=1)
@@ -115,7 +115,7 @@ def test_history_funding_source_survives_an_out_of_range_stamp_in_the_window():
     fake that skipped the mapper would skip the fix too. The poisoned hour reads ``None`` — pending, retried next pass —
     and the good hour in the same response still resolves.
     """
-    from contrib.hyperliquid_perp.common.instants import epoch_ms
+    from contrib.core.instants import epoch_ms
     from contrib.hyperliquid_perp.exchanges.hyperliquid import mapper
 
     noon = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)

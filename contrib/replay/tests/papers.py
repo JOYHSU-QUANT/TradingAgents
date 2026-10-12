@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 
-from contrib.hyperliquid_perp.common.digest import json_bytes, payload_digest
+from contrib.core.digest import json_bytes, payload_digest
 from contrib.hyperliquid_perp.domains.perp.risk_gate import (
     CurrentPositionState,
     RiskConfig,

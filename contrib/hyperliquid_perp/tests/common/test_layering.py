@@ -3,14 +3,16 @@
 None of these invariants is exercised anywhere else:
 
 - ``domains/perp/margin`` and ``persistence/models`` re-export the ONE
-  ``DECIMAL_CONTEXT`` that lives in ``common`` BY IDENTITY — deleting either
+  ``DECIMAL_CONTEXT`` that lives in ``contrib.core`` BY IDENTITY — deleting either
   name would break its importers loudly, but forking a second, equal context
   would not, and nothing else would notice. Both paths stay: the margin one
   is frozen by phase3-spec §2.1 (``paper/engine`` reads it there), the
   models one is the persistence layer's entry point;
-- ``common/`` stays at the bottom of the import graph — the rule in
-  ``common/__init__``'s docstring that nothing there imports from another
-  ``hyperliquid_perp`` package would otherwise be enforced by review only;
+- ``common/`` stays at the bottom of the package's import graph — the rule
+  in ``common/__init__``'s docstring that nothing there imports from another
+  ``hyperliquid_perp`` package would otherwise be enforced by review only
+  (which OTHER contrib packages it may import is the package graph's rule,
+  ``contrib/tests/test_package_graph.py``);
 - the config loader, the pre-LLM context guards and the no-decision policy
   keep their load-time import closures below the SDK, the store and the
   engines (issue #122);
@@ -35,6 +37,7 @@ from types import SimpleNamespace
 import pytest
 
 from contrib import hyperliquid_perp as perp_pkg
+from contrib.core import decimal_context
 from contrib.hyperliquid_perp import (
     common as common_pkg,
     integration as integration_pkg,
@@ -42,7 +45,6 @@ from contrib.hyperliquid_perp import (
     persistence as persistence_pkg,
     runtime as runtime_pkg,
 )
-from contrib.hyperliquid_perp.common import decimal_context
 from contrib.hyperliquid_perp.domains.perp import margin
 from contrib.hyperliquid_perp.persistence import models
 
@@ -74,7 +76,7 @@ def _package_tail(name: str | None) -> str | None:
     return name[len(_PACKAGE) + 1 :]  # ``""`` for the bare package
 
 
-def test_the_decimal_context_reexports_are_the_common_object():
+def test_the_decimal_context_reexports_are_the_core_object():
     # Identity, not equality: a re-export that re-declared its own context
     # would keep equal behavior today but fork the definition the next time
     # one side moves.
@@ -93,16 +95,20 @@ def test_the_config_loader_imports_no_compute_module():
     #
     # To add an import here, put the value in ``common/`` or a ``*_vocab``
     # module and add THAT module here by name, rather than admitting a
-    # compute module — ``common.enum_guard`` is on it because ``schema``'s
-    # four vocabulary enums inherit their refusal sentence from it (issue
-    # #166); ``common.decision_source`` because the loader validates the
-    # ``decision_source:`` block (which provider a run asks) on every load,
-    # and the parser sits in ``common`` for exactly this reason. Those two are
-    # the parsers on the list — each runs on every load (the market-data
+    # compute module — ``common.decision_source`` is on it because the loader
+    # validates the ``decision_source:`` block (which provider a run asks) on
+    # every load, and the parser sits in ``common`` for exactly this reason.
+    # ``domains.perp.market_data_config`` and ``common.decision_source`` are
+    # the two parsers on the list — each runs on every load (the market-data
     # block is always present, the decision-source default always applies),
-    # so a lazy import would buy nothing — and ``schema`` is the DTO
-    # module it reaches for the candle-interval vocabulary. Named module by
-    # module, never by a ``common.*`` prefix: the common-layer check below
+    # so a lazy import would buy nothing — and ``schema`` is the DTO module
+    # ``market_data_config`` reaches for the candle-interval vocabulary.
+    # ``schema``'s four vocabulary enums inherit their refusal sentence from
+    # ``contrib.core.enum_guard`` (issue #166); the walk follows in-package
+    # imports only, so ``contrib.core`` is not on the list, and
+    # ``contrib/tests/test_package_graph.py`` holds that package to the
+    # standard library instead. Named module by module, never by a
+    # ``common.*`` prefix: the common-layer check below
     # only forbids IN-PACKAGE imports, so a prefix would admit a ``common``
     # helper that grew a numpy import.
     #
@@ -123,7 +129,6 @@ def test_the_config_loader_imports_no_compute_module():
         "common.config_coercion",
         "common.constants",
         "common.decision_source",
-        "common.enum_guard",
         "domains.perp.indicator_vocab",
         "domains.perp.market_data_config",
         "domains.perp.schema",
@@ -610,29 +615,35 @@ def test_the_walk_reaches_every_suite_that_runs_on_import_but_not_a_function_bod
 def test_common_imports_nothing_from_the_rest_of_the_package():
     # Structural check on the import statements themselves (not runtime state,
     # which depends on what happens to be imported first): a relative import
-    # reaching above common/ (level >= 2) or an absolute import of the contrib
+    # reaching above common/ (level >= 2) or an absolute import of this
     # package both violate the bottom-of-the-import-graph rule. Sibling
-    # imports inside common/ (level 1) stay legal.
+    # imports inside common/ (level 1) stay legal. Which OTHER contrib
+    # packages common/ may import is not this test's rule: it is the package's
+    # row in ``contrib/tests/test_package_graph.py``'s ``ALLOWED`` (only
+    # ``contrib.core``, the floor below, since dashboard plan PR 1), held
+    # there for every module of the package at once.
     #
-    # NOTE the predicate here is deliberately WIDER than _package_tail above:
-    # common/ may import no contrib package at all, while config.py may import
-    # an allowlisted few from THIS package. Sharing _PACKAGE keeps the root
-    # spelled once without pretending the two rules are the same rule.
-    def is_contrib(name: str | None) -> bool:
-        return _within(name, "contrib")
+    # A ``from X import y`` is judged by the names it binds (``X.y``), so
+    # ``from contrib import hyperliquid_perp`` reaches this package exactly
+    # as ``from contrib.hyperliquid_perp import y`` does.
+    def is_own(name: str) -> bool:
+        return _within(name, _PACKAGE)
 
     offenders = []
     for source in package_sources(common_pkg):
         tree = ast.parse(source.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
-                if node.level >= 2 or is_contrib(node.module):
+                absolute_own = node.level == 0 and any(
+                    is_own(f"{node.module}.{alias.name}") for alias in node.names
+                )
+                if node.level >= 2 or absolute_own:
                     offenders.append(f"{source.name}: from {'.' * node.level}{node.module or ''}")
             elif isinstance(node, ast.Import):
                 offenders.extend(
                     f"{source.name}: import {alias.name}"
                     for alias in node.names
-                    if is_contrib(alias.name)
+                    if is_own(alias.name)
                 )
     assert not offenders, offenders
 

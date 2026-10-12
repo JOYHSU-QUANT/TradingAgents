@@ -44,7 +44,8 @@ from decimal import Decimal, localcontext
 from enum import Enum
 from typing import TYPE_CHECKING, Literal
 
-from ..common.decimal_context import DECIMAL_CONTEXT
+from contrib.core.decimal_context import DECIMAL_CONTEXT
+
 from ..exchanges.hyperliquid.errors import (
     ExchangeError,
     ExchangeThrottledError,

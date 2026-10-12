@@ -20,7 +20,8 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from ...common.instants import epoch_ms, from_epoch_ms
+from contrib.core.instants import epoch_ms, from_epoch_ms
+
 from .indicators import compute_indicators
 from .macro_trend import compute_macro_trend
 from .marginal_cost import PositionInputs, build_position_context

@@ -52,7 +52,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from ..common.instants import from_epoch_ms
+from contrib.core.instants import from_epoch_ms
+
 from ..exchanges.hyperliquid.errors import MalformedResponseError
 from ..exchanges.hyperliquid.mapper import (
     HL_SIDE_TO_LOCAL,

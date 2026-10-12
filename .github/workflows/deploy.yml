@@ -26,7 +26,7 @@ jobs:
             git checkout deploy/paper 2>/dev/null || git checkout -b deploy/paper origin/deploy/paper
             git reset --hard origin/deploy/paper
             .venv/bin/pip install -q -r requirements.txt
-            .venv/bin/python -m pytest contrib/hyperliquid_perp/tests/ contrib/carry/tests/ -q
+            .venv/bin/python -m pytest contrib/core/tests/ contrib/hyperliquid_perp/tests/ contrib/carry/tests/ contrib/tests/ -q
           '
           # The carry sleeve's perp daemon and coordinator run from this same
           # checkout (contrib/carry/RUNBOOK.md): the daemon is restarted with

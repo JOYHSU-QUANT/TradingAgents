@@ -309,7 +309,7 @@ class MarketContextProvider(ABC):
             "context_text": context_text,
             "format_instructions": format_text,
         }
-        from ..common.digest import json_bytes, payload_digest
+        from contrib.core.digest import json_bytes, payload_digest
 
         # Bytes end to end: the digest is over exactly the bytes the file
         # holds, so a verifier that rehashes the file (the fingerprint

@@ -13,10 +13,11 @@ from typing import Any
 
 import yaml
 
+from contrib.core.enum_guard import check_enum
+
 from .common.config_coercion import bool_from_yaml, int_from_yaml
 from .common.constants import LEGAL_NETWORKS
 from .common.decision_source import DecisionSourceConfig
-from .common.enum_guard import check_enum
 from .domains.perp.indicator_vocab import REGIME_INDICATORS, supported_indicators
 from .domains.perp.market_data_config import MarketDataConfig
 

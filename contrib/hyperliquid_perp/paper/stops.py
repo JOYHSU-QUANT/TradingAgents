@@ -31,7 +31,8 @@ from dataclasses import InitVar, dataclass, field
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, localcontext
 from enum import Enum
 
-from ..common.decimal_context import DECIMAL_CONTEXT
+from contrib.core.decimal_context import DECIMAL_CONTEXT
+
 from ..persistence.models import Side
 
 __all__ = [

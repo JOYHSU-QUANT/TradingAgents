@@ -207,6 +207,33 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **`contrib/core`, a floor every contrib package shares** (dashboard plan
+  PR 1). Five strategy-free modules moved out of
+  `contrib.hyperliquid_perp.common`: `atomic_io`, `decimal_context`,
+  `digest`, `enum_guard` and `instants`. No re-export is left behind; every
+  importer, in every package and its tests, now imports `contrib.core.<module>`.
+  `sidecar` stays in the perp package, because its contract is the perp
+  input payload's. The decodable epoch-ms range (`MIN_EPOCH_MS` /
+  `MAX_EPOCH_MS`) moved from `common.constants` into `contrib.core.instants`,
+  derived beside the decoder it describes: the second spelling of the epoch
+  existed only because the config loader's import closure could not reach
+  `instants`, and core sits outside that closure. The values are unchanged,
+  and so is the moved code, so this is not a segment point for any paper
+  run. A new test, `contrib/tests/test_package_graph.py`, holds the graph
+  between the packages: each package may import only the
+  packages its row in `ALLOWED` names (a package without a row, or a
+  directory of sources without an `__init__.py`, fails), `contrib.core`
+  imports the standard
+  library only, and which perp subpackages each other package reaches into
+  is frozen as of 2026-10-12 and can only shrink. CI's autoresearch job and
+  `deploy.yml` now also run `contrib/core/tests` and `contrib/tests`, and
+  mypy checks `contrib/core`. The perp RUNBOOK, RUNBOOK-live and SETUP test
+  gates also run those two directories. Left as they are, by decision:
+  autoresearch, replay and carry still reach `contrib.core` through their
+  `upstream.py` funnel (to be revisited when the exporter package arrives),
+  `paper.scheduler` still re-exports `parse_instant` for its two test
+  callers, and the graph test is not a required check.
+
 - **The CME futures-basis and CFTC positioning tools serve Ether beside
   Bitcoin** (`tradingagents/dataflows/cme_basis.py`,
   `tradingagents/dataflows/cftc_cot.py`, the two `crypto_data_tools`

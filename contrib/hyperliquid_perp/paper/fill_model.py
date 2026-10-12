@@ -21,7 +21,8 @@ from __future__ import annotations
 
 from decimal import Decimal, localcontext
 
-from ..common.decimal_context import DECIMAL_CONTEXT
+from contrib.core.decimal_context import DECIMAL_CONTEXT
+
 from ..persistence.models import Side
 from .stops import round_to_tick
 

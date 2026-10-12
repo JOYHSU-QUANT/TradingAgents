@@ -20,7 +20,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from ..common.enum_guard import check_enum
+from contrib.core.enum_guard import check_enum
+
 from ..persistence import repository as repo
 from .safe_mode import (
     REASON_INVALID_LOCAL_FILL,

@@ -16,8 +16,9 @@ from typing import TYPE_CHECKING, Any
 from hyperliquid.info import Info
 from hyperliquid.utils import constants
 
+from contrib.core.enum_guard import check_enum
+
 from ...common.constants import LEGAL_NETWORKS
-from ...common.enum_guard import check_enum
 from .errors import ExchangeError, ExchangeRequestError, ExchangeThrottledError
 
 if TYPE_CHECKING:

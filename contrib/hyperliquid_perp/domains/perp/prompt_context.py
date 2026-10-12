@@ -13,7 +13,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from ...common.instants import delta_ms, from_epoch_ms, gap_label
+from contrib.core.instants import delta_ms, from_epoch_ms, gap_label
+
 from .schema import (
     MacroAlignment,
     MacroTrend,

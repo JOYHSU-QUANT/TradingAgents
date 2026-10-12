@@ -6,7 +6,8 @@ import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from ...common.enum_guard import check_enum
+from contrib.core.enum_guard import check_enum
+
 from ..models import PositionState
 from ._base import _dec_or_none, _insert
 from ._vocab import _MODES

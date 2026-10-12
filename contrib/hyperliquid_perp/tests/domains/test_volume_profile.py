@@ -24,8 +24,8 @@ from decimal import Decimal, localcontext
 
 import pytest
 
+from contrib.core.decimal_context import DECIMAL_CONTEXT
 from contrib.hyperliquid_perp.common.constants import MIN_VOLUME_PROFILE_WINDOW
-from contrib.hyperliquid_perp.common.decimal_context import DECIMAL_CONTEXT
 from contrib.hyperliquid_perp.domains.perp.schema import Candle, ProfileShape, VolumeProfile
 from contrib.hyperliquid_perp.domains.perp.volume_profile import (
     BUCKET_COUNT,

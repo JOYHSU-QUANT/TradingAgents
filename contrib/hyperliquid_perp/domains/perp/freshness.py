@@ -7,8 +7,9 @@ composing exchange reads into engine inputs. This module owns the verdict —
 :func:`~.context_guards.context_refusal` calls it as the last of the four
 pre-LLM guards.
 
-SDK-free and persistence-free on purpose: it imports only :mod:`.schema` (for
-the context type and :func:`~.schema.interval_to_ms`) and ``common``. A
+SDK-free and persistence-free on purpose: from this package it imports only
+:mod:`.schema` (for the context type and :func:`~.schema.interval_to_ms`)
+and ``common``, and beyond it only the stdlib-only floor ``contrib.core``. A
 domain module that reached into the exchange adapter or the store would
 invert the package's layering; staying below both is also what lets
 :class:`ContextRefusal` validate its class against
@@ -25,9 +26,10 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from contrib.core.enum_guard import check_enum
+from contrib.core.instants import delta_ms, whole_hours_label
+
 from ...common.constants import CYCLE_INTERVAL, ERROR_TYPES, STALE_MARKET_DATA_ERROR
-from ...common.enum_guard import check_enum
-from ...common.instants import delta_ms, whole_hours_label
 from .schema import PerpMarketContext, interval_to_ms
 
 __all__ = [
@@ -70,7 +72,7 @@ def _utc_stamp(moment: datetime) -> str:
 
 
 # For the ``timedelta`` span below (the decision cycle) in ms; instant
-# subtraction goes through ``common.instants.delta_ms``.
+# subtraction goes through ``contrib.core.instants.delta_ms``.
 _ONE_MS = timedelta(milliseconds=1)
 
 

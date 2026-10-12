@@ -55,7 +55,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from ..common.instants import Seconds
+from contrib.core.instants import Seconds
+
 from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
 from ..persistence import repository as repo
 from ..persistence.cloid import OrderRole

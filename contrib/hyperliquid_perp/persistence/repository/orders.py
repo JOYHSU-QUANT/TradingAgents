@@ -7,7 +7,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
-from ...common.enum_guard import check_enum
+from contrib.core.enum_guard import check_enum
+
 from ..models import Side
 from ._base import _UNSET, _encode, _insert, _iso_utc, _Unset
 from ._vocab import (

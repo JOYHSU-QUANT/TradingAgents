@@ -48,7 +48,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
-from ..common.decimal_context import DECIMAL_CONTEXT
+from contrib.core.decimal_context import DECIMAL_CONTEXT
+
 from ..paper.stops import round_to_tick
 from ..paper.twap import floor_to_step
 from ..persistence import repository as repo

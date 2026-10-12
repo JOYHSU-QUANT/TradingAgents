@@ -17,6 +17,9 @@ from decimal import Decimal, localcontext
 from enum import Enum
 from typing import Any
 
+from contrib.core.decimal_context import DECIMAL_CONTEXT
+from contrib.core.enum_guard import check_enum
+
 from ..common.config_coercion import (
     bool_from_yaml,
     config_overrides,
@@ -25,8 +28,6 @@ from ..common.config_coercion import (
     str_from_yaml,
 )
 from ..common.constants import EXCHANGE_MIN_ORDER_NOTIONAL_USDC, LEGAL_NETWORKS
-from ..common.decimal_context import DECIMAL_CONTEXT
-from ..common.enum_guard import check_enum
 from ..domains.perp.risk_gate import MarginMode, RiskConfig
 
 __all__ = [
@@ -748,7 +749,7 @@ def compute_notional_caps(account_equity: Decimal, safety: LiveSafetyConfig) -> 
     ``pct_cap_notional = account_equity × max_target_margin_pct / 100 × leverage``
     ``effective_notional_cap = min(pct_cap_notional, max_notional_usdc)``
     """
-    # Same pin as every other money computation (common/decimal_context.py DECIMAL_CONTEXT):
+    # Same pin as every other money computation (contrib/core/decimal_context.py DECIMAL_CONTEXT):
     # the recorded startup caps must not depend on the ambient global context.
     with localcontext(DECIMAL_CONTEXT):
         pct_cap = account_equity * safety.max_target_margin_pct / 100 * safety.leverage

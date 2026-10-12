@@ -20,7 +20,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from ..common.instants import parse_instant
+from contrib.core.instants import parse_instant
 
 # The prompt-side DTO lives in ``domains/`` — the context builder assembles the
 # position section and must not import ``paper/`` — and is re-exported here,

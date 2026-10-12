@@ -13,7 +13,8 @@ from __future__ import annotations
 import logging
 from typing import Protocol
 
-from ..common.instants import Seconds, seconds_span
+from contrib.core.instants import Seconds, seconds_span
+
 from .config import KillSwitchConfig
 
 __all__ = [

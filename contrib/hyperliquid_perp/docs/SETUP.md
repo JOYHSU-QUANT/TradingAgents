@@ -31,7 +31,7 @@ pip install -r requirements.txt
 驗證安裝：
 
 ```bash
-python -m pytest contrib/hyperliquid_perp/tests/ -q
+python -m pytest contrib/core/tests/ contrib/hyperliquid_perp/tests/ contrib/tests/ -q
 ```
 
 ## 3. 設定
@@ -337,7 +337,7 @@ maintain_current 紀錄（`target_*` 全為 null）無法事後重現成幣量�
 
 ```bash
 # 本模組全部測試（純函式——不需要 key、不連網）
-python -m pytest contrib/hyperliquid_perp/tests/ -q
+python -m pytest contrib/core/tests/ contrib/hyperliquid_perp/tests/ contrib/tests/ -q
 
 # Lint
 python -m ruff check contrib/hyperliquid_perp/

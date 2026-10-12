@@ -27,12 +27,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from decimal import Decimal, localcontext
 
-# The one decimal context for money math now lives in the dependency-free
-# common layer (see its module docstring for the pin rationale). Re-exported
+# The one decimal context for money math now lives in the stdlib-only floor,
+# ``contrib.core.decimal_context`` (see its module docstring for the pin
+# rationale). Re-exported
 # from its original home for importers deliberately left on this path:
 # paper/engine stays untouched under the phase3-spec §2.1 freeze, and
 # out-of-tree consumers may still read it from here.
-from ...common.decimal_context import DECIMAL_CONTEXT
+from contrib.core.decimal_context import DECIMAL_CONTEXT
 
 __all__ = [
     "DECIMAL_CONTEXT",

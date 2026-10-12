@@ -26,9 +26,11 @@ what a guardrail built on that rule would have done. It scores nothing.
 It was the first package under ``contrib/`` to import BOTH neighbours
 (``contrib.carry`` follows the same funnel) —
 ``contrib.hyperliquid_perp`` for the decision vocabulary, the store, the
-paper cost parameters and (for the past papers) the parse seam, the gate,
-the payload digest and the prompt assembly, ``contrib.autoresearch`` for the
-split, the cost model and the research store (replay plan §3-1). The edge is one-way: neither
+paper cost parameters and (for the past papers) the parse seam, the gate
+and the prompt assembly, ``contrib.autoresearch`` for the split, the cost
+model and the research store (replay plan §3-1); the payload digest, the
+instants and the decimal context come from the shared floor
+``contrib.core``, which is no neighbour. The edge is one-way: neither
 neighbour imports this package, and ``tests/test_upstream.py`` reads their
 sources to hold that. What is borrowed is listed once, in
 :mod:`~contrib.replay.upstream`, and every other module here imports from

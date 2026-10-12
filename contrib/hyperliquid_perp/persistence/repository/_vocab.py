@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from contrib.core.enum_guard import VocabEnum
+
 from ...common.constants import ERROR_TYPES
-from ...common.enum_guard import VocabEnum
 from ...domains.perp.risk_gate import RiskAction
 from ...domains.perp.target_decision import DecisionMode, TargetSide
 from ..cloid import LIVE_ORDER_ROLES, OrderRole

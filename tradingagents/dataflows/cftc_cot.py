@@ -161,7 +161,9 @@ CACHE_TTL_HOURS = 24
 MAX_STALE_DAYS = 21
 # 2: the payload names its contract code, so a file holding the other
 # series' rows (a copied or renamed cache) is rejected rather than served
-# under this asset's title. Schema 1 caches are refetched once.
+# under this asset's title. A schema-1 cache is rejected and refetched once
+# — unless an older build sharing the cache directory keeps rewriting it
+# (the CHANGELOG's deploy note).
 CACHE_SCHEMA = 2
 
 # What the report says the leveraged-fund short usually is. In the report's
@@ -271,7 +273,11 @@ def _request(contract: Contract) -> list:
     # filter the host ignored or mangled would otherwise be parsed, stamped
     # as this contract and served under its title.
     foreign = sorted(
-        {str(row.get("cftc_contract_market_code")) for row in payload if isinstance(row, dict)}
+        {
+            str(row.get("cftc_contract_market_code", "(no code)"))
+            for row in payload
+            if isinstance(row, dict)
+        }
         - {contract.code}
     )
     if foreign:

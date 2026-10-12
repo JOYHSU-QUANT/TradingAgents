@@ -294,8 +294,8 @@ def front_expiry(day: date) -> date:
 def _in_session(index: pd.DatetimeIndex) -> pd.Series:
     """Which UTC hour stamps fall inside the CME Globex week, conservatively.
 
-    Globex trades Bitcoin and Ether futures from Sunday 17:00 to Friday 16:00 Central
-    Time. In UTC that is Sunday 22:00 to Friday 21:00 under daylight time and
+    Globex trades Bitcoin and Ether futures from Sunday 17:00 to Friday 16:00
+    Central Time. In UTC that is Sunday 22:00 to Friday 21:00 under daylight time and
     an hour later on both ends under standard time. The rule below is the
     intersection of the two — closed from Friday 21:00 to Sunday 23:00 UTC —
     so it needs no timezone database and cannot be wrong across a DST change;

@@ -144,21 +144,26 @@ Breaking changes within the 0.x line are called out explicitly.
   cached in its own `cftc_cot_eth.json`; a fixture of eight real Ether rows
   pins the parse and the report; the cache payload now carries its contract
   code (`CACHE_SCHEMA` 2), so a file holding the other series' rows is
-  rejected, and the loader's logs name the coin. **Input-surface change for
-  the `uniswap_v3` AI judge**, which rates `ETH-USD`: both analysts gain a
-  report they used to be told was BTC-only, so a paper run that reads this
-  build starts a new input segment. The hyperliquid paper-BTC run's reports
-  are byte-identical; what its analysts do see change is wording only — the
-  two tools' descriptions and argument texts (`'BTC' or 'ETH'`, `(5 BTC, 50
-  ETH)`) and the two analyst hint sentences (`Bitcoin or Ether`, `BTC and
-  ETH only`) — all outside `PROMPT_VERSION`'s scope: a dated note for a
-  later paper review, not a new prompt version. Deploy note: the first
-  positioning call after an upgrade rejects the schema-1 `cftc_cot_btc.json`
-  and refetches it (one Socrata GET), with no stale fallback for that one
-  call; and if the two paper hosts' checkouts share one cache directory
-  (both services run as the same user, and the default is
-  `~/.tradingagents/cache`), upgrade both in the same window, or each
-  version keeps rejecting and rewriting the other's file until they match.
+  rejected, a Socrata answer carrying another contract's rows is refused
+  before it is parsed, and the loader's logs and its `DATA_UNAVAILABLE`
+  sentinel name the coin (`CFTC COT BTC`, was `CFTC COT`). **Input-surface
+  change for the `uniswap_v3` AI judge**, which rates `ETH-USD` beside
+  `BTC-USD`: for ETH both analysts gain a report they used to be told was
+  BTC-only, so a paper run that reads this build starts a new input
+  segment. The hyperliquid paper-BTC run's reports are byte-identical, as
+  are the judge's BTC-USD ones; what their analysts do see change is
+  wording — the two tools' descriptions and argument texts (`'BTC' or
+  'ETH'`, `(5 BTC, 50 ETH)`), the two analyst hint sentences (`Bitcoin or
+  Ether`, `BTC and ETH only`) and the sentinel's coin — all outside
+  `PROMPT_VERSION`'s scope: a dated note for a later paper review, not a new
+  prompt version. Deploy note: the first positioning call after an upgrade
+  rejects the schema-1 `cftc_cot_btc.json` and refetches it (one Socrata
+  GET), with no stale fallback for that one call; and any old-build process
+  that reads BTC positioning through the same cache directory keeps
+  rejecting and rewriting the new build's file until it is upgraded too, so
+  upgrade such checkouts in the same window (the two paper services do not
+  share one: the uniswap judge keeps its cache beside its db, the
+  hyperliquid run uses the default `~/.tradingagents/cache`).
 
 - **The default deep-think model of both paper traders is Claude Sonnet 5.5,
   and the default completion cap is 16384** (`contrib/hyperliquid_perp`,

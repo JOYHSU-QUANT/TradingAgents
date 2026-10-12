@@ -274,10 +274,10 @@ def get_futures_basis(
     regulated future (Yahoo BTC=F or ETH=F) trades at over spot (Yahoo BTC-USD
     or ETH-USD), one contract per asset. Reported as a nominal percentage —
     the median over the latest 24 hours in which both traded, matched on the
-    same UTC hour, because the two DAILY closes are
-    hours apart and their difference is mostly clock mismatch — and annualized
-    by the front contract's days to expiry, with a 7-day annualized median and
-    the change against the reading 7 days earlier. The nominal basis decays
+    same UTC hour, because the two DAILY closes are hours apart and their
+    difference is mostly clock mismatch — and annualized by the front
+    contract's days to expiry, with a 7-day annualized median and the change
+    against the reading 7 days earlier. The nominal basis decays
     toward zero as the contract nears expiry and steps back up at the monthly
     roll, so annualized figures are the comparable ones. The annualized figure
     is withheld within 5 days of expiry, where it divides by almost nothing,
@@ -318,8 +318,8 @@ def get_futures_positioning(
 ) -> str:
     """
     Retrieve the CFTC Commitments of Traders (Traders in Financial Futures)
-    report for the CME Bitcoin or Ether future: open interest and, for each trader
-    category — dealers, asset managers, leveraged funds, other reportables,
+    report for the CME Bitcoin or Ether future: open interest and, for each
+    trader category — dealers, asset managers, leveraged funds, other reportables,
     non-reportables — the long, short and spreading positions, the net, its
     share of open interest, and the change against the previous published
     report and against the one four reports back, each change column
@@ -331,9 +331,9 @@ def get_futures_positioning(
     did. The publication date is derived and can be later than shown when a
     US holiday delays the release. Only the standard contract is read (5 BTC,
     50 ETH); the Micro contracts are separate series. A Scale line says what
-    size of weekly change is ordinary for each headline category and where its net
-    has ranged over the trailing year, computed from the series itself. A
-    leveraged-fund short is usually the futures leg of a cash-and-carry trade
+    size of weekly change is ordinary for each headline category and where
+    its net has ranged over the trailing year, computed from the series
+    itself. A leveraged-fund short is usually the futures leg of a cash-and-carry trade
     against spot or ETF holdings — the carry the futures basis pays — not a
     bearish view, and the report says so. The whole report is withheld, with
     no figures, when no report had been published by curr_date or the newest

@@ -253,6 +253,11 @@ class TestRequest:
         _serve(monkeypatch, body=[ROWS[0]] + ETH_ROWS[:2])
         with pytest.raises(cftc_cot.CftcError, match="rows of contract 146021 for a query on"):
             cftc_cot._request(BTC)
+        # A row with no code at all is foreign too: the filter was on the code.
+        nameless = {k: v for k, v in ROWS[0].items() if k != "cftc_contract_market_code"}
+        _serve(monkeypatch, body=[ROWS[0], nameless])
+        with pytest.raises(cftc_cot.CftcError, match=r"rows of contract \(no code\) for"):
+            cftc_cot._request(BTC)
 
     def test_a_runaway_answer_is_refused(self, monkeypatch):
         _serve(monkeypatch, body=[ROWS[0]] * cftc_cot.MAX_ROWS)

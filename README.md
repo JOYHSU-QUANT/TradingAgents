@@ -522,15 +522,14 @@ coin's prices that it "may be invalid, delisted". CME closes for the weekend
 and a paper loop does not, so a reading whose newest hour ended more than 3
 hours earlier says it is not a live one. The report also carries its own
 scale: on three days in four (measured over 492 days of Bitcoin; Ether,
-measured 2026-10-12 over the same 729 days as a Bitcoin re-measurement, rounds
-to the same figures) the 7-day change was under about 3 annualized points and
-a reading sat within about 1.5 points of its own 7-day median, and the
-annualized figure runs about a point high in the last days
+measured 2026-10-12 alongside a Bitcoin re-measurement over the same 729
+days, rounds to the same figures) the 7-day change was under about 3
+annualized points and a reading sat within about 1.5 points of its own 7-day
+median, and the annualized figure runs about a point high in the last days
 before it is withheld (5 to 7 days from expiry), because Yahoo's spot is an
 aggregate rather than the rate the contract settles to. The cost of the hourly
-method is two
-uncached Yahoo requests per call, through the same throttle latch as every
-other yfinance leaf.
+method is two uncached Yahoo requests per call, through the same throttle
+latch as every other yfinance leaf.
 
 Shipped disabled for the reason above and **cut over to `"yfinance"` on
 2026-09-22**, in the same dated flip as the CFTC positioning tool below. To
@@ -569,10 +568,9 @@ backtest of that window; the dataset has no release-date column, and the
 "derived" label is the disclosure. Only the standard contracts are read — 5
 BTC (code 133741) and 50 ETH (code 146021); the Micro contracts are separate
 series and the report says so. A Scale line, computed from the 52 changes
-between the 53 reports before
-the one served, says
-what size of weekly change is ordinary for each headline category
-and where its net has ranged as a share of open interest. Each series is a
+between the 53 reports before the one served, says what size of weekly change
+is ordinary for each headline category and where its net has ranged as a
+share of open interest. Each series is a
 few hundred rows, cached daily in its own file, stamped with its contract
 code, through the family's rolling snapshot on the family's clock (stale
 serves up to 21 days, failed fetches never written); a

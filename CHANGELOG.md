@@ -221,7 +221,9 @@ Breaking changes within the 0.x line are called out explicitly.
   and so is the moved code, so this is not a segment point for any paper
   run. A new test, `contrib/tests/test_package_graph.py`, holds the graph
   between the packages: each package may import only the
-  packages its row in `ALLOWED` names, `contrib.core` imports the standard
+  packages its row in `ALLOWED` names (a package without a row, or a
+  directory of sources without an `__init__.py`, fails), `contrib.core`
+  imports the standard
   library only, and which perp subpackages each other package reaches into
   is frozen as of 2026-10-12 and can only shrink. CI's autoresearch job and
   `deploy.yml` now also run `contrib/core/tests` and `contrib/tests`, and

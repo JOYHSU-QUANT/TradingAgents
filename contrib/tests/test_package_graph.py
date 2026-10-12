@@ -190,7 +190,8 @@ def test_every_directory_with_sources_is_a_package():
     # The scan finds packages by their ``__init__.py``, as the packages' own
     # neighbour discovery does. A directory of sources without one would be
     # importable as a namespace package and invisible to every check here, so
-    # it is refused by name instead. This directory is the one exception.
+    # it is refused by name instead. This directory is the one exception
+    # (``__pycache__`` holds no sources).
     unpackaged = sorted(
         p.name
         for p in _CONTRIB.iterdir()

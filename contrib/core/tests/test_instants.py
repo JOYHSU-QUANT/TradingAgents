@@ -198,7 +198,8 @@ def test_epoch_ms_refuses_a_naive_instant_naming_what_was_handed_in():
     # caller's, REQUIRED (no anonymous refusal): each caller pins its own
     # wording through ``what``. The label below is this test's own sample, not
     # a live one — the two windowed reads now pass "candle window end" and
-    # "funding history window end" and pin those in ``test_market_data.py``.
+    # "funding history window end" and pin those in the perp package's
+    # ``tests/exchanges/test_market_data.py``.
     naive = datetime(2026, 8, 31, 8, 0)
     with pytest.raises(ValueError, match="^market data window end must be timezone-aware"):
         epoch_ms(naive, what="market data window end")

@@ -98,15 +98,17 @@ def test_the_config_loader_imports_no_compute_module():
     # compute module — ``common.decision_source`` is on it because the loader
     # validates the ``decision_source:`` block (which provider a run asks) on
     # every load, and the parser sits in ``common`` for exactly this reason.
-    # It is the parser on the list — it runs on every load (the
-    # decision-source default always applies), so a lazy import would buy
-    # nothing — and ``schema`` is the DTO module it reaches for the
-    # candle-interval vocabulary. ``schema``'s four vocabulary enums inherit
-    # their refusal sentence from ``contrib.core.enum_guard`` (issue #166);
-    # the walk follows in-package imports only, so ``contrib.core`` is not on
-    # the list, and ``contrib/tests/test_package_graph.py`` holds that
-    # package to the standard library instead. Named module by
-    # module, never by a ``common.*`` prefix: the common-layer check below
+    # ``domains.perp.market_data_config`` and ``common.decision_source`` are
+    # the two parsers on the list — each runs on every load (the market-data
+    # block is always present, the decision-source default always applies),
+    # so a lazy import would buy nothing — and ``schema`` is the DTO module
+    # ``market_data_config`` reaches for the candle-interval vocabulary.
+    # ``schema``'s four vocabulary enums inherit their refusal sentence from
+    # ``contrib.core.enum_guard`` (issue #166); the walk follows in-package
+    # imports only, so ``contrib.core`` is not on the list, and
+    # ``contrib/tests/test_package_graph.py`` holds that package to the
+    # standard library instead. Named module by module, never by a
+    # ``common.*`` prefix: the common-layer check below
     # only forbids IN-PACKAGE imports, so a prefix would admit a ``common``
     # helper that grew a numpy import.
     #

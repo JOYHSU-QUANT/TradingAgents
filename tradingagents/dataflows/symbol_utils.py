@@ -82,11 +82,20 @@ _YAHOO_SAFE = re.compile(r"^[A-Za-z0-9._\-\^=]+$")
 # match before the ``USD`` substring.
 _CRYPTO_QUOTES = ("USDT", "USDC", "USD")
 
-# Quotes that make a crypto pair a cross: another crypto base or a non-USD fiat
-# currency. A deny-list rather than "anything but USD", so venue suffixes and
-# stablecoin quotes outside ``_CRYPTO_QUOTES`` (PERP, SWAP, DAI) keep resolving
-# to their base in ``classify_crypto_asset``.
-_CROSS_QUOTES = (CRYPTO_BASES | _FOREX_CURRENCIES) - {"USD"}
+# Quotes that make a crypto pair a cross: another crypto base, a wrapped, staked
+# or exchange-alias name for one (WBTC, STETH, XBT), a non-USD fiat currency, or
+# a euro stablecoin. A deny-list rather than "anything but USD", so venue
+# suffixes and stablecoin quotes outside ``_CRYPTO_QUOTES`` (PERP, SWAP, DAI)
+# keep resolving to their base in ``classify_crypto_asset``.
+_CROSS_QUOTES = (
+    CRYPTO_BASES
+    | _FOREX_CURRENCIES
+    | {"XBT", "WBTC", "WETH", "CBBTC", "STETH", "EURC", "EURT"}
+) - {"USD"}
+
+# The quote's first alphanumeric run, so a settle or venue tail (``BTC:BTC``,
+# ``EUR=X``) or stray whitespace does not hide the currency it starts with.
+_QUOTE_TOKEN = re.compile(r"[A-Z0-9]+")
 
 
 def crypto_base(raw: str) -> str | None:
@@ -190,7 +199,8 @@ def classify_crypto_asset(
         # that vendor's library failing and report it as text (#219).
         raise WiringGapError("native must be a collection of base symbols, not a bare string")
     base, _, quote = normalize_symbol((asset or "").replace("/", "-")).partition("-")
-    if quote.partition("-")[0] in _CROSS_QUOTES:
+    quote_token = _QUOTE_TOKEN.search(quote)
+    if quote_token is not None and quote_token.group() in _CROSS_QUOTES:
         return None, False
     if base in native:
         return base, False

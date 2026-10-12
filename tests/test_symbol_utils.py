@@ -96,7 +96,13 @@ class TestClassifyCryptoAsset(unittest.TestCase):
     def test_non_usd_crosses_are_no_signal(self):
         # The base alone is recognized, but every vendor's report is USD-priced,
         # so a cross must not be served the base's USD data (#351) — nor proxied.
-        for asset in ("ETH-BTC", "BTC-EUR", "ETH/BTC", "SOL-ETH", "ETH-BTC-PERP", "ETHBTC"):
+        for asset in (
+            "ETH-BTC", "BTC-EUR", "ETH/BTC", "SOL-ETH", "ETH-BTC-PERP", "ETHBTC",
+            # Aliases of a base and euro stablecoins are crosses too.
+            "ETH-XBT", "ETH-WBTC", "BTC-WETH", "ETH-STETH", "BTC-EURC", "BTC-EURT",
+            # A settle/venue tail or stray whitespace must not hide the quote.
+            "ETH/BTC:BTC", "BTC-EUR=X", "ETH- BTC",
+        ):
             with self.subTest(asset=asset):
                 self.assertEqual(classify_crypto_asset(asset, {"BTC", "ETH"}), (None, False))
 

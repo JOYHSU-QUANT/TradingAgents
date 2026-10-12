@@ -1669,7 +1669,8 @@ def _classify_asset(asset: str) -> tuple[str | None, bool]:
     * ``(None, False)`` — not a recognized crypto risk asset (a stablecoin, a
       quote-only, an unrecognized symbol, or a cross such as ``ETH-BTC``). A
       stablecoin has no crypto-vol character to proxy, so there is no signal
-      to serve; a cross asks for a non-USD price no USD-quoted chain answers.
+      to serve; a cross asks for a non-USD price no USD-denominated report
+      answers.
 
     Delegates to the shared ``normalize_symbol`` so pair forms and crypto-base
     recognition match the rest of the system — the same classification farside

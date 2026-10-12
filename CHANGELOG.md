@@ -59,9 +59,12 @@ Breaking changes within the 0.x line are called out explicitly.
   ignored the quote, so `get_futures_basis("ETH-BTC", …)` served CME Ether's
   basis against `ETH-USD`, and the ETF-flow, treasury, Deribit, whale and
   CFTC vendors did the same through the shared classifier (PR #350 widened
-  this to ETH crosses). A quote that is another crypto base or a non-USD fiat
-  currency now makes the pair a cross, answered `(None, False)` and never
-  proxied. The rule is a deny-list, so venue suffixes and stablecoin quotes
+  this to ETH crosses). A quote that is another crypto base (or a wrapped,
+  staked or exchange-alias name for one: `WBTC`, `WETH`, `CBBTC`, `STETH`,
+  `XBT`), a non-USD fiat currency or a euro stablecoin (`EURC`, `EURT`) now
+  makes the pair a cross, answered `(None, False)` and never proxied. Only
+  the quote's first alphanumeric run is read, so a settle or venue tail
+  (`ETH/BTC:BTC`, `BTC-EUR=X`) or stray whitespace does not hide it. The rule is a deny-list, so venue suffixes and stablecoin quotes
   (`BTC-PERP`, `ETH-USD-SWAP`, `ETH-DAI`) still resolve to their base, and
   undashed crosses (`ETHBTC`) stay no-signal as before. The no-signal text of
   the deribit, farside, sosovalue, treasury and whale vendors now lists a

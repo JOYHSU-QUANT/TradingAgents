@@ -906,9 +906,10 @@ def get_etf_flow_data(
     asset_key, market_proxy = _classify_asset(asset)
     if asset_key is None:
         # Not a recognized crypto risk asset (a stablecoin like USDT/USDC, a
-        # quote-only, or an unrecognized symbol). A stablecoin has no risk-on/off
-        # flow character, so serving BTC flows as its "proxy" would be a misleading
-        # signal. Like the earlier unsupported-asset path this is a "no signal"
+        # quote-only, an unrecognized symbol, or a cross such as ETH-BTC, which
+        # asks for a non-USD price these USD flows do not answer). A stablecoin
+        # has no risk-on/off flow character, so serving BTC flows as its "proxy"
+        # would be a misleading signal. Like the earlier unsupported-asset path this is a "no signal"
         # statement, not an error, so it is returned (more useful to the analyst
         # than a generic degraded-category sentinel) rather than raised.
         return (

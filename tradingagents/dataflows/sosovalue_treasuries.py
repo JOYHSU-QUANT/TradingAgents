@@ -55,7 +55,8 @@ request so the emergency-disable flip stays immediate.
 Asset scope: the module serves BTC only (that is the product). ``BTC`` gets
 the native report; another recognized crypto risk asset (including ETH, which
 has no treasuries module here) gets the same data labelled as a market-wide
-demand proxy; a stablecoin or unrecognized symbol gets a no-signal note —
+demand proxy; a stablecoin, an unrecognized symbol or a cross (``ETH-BTC``)
+gets a no-signal note —
 mirroring the ETF module's classification, with ETH on the proxy side this
 time.
 

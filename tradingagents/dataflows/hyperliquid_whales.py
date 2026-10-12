@@ -1238,8 +1238,8 @@ def _classify_asset(asset: str) -> str | None:
     """The venue coin a caller symbol maps to, or None for no signal.
 
     Read through the shared ``classify_crypto_asset`` so pair forms, slash
-    forms and the look-alike rejections (``WETH``, ``BTCB``, stablecoins) match
-    the other crypto vendors. The proxy lane that helper offers cannot fire
+    forms and the rejections (look-alikes like ``WETH``/``BTCB``, stablecoins,
+    crosses like ``ETH-BTC``) match the other crypto vendors. The proxy lane that helper offers cannot fire
     here — this vendor's native set IS the recognized-risk-asset vocabulary,
     since Hyperliquid lists a perp for each of them — so the flag is discarded:
     there is no symbol for which another coin's positioning would be the honest

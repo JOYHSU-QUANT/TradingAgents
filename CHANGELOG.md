@@ -64,7 +64,8 @@ Breaking changes within the 0.x line are called out explicitly.
   `XBT`), a non-USD fiat currency or a euro stablecoin (`EURC`, `EURT`) now
   makes the pair a cross, answered `(None, False)` and never proxied. Only
   the quote's first alphanumeric run is read, so a settle or venue tail
-  (`ETH/BTC:BTC`, `BTC-EUR=X`) or stray whitespace does not hide it. The rule is a deny-list, so venue suffixes and stablecoin quotes
+  (`ETH/BTC:BTC`, `BTC-EUR=X`) or stray whitespace does not hide it. The
+  rule is a deny-list, so venue suffixes and stablecoin quotes
   (`BTC-PERP`, `ETH-USD-SWAP`, `ETH-DAI`) still resolve to their base, and
   undashed crosses (`ETHBTC`) stay no-signal as before. The no-signal text of
   the deribit, farside, sosovalue, treasury and whale vendors now lists a

@@ -8,7 +8,7 @@
 #
 # `useDefault` also brings in gitleaks' own global path allowlist: lock files
 # (go.sum, package-lock.json, poetry.lock), node_modules/, binary and media
-# extensions (.pdf, .svg, .jpg, .bin, ...), and any path ending in
+# extensions (.pdf, .svg, .jpg, .bin, ...), and any path containing
 # gitleaks.toml -- this file included. None of those may hold a credential.
 # Binary blobs in a diff are not text-scanned either (*.db is gitignored).
 

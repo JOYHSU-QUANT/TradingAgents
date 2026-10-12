@@ -248,12 +248,26 @@ def test_an_empty_day_has_no_books_no_intent_and_lights_silent_day():
     assert row.spot_gas_cost == 0 and row.net == 0 and row.silent
     found = alerts([row], delta_alert_pct=10, d5_days=1)
     assert [alert.kind for alert in found] == [AlertKind.SILENT_DAY]
-    # A day either leg touched is not silent, whatever else it lights.
+    # A day either leg acted on is not silent, whatever else it lights.
     (perp_only,) = _rows(cycles=[PerpCycle(day(40), CycleKind.UNUSABLE, None)])
     (spot_only,) = _rows(
         decisions=[(day(40), "hold")], valuations=[_valuation(day(40), {}, {}, "0")]
     )
     assert not perp_only.silent and not spot_only.silent
+    # A trace that is not an action keeps the day silent: cycles that decided
+    # nothing all day, a run that is not a file target, a bar skipped as suspect.
+    (failed_all_day,) = _rows(
+        cycles=[PerpCycle(day(40) + h * MS_PER_HOUR, CycleKind.NO_DECISION, None) for h in (0, 4)]
+    )
+    (engine_run,) = _rows(cycles=[PerpCycle(day(40), CycleKind.ENGINE, RiskAction.APPROVED)])
+    (skipped,) = _rows(
+        decisions=[(day(40), "skipped_suspect")], valuations=[_valuation(day(40), {}, {}, "0")]
+    )
+    for silent_row in (failed_all_day, engine_run, skipped):
+        assert silent_row.silent
+    (lit,) = alerts([failed_all_day], delta_alert_pct=10, d5_days=3)
+    assert lit.kind is AlertKind.SILENT_DAY
+    assert lit.text == "neither leg acted: perp 2 cycle(s): no_decision 2, spot not decided"
 
 
 def test_a_book_day_refuses_impossible_states():
@@ -453,6 +467,7 @@ def test_weeks_are_iso_weeks_with_the_days_in_and_the_alerts_counted():
         (2026, 8, 2, 2, 2),  # Mon, Tue
     ]
     assert by_week[0].net == 0 and by_week[0].spot_gas_cost == 0
+    assert by_week[0].funding_pending == 0
 
 
 # --- the command ----------------------------------------------------------------
@@ -629,7 +644,7 @@ def test_the_command_prints_the_days_the_lights_the_weeks_and_the_span(tmp_path:
     # Two days held in a row; the default asks three before the escalation lights.
     assert not any(line.startswith("    ALERT held by D5") for line in out)
     assert out[-2] == (
-        "  2026-W07  4 day(s), 2 in  funding 4.0300  costs 20.9450 (perp fees 0.4500, "
+        "  2026-W07  4 day(s), 2 in  funding 4.0300 (1 pending)  costs 20.9450 (perp fees 0.4500, "
         "spot swaps 14.5000, gas 5.9950)  net -16.9150  alerts 2"
     )
     assert out[-1] == (

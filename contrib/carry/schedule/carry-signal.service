@@ -21,6 +21,11 @@ WorkingDirectory=/home/trader/TradingAgents
 ExecStart=/home/trader/TradingAgents/contrib/carry/schedule/carry-signal.sh
 Restart=on-failure
 RestartSec=5min
+# A settings error (the script's exit 4: a bad PYTHON, a run id without its
+# store, a log that cannot be written) is not retried: nothing changes in
+# five minutes, and the retry would only spend the start limit the operator
+# needs for the manual start after the fix.
+RestartPreventExitStatus=4
 # Two pages of funding and a few reads: a run past this is stuck, not slow.
 TimeoutStartSec=8min
 # Short of memory, the kernel takes this run (retried, then the operator's),

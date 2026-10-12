@@ -43,9 +43,13 @@ The lights (plan §2 D5 and D7, in these words):
   that day recorded: the two legs did not read the same file.
 - **no sidecar** — perp cycles applied a document but no sidecar for the
   day is under the payload directory: the wrong directory, or lost files.
-- **silent day** — neither leg left a trace: no perp cycle and no spot
-  decision. Both daemons down, or the coordinator dead and the spot visit
-  refusing at ``target``, reads as a quiet book otherwise.
+- **silent day** — neither leg acted on anything: no perp cycle read a
+  document (none ran, or every one ended without a decision, or the run is
+  not a file target) and the spot bar was not decided, or was skipped as
+  suspect. Both daemons down, a venue outage all day, the coordinator dead
+  with the spot visit refusing at ``target`` — each reads as a quiet book
+  otherwise. A day a leg maintained on an unusable document is D5's, not
+  this light's.
 - **sidecar not read** — a sidecar file under the payload directory that
   could not be read as one; said per file, under no day, since the day it
   belongs to is what could not be read.
@@ -310,9 +314,22 @@ class BookDay:
         return self.perp_held_by_d5 or self.spot_held_by_d5
 
     @property
+    def perp_read(self) -> bool:
+        """Whether any perp cycle of the day read the document (applied, pending or unusable)."""
+        return any(
+            self.cycles.get(kind, 0)
+            for kind in (CycleKind.APPLIED, CycleKind.PENDING, CycleKind.UNUSABLE)
+        )
+
+    @property
+    def spot_moved(self) -> bool:
+        """Whether the spot bar was decided by the strategy (a suspect bar skipped is not)."""
+        return self.spot_outcome is not None and self.spot_outcome != _SPOT_SKIPPED
+
+    @property
     def silent(self) -> bool:
-        """Neither leg left a trace of the day."""
-        return not self.cycles and self.spot_outcome is None
+        """Neither leg acted on anything: no perp cycle read a document, no spot bar was decided."""
+        return not self.perp_read and not self.spot_moved
 
     @property
     def perp_digests(self) -> frozenset[str]:
@@ -439,6 +456,7 @@ class AlertKind(str, Enum):
     NO_SIDECAR = "no sidecar"
     HELD_BY_D5 = "held by D5"
     SILENT_DAY = "silent day"
+    SIDECAR_NOT_READ = "sidecar not read"
 
 
 @dataclass(frozen=True)
@@ -471,11 +489,7 @@ def alerts(rows: Sequence[BookDay], *, delta_alert_pct: int, d5_days: int) -> li
                     f"exceeds {delta_alert_pct}% (D7)",
                 )
             )
-        spot_acted = (
-            row.spot_outcome is not None
-            and row.spot_outcome != _SPOT_SKIPPED
-            and row.spot_target is not None
-        )
+        spot_acted = row.spot_moved and row.spot_target is not None
         if spot_acted and row.applied == 0:
             found.append(
                 Alert(
@@ -525,7 +539,8 @@ def alerts(rows: Sequence[BookDay], *, delta_alert_pct: int, d5_days: int) -> li
                 Alert(
                     row.boundary_ms,
                     AlertKind.SILENT_DAY,
-                    "no perp cycle and no spot decision: neither leg ran",
+                    f"neither leg acted: perp {_cycles(row.cycles)}, spot "
+                    f"{row.spot_outcome or 'not decided'}",
                 )
             )
         streak = streak + 1 if row.held_by_d5 else 0
@@ -568,6 +583,7 @@ class WeekRow:
     costs: Decimal
     net: Decimal
     unpriced: int
+    funding_pending: int
     alerts: int
 
 
@@ -597,6 +613,7 @@ def weeks(rows: Sequence[BookDay], found: Sequence[Alert]) -> list[WeekRow]:
                 costs=costs,
                 net=funding - costs,
                 unpriced=sum(1 for row in group if row.unpriced),
+                funding_pending=sum(row.perp_funding_pending for row in group),
                 alerts=sum(alert_days.get(row.boundary_ms, 0) for row in group),
             )
         )
@@ -695,12 +712,15 @@ def format_report(
         for alert in by_day.get(row.boundary_ms, []):
             lines.append(f"    ALERT {alert.kind.value}: {alert.text}")
     for problem in problems:
-        lines.append(f"    ALERT sidecar not read: {problem.path}: {problem.reason}")
+        lines.append(
+            f"    ALERT {AlertKind.SIDECAR_NOT_READ.value}: {problem.path}: {problem.reason}"
+        )
     lines.append("weeks (ISO):")
     for week in weeks(rows, found):
+        pending = f" ({week.funding_pending} pending)" if week.funding_pending else ""
         lines.append(
             f"  {week.year}-W{week.week:02d}  {week.days} day(s), {week.days_in} in  "
-            f"funding {_money(week.funding)}  costs {_money(week.costs)} (perp fees "
+            f"funding {_money(week.funding)}{pending}  costs {_money(week.costs)} (perp fees "
             f"{_money(week.perp_fees)}, spot swaps {_money(week.spot_swap_cost)}, gas "
             f"{_money(week.spot_gas_cost)}){_unpriced_note(week.unpriced)}  "
             f"net {_money(week.net)}  alerts {week.alerts}"
@@ -709,8 +729,10 @@ def format_report(
     funding = sum((row.perp_funding for row in rows), _ZERO)
     costs = sum((row.costs for row in rows), _ZERO)
     unpriced = sum(1 for row in rows if row.unpriced)
-    pending = sum(row.perp_funding_pending for row in rows)
-    pending_note = f" ({pending} settlement(s) still pending, not counted)" if pending else ""
+    pending_count = sum(row.perp_funding_pending for row in rows)
+    pending_note = (
+        f" ({pending_count} settlement(s) still pending, not counted)" if pending_count else ""
+    )
     lines.append(
         f"span: {days_in} of {len(rows)} day(s) in; funding {_money(funding)}{pending_note}, "
         f"costs {_money(costs)}{_unpriced_note(unpriced)}, net {_money(funding - costs)}; "

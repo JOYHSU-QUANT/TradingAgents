@@ -132,7 +132,7 @@ store 可以是伺服器上的，也可以是快照下來的（perp 的 sidecar 
 | `one-legged` | 現貨那根對著 target 決策了，perp 當天卻沒有任何 cycle applied；或反過來 perp applied 了、現貨沒有 target 或沒決策 |
 | `different documents` | 現貨 `targets.digest`（`target` 指令讀到的交接檔位元組 sha256）不在 perp 當天 sidecar 記的 digest 裡：兩腿讀的不是同一份檔 |
 | `no sidecar` | perp 有 applied cycle，payload 目錄下卻找不到當天的 sidecar：目錄指錯或檔案丟了 |
-| `silent day` | 那天 perp 沒有任何 cycle、現貨也沒有決策：兩腿都沒跑，否則看起來像安靜的一天 |
+| `silent day` | 那天沒有任何 perp cycle 讀到文件（沒跑、全部沒決策、或不是 file-target run）、現貨也沒被策略決策（沒 visit 或 bar 可疑被跳過）：兩腿都沒動，否則看起來像安靜的一天。perp 對著不可用文件維持的日子歸 D5，不算這盞 |
 | `sidecar not read` | 一個 `.handoff.json` 讀不出來（壞 JSON、別的幣、缺欄位）：逐檔列在日列之後、不歸哪一天，算進亮燈數 |
 
 合計行印：在場天數、funding（與 venue 還沒入帳的 pending 結算數——那些沒算進去）、成本、net、亮燈數（含讀不出來的 sidecar）與被 D5 維持的天數。

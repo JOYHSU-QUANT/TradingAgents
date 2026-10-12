@@ -400,8 +400,8 @@ cd ~/uniswap-paper
 | `python3: not found` 接 `==== exit 127` | `PYTHON` 不是路徑而且 PATH 上沒有 | 改 §3.1 的 `PYTHON` 成 `.venv/bin/python` 的完整路徑 |
 | `Error: Invalid value: Invalid value for '-f' ".../.env" does not exist.` 接 `==== exit 2` | checkout 根目錄沒有 `.env` | 補上 `.env`（§1.4） |
 | 其他 `usage: ...` 接 `==== exit 2` | visit 的指令被改壞 | 對照 git 版的 `paper-visit.sh`；設定只放在 `paper-visit.local.sh` |
-| 有 `==== ... visit of` 卻沒有 `==== exit`，`systemctl status` 是 `result 'timeout'` | visit 跑超過 55 分鐘被 systemd 停掉；印到一半的輸出還在 | 多半是節點或閘道卡住；下一次 visit 會重來 |
-| 有 `==== ... visit of` 與前幾步的輸出、沒有 `==== exit`，`systemctl status` 是 `status=4` | log 在 visit 中途變成寫不了（磁碟滿、權限被改）；寫得了的那幾步已經跑過，後面的沒跑 | 檢查磁碟與 `/home/trader/data/uniswap` 的權限；下一次 visit 會補 |
+| 有 `==== ... visit:` 卻沒有 `==== exit`，`systemctl status` 是 `result 'timeout'` | visit 跑超過 55 分鐘被 systemd 停掉；印到一半的輸出還在 | 多半是節點或閘道卡住；下一次 visit 會重來 |
+| 有 `==== ... visit:` 與前幾步的輸出、沒有 `==== exit`，`systemctl status` 是 `status=4` | log 在 visit 中途變成寫不了（磁碟滿、權限被改）；寫得了的那幾步已經跑過，後面的沒跑 | 檢查磁碟與 `/home/trader/data/uniswap` 的權限；下一次 visit 會補 |
 | 這次 visit 完全沒有留下任何一行，`systemctl status` 是 `status=4` | visit 腳本進不了 checkout 目錄，或 log 寫不了（目錄不是 trader 的、建不了） | 檢查 `/home/trader/data/uniswap` 的擁有者與權限；visit 沒有跑 |
 
 ---

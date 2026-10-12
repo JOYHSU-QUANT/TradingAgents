@@ -80,6 +80,8 @@ def test_the_service_retries_once_within_the_grace_and_runs_the_script_from_the_
     assert service["WorkingDirectory"] == [_CHECKOUT]
     assert service["ExecStart"] == [f"{_CHECKOUT}/contrib/carry/schedule/carry-signal.sh"]
     assert service["Restart"] == ["on-failure"]
+    # The script's settings-error exit is not retried: nothing to retry.
+    assert service["RestartPreventExitStatus"] == ["4"]
     # One retry (two starts in the interval), five minutes on: the plan's 23:55.
     assert service["StartLimitBurst"] == ["2"]
     assert _seconds(service["StartLimitIntervalSec"][0]) >= 2 * _seconds(service["RestartSec"][0])

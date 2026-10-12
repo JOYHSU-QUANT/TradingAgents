@@ -1,10 +1,12 @@
-"""CME Bitcoin futures basis, read through the existing yfinance layer.
+"""CME Bitcoin and Ether futures basis, read through the existing yfinance layer.
 
-The basis is the gap between the front-month CME Bitcoin future (Yahoo's
-continuous ``BTC=F``) and spot (``BTC-USD``), the one USD-denominated,
-institution-facing price this project's other sources do not carry: Deribit
-gives options-implied vol, Hyperliquid gives perp funding, and neither says
-what regulated futures pay over spot.
+The basis is the gap between the front-month CME future (Yahoo's continuous
+``BTC=F`` or ``ETH=F``) and spot (``BTC-USD`` or ``ETH-USD``), the one
+USD-denominated, institution-facing price this project's other sources do not
+carry: Deribit gives options-implied vol, Hyperliquid gives perp funding, and
+neither says what regulated futures pay over spot. One contract per asset,
+never one as a proxy for the other: the basis is what a contract pays over its
+own underlying.
 
 Why HOURLY bars matched on their timestamp, and not the two daily closes the
 OHLCV cache already holds. Measured 2026-09-21, each over the window named:
@@ -39,6 +41,17 @@ reader would take every month-end convergence for weakening demand. The
 expiry rule is a fact about the contract that can change; it lives in
 ``front_expiry`` with the date it was last checked.
 
+Ether was wired on 2026-10-12 and measured the same way over the 729 days then
+available, with Bitcoin re-measured over the same days for comparison (in
+parentheses). The two feeds are alike at this resolution: hourly bars with
+volume 96% of the time in both, a negative nominal basis on 1.8% of daily
+readings (1.1%), an annualized median of 6.8% (6.6%), a 7-day change under
+3.1 points on three days in four (2.8) and a reading within 1.6 points of its
+own 7-day median (1.5), with the same pre-expiry drift by days-to-expiry
+bucket (8.3% at 5 to 7 days against 6.6% to 7.5% further out; 8.1% against
+6.6% to 7.2%). So the method, every bound and the scale below are one set,
+shared by both contracts.
+
 The cost of the hourly method is that it cannot use ``load_ohlcv``'s disk
 cache, so each call makes two Yahoo requests. Both go through
 ``yf_fetch_unhidden`` like every other yfinance leaf, so a throttle keeps its
@@ -64,14 +77,36 @@ from .yfinance_common import yf_fetch_unhidden
 
 logger = logging.getLogger(__name__)
 
-FUTURES_SYMBOL = "BTC=F"
-SPOT_SYMBOL = "BTC-USD"
 
-# CME lists Bitcoin and Ether futures; only Bitcoin is wired. Another asset is
-# answered with a no-signal sentence rather than BTC's basis as a proxy: the
+class Contract(NamedTuple):
+    """One CME crypto future and the spot series its basis is measured against."""
+
+    coin: str
+    # The product name as CME lists it, for the report's title.
+    name: str
+    # Yahoo's continuous front-month symbol, and Yahoo's spot aggregate.
+    futures: str
+    spot: str
+
+
+# CME lists Bitcoin and Ether futures, and both are wired. Any other asset is
+# answered with a no-signal sentence rather than one of these as a proxy: the
 # basis is what one contract pays over its own underlying, which says nothing
 # about a different underlying's carry.
-SUPPORTED_ASSETS = frozenset({"BTC"})
+CONTRACTS = {
+    c.coin: c
+    for c in (
+        Contract("BTC", "Bitcoin", "BTC=F", "BTC-USD"),
+        Contract("ETH", "Ether", "ETH=F", "ETH-USD"),
+    )
+}
+SUPPORTED_ASSETS = frozenset(CONTRACTS)
+# "the CME Bitcoin and Ether front-month futures only (BTC, ETH)": the
+# no-signal sentence, read off the table so a row added there is named here.
+_COVERAGE = (
+    f"the CME {' and '.join(c.name for c in CONTRACTS.values())} front-month futures only "
+    f"({', '.join(CONTRACTS)})"
+)
 
 BAR_INTERVAL = "1h"
 
@@ -164,7 +199,9 @@ NOT_LIVE_HOURS = 3
 # change was under 2.8 points and the reading sat within 1.4 points of its own
 # 7-day median. Rounded, and said in the report, because adjacent 4-hour
 # cycles share 20 of a window's 24 hours — without a scale a model narrates
-# the same point of noise six times a day.
+# the same point of noise six times a day. Ether, measured 2026-10-12 over 364
+# 7-day changes, rounds to the same two figures (3.1 and 1.6 points, against
+# Bitcoin's 2.8 and 1.5 over the same days), so one scale serves both.
 ORDINARY_CHANGE_POINTS = 3
 ORDINARY_GAP_POINTS = 1.5
 
@@ -231,12 +268,13 @@ def _last_friday(year: int, month: int) -> date:
 
 
 def front_expiry(day: date) -> date:
-    """The expiry of the CME Bitcoin contract that is front-month on ``day``.
+    """The expiry of the CME Bitcoin or Ether contract that is front-month on ``day``.
 
-    CME Bitcoin futures stop trading on the last Friday of the contract month
-    (CME Group contract specifications, checked 2026-09-21), and a contract is
-    listed for every month, so the front month on a given day is that month's
-    contract until its last Friday and the next month's from the day after.
+    Both stop trading on the last Friday of the contract month (CME Group
+    contract specifications, checked 2026-09-21 for Bitcoin and 2026-10-12 for
+    Ether), and each is listed for every month, so the front month on a given
+    day is that month's contract until its last Friday and the next month's
+    from the day after.
 
     Approximate in one respect: when that Friday is not a business day in both
     London and the US, the exchange moves the last trading day to the business
@@ -256,7 +294,7 @@ def front_expiry(day: date) -> date:
 def _in_session(index: pd.DatetimeIndex) -> pd.Series:
     """Which UTC hour stamps fall inside the CME Globex week, conservatively.
 
-    Globex trades Bitcoin futures from Sunday 17:00 to Friday 16:00 Central
+    Globex trades Bitcoin and Ether futures from Sunday 17:00 to Friday 16:00 Central
     Time. In UTC that is Sunday 22:00 to Friday 21:00 under daylight time and
     an hour later on both ends under standard time. The rule below is the
     intersection of the two — closed from Friday 21:00 to Sunday 23:00 UTC —
@@ -270,13 +308,15 @@ def _in_session(index: pd.DatetimeIndex) -> pd.Series:
     return pd.Series(~closed, index=index)
 
 
-def _fetch_hourly(symbol: str, start: date, end: date) -> pd.DataFrame:
+def _fetch_hourly(symbol: str, start: date, end: date, *, traded: bool = False) -> pd.DataFrame:
     """Hourly bars for ``symbol`` over ``[start, end)``, indexed by UTC hour.
 
     Through ``Ticker.history`` and ``yf_fetch_unhidden``, as ``load_ohlcv``
     fetches: ``yf.download`` swallows a throttle into an empty frame (#67).
     ``auto_adjust`` is off because there is nothing to adjust on a future or a
     coin, and the adjust step is one more place for the library to fail.
+    ``traded`` asks for a ``Volume`` column too (the futures leg is filtered
+    on it); rows without one are a malformed feed, refused naming the symbol.
     """
     ticker = yf.Ticker(symbol)
     frame = yf_fetch_unhidden(
@@ -302,6 +342,8 @@ def _fetch_hourly(symbol: str, start: date, end: date) -> pd.DataFrame:
         raise CmeBasisError(
             f"hourly {symbol} rows are not indexed by time ({type(frame.index).__name__})"
         )
+    if traded and "Volume" not in frame.columns:
+        raise CmeBasisError(f"hourly {symbol} rows carry no Volume column")
     index = frame.index
     frame = frame.set_axis(
         index.tz_localize("UTC") if index.tz is None else index.tz_convert("UTC")
@@ -324,7 +366,7 @@ def usable_legs(
     can say which series fell short, instead of naming one of them by habit.
     """
     if "Volume" not in futures.columns:
-        raise CmeBasisError(f"hourly {FUTURES_SYMBOL} rows carry no Volume column")
+        raise CmeBasisError("hourly futures rows carry no Volume column")
     traded = pd.to_numeric(futures["Volume"], errors="coerce").fillna(0) > 0
     kept = futures[traded & _in_session(futures.index)]
     cut = pd.Timestamp(bound)
@@ -408,24 +450,24 @@ def _annualized_withheld(reading: Reading) -> str:
     )
 
 
-def _withheld(coin: str, curr_date: str, why: str) -> str:
+def _withheld(contract: Contract, curr_date: str, why: str) -> str:
     """The whole report, for a date this tool cannot serve: no figures at all."""
     return (
-        f"## CME Bitcoin Futures Basis — {coin}\n"
+        f"## CME {contract.name} Futures Basis — {contract.coin}\n"
         f"- Withheld for {curr_date}\n"
-        f"\nThe futures basis is withheld for this date. {why} Treat the {coin} futures "
+        f"\nThe futures basis is withheld for this date. {why} Treat the {contract.coin} futures "
         f"basis as unavailable for {curr_date}; do not compute one from the futures and "
         f"spot prices in other reports, whose closes are hours apart."
     )
 
 
 def get_futures_basis(asset: str, curr_date: str) -> str:
-    """Fetch the CME Bitcoin front-month futures basis as a markdown report.
+    """Fetch the CME Bitcoin or Ether front-month futures basis as a markdown report.
 
     Args:
-        asset: "BTC", or a pair form like "BTC-USD". Any other symbol gets a
-            no-signal sentence: this tool reads one contract, and its basis is
-            not a proxy for another underlying's.
+        asset: "BTC" or "ETH", or a pair form like "BTC-USD". Any other symbol
+            gets a no-signal sentence: this tool reads one contract per asset,
+            and neither basis is a proxy for another underlying's.
         curr_date: The analysis date (yyyy-mm-dd). Hourly bars stamped after
             it are never read. A date more than ``MAX_FUTURE_DAYS`` ahead of
             the UTC clock, or more than ``MAX_DATE_AGE_DAYS`` behind it, is
@@ -466,15 +508,15 @@ def get_futures_basis(asset: str, curr_date: str) -> str:
     if coin is None or is_proxy:
         return (
             f"There is no futures-basis signal for {quote_argument(asset)}: this tool reads "
-            f"the CME Bitcoin front-month future only. Do not substitute BTC's basis for "
-            f"another asset's."
+            f"{_COVERAGE}. Do not substitute either basis for another asset's."
         )
+    contract = CONTRACTS[coin]
 
     now = _utc_now()
     today = now.date()
     if (curr_day - today).days > MAX_FUTURE_DAYS:
         return _withheld(
-            coin,
+            contract,
             curr_date,
             f"It is more than {MAX_FUTURE_DAYS} day ahead of the UTC clock ({today.isoformat()}), "
             f"which is a mistaken date rather than a timezone offset.",
@@ -486,7 +528,7 @@ def get_futures_basis(asset: str, curr_date: str) -> str:
     )
     if (today - curr_day).days > MAX_DATE_AGE_DAYS:
         return _withheld(
-            coin,
+            contract,
             curr_date,
             f"It is more than {MAX_DATE_AGE_DAYS} days before the UTC clock "
             f"({today.isoformat()}): a reading needs {FETCH_WINDOW_DAYS} days of synchronous "
@@ -501,8 +543,8 @@ def get_futures_basis(asset: str, curr_date: str) -> str:
     # would invite exactly the asynchronous subtraction this tool exists to
     # replace. The first failure therefore leaves with its own type.
     end = bound.date() + timedelta(days=1)
-    futures = _fetch_hourly(FUTURES_SYMBOL, start, end)
-    spot = _fetch_hourly(SPOT_SYMBOL, start, end)
+    futures = _fetch_hourly(contract.futures, start, end, traded=True)
+    spot = _fetch_hourly(contract.spot, start, end)
     basis = matched_basis(futures, spot, bound)
 
     current = reading_at(basis, pd.Timestamp(bound)) if not basis.empty else None
@@ -515,7 +557,7 @@ def get_futures_basis(asset: str, curr_date: str) -> str:
             f"{symbol} had {len(leg)} usable hours, the newest "
             f"{_stamp(leg.index[-1]) + ' UTC' if len(leg) else 'none'}"
             for symbol, leg in zip(
-                (FUTURES_SYMBOL, SPOT_SYMBOL), usable_legs(futures, spot, bound), strict=True
+                (contract.futures, contract.spot), usable_legs(futures, spot, bound), strict=True
             )
         )
         if current is None:
@@ -530,7 +572,7 @@ def get_futures_basis(asset: str, curr_date: str) -> str:
                 f"not served"
             )
         logger.warning("Futures basis withheld for %s: %s (%s)", curr_date, shortfall, legs)
-        return _withheld(coin, curr_date, f"{shortfall} ({legs}).")
+        return _withheld(contract, curr_date, f"{shortfall} ({legs}).")
 
     lookback = pd.Timedelta(days=LOOKBACK_DAYS)
     prior = reading_at(basis, current.last - lookback)
@@ -544,8 +586,8 @@ def get_futures_basis(asset: str, curr_date: str) -> str:
         else "futures level with spot"
     )
     lines = [
-        f"## CME Bitcoin Futures Basis — {coin}",
-        f"- CME front-month future (Yahoo {FUTURES_SYMBOL}) against spot (Yahoo {SPOT_SYMBOL}), "
+        f"## CME {contract.name} Futures Basis — {coin}",
+        f"- CME front-month future (Yahoo {contract.futures}) against spot (Yahoo {contract.spot}), "
         f"hourly closes matched on the same UTC hour | newest hour {_stamp(current.last)} UTC "
         f"| analysis date {curr_date}",
     ]
@@ -616,7 +658,7 @@ def get_futures_basis(asset: str, curr_date: str) -> str:
     lines.append("")
     lines.append(
         f"_Method: only hours inside the CME session in which the future traded are used, and "
-        f"each figure is a median, because Yahoo's hourly {FUTURES_SYMBOL} closes are unreliable "
+        f"each figure is a median, because Yahoo's hourly {contract.futures} closes are unreliable "
         f"around session breaks. The expiry date follows the last-Friday rule and can be a day "
         f"late around an exchange holiday, so read the annualized figure as approximate. "
         f"{SCALE_NOTE}._"

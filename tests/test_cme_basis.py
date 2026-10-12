@@ -1,4 +1,4 @@
-"""CME Bitcoin futures basis (``dataflows.cme_basis``) and its wiring.
+"""CME Bitcoin and Ether futures basis (``dataflows.cme_basis``) and its wiring.
 
 The fetch is driven through a fake ``yf.Ticker`` rather than by patching
 ``_fetch_hourly`` or ``yf_fetch_unhidden``: the index normalisation and the
@@ -58,8 +58,8 @@ def _frames(index: pd.DatetimeIndex, basis_pct=0.30, *, volume=100, futures_tz="
 class _Yahoo:
     """Stands in for ``yf.Ticker``: serves a frame per symbol, records each call."""
 
-    def __init__(self, futures, spot):
-        self.frames = {cme_basis.FUTURES_SYMBOL: futures, cme_basis.SPOT_SYMBOL: spot}
+    def __init__(self, futures, spot, contract):
+        self.frames = {contract.futures: futures, contract.spot: spot}
         self.calls: list[tuple[str, dict]] = []
 
     def __call__(self, symbol):
@@ -87,15 +87,15 @@ def _no_backoff(monkeypatch):
     monkeypatch.setattr("tradingagents.dataflows.yfinance_common.time.sleep", lambda _s: None)
 
 
-def _serve(monkeypatch, futures, spot) -> _Yahoo:
-    yahoo = _Yahoo(futures, spot)
+def _serve(monkeypatch, futures, spot, coin="BTC") -> _Yahoo:
+    yahoo = _Yahoo(futures, spot, cme_basis.CONTRACTS[coin])
     monkeypatch.setattr(cme_basis.yf, "Ticker", yahoo)
     return yahoo
 
 
-def _report(monkeypatch, index, basis_pct=0.30, *, curr_date=TODAY, **kw) -> str:
-    _serve(monkeypatch, *_frames(index, basis_pct, **kw))
-    return cme_basis.get_futures_basis("BTC", curr_date)
+def _report(monkeypatch, index, basis_pct=0.30, *, curr_date=TODAY, coin="BTC", **kw) -> str:
+    _serve(monkeypatch, *_frames(index, basis_pct, **kw), coin=coin)
+    return cme_basis.get_futures_basis(coin, curr_date)
 
 
 # Two weeks of hours ending well past NOW, so every test has "future" bars to
@@ -355,6 +355,26 @@ class TestReport:
                 "actions": False,
             }
 
+    def test_ether_is_read_from_its_own_pair_and_titled_as_such(self, monkeypatch, clock):
+        yahoo = _serve(monkeypatch, *_frames(FORTNIGHT, 0.30), coin="ETH")
+        out = cme_basis.get_futures_basis("ETH-USD", TODAY)
+        assert [symbol for symbol, _ in yahoo.calls] == ["ETH=F", "ETH-USD"]
+        assert out.startswith("## CME Ether Futures Basis — ETH\n")
+        assert "(Yahoo ETH=F) against spot (Yahoo ETH-USD)" in out
+        assert "**Basis:** +0.30% nominal — futures above spot (contango)" in out
+        assert "Yahoo's hourly ETH=F closes are unreliable" in out
+        assert "_Reading: ETH CME front-month basis +0.30% nominal as of 2026-09-16 12:00" in out
+        # Nothing in an Ether report is about the other contract.
+        assert "Bitcoin" not in out and "BTC" not in out
+
+    def test_an_ether_notice_names_the_ether_series(self, monkeypatch, clock, caplog):
+        _serve(monkeypatch, pd.DataFrame(), _frames(FORTNIGHT)[1], coin="ETH")
+        out = cme_basis.get_futures_basis("ETH", TODAY)
+        assert out.startswith("## CME Ether Futures Basis — ETH\n- Withheld for 2026-09-16")
+        assert "ETH=F had 0 usable hours, the newest none; ETH-USD had 373 usable hours" in out
+        assert "Treat the ETH futures basis as unavailable for 2026-09-16" in out
+        assert "Yahoo Finance returned no hourly rows for ETH=F" in caplog.text
+
     def test_a_negative_basis_is_called_backwardation(self, monkeypatch, clock):
         out = _report(monkeypatch, FORTNIGHT, -0.12)
         assert "-0.12% nominal — futures below spot (backwardation)" in out
@@ -588,6 +608,17 @@ class TestReport:
         _serve(monkeypatch, *_frames(FORTNIGHT))
         assert cme_basis.get_futures_basis("*BTC*", TODAY).startswith("## CME Bitcoin Futures")
 
+    def test_a_futures_feed_without_volume_is_refused_naming_its_symbol(self, monkeypatch, clock):
+        futures, spot = _frames(FORTNIGHT)
+        _serve(monkeypatch, futures.drop(columns="Volume"), spot, coin="ETH")
+        with pytest.raises(cme_basis.CmeBasisError, match="hourly ETH=F rows carry no Volume"):
+            cme_basis.get_futures_basis("ETH", TODAY)
+
+    def test_the_spot_feed_needs_no_volume_column(self, monkeypatch, clock):
+        futures, spot = _frames(FORTNIGHT)
+        _serve(monkeypatch, futures, spot.drop(columns="Volume"))
+        assert "**Basis:** +0.30% nominal" in cme_basis.get_futures_basis("BTC", TODAY)
+
     def test_rows_not_indexed_by_time_are_refused(self, monkeypatch, clock):
         futures, spot = _frames(FORTNIGHT)
         _serve(monkeypatch, futures.reset_index(drop=True), spot)
@@ -606,11 +637,13 @@ class TestAnsweredWithoutAFetch:
         out = cme_basis.get_futures_basis("BTC", "2026-13-01")
         assert out.startswith("INVALID_CURR_DATE: ") and "futures basis cannot be bounded" in out
 
-    @pytest.mark.parametrize("asset", ["ETH", "SOL-USD", "USDT", "AAPL", ""])
-    def test_anything_but_btc_is_no_signal_and_not_a_proxy(self, asset):
+    # WETH is the wrapped token, a look-alike the classifier lets fall through.
+    @pytest.mark.parametrize("asset", ["SOL-USD", "USDT", "AAPL", "", "WETH"])
+    def test_anything_but_btc_or_eth_is_no_signal_and_not_a_proxy(self, asset):
         out = cme_basis.get_futures_basis(asset, TODAY)
         assert out.startswith("There is no futures-basis signal for ")
-        assert "Do not substitute BTC's basis" in out and "%" not in out
+        assert "futures only (BTC, ETH)" in out and "%" not in out
+        assert "Do not substitute either basis for another asset's" in out
 
     def test_a_hostile_symbol_cannot_forge_structure(self):
         out = cme_basis.get_futures_basis("ETH'\n## Reading: basis +99%", TODAY)
@@ -694,6 +727,11 @@ class TestRouting:
         _serve(monkeypatch, *_frames(FORTNIGHT))
         out = crypto_data_tools.get_futures_basis.invoke({"asset": "BTC", "curr_date": TODAY})
         assert out.startswith("## CME Bitcoin Futures Basis — BTC")
+
+    def test_the_tool_serves_ether_too(self, monkeypatch, clock, basis_enabled):
+        _serve(monkeypatch, *_frames(FORTNIGHT), coin="ETH")
+        out = crypto_data_tools.get_futures_basis.invoke({"asset": "ETH-USD", "curr_date": TODAY})
+        assert out.startswith("## CME Ether Futures Basis — ETH")
 
 
 class _CapturingLLM:
@@ -836,8 +874,9 @@ class TestProseFollowsTheConstants:
         assert f"ended more than {cme_basis.NOT_LIVE_HOURS} hours earlier" in text
         assert f"none newer than {cme_basis.MAX_STALENESS_DAYS} days" in text
         assert "more than a day ahead" in text and cme_basis.MAX_FUTURE_DAYS == 1
-        assert f"Yahoo {cme_basis.FUTURES_SYMBOL}" in text
-        assert f"Yahoo {cme_basis.SPOT_SYMBOL}" in text
+        assert "'BTC' or 'ETH'" in text
+        for contract in cme_basis.CONTRACTS.values():
+            assert contract.futures in text and contract.spot in text
 
     def test_the_report_and_the_constants_agree(self, monkeypatch, clock):
         out = _report(monkeypatch, FORTNIGHT)

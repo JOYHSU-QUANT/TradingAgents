@@ -125,13 +125,13 @@ TOOLS_CATEGORIES = {
         ],
     },
     "futures_basis": {
-        "description": "CME Bitcoin front-month futures basis over spot, nominal and annualized (crypto)",
+        "description": "CME Bitcoin or Ether front-month futures basis over spot, nominal and annualized (crypto)",
         "tools": [
             "get_futures_basis",
         ],
     },
     "futures_positioning": {
-        "description": "CFTC Commitments of Traders positioning in CME Bitcoin futures by trader category (crypto)",
+        "description": "CFTC Commitments of Traders positioning in CME Bitcoin or Ether futures by trader category (crypto)",
         "tools": [
             "get_futures_positioning",
         ],

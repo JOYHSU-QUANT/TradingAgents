@@ -155,7 +155,7 @@ OPTIONAL_NEWS_TOOLS = (
         scope="crypto",
         hint=(
             "get_futures_positioning(asset, curr_date) for the CFTC Commitments of "
-            "Traders report on CME Bitcoin futures — each trader category's long, "
+            "Traders report on the CME Bitcoin or Ether future — each trader category's long, "
             "short and net positions against open interest, with the changes against "
             "the previous report and the one four reports back (each labelled with its "
             "comparison date) and a Scale line saying what size of weekly change is "
@@ -164,7 +164,7 @@ OPTIONAL_NEWS_TOOLS = (
             "mid-week date sees the previous week's report. "
             f"{cftc_cot.CARRY_NOTE}: the market analyst's futures-basis report is the "
             "price side of this same market, so read the two together rather than as "
-            "two signals. BTC only (another asset gets a no-signal note)"
+            "two signals. BTC and ETH only (another asset gets a no-signal note)"
         ),
     ),
 )

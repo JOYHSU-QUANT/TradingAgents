@@ -485,9 +485,10 @@ config["data_vendors"]["whale_positioning"] = "hyperliquid_stats"  # the dated c
 ```
 
 A second crypto-only market-analyst tool, beside the Deribit options one, is the
-**CME Bitcoin futures basis** (`futures_basis`, vendor `yfinance`, keyless, BTC
-only): what the regulated front-month future (Yahoo `BTC=F`) trades at over
-spot (`BTC-USD`), as a nominal percentage and annualized by the contract's days
+**CME Bitcoin or Ether futures basis** (`futures_basis`, vendor `yfinance`,
+keyless, BTC and ETH, each its own contract): what the regulated front-month
+future (Yahoo `BTC=F` or `ETH=F`) trades at over spot (`BTC-USD` or
+`ETH-USD`), as a nominal percentage and annualized by the contract's days
 to expiry, with a 7-day annualized median and the change against the reading 7
 days earlier. It is the one USD-denominated, institution-facing price the other
 sources do not carry.
@@ -538,7 +539,8 @@ config["data_vendors"]["futures_basis"] = "none"
 ```
 
 A fifth news-analyst source is the **CFTC Commitments of Traders report on CME
-Bitcoin futures** (`futures_positioning`, vendor `cftc`, keyless, BTC only):
+Bitcoin or Ether futures** (`futures_positioning`, vendor `cftc`, keyless, BTC
+and ETH, each its own contract and series):
 open interest and, for each trader category — dealers, asset managers,
 leveraged funds, other reportables, non-reportables — the long, short and
 spreading positions, the net, its share of open interest, and the change

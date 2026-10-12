@@ -123,6 +123,36 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **The CME futures-basis and CFTC positioning tools serve Ether beside
+  Bitcoin** (`tradingagents/dataflows/cme_basis.py`,
+  `tradingagents/dataflows/cftc_cot.py`, the two `crypto_data_tools`
+  wrappers, both analysts' hints, `interface.py`, `default_config.py`,
+  README). Each module now carries a `CONTRACTS` table with one contract per
+  asset — Yahoo `ETH=F`/`ETH-USD` beside `BTC=F`/`BTC-USD`, and the CFTC's
+  50-ETH standard Ether future (code 146021) beside the 5-BTC one — and
+  `SUPPORTED_ASSETS` is that table's keys, so `ETH` and its pair forms get
+  their own report (`## CME Ether Futures Basis — ETH`, `CME Ether futures
+  (ETH)`), any other symbol still gets the no-signal sentence, now naming
+  both, and neither asset is ever a proxy for the other. The method, the
+  bounds and the scale are shared on measurement rather than assumed: over
+  the same 729 days of hourly history (2026-10-12) Ether's basis rounds to
+  the same scale as Bitcoin's (a 7-day change under about 3 annualized
+  points on three days in four, a reading within about 1.5 points of its own
+  7-day median, the same pre-expiry drift), and in the CFTC series leveraged
+  funds were net short and dealers net long in 52 of the last 52 Ether
+  reports too, so `CARRY_NOTE` holds for both. The Ether COT series is
+  cached in its own `cftc_cot_eth.json`; a fixture of eight real Ether rows
+  pins the parse and the report; the cache payload now carries its contract
+  code (`CACHE_SCHEMA` 2), so a file holding the other series' rows is
+  rejected, and the loader's logs name the coin. **Input-surface change for
+  the `uniswap_v3` AI judge**, which rates `ETH-USD`: both analysts gain a
+  report they used to be told was BTC-only, so a paper run that reads this
+  build starts a new input segment. The hyperliquid paper-BTC run's reports
+  are byte-identical; the only change its analysts see is a few words in
+  the two tools' hint sentences (now "Bitcoin or Ether", "BTC and ETH
+  only"), which sit outside `PROMPT_VERSION`'s scope — a dated note for a
+  later paper review, not a new prompt version.
+
 - **The default deep-think model of both paper traders is Claude Sonnet 5.5,
   and the default completion cap is 16384** (`contrib/hyperliquid_perp`,
   `contrib/uniswap_v3`, `contrib/replay`, the CLI). `hyperliquid.example.yaml`

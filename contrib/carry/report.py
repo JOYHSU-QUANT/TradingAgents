@@ -308,7 +308,13 @@ class BookDay:
 
     @property
     def basis(self) -> Decimal | None:
-        """The spot bar's close against the perp mark at the day's first cycle: ``spot / mark − 1``."""
+        """The spot bar's close against the perp mark at the day's first cycle: ``spot / mark − 1``.
+
+        Both readings are the day's own: a carried spot close against today's
+        mark would be a price move, not a basis.
+        """
+        if self.spot_carried:
+            return None
         first = None if self.perp_first is None else self.perp_first.position
         mark = None if first is None else first.mark
         if self.spot_price is None or mark is None or mark <= 0:
@@ -601,12 +607,13 @@ def alerts(rows: Sequence[BookDay], *, delta_alert_pct: int, d5_days: int) -> li
                 for leg, held in (("perp", row.perp_held_by_d5), ("spot", row.spot_held_by_d5))
                 if held
             ]
+            today = ", ".join(legs) if legs else "silent, the streak carried"
             found.append(
                 Alert(
                     row.boundary_ms,
                     AlertKind.HELD_BY_D5,
                     f"{streak} days in a row a leg maintained for want of a usable document "
-                    f"(today: {', '.join(legs)}); a human steps in (D5)",
+                    f"(today: {today}); a human steps in (D5)",
                 )
             )
     return found
@@ -737,7 +744,8 @@ def _day_lines(row: BookDay, coin: str) -> list[str]:
         ),
         (
             f"    perp {_cycles(row.cycles)}{refused}; spot {outcome}, target {target}; "
-            f"equity perp {_money(row.perp_equity)} / spot {_money(row.spot_equity)}"
+            f"equity perp {_money(row.perp_equity)}{perp_as_of} / spot "
+            f"{_money(row.spot_equity)}{spot_as_of}"
         ),
     ]
 

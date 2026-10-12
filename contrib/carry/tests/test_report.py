@@ -461,6 +461,11 @@ def test_days_held_by_d5_light_the_escalation_only_in_a_row(tmp_path: Path):
     carried = d5(alerts([perp_held, silent_between, still_held], delta_alert_pct=10, d5_days=2))
     assert _kinds(carried) == [("2026-02-14", "held by D5")]
     assert "2 days in a row" in carried[0].text
+    # Once lit, a silent day keeps the light on and says it is carrying, not held.
+    (silent_after,) = _rows(since_ms=day(45))
+    kept = d5(alerts([perp_held, spot_held, silent_after], delta_alert_pct=10, d5_days=2))
+    assert _kinds(kept) == [("2026-02-13", "held by D5"), ("2026-02-15", "held by D5")]
+    assert "(today: silent, the streak carried)" in kept[1].text
     # A pending cycle alone is the schedule, not a fault.
     pending = _row(day(42), cycles=[PerpCycle(day(42), CycleKind.PENDING, None)], targets=[])
     assert pending.perp_held_by_d5 is False
@@ -491,6 +496,7 @@ def test_a_leg_without_a_reading_keeps_its_last_known_holding(tmp_path: Path):
     assert not yesterday.spot_carried and not yesterday.perp_carried
     assert today.spot_carried and not today.perp_carried
     assert today.spot_qty == Decimal("0.9") and today.delta == (Decimal(0), Decimal(0))
+    assert today.basis is None and yesterday.basis == Decimal(0)  # a carried close is no basis
     assert today.perp_held_by_d5 and not today.silent
     found = alerts(rows, delta_alert_pct=10, d5_days=1)
     assert _kinds(found) == [("2026-02-12", "held by D5")]

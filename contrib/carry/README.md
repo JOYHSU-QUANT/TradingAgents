@@ -119,7 +119,7 @@ store 可以是伺服器上的，也可以是快照下來的（perp 的 sidecar 
 | spot 這一天 | 就是那根日線 bar：決策、valuation（成交後、以收盤價計）、fills 都在 `time`＝邊界那根；swap 成本＝以 bar 收盤價算的「進去的價值 − 出來的價值」（池子費＋滑價，與 uniswap `report` 的兩項加總相同，不帶它的費率表）；gas＝`gas_cost_eth` × valuation 裡 WETH 的價（沒有 WETH 價就只印 ETH 數、不計入成本並在合計註明） |
 | cycle 種類 | `applied`（讀到可用的交接檔、送進閘門；`refused by the gate` 另計——含 off-grid margin 的 fail closed，排程器記成 `invalid_output`、閘門字是 `invalid_fail_closed`，sidecar 照寫）、`pending`（午夜前讀到明天的檔，正常排程）、`unusable`（缺檔、陳舊、別的幣、讀不懂：兩腿維持，D5）、`no_decision`（cycle 沒有決策：市場資料、寫入失敗、沒有答案列）、`engine`（這個 run 不是 file-target）。閘門的字走 perp 的 `RiskAction` 列舉，不認識的字拒絕整份報表 |
 | delta | **以幣計**，不以美元：現貨持有的代幣數 − perp 空單數量；兩個時點不同（現貨是 bar 收盤、perp 是當日最後快照），美元讀法會隨兩邊同向的價差亂亮。超過較大一腿的 `--delta-alert-pct`（預設 10%，D7）就亮，只要任一腿有東西就看，不看當天 intent——出場只做掉一腿就是計畫怕的裸部位。一腿當天沒有讀數（perp 沒快照、現貨那根沒決策）就沿用它最後一次已知的持有量，日列印 `(as of <日期>)`：沒看到不等於空手 |
-| basis | 現貨 bar 收盤價對 perp 當天第一個快照的 mark（那個快照要有倉位，flat 的快照印 n/a）：`spot / mark − 1`，並印那個快照的時間；perp cycle 是滾動的 4 小時，第一個快照最多晚午夜 4 小時，所以這個數**含最多一個 cycle 的價格移動**，看趨勢不看單日 |
+| basis | 現貨 bar 收盤價對 perp 當天第一個快照的 mark（那個快照要有倉位，flat 的快照印 n/a；現貨那根沒決策、沿用前一天讀數的日子也印 n/a——舊收盤對今天的 mark 是價格移動不是基差）：`spot / mark − 1`，並印那個快照的時間；perp cycle 是滾動的 4 小時，第一個快照最多晚午夜 4 小時，所以這個數**含最多一個 cycle 的價格移動**，看趨勢不看單日 |
 | in／out | 當天的 intent：perp sidecar 說 short 就是 in，沒有 sidecar 就看現貨 target 的 weight > 0；兩者都沒有印 `?` |
 | net | funding − perp 手續費 − 現貨 swap 成本 − gas |
 

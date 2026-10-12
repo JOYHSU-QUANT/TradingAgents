@@ -263,8 +263,14 @@ def test_an_empty_day_has_no_books_no_intent_and_lights_silent_day():
     (skipped,) = _rows(
         decisions=[(day(40), "skipped_suspect")], valuations=[_valuation(day(40), {}, {}, "0")]
     )
-    for silent_row in (failed_all_day, engine_run, skipped):
+    (pending_all_day,) = _rows(
+        cycles=[PerpCycle(day(40) + h * MS_PER_HOUR, CycleKind.PENDING, None) for h in (0, 4)]
+    )
+    for silent_row in (failed_all_day, engine_run, skipped, pending_all_day):
         assert silent_row.silent
+    # A skipped bar was never put to the strategy: not a D5 hold, so a silent
+    # day is never a D5 day as well.
+    assert not skipped.spot_held_by_d5 and not skipped.held_by_d5
     (lit,) = alerts([failed_all_day], delta_alert_pct=10, d5_days=3)
     assert lit.kind is AlertKind.SILENT_DAY
     assert lit.text == "neither leg acted: perp 2 cycle(s): no_decision 2, spot not decided"

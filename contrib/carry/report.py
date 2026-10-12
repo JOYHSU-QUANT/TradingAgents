@@ -43,13 +43,14 @@ The lights (plan §2 D5 and D7, in these words):
   that day recorded: the two legs did not read the same file.
 - **no sidecar** — perp cycles applied a document but no sidecar for the
   day is under the payload directory: the wrong directory, or lost files.
-- **silent day** — neither leg acted on anything: no perp cycle read a
-  document (none ran, or every one ended without a decision, or the run is
-  not a file target) and the spot bar was not decided, or was skipped as
-  suspect. Both daemons down, a venue outage all day, the coordinator dead
-  with the spot visit refusing at ``target`` — each reads as a quiet book
-  otherwise. A day a leg maintained on an unusable document is D5's, not
-  this light's.
+- **silent day** — neither leg acted on anything: no perp cycle applied a
+  document or found one unusable (none ran, every one ended without a
+  decision, every one only saw tomorrow's document, or the run is not a
+  file target) and the spot bar was not decided, or was skipped as
+  suspect. Both daemons down, a venue outage all day, a handoff written
+  late for the next boundary only, the coordinator dead with the spot
+  visit refusing at ``target`` — each reads as a quiet book otherwise. A
+  day a leg maintained on an unusable document is D5's, not this light's.
 - **sidecar not read** — a sidecar file under the payload directory that
   could not be read as one; said per file, under no day, since the day it
   belongs to is what could not be read.
@@ -307,7 +308,8 @@ class BookDay:
 
     @property
     def spot_held_by_d5(self) -> bool:
-        return self.spot_outcome is not None and self.spot_target is None
+        """The strategy decided the bar with no target in the store; a skipped bar was not asked."""
+        return self.spot_moved and self.spot_target is None
 
     @property
     def held_by_d5(self) -> bool:
@@ -315,11 +317,13 @@ class BookDay:
 
     @property
     def perp_read(self) -> bool:
-        """Whether any perp cycle of the day read the document (applied, pending or unusable)."""
-        return any(
-            self.cycles.get(kind, 0)
-            for kind in (CycleKind.APPLIED, CycleKind.PENDING, CycleKind.UNUSABLE)
-        )
+        """Whether any perp cycle of the day applied a document or found one unusable.
+
+        A ``pending`` cycle only saw tomorrow's document; a day of nothing
+        but those (a handoff written late, for the next boundary only) is
+        a day the leg acted on nothing.
+        """
+        return self.applied > 0 or self.unusable > 0
 
     @property
     def spot_moved(self) -> bool:

@@ -256,8 +256,8 @@ cd ~/TradingAgents
 | perp journal 每個 cycle `carry handoff unusable` | 協調者整天沒寫檔，或 `target_path` 指錯 | 看 `carry-signal.log`；路徑錯就改 yaml 再 restart（持倉重啟走 protection-only，hl RUNBOOK） |
 | perp journal `pending` | 午夜前讀到明天的檔 | 正常，不用管 |
 | uniswap visit log carry 鏈 `exit 3` | 交接檔還不是今天的 | 當天後面兩次 visit 會重試；三次都 3 就看協調者 |
-| `report` `ALERT delta` | 兩腿數量差超過 10% | 看是哪一腿沒做到：perp 被閘門擋（`refused by the gate`；off-grid 的 margin 也算在這裡）、現貨 `no_trade`／`rejected`（gas 沒了？）；paper 階段**只看不補**（D7）。**大漲跌後隔天的燈多半是 deadband**：兩腿的再平衡門檻不同步——現貨 band 0.05 對 0.3 的 weight，加上協調者隔天照兩邊 equity 重算 weight（perp 空單賠、現貨賺，weight 反向走），ETH 單日動約 **±13%** 以上現貨就重平衡；perp 的 10 點 margin deadband 要約 **+24%／−28%** 才動。所以 13–24% 的單日行情隔天會看到一腿動、一腿不動的 delta 燈；這種燈不算成績單的「delta 亮燈」，只數價格移動解釋不了的（單日行情沒到 13% 卻亮燈，就是一腿沒做到） |
-| `ALERT silent day` | 那天 perp 沒有任何 cycle、現貨也沒決策 | 兩個 daemon 都停了，或協調者死了讓 visit 的 carry 鏈停在 `target`：`systemctl status` 兩邊都看 |
+| `report` `ALERT delta` | 兩腿數量差超過 10% | 看是哪一腿沒做到：perp 被閘門擋（`refused by the gate`；off-grid 的 margin 也算在這裡）、現貨 `no_trade`／`rejected`（gas 沒了？）；paper 階段**只看不補**（D7）。**大漲跌後隔天的燈多半是 deadband**：兩腿的再平衡門檻不同步——現貨 band 0.05 對 0.3 的 weight，加上協調者隔天照兩邊 equity 重算 weight（perp 空單賠、現貨賺，weight 反向走），ETH 單日動約 **±16–17%** 以上現貨就重平衡（協調者 23:50 讀到的現貨 equity 是當天早上那根 bar 的、還沒含當日行情，perp 的則是 20 點前後的快照、已含）；perp 的 10 點 margin deadband 要約 **+24%／−28%** 才動。所以 16–24% 的單日行情隔天會看到一腿動、一腿不動的 delta 燈；這種燈不算成績單的「delta 亮燈」，只數價格移動解釋不了的（單日行情沒到 16% 卻亮燈，就是一腿沒做到） |
+| `ALERT silent day` | 那天沒有任何 perp cycle 讀到可用或不可用的文件（沒跑、全部 `no_decision`、全部 `pending`、或不是 file-target run），現貨也沒被策略決策（沒 visit、或 bar 可疑被跳過） | 燈的文字印的是 cycle 種類與現貨結果：全 `no_decision` 看 perp journal（venue 掛了一整天？）；全 `pending` 是交接檔只寫了明天那份（協調者晚跑超過寬限）；沒有 cycle 看 `systemctl status hl-paper-carry-eth`；現貨 `not decided` 看 visit log 的 carry 鏈（`target` exit 3？）、`skipped_suspect` 看那根 bar 為何可疑 |
 | `ALERT sidecar not read` | payload 目錄下有一個 `.handoff.json` 讀不出來 | 多半是 restart 切到寫一半；那個 cycle 讀了哪份檔已經查不到，看前後 cycle 的 |
 | `ALERT held by D5` | 一腿連續三天沒有可用的交接檔 | 由人介入：先修協調者；要停就 §7 |
 | `ALERT one-legged`／`different documents` | 兩腿看到的不是同一天／同一份檔 | 對 `carry-signal.log` 的寫檔時間與兩邊的 sidecar／`targets` 列；排程刻意不重跑成功的那天（README） |

@@ -283,6 +283,6 @@ def test_a_run_id_without_its_store_is_a_settings_error_said_before_running(
     # Half of a pair would reach the command as --perp-db "" and fail at 23:50
     # as "no such file"; the script names the setting instead and runs nothing.
     code, calls, log = _run(tmp_path, monkeypatch, extra=extra)
-    assert code == 1 and calls == []
+    assert code == 4 and calls == []
     assert f"==== {said}: fix carry-signal.local.sh" in log
-    assert log[-1] == "==== exit 1"
+    assert log[-1] == "==== exit 4"

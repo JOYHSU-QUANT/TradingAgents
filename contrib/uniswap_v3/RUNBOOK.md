@@ -256,17 +256,18 @@ systemctl list-timers uniswap-v3-paper.timer         # 下一次 visit 的時間
 `uniswap-v3-paper.timer` 每天 **00:10、01:10、02:10 UTC**（台灣時間 08:10、09:10、10:10）各跑一次 `uniswap-v3-paper.service`，
 它以 `trader` 身分在 checkout 根目錄執行 `contrib/uniswap_v3/schedule/paper-visit.sh`，一次 visit 兩條鏈、前後跑；
 **鏈內前一步結束碼 0 才跑下一步，一條鏈失敗不擋另一條**（judge 的 429 風暴不該拖垮 carry 腿，交接檔缺檔也不該讓
-AI run 當天不決策），visit 的結束碼＝第一個不是 0 的（judge 鏈的優先）。judge 鏈：
+AI run 當天不決策），visit 的結束碼＝執行順序上第一個不是 0 的。**carry 鏈先跑**：它是兩條沒有模型的快指令，而 perp 腿幾小時內就會照同一份交接檔行動，
+judge 鏈若卡到 55 分鐘 timeout 不能把它拖到下一次 visit。carry 鏈（§3.1 的 `RUN_CARRY` 有設才跑；整個 sleeve 的操作在 [contrib/carry/RUNBOOK.md](../carry/RUNBOOK.md)）：
 
-1. `paper` 對照 run（不讀判斷，所以 judge 掛了也擋不住它）；
-2. `backfill --from <今天的邊界>`：把今天的 bar 讀進 store；
-3. `verdict`：問判斷（問過的代幣直接跳過）；
-4. `paper` AI run——只有判斷寫進來了才會跑到這一步，所以 AI run 不會在判斷之前就把當根決策掉。
+1. `target --handoff <交接檔>`：把協調者的交接檔寫進 store 的 `targets`（寫過就不改；交接檔還沒有、邊界沒到或已過一天→結束碼 3，這條鏈停在這步）；
+2. `paper` carry run——只有目標寫進來了才會跑到這一步，所以 carry run 不會在目標之前就把當根決策掉（README「`targets`」）。
 
-carry 鏈（§3.1 的 `RUN_CARRY` 有設才跑；整個 sleeve 的操作在 [contrib/carry/RUNBOOK.md](../carry/RUNBOOK.md)）：
+judge 鏈：
 
-5. `target --handoff <交接檔>`：把協調者的交接檔寫進 store 的 `targets`（寫過就不改；交接檔還沒有、邊界沒到或已過一天→結束碼 3，這條鏈停在這步）；
-6. `paper` carry run——只有目標寫進來了才會跑到這一步，所以 carry run 不會在目標之前就把當根決策掉（README「`targets`」）。
+3. `paper` 對照 run（不讀判斷，所以 judge 掛了也擋不住它）；
+4. `backfill --from <今天的邊界>`：把今天的 bar 讀進 store；
+5. `verdict`：問判斷（問過的代幣直接跳過）；
+6. `paper` AI run——只有判斷寫進來了才會跑到這一步，所以 AI run 不會在判斷之前就把當根決策掉。
 
 - 第一次 visit 決策 00:00 收盤的那根 bar；後兩次發現已決策，結束碼 0、不寫決策（只會把先前 pending 的讀數核對成 final）。
   第一次若拿到結束碼 3（節點落後、成交區塊還沒到、judge 沒答、store 被鎖住），後兩次就是重試；
@@ -299,7 +300,7 @@ PYTHON="/home/trader/uniswap-paper/.venv/bin/python"
 | `CONFIG_TREND` | `contrib/uniswap_v3/configs/paper-trend.local.yaml` | 通常不用 |
 | `CONFIG_AI` | `contrib/uniswap_v3/configs/paper-ai.local.yaml` | 通常不用（`verdict` 與 `backfill` 也讀這份） |
 | `CONFIG_CARRY` | `contrib/uniswap_v3/configs/paper-carry.local.yaml` | 通常不用（`target` 也讀這份） |
-| `HANDOFF` | `contrib/carry/data/handoff-ETH.json` | 伺服器上改成協調者寫的那個檔：`/home/trader/data/carry/handoff-ETH.json`（carry RUNBOOK §3） |
+| `HANDOFF` | `contrib/carry/data/handoff-ETH.json` | 伺服器上改成協調者寫的那個檔：`/home/trader/data/carry/handoff-ETH.json`（路徑在 carry RUNBOOK §0，設定時機在它的 §4 第 3 步） |
 | `DB` | `contrib/uniswap_v3/data/paper.db` | 伺服器上改成 `/home/trader/data/uniswap/paper.db` |
 | `LOG` | `contrib/uniswap_v3/data/paper-visits.log` | 伺服器上改成 `/home/trader/data/uniswap/paper-visits.log` |
 | `PYTHON` | `python3` | 伺服器上改成 `.venv/bin/python` 的完整路徑 |
@@ -343,7 +344,7 @@ cd ~/uniswap-paper
 .venv/bin/python -m contrib.uniswap_v3 report --db /home/trader/data/uniswap/paper.db --run-id paper-ai-1
 ```
 
-- log 每次 visit 有一行 `==== <UTC 時間> visit of "paper-trend-1" and "paper-ai-1" (db ..., python ...)`、四步各自的輸出、一行 `==== exit <碼>`。
+- log 每次 visit 有一行 `==== <UTC 時間> visit: trend "paper-trend-1", ai "paper-ai-1", carry "" (db ..., python ...)`、各步的輸出、一行 `==== exit <碼>`。
   `verdict` 那步每個代幣一行評等與耗時（§2.5）。
 - `status --run-id` 從 `run paper-ai-1: ...` 那行算起的第三行，說 run 跟不跟得上時鐘：`up to date` 是最近一個
   已過的邊界已決策；`behind: N boundary(ies) ...` 是有 N 根已過但還沒決策——對照 run 到 00:10、AI run 到 00:3x（等判斷）之間是 1、正常；
@@ -385,7 +386,7 @@ cd ~/uniswap-paper
 | `failed: ... the clock is behind` | 這台機器的時鐘早於 run 已走到的邊界 | 校時 |
 | `failed: the strategy refused the bar at ... (ai_gated_weights reads verdicts, and the view carries none ...)` | 策略讀判斷，設定檔卻沒有 `verdicts` 區塊 | 設定補上 `verdicts`，用新的 run id 開 run（原 run 已開在沒有判斷的設定下） |
 | `verdict`：`warning: the boundary ... passed N s ago, more than agent.ask_within_seconds (14400 s)` 接 `exit 0` | 邊界過了超過 4 小時才跑到 `verdict`（主機關機錯過 visit、過了 04:00 才開機補跑，或下午手動跑）；還沒問的代幣不問、那根沒判斷，已寫進的判斷照用 | 沒事，是設計（§2.5）；排程時段內就出現的話，看前面幾步為什麼拖那麼久 |
-| `==== RUN_TREND and RUN_AI are both empty` 接 `==== exit 1` | `paper-visit.local.sh` 把兩個 run id 都留空 | 填回去（§3.1） |
+| `==== RUN_TREND, RUN_AI and RUN_CARRY are all empty` 接 `==== exit 1` | `paper-visit.local.sh` 把三個 run id 都留空 | 填回去（§3.1） |
 | `verdict`：`try again later: the store has no bar at ...` 接 `exit 3` | 當天的 bar 還沒進 store（前一步的 `backfill` 沒讀到，多半是節點落後） | 當天後面的重試會補；順序見 §2.5 |
 | `verdict`：`try again later: the judge did not answer on ETH-USD (...)` 接 `exit 3` | 原因可能會過：閘道回 402（額度）、408、429、5xx，連線／逾時類錯誤，或分析師的資料源被限流／掛了（括號裡是 `VendorRateLimitError`／`VendorUnavailableError` 之類）；已答的代幣已寫進 store | 當天後面的重試只問剩下的；**一整天都是 3** 就看括號裡的例外：閘道的就查 OpenRouter 額度與服務狀態，資料源的就查該資料源 |
 | `verdict`：`failed: the judge cannot be built (ValueError: API key for provider 'openrouter' is not set. Please set ...)` | `.env` 沒有供應商的 key | 補 key（§1.4） |

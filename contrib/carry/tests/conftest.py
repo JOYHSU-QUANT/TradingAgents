@@ -163,6 +163,9 @@ _SPOT_BOOKS = (
 # The cycle kinds a test states, as (attempt status, ai_inputs.model, rationale).
 _CYCLE_ROWS = {
     "applied": ("completed", "file-target", "carry handoff h.json: enter at X; perp leg short"),
+    # The decision contract refused the rendered target (an off-grid margin):
+    # the scheduler's status is invalid_output, the gate's word invalid_fail_closed.
+    "off_grid": ("invalid_output", "file-target", "margin_off_step_grid"),
     "pending": ("completed", "file-target", "carry handoff pending: the document is for X"),
     "unusable": ("completed", "file-target", "carry handoff unusable: no such file"),
     "failed": ("api_failed", "file-target", None),

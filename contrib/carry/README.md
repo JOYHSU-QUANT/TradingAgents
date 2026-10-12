@@ -117,9 +117,9 @@ store 可以是伺服器上的，也可以是快照下來的（perp 的 sidecar 
 |---|---|
 | perp 這一天 | 以 UTC 日切：funding 收入＝`funding_events` 裡 `posted` 的 `funding_pnl` 加總（帳本正負號，收到為正）；手續費＝`fills.fee` 加總；倉位與 equity 取當天**最後一個** cycle 快照；cycle 以排程時間歸日 |
 | spot 這一天 | 就是那根日線 bar：決策、valuation（成交後、以收盤價計）、fills 都在 `time`＝邊界那根；swap 成本＝以 bar 收盤價算的「進去的價值 − 出來的價值」（池子費＋滑價，與 uniswap `report` 的兩項加總相同，不帶它的費率表）；gas＝`gas_cost_eth` × valuation 裡 WETH 的價（沒有 WETH 價就只印 ETH 數、不計入成本並在合計註明） |
-| cycle 種類 | `applied`（讀到可用的交接檔、送進閘門；`refused by the gate` 另計）、`pending`（午夜前讀到明天的檔，正常排程）、`unusable`（缺檔、陳舊、別的幣、讀不懂：兩腿維持，D5）、`no_decision`（cycle 沒有決策：市場資料、寫入失敗）、`engine`（這個 run 不是 file-target） |
+| cycle 種類 | `applied`（讀到可用的交接檔、送進閘門；`refused by the gate` 另計——含 off-grid margin 的 fail closed，排程器記成 `invalid_output`、閘門字是 `invalid_fail_closed`，sidecar 照寫）、`pending`（午夜前讀到明天的檔，正常排程）、`unusable`（缺檔、陳舊、別的幣、讀不懂：兩腿維持，D5）、`no_decision`（cycle 沒有決策：市場資料、寫入失敗、沒有答案列）、`engine`（這個 run 不是 file-target）。閘門的字走 perp 的 `RiskAction` 列舉，不認識的字拒絕整份報表 |
 | delta | **以幣計**，不以美元：現貨持有的代幣數 − perp 空單數量；兩個時點不同（現貨是 bar 收盤、perp 是當日最後快照），美元讀法會隨兩邊同向的價差亂亮。超過較大一腿的 `--delta-alert-pct`（預設 10%，D7）就亮，只要任一腿有東西就看，不看當天 intent——出場只做掉一腿就是計畫怕的裸部位 |
-| basis | 現貨 bar 收盤價對 perp 當天第一個快照的 mark：`spot / mark − 1`，並印那個快照的時間 |
+| basis | 現貨 bar 收盤價對 perp 當天第一個快照的 mark：`spot / mark − 1`，並印那個快照的時間；perp cycle 是滾動的 4 小時，第一個快照最多晚午夜 4 小時，所以這個數**含最多一個 cycle 的價格移動**，看趨勢不看單日 |
 | in／out | 當天的 intent：perp sidecar 說 short 就是 in，沒有 sidecar 就看現貨 target 的 weight > 0；兩者都沒有印 `?` |
 | net | funding − perp 手續費 − 現貨 swap 成本 − gas |
 
@@ -132,8 +132,11 @@ store 可以是伺服器上的，也可以是快照下來的（perp 的 sidecar 
 | `one-legged` | 現貨那根對著 target 決策了，perp 當天卻沒有任何 cycle applied；或反過來 perp applied 了、現貨沒有 target 或沒決策 |
 | `different documents` | 現貨 `targets.digest`（`target` 指令讀到的交接檔位元組 sha256）不在 perp 當天 sidecar 記的 digest 裡：兩腿讀的不是同一份檔 |
 | `no sidecar` | perp 有 applied cycle，payload 目錄下卻找不到當天的 sidecar：目錄指錯或檔案丟了 |
+| `silent day` | 那天 perp 沒有任何 cycle、現貨也沒有決策：兩腿都沒跑，否則看起來像安靜的一天 |
+| `sidecar not read` | 一個 `.handoff.json` 讀不出來（壞 JSON、別的幣、缺欄位）：逐檔列在日列之後、不歸哪一天，算進亮燈數 |
 
-讀不出來的 sidecar 逐一列在後面（`sidecar not read:`），不擋報表。合計行印：在場天數、funding、成本、net、亮燈數與被 D5 維持的天數。
+合計行印：在場天數、funding（與 venue 還沒入帳的 pending 結算數——那些沒算進去）、成本、net、亮燈數（含讀不出來的 sidecar）與被 D5 維持的天數。
+`one-legged` 的現貨側只算真的對著 target 決策過的 bar：`skipped_suspect`（bar 可疑、策略沒被問）不算有行動。
 結束碼：0 印完（亮燈不改結束碼，`grep ALERT`）；1 拒絕——現貨 run 的設定快照沒有 `targets` 區塊（不是 carry run）、交易的代幣不含交接檔那個、
 兩個 run 都沒有任何決策、span 空、門檻 < 1、store 不在或不是那種 store。
 

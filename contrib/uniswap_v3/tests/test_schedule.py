@@ -465,8 +465,8 @@ def test_a_linux_visit_with_a_carry_run_records_the_handoff_then_visits_it(tmp_p
     settings = _CARRY + 'HANDOFF="h/handoff-ETH.json"\n'
     code, calls, log = _visit(tmp_path, monkeypatch, extra=settings)
     assert code == 0
-    assert _commands(calls) == ["paper", "backfill", "verdict", "paper", "target", "paper"]
-    target, carry = calls[4:]
+    assert _commands(calls) == ["target", "paper", "paper", "backfill", "verdict", "paper"]
+    target, carry = calls[:2]
     assert target[target.index("--handoff") + 1] == "h/handoff-ETH.json"
     assert carry[carry.index("--run-id") + 1] == "paper-carry-1"
     for call in (target, carry):
@@ -478,15 +478,16 @@ def test_a_linux_visit_with_a_carry_run_records_the_handoff_then_visits_it(tmp_p
 @pytest.mark.parametrize(
     ("exits", "code", "commands"),
     [
-        # The judge chain stopped at the verdict; the carry chain ran whole, and the
-        # visit's code is the judge chain's, the first that was not 0.
-        ({"EXIT_VERDICT": 3}, 3, ["paper", "backfill", "verdict", "target", "paper"]),
-        ({"EXIT_VERDICT": 3, "EXIT_TARGET": 1}, 3, ["paper", "backfill", "verdict", "target"]),
-        # The control run failed: the judge chain is over, the carry chain still runs.
-        ({"EXIT_PAPER": 1}, 1, ["paper", "target", "paper"]),
+        # The carry chain runs first and whole; the judge chain stopped at the
+        # verdict, and its code is the visit's, the first that was not 0.
+        ({"EXIT_VERDICT": 3}, 3, ["target", "paper", "paper", "backfill", "verdict"]),
+        # Both chains failed: the carry chain's code, as it ran first.
+        ({"EXIT_VERDICT": 3, "EXIT_TARGET": 1}, 1, ["target", "paper", "backfill", "verdict"]),
+        # The control run failed: the judge chain is over, the carry chain already ran.
+        ({"EXIT_PAPER": 1}, 1, ["target", "paper", "paper"]),
         # The handoff is not there yet (exit 3): the carry run waits, the judge chain is whole.
-        ({"EXIT_TARGET": 3}, 3, ["paper", "backfill", "verdict", "paper", "target"]),
-        ({"EXIT_PAPER_CARRY": 1}, 1, ["paper", "backfill", "verdict", "paper", "target", "paper"]),
+        ({"EXIT_TARGET": 3}, 3, ["target", "paper", "backfill", "verdict", "paper"]),
+        ({"EXIT_PAPER_CARRY": 1}, 1, ["target", "paper", "paper", "backfill", "verdict", "paper"]),
     ],
 )
 def test_the_two_chains_do_not_stop_each_other_and_the_first_failure_is_the_visits(

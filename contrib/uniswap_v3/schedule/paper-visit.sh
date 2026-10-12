@@ -12,19 +12,22 @@
 # A visit is two chains, one after the other; within a chain each step runs
 # only when the one before exited 0, and a chain's failure does not stop the
 # other (the judge's outage must not take the carry leg down, nor a missing
-# handoff the AI run). The judge chain, in this order:
-#   1. paper     the control run, which reads no verdicts;
-#   2. backfill  today's bar into the store (the verdict command reads the
+# handoff the AI run). The carry chain runs first: it is two quick commands
+# with no model behind them, and the perp leg acts on the same handoff within
+# hours, so a judge that runs to the visit's timeout must not push it to the
+# next visit. The carry chain (contrib/carry/RUNBOOK.md), only with RUN_CARRY set:
+#   1. target    the carry coordinator's handoff into the store's targets;
+#   2. paper     the carry run, which reads the targets.
+# The judge chain, in this order:
+#   3. paper     the control run, which reads no verdicts;
+#   4. backfill  today's bar into the store (the verdict command reads the
 #                store alone, and the AI run's paper decides as it reads);
-#   3. verdict   the judge's verdict on every traded token at that bar;
-#   4. paper     the AI-gated run, which reads the verdicts.
-# The carry chain (contrib/carry/RUNBOOK.md), only with RUN_CARRY set:
-#   5. target    the carry coordinator's handoff into the store's targets;
-#   6. paper     the carry run, which reads the targets.
+#   5. verdict   the judge's verdict on every traded token at that bar;
+#   6. paper     the AI-gated run, which reads the verdicts.
 # A retry does not ask again for a verdict that was already given: the
 # command keeps what it has and asks only about the rest; a target already
-# in the store is left as it is. An empty RUN_TREND leaves out step 1, an
-# empty RUN_AI steps 2 to 4, an empty RUN_CARRY steps 5 and 6, each said in
+# in the store is left as it is. An empty RUN_CARRY leaves out steps 1 and
+# 2, an empty RUN_TREND step 3, an empty RUN_AI steps 4 to 6, each said in
 # the log; all three empty is a setting to fix, exit 1.
 set -u
 
@@ -115,11 +118,12 @@ if [ -z "$RUN_TREND" ] && [ -z "$RUN_AI" ] && [ -z "$RUN_CARRY" ]; then
     say "RUN_TREND, RUN_AI and RUN_CARRY are all empty: nothing to visit; fix paper-visit.local.sh"
     finish 1
 fi
-judge_chain
-judge=$?
 carry_chain
 carry=$?
-if [ "$judge" -ne 0 ]; then
-    finish "$judge"
+judge_chain
+judge=$?
+# The visit's code is the first that was not 0, in the order the chains ran.
+if [ "$carry" -ne 0 ]; then
+    finish "$carry"
 fi
-finish "$carry"
+finish "$judge"

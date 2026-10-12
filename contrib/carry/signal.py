@@ -102,7 +102,7 @@ def whole(
     return value
 
 
-def finite(value: object, what: str, *, error: type[ValueError] = SignalError) -> float:
+def finite(value: object, what: str, *, error: type[Exception] = SignalError) -> float:
     """``value`` as a finite float, by the research package's one numeric guard."""
     try:
         return require_number(value, what)

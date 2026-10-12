@@ -4,8 +4,9 @@
 # minutes later when it failed) or any other scheduler. It appends the
 # command's output to a log file and exits as the command did: 0 the handoff
 # is written, 1 refused (the log says why), 2 usage. It exits 4 itself when
-# it cannot get to the repository or write the log, or PYTHON names a path
-# that is not there: the command is not run then. See contrib/carry/RUNBOOK.md.
+# it cannot get to the repository or write the log, PYTHON names a path
+# that is not there, or a run id is set without its store (or the reverse):
+# the command is not run then. See contrib/carry/RUNBOOK.md.
 #
 # One run is one command, python -m contrib.carry signal (contrib/carry/README.md),
 # with each leg's store for the sizing once that leg's run id is set. Leave
@@ -64,13 +65,14 @@ case "$PYTHON" in
 esac
 
 # A run id and its store go together: one without the other is a settings
-# error, said here, not a store the command cannot find at 23:50.
+# error (exit 4, like a bad PYTHON: nothing to retry), said here, not a
+# store the command cannot find at 23:50.
 # pair LEG RUN_ID DB: x = the run id alone is set, y = the store alone.
 pair() {
     case "${2:+x}${3:+y}" in
     x | y)
         say "${1}_DB and ${1}_RUN_ID go together, one is empty: fix carry-signal.local.sh"
-        finish 1
+        finish 4
         ;;
     esac
 }

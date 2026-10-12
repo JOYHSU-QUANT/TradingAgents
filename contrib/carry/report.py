@@ -43,6 +43,12 @@ The lights (plan §2 D5 and D7, in these words):
   that day recorded: the two legs did not read the same file.
 - **no sidecar** — perp cycles applied a document but no sidecar for the
   day is under the payload directory: the wrong directory, or lost files.
+- **silent day** — neither leg left a trace: no perp cycle and no spot
+  decision. Both daemons down, or the coordinator dead and the spot visit
+  refusing at ``target``, reads as a quiet book otherwise.
+- **sidecar not read** — a sidecar file under the payload directory that
+  could not be read as one; said per file, under no day, since the day it
+  belongs to is what could not be read.
 
 Costs are each leg's own: the perp fills' fees and the spot swaps' cost at
 the bar's prices (what went in less what came out — the pools' fees and
@@ -61,6 +67,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
+from enum import Enum
 from itertools import groupby
 from pathlib import Path
 from typing import Final, TypeVar
@@ -71,6 +78,7 @@ from .signal import instant_ms
 from .stores import (
     CycleKind,
     PerpCycle,
+    PerpPosition,
     PerpSnapshot,
     SpotFill,
     SpotTarget,
@@ -83,6 +91,7 @@ __all__ = [
     "DEFAULT_DELTA_ALERT_PCT",
     "GAS_TOKEN",
     "Alert",
+    "AlertKind",
     "BookDay",
     "Sidecar",
     "SidecarProblem",
@@ -101,7 +110,11 @@ DEFAULT_DELTA_ALERT_PCT: Final = 10
 # D5: this many days held for want of a document in a row is the operator's.
 DEFAULT_D5_DAYS: Final = 3
 # The gate's words for an applied target that was not acted on.
-_REFUSED: Final = frozenset({RiskAction.REJECTED.value, RiskAction.INVALID_FAIL_CLOSED.value})
+_REFUSED: Final = frozenset({RiskAction.REJECTED, RiskAction.INVALID_FAIL_CLOSED})
+# The spot engine's word for a bar it did not ask the strategy about (the
+# bar was suspect): a target written for that bar was not acted on. Spelled
+# here because the spot package may not be imported.
+_SPOT_SKIPPED: Final = "skipped_suspect"
 
 _ZERO: Final = Decimal(0)
 _T = TypeVar("_T")
@@ -177,6 +190,7 @@ class BookDay:
     boundary_ms: int
     token: str
     perp_funding: Decimal
+    perp_funding_pending: int
     perp_fees: Decimal
     perp_first: PerpSnapshot | None
     perp_last: PerpSnapshot | None
@@ -190,6 +204,14 @@ class BookDay:
     spot_gas_eth: Decimal
     spot_gas_cost: Decimal | None
 
+    def __post_init__(self) -> None:
+        if (self.perp_first is None) != (self.perp_last is None):
+            raise ValueError("a day has both its first and last perp snapshot, or neither")
+        if (self.spot_outcome is None) != (self.spot_valuation is None):
+            raise ValueError("a decided spot bar carries its valuation, an undecided one none")
+        if self.refused > self.applied:
+            raise ValueError("the gate refuses applied cycles only")
+
     @property
     def boundary(self) -> date:
         return from_epoch_ms(self.boundary_ms).date()
@@ -199,15 +221,17 @@ class BookDay:
         return None if self.perp_last is None else self.perp_last.equity
 
     @property
+    def _perp_position(self) -> PerpPosition | None:
+        return None if self.perp_last is None else self.perp_last.position
+
+    @property
     def perp_size(self) -> Decimal:
         """The signed position at the day's end: negative short, zero flat or without a snapshot."""
-        if self.perp_last is None or self.perp_last.size is None:
-            return _ZERO
-        return self.perp_last.size
+        return _ZERO if self._perp_position is None else self._perp_position.size
 
     @property
     def perp_mark(self) -> Decimal | None:
-        return None if self.perp_last is None else self.perp_last.mark
+        return None if self._perp_position is None else self._perp_position.mark
 
     @property
     def spot_equity(self) -> Decimal | None:
@@ -254,7 +278,8 @@ class BookDay:
     @property
     def basis(self) -> Decimal | None:
         """The spot bar's close against the perp mark at the day's first cycle: ``spot / mark − 1``."""
-        mark = None if self.perp_first is None else self.perp_first.mark
+        first = None if self.perp_first is None else self.perp_first.position
+        mark = None if first is None else first.mark
         if self.spot_price is None or mark is None or mark <= 0:
             return None
         return self.spot_price / mark - 1
@@ -283,6 +308,11 @@ class BookDay:
     @property
     def held_by_d5(self) -> bool:
         return self.perp_held_by_d5 or self.spot_held_by_d5
+
+    @property
+    def silent(self) -> bool:
+        """Neither leg left a trace of the day."""
+        return not self.cycles and self.spot_outcome is None
 
     @property
     def perp_digests(self) -> frozenset[str]:
@@ -342,6 +372,7 @@ def build_rows(
     since_ms: int,
     until_ms: int,
     funding: Sequence[tuple[int, Decimal]],
+    pending_funding: Sequence[int],
     fees: Sequence[tuple[int, Decimal]],
     snapshots: Sequence[PerpSnapshot],
     cycles: Sequence[PerpCycle],
@@ -356,10 +387,11 @@ def build_rows(
         raise ValueError("the span's ends are UTC day boundaries")
     token = SPOT_TOKENS[coin]
     funding_by_day = _sum_by_day(funding)
+    pending_by_day = Counter(floor_day(at_ms) for at_ms in pending_funding)
     fees_by_day = _sum_by_day(fees)
     snapshots_by_day = _group(snapshots, lambda snapshot: floor_day(snapshot.at_ms))
     cycles_by_day = _group(cycles, lambda cycle: floor_day(cycle.scheduled_ms))
-    sidecars_by_day = _group(sidecars, lambda sidecar: sidecar.handoff.as_of_ms)
+    sidecars_by_day = _group(sidecars, lambda sidecar: floor_day(sidecar.handoff.as_of_ms))
     fills_at = _group(fills, lambda fill: fill.at_ms)
     outcome_at = dict(decisions)
     valuation_at = {valuation.at_ms: valuation for valuation in valuations}
@@ -376,6 +408,7 @@ def build_rows(
                 boundary_ms=day,
                 token=token,
                 perp_funding=funding_by_day.get(day, _ZERO),
+                perp_funding_pending=pending_by_day.get(day, 0),
                 perp_fees=fees_by_day.get(day, _ZERO),
                 perp_first=day_snapshots[0] if day_snapshots else None,
                 perp_last=day_snapshots[-1] if day_snapshots else None,
@@ -397,12 +430,23 @@ def build_rows(
     return rows
 
 
+class AlertKind(str, Enum):
+    """The lights, as the lines spell them (module docstring)."""
+
+    DELTA = "delta"
+    ONE_LEGGED = "one-legged"
+    DIFFERENT_DOCUMENTS = "different documents"
+    NO_SIDECAR = "no sidecar"
+    HELD_BY_D5 = "held by D5"
+    SILENT_DAY = "silent day"
+
+
 @dataclass(frozen=True)
 class Alert:
     """One light, on one day."""
 
     boundary_ms: int
-    kind: str
+    kind: AlertKind
     text: str
 
 
@@ -421,28 +465,38 @@ def alerts(rows: Sequence[BookDay], *, delta_alert_pct: int, d5_days: int) -> li
             found.append(
                 Alert(
                     row.boundary_ms,
-                    "delta",
+                    AlertKind.DELTA,
                     f"net exposure {_qty(net)} of the coin ({pct(share)} of the larger leg: spot "
                     f"holds {_qty(row.spot_qty)}, perp holds {_qty(row.perp_size)}) "
                     f"exceeds {delta_alert_pct}% (D7)",
                 )
             )
-        spot_acted = row.spot_outcome is not None and row.spot_target is not None
+        spot_acted = (
+            row.spot_outcome is not None
+            and row.spot_outcome != _SPOT_SKIPPED
+            and row.spot_target is not None
+        )
         if spot_acted and row.applied == 0:
             found.append(
                 Alert(
                     row.boundary_ms,
-                    "one-legged",
+                    AlertKind.ONE_LEGGED,
                     "the spot bar decided on a target while no perp cycle applied the day's "
                     f"document ({_cycles(row.cycles)})",
                 )
             )
         elif row.applied > 0 and not spot_acted:
-            what = "no decision" if row.spot_outcome is None else "no target"
+            what = (
+                "no decision"
+                if row.spot_outcome is None
+                else f"outcome {row.spot_outcome}"
+                if row.spot_target is not None
+                else "no target"
+            )
             found.append(
                 Alert(
                     row.boundary_ms,
-                    "one-legged",
+                    AlertKind.ONE_LEGGED,
                     f"{row.applied} perp cycle(s) applied the day's document while the spot bar "
                     f"has {what}",
                 )
@@ -452,7 +506,7 @@ def alerts(rows: Sequence[BookDay], *, delta_alert_pct: int, d5_days: int) -> li
             found.append(
                 Alert(
                     row.boundary_ms,
-                    "different documents",
+                    AlertKind.DIFFERENT_DOCUMENTS,
                     f"the spot target came from the handoff {_short(row.spot_target.digest)}, "
                     f"the perp sidecars recorded {', '.join(sorted(_short(d) for d in digests))}",
                 )
@@ -461,9 +515,17 @@ def alerts(rows: Sequence[BookDay], *, delta_alert_pct: int, d5_days: int) -> li
             found.append(
                 Alert(
                     row.boundary_ms,
-                    "no sidecar",
+                    AlertKind.NO_SIDECAR,
                     f"{row.applied} perp cycle(s) applied a document but no sidecar for this "
                     f"day is under the payload directory",
+                )
+            )
+        if row.silent:
+            found.append(
+                Alert(
+                    row.boundary_ms,
+                    AlertKind.SILENT_DAY,
+                    "no perp cycle and no spot decision: neither leg ran",
                 )
             )
         streak = streak + 1 if row.held_by_d5 else 0
@@ -478,7 +540,7 @@ def alerts(rows: Sequence[BookDay], *, delta_alert_pct: int, d5_days: int) -> li
             found.append(
                 Alert(
                     row.boundary_ms,
-                    "held by D5",
+                    AlertKind.HELD_BY_D5,
                     f"{streak} days in a row a leg maintained for want of a usable document "
                     f"(today: {', '.join(legs)}); a human steps in (D5)",
                 )
@@ -580,16 +642,18 @@ def _day_lines(row: BookDay, coin: str) -> list[str]:
     )
     target = "none" if row.spot_target is None else plain(row.spot_target.weight)
     outcome = row.spot_outcome or "not decided"
+    first_position = None if row.perp_first is None else row.perp_first.position
     first = (
         "n/a"
-        if row.perp_first is None
-        else f"{_price(row.perp_first.mark)} at {iso_utc(row.perp_first.at_ms)[11:16]}Z"
+        if row.perp_first is None or first_position is None
+        else f"{_price(first_position.mark)} at {iso_utc(row.perp_first.at_ms)[11:16]}Z"
     )
+    pending = f" ({row.perp_funding_pending} pending)" if row.perp_funding_pending else ""
     refused = f", {row.refused} refused by the gate" if row.refused else ""
     return [
         (
             f"{row.boundary.isoformat()}  {_STANCE[row.intent_in]}  "
-            f"funding {_money(row.perp_funding)}  perp fees {_money(row.perp_fees)}  "
+            f"funding {_money(row.perp_funding)}{pending}  perp fees {_money(row.perp_fees)}  "
             f"spot swaps {_money(row.spot_swap_cost)}  gas {gas}  net {_money(row.net)}"
         ),
         (
@@ -629,9 +693,9 @@ def format_report(
     for row in rows:
         lines.extend(_day_lines(row, coin))
         for alert in by_day.get(row.boundary_ms, []):
-            lines.append(f"    ALERT {alert.kind}: {alert.text}")
+            lines.append(f"    ALERT {alert.kind.value}: {alert.text}")
     for problem in problems:
-        lines.append(f"  sidecar not read: {problem.path}: {problem.reason}")
+        lines.append(f"    ALERT sidecar not read: {problem.path}: {problem.reason}")
     lines.append("weeks (ISO):")
     for week in weeks(rows, found):
         lines.append(
@@ -645,9 +709,12 @@ def format_report(
     funding = sum((row.perp_funding for row in rows), _ZERO)
     costs = sum((row.costs for row in rows), _ZERO)
     unpriced = sum(1 for row in rows if row.unpriced)
+    pending = sum(row.perp_funding_pending for row in rows)
+    pending_note = f" ({pending} settlement(s) still pending, not counted)" if pending else ""
     lines.append(
-        f"span: {days_in} of {len(rows)} day(s) in; funding {_money(funding)}, costs "
-        f"{_money(costs)}{_unpriced_note(unpriced)}, net {_money(funding - costs)}; "
-        f"{len(found)} alert(s), {sum(1 for row in rows if row.held_by_d5)} day(s) held by D5"
+        f"span: {days_in} of {len(rows)} day(s) in; funding {_money(funding)}{pending_note}, "
+        f"costs {_money(costs)}{_unpriced_note(unpriced)}, net {_money(funding - costs)}; "
+        f"{len(found) + len(problems)} alert(s), "
+        f"{sum(1 for row in rows if row.held_by_d5)} day(s) held by D5"
     )
     return lines

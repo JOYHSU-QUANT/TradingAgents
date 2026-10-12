@@ -58,6 +58,7 @@ from .upstream import (
     FILE_TARGET_PENDING_PREFIX,
     FILE_TARGET_UNUSABLE_PREFIX,
     AttemptStatus,
+    RiskAction,
     sqlite_file_uri,
 )
 
@@ -66,6 +67,7 @@ __all__ = [
     "CycleKind",
     "Equity",
     "PerpCycle",
+    "PerpPosition",
     "PerpSnapshot",
     "SpotFill",
     "SpotRun",
@@ -76,6 +78,7 @@ __all__ = [
     "perp_equity",
     "perp_fees",
     "perp_funding",
+    "perp_pending_funding",
     "perp_snapshots",
     "spot_decisions",
     "spot_equity",
@@ -131,10 +134,6 @@ def _decimal(raw: object, path: Path, *, leg: str, what: str) -> Decimal:
         return decimal(raw, what, error=StoreReadError)
     except StoreReadError as exc:
         raise StoreReadError(f"{leg} store {path}: {exc}") from None
-
-
-def _optional_decimal(raw: object, path: Path, *, leg: str, what: str) -> Decimal | None:
-    return None if raw is None else _decimal(raw, path, leg=leg, what=what)
 
 
 def _perp_ms(stamp: object, path: Path, *, what: str) -> int:
@@ -230,34 +229,70 @@ class CycleKind(str, Enum):
 
 @dataclass(frozen=True)
 class PerpCycle:
-    """One decision cycle: when it was scheduled, how it ended, and the gate's word on it."""
+    """One decision cycle: when it was scheduled, how it ended, and the gate's word on it.
+
+    ``risk_action`` is the gate's word on an applied target, ``None`` for a
+    cycle that put nothing to the gate.
+    """
 
     scheduled_ms: int
     kind: CycleKind
-    risk_action: str | None
+    risk_action: RiskAction | None
+
+
+@dataclass(frozen=True)
+class PerpPosition:
+    """The position a snapshot carried: its signed size (a short is negative) and the mark."""
+
+    size: Decimal
+    mark: Decimal
 
 
 @dataclass(frozen=True)
 class PerpSnapshot:
-    """A cycle-end account snapshot, with the position of the same instant when there was one."""
+    """A cycle-end account snapshot, with the position of the same instant when there was one.
+
+    The engine writes the position row only while the run holds a position,
+    so ``position`` is ``None`` exactly when the run was flat.
+    """
 
     at_ms: int
     equity: Decimal
-    size: Decimal | None
-    mark: Decimal | None
+    position: PerpPosition | None
+
+
+# The attempt statuses under which the provider's answer reached the store:
+# ``completed``, and ``invalid_output`` — the scheduler's word for an answer
+# the decision contract refused (a file target with an off-grid margin fails
+# closed THERE, after the sidecar was written), so it is an applied cycle the
+# gate refused, not a cycle that decided nothing.
+_DECIDED: Final = frozenset({AttemptStatus.COMPLETED.value, AttemptStatus.INVALID_OUTPUT.value})
 
 
 def _kind(status: object, model: object, reason: object) -> CycleKind:
-    if status != AttemptStatus.COMPLETED.value:
+    if status not in _DECIDED or reason is None:
+        # No answer row at all is missing evidence: it fails toward the alarm.
         return CycleKind.NO_DECISION
     if model != FILE_TARGET_MODEL:
         return CycleKind.ENGINE
-    text = "" if reason is None else str(reason)
+    text = str(reason)
     if text.startswith(FILE_TARGET_UNUSABLE_PREFIX):
         return CycleKind.UNUSABLE
     if text.startswith(FILE_TARGET_PENDING_PREFIX):
         return CycleKind.PENDING
     return CycleKind.APPLIED
+
+
+def _risk_action(value: object, path: Path, *, what: str) -> RiskAction | None:
+    """The gate's word through its own vocabulary; a word this package does not know is refused."""
+    if value is None:
+        return None
+    try:
+        return RiskAction(value)
+    except ValueError:
+        raise StoreReadError(
+            f"perp store {path}: {what}: risk_action {value!r} is not a gate action"
+        ) from None
 
 
 def perp_cycles(path: Path, run_id: str) -> list[PerpCycle]:
@@ -282,7 +317,7 @@ def perp_cycles(path: Path, run_id: str) -> list[PerpCycle]:
         PerpCycle(
             _perp_ms(scheduled, path, what=what),
             _kind(status, model, reason),
-            None if action is None else str(action),
+            _risk_action(action, path, what=f"run {run_id!r}: a cycle's output"),
         )
         for scheduled, status, model, reason, action in rows
         if status != AttemptStatus.IN_PROGRESS.value
@@ -305,6 +340,19 @@ def perp_funding(path: Path, run_id: str, coin: str) -> list[tuple[int, Decimal]
         )
         for stamp, pnl in rows
     ]
+
+
+def perp_pending_funding(path: Path, run_id: str, coin: str) -> list[int]:
+    """The instants of the run's settlements on ``coin`` not yet posted (rate unavailable)."""
+    rows = _rows(
+        path,
+        "SELECT funding_timestamp FROM funding_events "
+        "WHERE run_id = ? AND symbol = ? AND status != 'posted' ORDER BY funding_timestamp",
+        (run_id, coin),
+        leg="perp",
+    )
+    what = f"run {run_id!r}: a funding event's timestamp"
+    return [_perp_ms(stamp, path, what=what) for (stamp,) in rows]
 
 
 def perp_fees(path: Path, run_id: str, coin: str) -> list[tuple[int, Decimal]]:
@@ -337,15 +385,25 @@ def perp_snapshots(path: Path, run_id: str, coin: str) -> list[PerpSnapshot]:
         leg="perp",
     )
     what = f"run {run_id!r}"
-    return [
-        PerpSnapshot(
-            _perp_ms(stamp, path, what=f"{what}: the perp snapshot's timestamp"),
-            _decimal(equity, path, leg="perp", what=f"{what} account_equity"),
-            _optional_decimal(size, path, leg="perp", what=f"{what} position_size"),
-            _optional_decimal(mark, path, leg="perp", what=f"{what} mark_price"),
+    snapshots = []
+    for stamp, equity, size, mark in rows:
+        at_ms = _perp_ms(stamp, path, what=f"{what}: the perp snapshot's timestamp")
+        if (size is None) != (mark is None):
+            raise StoreReadError(
+                f"perp store {path}: {what}: the position row at {stamp} has a size "
+                f"without a mark, or a mark without a size"
+            )
+        position = (
+            None
+            if size is None
+            else PerpPosition(
+                _decimal(size, path, leg="perp", what=f"{what} position_size"),
+                _decimal(mark, path, leg="perp", what=f"{what} mark_price"),
+            )
         )
-        for stamp, equity, size, mark in rows
-    ]
+        equity_value = _decimal(equity, path, leg="perp", what=f"{what} account_equity")
+        snapshots.append(PerpSnapshot(at_ms, equity_value, position))
+    return snapshots
 
 
 # --- the report's reads: the spot leg -----------------------------------------

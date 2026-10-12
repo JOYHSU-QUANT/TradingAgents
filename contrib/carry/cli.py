@@ -63,6 +63,7 @@ from .stores import (
     perp_equity,
     perp_fees,
     perp_funding,
+    perp_pending_funding,
     perp_snapshots,
     spot_decisions,
     spot_equity,
@@ -357,7 +358,8 @@ def _cmd_signal(
     max_reading_age = _reading_age(args)
     now_at = now()
     now_ms = epoch_ms(now_at, what="the clock")
-    as_of_ms = _day_boundary(args.as_of, what="--as-of") or default_boundary(now_ms)
+    as_of = _day_boundary(args.as_of, what="--as-of")
+    as_of_ms = default_boundary(now_ms) if as_of is None else as_of
     out = Path(args.out)
     if not out.parent.is_dir():
         raise _Refused(f"--out {out}: the directory does not exist")
@@ -562,6 +564,7 @@ def _cmd_report(args: argparse.Namespace, *, now: Callable[[], datetime]) -> int
         since_ms=since_ms,
         until_ms=until_ms,
         funding=perp_funding(perp_db, args.perp_run_id, coin),
+        pending_funding=perp_pending_funding(perp_db, args.perp_run_id, coin),
         fees=perp_fees(perp_db, args.perp_run_id, coin),
         snapshots=perp_snapshots(perp_db, args.perp_run_id, coin),
         cycles=cycles,

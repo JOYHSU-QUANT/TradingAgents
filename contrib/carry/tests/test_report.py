@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
+import sqlite3
 from decimal import Decimal
 from pathlib import Path
 
@@ -12,6 +14,7 @@ from contrib.carry.cli import main
 from contrib.carry.handoff import iso_utc
 from contrib.carry.report import (
     Alert,
+    AlertKind,
     Sidecar,
     alerts,
     build_rows,
@@ -22,17 +25,20 @@ from contrib.carry.report import (
 from contrib.carry.stores import (
     CycleKind,
     PerpCycle,
+    PerpPosition,
     PerpSnapshot,
     SpotFill,
     SpotTarget,
     SpotValuation,
+    StoreReadError,
     perp_cycles,
     perp_fees,
     perp_funding,
+    perp_pending_funding,
     perp_snapshots,
     spot_run,
 )
-from contrib.carry.upstream import from_epoch_ms
+from contrib.carry.upstream import RiskAction, from_epoch_ms
 
 from .conftest import (
     COIN,
@@ -66,8 +72,10 @@ def _sidecar_for(payloads: Path, day_ms: int, *, stem: str, digest: str, hours: 
     return next(sidecar for sidecar in sidecars if sidecar.path == path)
 
 
-def _snapshot(at_ms: int, equity: str, size: str, mark: str) -> PerpSnapshot:
-    return PerpSnapshot(at_ms, Decimal(equity), Decimal(size), Decimal(mark))
+def _snapshot(at_ms: int, equity: str, size: str | None, mark: str | None) -> PerpSnapshot:
+    flat = size is None or mark is None
+    position = None if flat else PerpPosition(Decimal(size), Decimal(mark))
+    return PerpSnapshot(at_ms, Decimal(equity), position)
 
 
 def _valuation(at_ms: int, balances: dict[str, str], prices: dict[str, str], total: str):
@@ -81,6 +89,7 @@ def _valuation(at_ms: int, balances: dict[str, str], prices: dict[str, str], tot
 
 _BOOKS = (
     "funding",
+    "pending_funding",
     "fees",
     "snapshots",
     "cycles",
@@ -168,9 +177,9 @@ def _entry_day(tmp_path: Path):
         _sidecar_for(payloads, day(40), stem="in2", digest=A, hours=4),
     ]
     cycles = [
-        PerpCycle(day(40) + h * MS_PER_HOUR + 5 * MINUTE, CycleKind.APPLIED, "approved")
+        PerpCycle(day(40) + h * MS_PER_HOUR + 5 * MINUTE, CycleKind.APPLIED, RiskAction.APPROVED)
         for h in (0, 4, 8, 12, 16, 20)
-    ] + [PerpCycle(day(40) + 23 * MS_PER_HOUR + 55 * MINUTE, CycleKind.PENDING, "approved")]
+    ] + [PerpCycle(day(40) + 23 * MS_PER_HOUR + 55 * MINUTE, CycleKind.PENDING, None)]
     return _rows(
         funding=[(day(40) + h * MS_PER_HOUR, Decimal("0.05")) for h in range(1, 24)],
         fees=[(day(40) + 10 * MINUTE, Decimal("0.45"))],
@@ -192,7 +201,7 @@ def _entry_day(tmp_path: Path):
 def test_a_days_row_reads_each_leg_in_its_own_books(tmp_path: Path):
     (row,) = _entry_day(tmp_path)
     assert row.boundary.isoformat() == "2026-02-10"
-    assert row.perp_funding == Decimal("1.15")
+    assert row.perp_funding == Decimal("1.15") and row.perp_funding_pending == 0
     assert row.perp_fees == Decimal("0.45")
     assert (row.perp_size, row.perp_mark, row.perp_equity) == (
         Decimal("-0.9"),
@@ -223,21 +232,39 @@ def test_a_days_row_reads_each_leg_in_its_own_books(tmp_path: Path):
 def test_a_refused_target_is_counted_apart_from_an_approved_one():
     (row,) = _rows(
         cycles=[
-            PerpCycle(day(40), CycleKind.APPLIED, "approved"),
-            PerpCycle(day(40) + 4 * MS_PER_HOUR, CycleKind.APPLIED, "rejected"),
-            PerpCycle(day(40) + 8 * MS_PER_HOUR, CycleKind.APPLIED, "invalid_fail_closed"),
+            PerpCycle(day(40), CycleKind.APPLIED, RiskAction.APPROVED),
+            PerpCycle(day(40) + 4 * MS_PER_HOUR, CycleKind.APPLIED, RiskAction.REJECTED),
+            PerpCycle(day(40) + 8 * MS_PER_HOUR, CycleKind.APPLIED, RiskAction.INVALID_FAIL_CLOSED),
             PerpCycle(day(40) + 12 * MS_PER_HOUR, CycleKind.UNUSABLE, None),
         ]
     )
     assert (row.applied, row.refused, row.unusable) == (3, 2, 1)
 
 
-def test_an_empty_day_has_no_books_and_no_intent():
+def test_an_empty_day_has_no_books_no_intent_and_lights_silent_day():
     (row,) = _rows()
     assert row.perp_size == 0 and row.spot_qty == 0 and row.perp_equity is None
     assert row.intent_in is None and row.delta == (Decimal(0), None) and row.basis is None
-    assert row.spot_gas_cost == 0 and row.net == 0
-    assert alerts([row], delta_alert_pct=10, d5_days=1) == []
+    assert row.spot_gas_cost == 0 and row.net == 0 and row.silent
+    found = alerts([row], delta_alert_pct=10, d5_days=1)
+    assert [alert.kind for alert in found] == [AlertKind.SILENT_DAY]
+    # A day either leg touched is not silent, whatever else it lights.
+    (perp_only,) = _rows(cycles=[PerpCycle(day(40), CycleKind.UNUSABLE, None)])
+    (spot_only,) = _rows(
+        decisions=[(day(40), "hold")], valuations=[_valuation(day(40), {}, {}, "0")]
+    )
+    assert not perp_only.silent and not spot_only.silent
+
+
+def test_a_book_day_refuses_impossible_states():
+    (row,) = _rows()
+    first = _snapshot(day(40), "1", None, None)
+    with pytest.raises(ValueError, match="first and last perp snapshot"):
+        dataclasses.replace(row, perp_first=first)
+    with pytest.raises(ValueError, match="decided spot bar carries its valuation"):
+        dataclasses.replace(row, spot_outcome="hold")
+    with pytest.raises(ValueError, match="refuses applied cycles only"):
+        dataclasses.replace(row, refused=1)
 
 
 def test_the_span_must_be_day_boundaries():
@@ -288,7 +315,7 @@ def _row(day_ms: int, payloads: Path | None = None, **changes):
     """
     books: dict[str, object] = {
         "snapshots": [_snapshot(day_ms + MS_PER_HOUR, "10000", "-0.9", "3000")],
-        "cycles": [PerpCycle(day_ms + 5 * MINUTE, CycleKind.APPLIED, "approved")],
+        "cycles": [PerpCycle(day_ms + 5 * MINUTE, CycleKind.APPLIED, RiskAction.APPROVED)],
         "decisions": [(day_ms, "hold")],
         "valuations": [_valuation(day_ms, {"WETH": "0.9"}, {"WETH": "3000"}, "2700")],
         "targets": [SpotTarget(day_ms, Decimal("0.3"), A)],
@@ -301,7 +328,9 @@ def _row(day_ms: int, payloads: Path | None = None, **changes):
 
 
 def _kinds(found: list[Alert]) -> list[tuple[str, str]]:
-    return [(from_epoch_ms(alert.boundary_ms).date().isoformat(), alert.kind) for alert in found]
+    return [
+        (from_epoch_ms(alert.boundary_ms).date().isoformat(), alert.kind.value) for alert in found
+    ]
 
 
 def test_the_delta_lights_when_one_leg_is_short_of_the_other_whatever_the_intent(tmp_path: Path):
@@ -353,8 +382,15 @@ def test_a_one_legged_day_lights_from_either_side(tmp_path: Path):
     found = alerts([spot_silent], delta_alert_pct=10, d5_days=3)
     assert _kinds(found) == [("2026-02-12", "one-legged")]
     assert "spot bar has no target" in found[0].text
-    undecided = _row(day(42), payloads, decisions=[], targets=[])
-    assert "spot bar has no decision" in alerts([undecided], delta_alert_pct=10, d5_days=3)[0].text
+    undecided = _row(day(42), payloads, decisions=[], valuations=[], targets=[])
+    found = alerts([undecided], delta_alert_pct=10, d5_days=3)
+    one_legged = next(alert for alert in found if alert.kind is AlertKind.ONE_LEGGED)
+    assert "spot bar has no decision" in one_legged.text
+    # A suspect bar the strategy was never asked about did not act on its target.
+    skipped = _row(day(42), payloads, decisions=[(day(42), "skipped_suspect")])
+    found = alerts([skipped], delta_alert_pct=10, d5_days=3)
+    assert _kinds(found) == [("2026-02-12", "one-legged")]
+    assert "spot bar has outcome skipped_suspect" in found[0].text
     # Applied cycles with no sidecar under the payload directory are said too.
     no_sidecar = _row(day(42))
     assert _kinds(alerts([no_sidecar], delta_alert_pct=10, d5_days=3)) == [
@@ -432,6 +468,7 @@ def _books(
         cycles=[(_at(day(40), h, 5), "applied") for h in (0, 4, 8, 12, 16, 20)]
         + [(_at(day(40), 23, 55), "pending")]
         + [(_at(day(41), h, 5), "applied") for h in (0, 4, 8, 12, 16, 20)]
+        + [(_at(day(41), 23, 55), "off_grid", "invalid_fail_closed")]
         + [(_at(day(42), h, 5), "unusable") for h in (0, 4, 8, 12, 16, 20)]
         + [(_at(day(43), h, 5), "unusable") for h in (0, 4, 8, 12)]
         + [(_at(day(43), 16, 5), "failed"), (_at(day(43), 20, 5), "in_progress")],
@@ -514,18 +551,30 @@ def _report(perp: Path, spot: Path, *extra: str, now_ms: int = day(44) + 3 * MS_
 def test_the_stores_read_as_the_report_needs_them(tmp_path: Path):
     perp, spot, _ = _books(tmp_path)
     cycles = perp_cycles(perp, PERP_RUN)
-    assert len(cycles) == 24  # the in-progress attempt is not a cycle yet
+    assert len(cycles) == 25  # the in-progress attempt is not a cycle yet
+    # The off-grid margin: the contract refused it after the document applied.
+    assert (cycles[13].kind, cycles[13].risk_action) == (
+        CycleKind.APPLIED,
+        RiskAction.INVALID_FAIL_CLOSED,
+    )
     assert [c.kind for c in cycles[-3:]] == [
         CycleKind.UNUSABLE,
         CycleKind.UNUSABLE,
         CycleKind.NO_DECISION,
     ]
-    assert cycles[0].risk_action == "approved" and cycles[-1].risk_action is None
+    assert cycles[0].risk_action is RiskAction.APPROVED and cycles[-1].risk_action is None
     assert sum(pnl for _, pnl in perp_funding(perp, PERP_RUN, COIN)) == Decimal("4.03")
+    # The fixture always adds one settlement the venue had not posted yet.
+    assert perp_pending_funding(perp, PERP_RUN, COIN) == [day(40) + 23 * MS_PER_HOUR]
     snapshots = perp_snapshots(perp, PERP_RUN, COIN)
-    assert (snapshots[0].size, snapshots[0].mark) == (Decimal("-0.9"), Decimal(3000))
-    # A flat snapshot has no position row: no size, no mark.
-    assert (snapshots[-1].size, snapshots[-1].mark) == (None, None)
+    assert snapshots[0].position == PerpPosition(Decimal("-0.9"), Decimal(3000))
+    # A flat snapshot has no position row.
+    assert snapshots[-1].position is None
+    # A gate word this package does not know refuses the read, not a silent "approved".
+    with sqlite3.connect(perp) as conn:
+        conn.execute("UPDATE ai_outputs SET risk_action = 'waved_through' WHERE output_id = 'out0'")
+    with pytest.raises(StoreReadError, match="'waved_through' is not a gate action"):
+        perp_cycles(perp, PERP_RUN)
     run = spot_run(spot, SPOT_RUN)
     assert (run.quote, run.tokens, run.target_source) == ("USDC", ("USDC", "WETH"), "carry-eth-v1")
 
@@ -540,7 +589,7 @@ def test_the_command_prints_the_days_the_lights_the_weeks_and_the_span(tmp_path:
         "(delta lights above 10%, D5 lights at 3 days)"
     )
     assert out[1] == (
-        "2026-02-10  in   funding 1.1500  perp fees 0.4500  spot swaps 4.5000  "
+        "2026-02-10  in   funding 1.1500 (1 pending)  perp fees 0.4500  spot swaps 4.5000  "
         "gas 2.9950 (0.001 ETH)  net -6.7950"
     )
     assert out[2] == (
@@ -584,8 +633,8 @@ def test_the_command_prints_the_days_the_lights_the_weeks_and_the_span(tmp_path:
         "spot swaps 14.5000, gas 5.9950)  net -16.9150  alerts 2"
     )
     assert out[-1] == (
-        "span: 2 of 4 day(s) in; funding 4.0300, costs 20.9450, net -16.9150; 2 alert(s), "
-        "2 day(s) held by D5"
+        "span: 2 of 4 day(s) in; funding 4.0300 (1 settlement(s) still pending, not counted), "
+        "costs 20.9450, net -16.9150; 2 alert(s), 2 day(s) held by D5"
     )
 
 
@@ -614,7 +663,8 @@ def test_the_command_finds_the_sidecars_in_the_perp_layout_or_where_told(tmp_pat
     (payloads / "in9.handoff.json").write_text("{", encoding="utf-8")
     argv, now = _report(perp, spot, "--until", "2026-02-10")
     assert main(argv, now=now) == 0
-    assert "  sidecar not read: " in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "    ALERT sidecar not read: " in out and "1 alert(s)" in out
 
 
 @pytest.mark.parametrize(
@@ -681,8 +731,6 @@ def test_the_command_says_when_no_day_has_finished_yet(tmp_path: Path, capsys):
 
 
 def test_a_spot_config_snapshot_the_report_cannot_read_is_refused(tmp_path: Path, capsys):
-    import sqlite3
-
     perp, spot, _ = _books(tmp_path)
     for config, said in (
         ("not json", "config is not JSON"),

@@ -26,8 +26,13 @@ Breaking changes within the 0.x line are called out explicitly.
   when a leg maintained for want of a usable document three days running
   (a `pending` cycle is the schedule, not a fault), `one-legged`,
   `different documents` (the spot target's digest is not among the day's
-  sidecar digests) and `no sidecar`. The report changes nothing and exits
-  0 with lights (`grep ALERT`). `contrib/carry/schedule/` ships the
+  sidecar digests), `no sidecar`, `silent day` (neither leg left a trace)
+  and `sidecar not read`. A file-target cycle the decision contract refused
+  (an off-grid margin, stored as `invalid_output`) counts as applied and
+  refused by the gate, and the gate's word is read through the perp
+  package's `RiskAction`, so an unknown word refuses the report rather than
+  passing as approved. The report changes nothing and exits 0 with lights
+  (`grep ALERT`). `contrib/carry/schedule/` ships the
   coordinator's `carry-signal.sh` (settings in a gitignored
   `carry-signal.local.sh`, one retry five minutes after a failure through
   `Restart=on-failure` rather than a second timer time, so a successful
@@ -36,11 +41,11 @@ Breaking changes within the 0.x line are called out explicitly.
   second perp paper daemon with its own config, store and run id; the
   deploy workflow runs the package's tests and restarts that daemon while
   its unit is enabled (one the operator disabled stays down). The uniswap visit script now runs two chains
-  that do not stop each other — the judge chain as before, and a carry
-  chain (`target` then the carry run's `paper`, opted into with
-  `RUN_CARRY`) — so a judge outage cannot take the carry leg down nor a
-  missing handoff the AI run; the visit's exit code is the first that was
-  not 0. `contrib/carry/RUNBOOK.md` carries the host layout, the three
+  that do not stop each other — a carry chain first (`target` then the
+  carry run's `paper`, opted into with `RUN_CARRY`; two quick commands the
+  perp leg's timing depends on), then the judge chain as before — so a
+  judge outage cannot take the carry leg down nor a missing handoff the AI
+  run; the visit's exit code is the first that was not 0, in run order. `contrib/carry/RUNBOOK.md` carries the host layout, the three
   settings files, the units' install, the first day's order of operations
   (coordinator, perp daemon, spot run, timer), the daily checks, what each
   light means and how to stop. The stale-document policy, the handoff

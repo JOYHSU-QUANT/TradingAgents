@@ -249,18 +249,23 @@ cd ~/TradingAgents
 
 | 看到 | 意思 | 做什麼 |
 |---|---|---|
-| `carry-signal` log `exit 1`，句子是 reading age | 23:00 的結算還沒進 store 或 timer 跑太早／太晚 | 等 service 的 5 分鐘重試；再失敗就在 6 小時寬限內手動 `sudo systemctl start carry-signal.service` |
+| `carry-signal` log `exit 1`，句子是 reading age | 23:00 的結算還沒進 store 或 timer 跑太早／太晚 | 等 service 的 5 分鐘重試；再失敗就在 6 小時寬限內手動 `sudo systemctl reset-failed carry-signal.service && sudo systemctl start carry-signal.service`（`StartLimitBurst=2` 對手動 start 也算，一小時內第三次要先 `reset-failed`） |
+| `carry-signal` log `exit 4` | 設定錯：`PYTHON` 路徑不在、run id 與 store 沒成對、log 寫不了 | 修 `carry-signal.local.sh`，再手動 start；這一類不該等 service 重試 |
 | `exit 1`，venue 失敗／回補沒走到底 | Hyperliquid 端點掛了 | 同上；兩腿維持現狀（D5），不用動 |
 | `exit 1`，`is ... later than` | 交接檔的邊界比要決定的晚：時鐘或 `--as-of` 錯 | 不要刪檔；先弄清楚哪一邊的時間錯 |
 | perp journal 每個 cycle `carry handoff unusable` | 協調者整天沒寫檔，或 `target_path` 指錯 | 看 `carry-signal.log`；路徑錯就改 yaml 再 restart（持倉重啟走 protection-only，hl RUNBOOK） |
 | perp journal `pending` | 午夜前讀到明天的檔 | 正常，不用管 |
 | uniswap visit log carry 鏈 `exit 3` | 交接檔還不是今天的 | 當天後面兩次 visit 會重試；三次都 3 就看協調者 |
-| `report` `ALERT delta` | 兩腿數量差超過 10% | 看是哪一腿沒做到：perp 被閘門擋（`refused by the gate`）、現貨 NO_TRADE／REJECTED（gas 沒了？）；paper 階段**只看不補**（D7） |
+| `report` `ALERT delta` | 兩腿數量差超過 10% | 看是哪一腿沒做到：perp 被閘門擋（`refused by the gate`；off-grid 的 margin 也算在這裡）、現貨 `no_trade`／`rejected`（gas 沒了？）；paper 階段**只看不補**（D7）。**大漲跌後隔天的燈多半是 deadband**：現貨 band 0.05（對 0.3 weight 約 17% 相對）與 perp 的 10 點 margin deadband 不同步，ETH 一天動 10–15% 時現貨重平衡、perp 不動；這種燈不算成績單的「delta 亮燈」，只數價格移動解釋不了的 |
+| `ALERT silent day` | 那天 perp 沒有任何 cycle、現貨也沒決策 | 兩個 daemon 都停了，或協調者死了讓 visit 的 carry 鏈停在 `target`：`systemctl status` 兩邊都看 |
+| `ALERT sidecar not read` | payload 目錄下有一個 `.handoff.json` 讀不出來 | 多半是 restart 切到寫一半；那個 cycle 讀了哪份檔已經查不到，看前後 cycle 的 |
 | `ALERT held by D5` | 一腿連續三天沒有可用的交接檔 | 由人介入：先修協調者；要停就 §7 |
 | `ALERT one-legged`／`different documents` | 兩腿看到的不是同一天／同一份檔 | 對 `carry-signal.log` 的寫檔時間與兩邊的 sidecar／`targets` 列；排程刻意不重跑成功的那天（README） |
 | `ALERT no sidecar` | `--payloads-dir` 指錯或 payload 目錄被清 | 用 `<perp-db 目錄>/payloads/carry-ETH-1` |
 
 成績單門檻（計畫 §3.5）：paper 跑滿 4 週後，`report` 的每週 `net` > 0 **且** `delta` 亮燈每週 ≤ 1 次，才談 live。
+**只數滿 7 天的 ISO 週**（`days` 欄＝7）；週中開段的那個殘週帶著進場的 swap 成本與 gas，`net` 必然為負，當脈絡看不計分。
+每日 `funding` 後面若印 `(N pending)`，是 venue 當時沒給費率、還沒入帳的結算：那天與合計都少算了它們，入帳後重跑數字會變。
 
 ---
 

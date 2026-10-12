@@ -69,7 +69,6 @@ from .signal import (
     SignalError,
     decimal,
     finite,
-    instant_ms,
     whole,
 )
 from .stores import Equity
@@ -85,7 +84,6 @@ __all__ = [
     "Handoff",
     "HandoffError",
     "build",
-    "instant_ms",
     "iso_utc",
     "load_document",
     "plain",

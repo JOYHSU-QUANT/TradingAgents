@@ -55,14 +55,28 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from decimal import ROUND_DOWN, Decimal, InvalidOperation
+from decimal import ROUND_DOWN, Decimal
 from pathlib import Path
 from types import MappingProxyType
 from typing import Final
 
-from .signal import Action, Params, Position, Reading, Side, SignalError, finite, whole
+from .signal import (
+    Action,
+    Params,
+    Position,
+    Reading,
+    Side,
+    SignalError,
+    decimal,
+    finite,
+    instant_ms,
+    whole,
+)
 from .stores import Equity
-from .upstream import atomic_write_text, from_epoch_ms
+from .upstream import (
+    atomic_write_text,
+    from_epoch_ms,
+)
 
 __all__ = [
     "HANDOFF_VERSION",
@@ -71,7 +85,9 @@ __all__ = [
     "Handoff",
     "HandoffError",
     "build",
+    "instant_ms",
     "iso_utc",
+    "load_document",
     "plain",
     "previous_handoff",
     "read_handoff",
@@ -103,15 +119,21 @@ def plain(value: Decimal) -> str:
 
 
 def _decimal(value: object, what: str) -> Decimal:
-    if not isinstance(value, str):
-        raise HandoffError(f"{what} must be a decimal string, got {value!r}")
+    return decimal(value, what, error=HandoffError)
+
+
+def load_document(path: Path) -> object:
+    """The JSON at ``path``; :class:`HandoffError` when it cannot be read or is not JSON."""
     try:
-        parsed = Decimal(value)
-    except InvalidOperation:
-        raise HandoffError(f"{what} is not a decimal: {value!r}") from None
-    if not parsed.is_finite():
-        raise HandoffError(f"{what} must be finite, got {value!r}")
-    return parsed
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise HandoffError(
+            f"{path}: cannot read: {getattr(exc, 'strerror', None) or exc}"
+        ) from None
+    try:
+        return json.loads(raw)
+    except ValueError as exc:
+        raise HandoffError(f"{path}: not JSON: {exc}") from None
 
 
 def _optional_decimal(value: object, what: str) -> Decimal | None:
@@ -431,16 +453,7 @@ def write_handoff(path: Path, handoff: Handoff) -> None:
 
 def read_handoff(path: Path) -> Handoff:
     """The handoff at ``path``, validated; :class:`HandoffError` for anything else."""
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise HandoffError(
-            f"{path}: cannot read: {getattr(exc, 'strerror', None) or exc}"
-        ) from None
-    try:
-        doc = json.loads(raw)
-    except ValueError as exc:
-        raise HandoffError(f"{path}: not JSON: {exc}") from None
+    doc = load_document(path)
     try:
         return Handoff.from_document(doc)
     except HandoffError as exc:

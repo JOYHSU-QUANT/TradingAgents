@@ -1,0 +1,28 @@
+# The carry sleeve's perp leg: a second contrib/hyperliquid_perp paper daemon
+# beside hl-paper, deciding from the coordinator's handoff and asking no
+# model (decision_source: file_target; carry plan section 3.3). Its own config,
+# store and run id; the paper-BTC run's are not touched. The RUNBOOK
+# installs it into /etc/systemd/system and adds --create for the first start
+# only. The deploy workflow restarts it, as it does hl-paper, while the unit
+# is enabled; one the operator disabled stays down.
+[Unit]
+Description=contrib/hyperliquid_perp paper daemon for the carry sleeve (ETH, file target)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=10min
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=trader
+WorkingDirectory=/home/trader/TradingAgents
+ExecStart=/home/trader/TradingAgents/.venv/bin/python -m contrib.hyperliquid_perp paper --coin ETH --config contrib/hyperliquid_perp/configs/hyperliquid-carry-eth.local.yaml --run-id carry-ETH-1 --db /home/trader/data/carry/paper_trading.db
+# A daemon that exits is brought back (the restart reconciliation is
+# idempotent); the loop stops cleanly on SIGTERM after a last export.
+Restart=on-failure
+RestartSec=60
+KillSignal=SIGTERM
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

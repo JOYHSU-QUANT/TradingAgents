@@ -184,7 +184,18 @@ def test_the_service_is_stopped_before_the_next_visit_is_due_and_runs_the_script
 
 
 def test_the_linux_visit_takes_its_settings_from_a_local_file_before_using_them():
-    names = ("RUN_TREND", "RUN_AI", "CONFIG_TREND", "CONFIG_AI", "DB", "LOG", "PYTHON")
+    names = (
+        "RUN_TREND",
+        "RUN_AI",
+        "RUN_CARRY",
+        "CONFIG_TREND",
+        "CONFIG_AI",
+        "CONFIG_CARRY",
+        "HANDOFF",
+        "DB",
+        "LOG",
+        "PYTHON",
+    )
     defaults = [_at(f"{name}=", _VISIT_SH) for name in names]
     reads = 'if [ -f "$here/paper-visit.local.sh" ]; then . "$here/paper-visit.local.sh"'
     local = _at(reads, _VISIT_SH)
@@ -368,23 +379,24 @@ def test_the_installer_clones_repo_url_without_the_deploy_key(tmp_path, monkeypa
 
 
 # A python that records what it is asked, one line per call, and exits as told
-# for the command (the word after contrib.uniswap_v3); the second paper call,
-# the AI run's, is told apart by EXIT_PAPER_AI. Told LOCK_LOG, it takes the
-# write bit off that file, as a log that stops taking writes mid-visit.
+# for the command (the word after contrib.uniswap_v3); the three paper calls
+# are told apart by their run id (EXIT_PAPER the control run's, EXIT_PAPER_AI
+# the AI run's, EXIT_PAPER_CARRY the carry run's). Told LOCK_LOG, it takes
+# the write bit off that file, as a log that stops taking writes mid-visit.
 _STUB = """#!/bin/sh
 printf '%s\\n' "$*" >>"$STUB_LOG"
 if [ -n "${LOCK_LOG:-}" ]; then chmod a-w "$LOCK_LOG"; fi
 case "$*" in
-    *" contrib.uniswap_v3 paper "*)
-        if [ "$(grep -c ' contrib.uniswap_v3 paper ' "$STUB_LOG")" -ge 2 ]; then
-            exit "${EXIT_PAPER_AI:-0}"
-        fi
-        exit "${EXIT_PAPER:-0}" ;;
+    *" contrib.uniswap_v3 paper "*"--run-id paper-trend-1"*) exit "${EXIT_PAPER:-0}" ;;
+    *" contrib.uniswap_v3 paper "*"--run-id paper-ai-1"*) exit "${EXIT_PAPER_AI:-0}" ;;
+    *" contrib.uniswap_v3 paper "*) exit "${EXIT_PAPER_CARRY:-0}" ;;
     *" contrib.uniswap_v3 backfill "*) exit "${EXIT_BACKFILL:-0}" ;;
     *" contrib.uniswap_v3 verdict "*) exit "${EXIT_VERDICT:-0}" ;;
+    *" contrib.uniswap_v3 target "*) exit "${EXIT_TARGET:-0}" ;;
 esac
 exit 0
 """
+_CARRY = 'RUN_CARRY="paper-carry-1"\n'
 
 
 def _visit(
@@ -441,9 +453,49 @@ def test_a_linux_visit_runs_the_control_run_then_backfill_verdict_and_the_ai_run
     for call in calls:
         assert "--balance" not in call and "--gas-eth" not in call
         assert call[:3] == ["-m", "dotenv", "run"] and "store.db" in call
-    assert log[0].startswith("==== ") and 'visit of "paper-trend-1" and "paper-ai-1"' in log[0]
+    assert log[0].startswith("==== ")
+    assert 'visit: trend "paper-trend-1", ai "paper-ai-1", carry ""' in log[0]
     assert '(db "store.db", python "' in log[0]
+    # The carry run is opted into (RUNBOOK §3.1): left out, and said, by default.
+    assert "==== RUN_CARRY is empty: target and the carry run are left out" in log
     assert log[-1] == "==== exit 0"
+
+
+def test_a_linux_visit_with_a_carry_run_records_the_handoff_then_visits_it(tmp_path, monkeypatch):
+    settings = _CARRY + 'HANDOFF="h/handoff-ETH.json"\n'
+    code, calls, log = _visit(tmp_path, monkeypatch, extra=settings)
+    assert code == 0
+    assert _commands(calls) == ["paper", "backfill", "verdict", "paper", "target", "paper"]
+    target, carry = calls[4:]
+    assert target[target.index("--handoff") + 1] == "h/handoff-ETH.json"
+    assert carry[carry.index("--run-id") + 1] == "paper-carry-1"
+    for call in (target, carry):
+        assert call[call.index("--config") + 1].endswith("paper-carry.local.yaml")
+        assert "--balance" not in call and "store.db" in call
+    assert 'carry "paper-carry-1"' in log[0] and log[-1] == "==== exit 0"
+
+
+@pytest.mark.parametrize(
+    ("exits", "code", "commands"),
+    [
+        # The judge chain stopped at the verdict; the carry chain ran whole, and the
+        # visit's code is the judge chain's, the first that was not 0.
+        ({"EXIT_VERDICT": 3}, 3, ["paper", "backfill", "verdict", "target", "paper"]),
+        ({"EXIT_VERDICT": 3, "EXIT_TARGET": 1}, 3, ["paper", "backfill", "verdict", "target"]),
+        # The control run failed: the judge chain is over, the carry chain still runs.
+        ({"EXIT_PAPER": 1}, 1, ["paper", "target", "paper"]),
+        # The handoff is not there yet (exit 3): the carry run waits, the judge chain is whole.
+        ({"EXIT_TARGET": 3}, 3, ["paper", "backfill", "verdict", "paper", "target"]),
+        ({"EXIT_PAPER_CARRY": 1}, 1, ["paper", "backfill", "verdict", "paper", "target", "paper"]),
+    ],
+)
+def test_the_two_chains_do_not_stop_each_other_and_the_first_failure_is_the_visits(
+    tmp_path, monkeypatch, exits, code, commands
+):
+    exited, calls, log = _visit(tmp_path, monkeypatch, extra=_CARRY, **exits)
+    assert exited == code
+    assert _commands(calls) == commands
+    assert log[-1] == f"==== exit {code}"
 
 
 @pytest.mark.parametrize(
@@ -469,7 +521,9 @@ def test_a_linux_visit_stops_at_the_first_step_that_fails_and_exits_as_it_did(
 
 _TREND_LEFT_OUT = "RUN_TREND is empty: the control run is left out"
 _AI_LEFT_OUT = "RUN_AI is empty: backfill, verdict and the AI run are left out"
-_BOTH_EMPTY = "RUN_TREND and RUN_AI are both empty: nothing to visit; fix paper-visit.local.sh"
+_ALL_EMPTY = (
+    "RUN_TREND, RUN_AI and RUN_CARRY are all empty: nothing to visit; fix paper-visit.local.sh"
+)
 
 
 @pytest.mark.parametrize(
@@ -477,10 +531,11 @@ _BOTH_EMPTY = "RUN_TREND and RUN_AI are both empty: nothing to visit; fix paper-
     [
         ('RUN_TREND=""\n', 0, ["backfill", "verdict", "paper"], _TREND_LEFT_OUT),
         ('RUN_AI=""\n', 0, ["paper"], _AI_LEFT_OUT),
-        ('RUN_TREND=""\nRUN_AI=""\n', 1, [], _BOTH_EMPTY),
+        ('RUN_TREND=""\nRUN_AI=""\n', 1, [], _ALL_EMPTY),
+        ('RUN_TREND=""\nRUN_AI=""\n' + _CARRY, 0, ["target", "paper"], _AI_LEFT_OUT),
     ],
 )
-def test_a_linux_visit_with_an_empty_run_id_says_so_and_with_both_empty_exits_1(
+def test_a_linux_visit_with_an_empty_run_id_says_so_and_with_all_empty_exits_1(
     tmp_path, monkeypatch, extra, code, commands, said
 ):
     exited, calls, log = _visit(tmp_path, monkeypatch, extra=extra)

@@ -26,9 +26,19 @@ jobs:
             git checkout deploy/paper 2>/dev/null || git checkout -b deploy/paper origin/deploy/paper
             git reset --hard origin/deploy/paper
             .venv/bin/pip install -q -r requirements.txt
-            .venv/bin/python -m pytest contrib/hyperliquid_perp/tests/ -q
+            .venv/bin/python -m pytest contrib/hyperliquid_perp/tests/ contrib/carry/tests/ -q
           '
+          # The carry sleeve's perp daemon and coordinator run from this same
+          # checkout (contrib/carry/RUNBOOK.md): the daemon is restarted with
+          # hl-paper while its unit is enabled (one the operator disabled stays
+          # down); the coordinator's timer runs the checkout as it is.
           sudo systemctl restart hl-paper
+          if systemctl is-enabled --quiet hl-paper-carry-eth 2>/dev/null; then
+            sudo systemctl restart hl-paper-carry-eth
+          fi
           sleep 15
           sudo systemctl is-active hl-paper
+          if systemctl is-enabled --quiet hl-paper-carry-eth 2>/dev/null; then
+            sudo systemctl is-active hl-paper-carry-eth
+          fi
           EOF

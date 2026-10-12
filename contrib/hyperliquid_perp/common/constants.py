@@ -17,6 +17,7 @@ __all__ = [
     "FILE_TARGET_MODEL",
     "FILE_TARGET_PENDING_PREFIX",
     "FILE_TARGET_UNUSABLE_PREFIX",
+    "HANDOFF_SIDECAR_SUFFIX",
     "HOLDING_COST_HOURS",
     "LEGAL_NETWORKS",
     "MACRO_FAST_PERIOD",
@@ -239,6 +240,11 @@ FILE_TARGET_MODEL = "file-target"
 # writer and readers agree on the spelling without importing each other.
 FILE_TARGET_UNUSABLE_PREFIX = "carry handoff unusable: "
 FILE_TARGET_PENDING_PREFIX = "carry handoff pending: "
+# The handoff sidecar's suffix (``<payload>.handoff.json``): written by
+# ``integration/file_target_provider`` beside the payload, read by the carry
+# report. Here beside the prefixes for the same reason: the reader must not
+# import the provider (it loads the engine bridge) to learn the spelling.
+HANDOFF_SIDECAR_SUFFIX = ".handoff.json"
 
 # The horizon the prompt's position section states holding cost over. Funding
 # on Hyperliquid is charged hourly; 8h is one conventional funding "period",

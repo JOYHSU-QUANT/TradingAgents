@@ -1,0 +1,16 @@
+# Once a day, ten minutes before the UTC day boundary the handoff is for
+# (carry plan section 3.1): the venue has settled 23:00 by then, and the perp
+# cycles and the spot visit of the new day find the document written.
+# Persistent catches up a run missed while the host was down: within six
+# hours after the midnight it decides that midnight late, later it is
+# refused (the reading is too old for the next boundary) and does no harm.
+[Unit]
+Description=contrib/carry coordinator, daily at 23:50 UTC
+
+[Timer]
+OnCalendar=*-*-* 23:50:00 UTC
+Persistent=true
+Unit=carry-signal.service
+
+[Install]
+WantedBy=timers.target

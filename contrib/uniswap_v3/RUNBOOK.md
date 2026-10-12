@@ -101,7 +101,7 @@ python -m dotenv run -- python -m pytest -q -m smoke contrib/uniswap_v3/tests/te
 第三條真的問一次 judge（ETH-USD、今天；約 15–20 次 completion，花錢）：`.env` 要有 `OPENROUTER_API_KEY`，
 沒有就 skip；它印出評等與耗時，是跑 AI 閘門策略前唯一一次「引擎＋閘道＋key 通不通」的檢查。
 
-### 1.2 設定檔：兩份
+### 1.2 設定檔：兩份（carry sleeve 再加一份）
 
 兩個 run 各一份設定檔，從範例複製後改 `strategy`（gitignored，本機改好再送上伺服器）：
 
@@ -109,6 +109,10 @@ python -m dotenv run -- python -m pytest -q -m smoke contrib/uniswap_v3/tests/te
 Copy-Item contrib/uniswap_v3/configs/uniswap_v3.example.yaml contrib/uniswap_v3/configs/paper-trend.local.yaml
 Copy-Item contrib/uniswap_v3/configs/uniswap_v3.example.yaml contrib/uniswap_v3/configs/paper-ai.local.yaml
 ```
+
+carry sleeve 的現貨腿是第三份 `paper-carry.local.yaml`（`strategy` 換成 `external_weights`、`targets` 區塊打開、
+只交易交接檔指名的那個代幣），它的寫法與開 run 的步驟在 [contrib/carry/RUNBOOK.md](../carry/RUNBOOK.md) §2，
+這裡只在 §3 說 visit 怎麼帶它。
 
 - `paper-trend.local.yaml`（對照 run）：`strategy` 換成範例裡註解掉的 `trend_vol_weights` 區塊；**不打開 `verdicts`**
   （對照 run 不讀判斷，它的設定快照就是純規則 run 的）。
@@ -197,6 +201,8 @@ systemctl list-timers uniswap-v3-paper.timer         # 下一次 visit 的時間
   **paper 的錢是虛擬的，gas 直接給足**：主網一筆 swap 的 gas 是幾美元起跳，gas 用完之後每次再平衡都會被拒
   （stderr 警告、結束碼仍 0），沒有東西會幫它補。只給 USDC 開就不會在第一根因歷史不夠而賣掉代幣（§1.3）。
 - run id `paper-trend-1`／`paper-ai-1` 是 visit 腳本的預設；用別的 id 就改 §3.1 的設定。
+- carry 的第三個 run（`paper-carry-1`）不在這裡開：它要等協調者的第一份交接檔，步驟在
+  [contrib/carry/RUNBOOK.md](../carry/RUNBOOK.md) §4；開好後在 §3.1 設 `RUN_CARRY`，visit 才會帶它。
 
 排程**不帶** `--balance` 是故意的：`DB` 或 run id 打錯時 visit 會以結束碼 1 失敗
 （`there is no run ..., and a new run needs opening balances`），而不是悄悄開一個新 run。
@@ -248,13 +254,19 @@ systemctl list-timers uniswap-v3-paper.timer         # 下一次 visit 的時間
 ## 3. 排程（systemd timer）
 
 `uniswap-v3-paper.timer` 每天 **00:10、01:10、02:10 UTC**（台灣時間 08:10、09:10、10:10）各跑一次 `uniswap-v3-paper.service`，
-它以 `trader` 身分在 checkout 根目錄執行 `contrib/uniswap_v3/schedule/paper-visit.sh`，一次 visit 四步、**前一步結束碼 0 才跑下一步**，
-visit 的結束碼＝第一個不是 0 的：
+它以 `trader` 身分在 checkout 根目錄執行 `contrib/uniswap_v3/schedule/paper-visit.sh`，一次 visit 兩條鏈、前後跑；
+**鏈內前一步結束碼 0 才跑下一步，一條鏈失敗不擋另一條**（judge 的 429 風暴不該拖垮 carry 腿，交接檔缺檔也不該讓
+AI run 當天不決策），visit 的結束碼＝第一個不是 0 的（judge 鏈的優先）。judge 鏈：
 
 1. `paper` 對照 run（不讀判斷，所以 judge 掛了也擋不住它）；
 2. `backfill --from <今天的邊界>`：把今天的 bar 讀進 store；
 3. `verdict`：問判斷（問過的代幣直接跳過）；
 4. `paper` AI run——只有判斷寫進來了才會跑到這一步，所以 AI run 不會在判斷之前就把當根決策掉。
+
+carry 鏈（§3.1 的 `RUN_CARRY` 有設才跑；整個 sleeve 的操作在 [contrib/carry/RUNBOOK.md](../carry/RUNBOOK.md)）：
+
+5. `target --handoff <交接檔>`：把協調者的交接檔寫進 store 的 `targets`（寫過就不改；交接檔還沒有、邊界沒到或已過一天→結束碼 3，這條鏈停在這步）；
+6. `paper` carry run——只有目標寫進來了才會跑到這一步，所以 carry run 不會在目標之前就把當根決策掉（README「`targets`」）。
 
 - 第一次 visit 決策 00:00 收盤的那根 bar；後兩次發現已決策，結束碼 0、不寫決策（只會把先前 pending 的讀數核對成 final）。
   第一次若拿到結束碼 3（節點落後、成交區塊還沒到、judge 沒答、store 被鎖住），後兩次就是重試；
@@ -262,7 +274,8 @@ visit 的結束碼＝第一個不是 0 的：
   那步沒成功的話——走「沒判斷」政策）。
 - 每次最多跑 **55 分鐘**（`TimeoutStartSec`）：兩個代幣的問答約 25–30 分鐘，超時多半是節點或閘道卡住，下一次 visit 會重來。
   還在跑的 visit 不會被下一次 timer 再開一次；`Persistent=true` 補跑主機關機時錯過的那次。
-- `RUN_TREND`／`RUN_AI` 留空就跳過該段、log 寫一行；兩個都空是設定錯：log 一行、結束碼 1。
+- `RUN_TREND`／`RUN_AI`／`RUN_CARRY` 留空就跳過該段、log 寫一行；三個都空是設定錯：log 一行、結束碼 1。
+  log 每次 visit 的第一行印三個 run id（`visit: trend "…", ai "…", carry "…"`），空的就印空字串。
 - 這台機器 2 GB 記憶體：judge 的 graph 與 hl-paper 的引擎各是一個 Python 行程，visit 時段兩者可能同時在跑。service 設了
   `OOMScoreAdjust=500`：記憶體不夠時 kernel 先殺 visit（下一次重來、已答的代幣保留），不是 hl-paper。`journalctl` 看到
   `oom-kill` 就用 §0.1 的 drop-in 把 timer 挪開 hl-paper 問 LLM 的時段。
@@ -282,8 +295,11 @@ PYTHON="/home/trader/uniswap-paper/.venv/bin/python"
 |---|---|---|
 | `RUN_TREND` | `paper-trend-1` | 與 §2 開的對照 run 一致；留空就不跑對照 run |
 | `RUN_AI` | `paper-ai-1` | 與 §2 開的 AI run 一致；留空就不跑 backfill／verdict／AI run |
+| `RUN_CARRY` | （空） | carry 的現貨 run 開好後設成它的 id（`paper-carry-1`）；空＝不跑 target／carry run。三個都空是設定錯：log 一行、結束碼 1 |
 | `CONFIG_TREND` | `contrib/uniswap_v3/configs/paper-trend.local.yaml` | 通常不用 |
 | `CONFIG_AI` | `contrib/uniswap_v3/configs/paper-ai.local.yaml` | 通常不用（`verdict` 與 `backfill` 也讀這份） |
+| `CONFIG_CARRY` | `contrib/uniswap_v3/configs/paper-carry.local.yaml` | 通常不用（`target` 也讀這份） |
+| `HANDOFF` | `contrib/carry/data/handoff-ETH.json` | 伺服器上改成協調者寫的那個檔：`/home/trader/data/carry/handoff-ETH.json`（carry RUNBOOK §3） |
 | `DB` | `contrib/uniswap_v3/data/paper.db` | 伺服器上改成 `/home/trader/data/uniswap/paper.db` |
 | `LOG` | `contrib/uniswap_v3/data/paper-visits.log` | 伺服器上改成 `/home/trader/data/uniswap/paper-visits.log` |
 | `PYTHON` | `python3` | 伺服器上改成 `.venv/bin/python` 的完整路徑 |

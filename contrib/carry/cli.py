@@ -20,6 +20,11 @@ by. Put the rows there first with the research package's own walk, into
 the same store file:
 ``python -m contrib.autoresearch fetch --db <autoresearch.sqlite> --coin ETH --since 2024-01-01``.
 
+``report`` reads the two legs' stores and the perp run's handoff sidecars
+(:mod:`.report`) and prints each UTC day of the span with the lights the
+plan asks for (D5, D7), each ISO week and the span's total. It reads
+only; the stores are opened read-only and the daemons need not stop.
+
 Exit codes: 0 done, 1 refused (a message on stderr says why), 2 usage.
 """
 
@@ -42,8 +47,30 @@ from .handoff import (
     write_handoff,
 )
 from .history import DEFAULT_MAX_READING_AGE_HOURS, floor_day, format_summary, pct, replay
+from .report import (
+    DEFAULT_D5_DAYS,
+    DEFAULT_DELTA_ALERT_PCT,
+    alerts,
+    build_rows,
+    format_report,
+    read_sidecars,
+)
 from .signal import OUT, Action, Params, Reading, Side, SignalError, advance, decide, read
-from .stores import Equity, StoreReadError, perp_equity, spot_equity
+from .stores import (
+    Equity,
+    StoreReadError,
+    perp_cycles,
+    perp_equity,
+    perp_fees,
+    perp_funding,
+    perp_snapshots,
+    spot_decisions,
+    spot_equity,
+    spot_fills,
+    spot_run,
+    spot_targets,
+    spot_valuations,
+)
 from .upstream import (
     FUNDING_INTERVAL_MS,
     MS_PER_DAY,
@@ -56,6 +83,7 @@ from .upstream import (
     epoch_ms,
     from_epoch_ms,
     load_market,
+    payload_dir,
     render_fetch,
 )
 
@@ -200,6 +228,52 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_reading_age_arg(history, "leave a boundary undecided when")
     _add_param_args(history)
+
+    report = sub.add_parser(
+        "report",
+        help="reconcile the two legs' books day by day and light D5 / D7",
+        description=(
+            "Read the perp run's and the spot run's stores (read-only) and the perp run's "
+            "handoff sidecars, and print each UTC day of the span: funding, each leg's costs, "
+            "the net exposure in the coin, the basis, how the perp cycles ended and what the "
+            "spot bar did, with the plan's lights; then each ISO week and the span."
+        ),
+    )
+    report.add_argument("--coin", required=True, choices=COINS)
+    report.add_argument("--perp-db", required=True, metavar="PATH", help="the perp leg's store")
+    report.add_argument("--perp-run-id", required=True, metavar="RUN", help="the perp leg's run")
+    report.add_argument("--spot-db", required=True, metavar="PATH", help="the spot leg's store")
+    report.add_argument("--spot-run-id", required=True, metavar="RUN", help="the spot leg's run")
+    report.add_argument(
+        "--payloads-dir",
+        metavar="DIR",
+        help=(
+            "where the perp run keeps its payloads and handoff sidecars; default: the perp "
+            "package's layout, <perp-db dir>/payloads/<perp-run-id>"
+        ),
+    )
+    report.add_argument("--since", metavar="DAY", help="first day (a UTC day boundary)")
+    report.add_argument(
+        "--until", metavar="DAY", help="last day (a UTC day boundary); default: yesterday"
+    )
+    report.add_argument(
+        "--delta-alert-pct",
+        type=int,
+        default=DEFAULT_DELTA_ALERT_PCT,
+        help=(
+            f"light the delta above this share of the larger leg "
+            f"(default {DEFAULT_DELTA_ALERT_PCT}, D7)"
+        ),
+    )
+    report.add_argument(
+        "--d5-days",
+        type=int,
+        default=DEFAULT_D5_DAYS,
+        help=(
+            f"light the escalation after this many days held in a row "
+            f"(default {DEFAULT_D5_DAYS}, D5)"
+        ),
+    )
     return parser
 
 
@@ -283,9 +357,7 @@ def _cmd_signal(
     max_reading_age = _reading_age(args)
     now_at = now()
     now_ms = epoch_ms(now_at, what="the clock")
-    as_of_ms = _instant_ms(args.as_of, what="--as-of") if args.as_of else default_boundary(now_ms)
-    if as_of_ms % MS_PER_DAY:
-        raise _Refused(f"--as-of {iso_utc(as_of_ms)} is not a UTC day boundary")
+    as_of_ms = _day_boundary(args.as_of, what="--as-of") or default_boundary(now_ms)
     out = Path(args.out)
     if not out.parent.is_dir():
         raise _Refused(f"--out {out}: the directory does not exist")
@@ -433,6 +505,80 @@ def _cmd_history(args: argparse.Namespace) -> int:
     return 0
 
 
+def _day_boundary(text: str | None, *, what: str) -> int | None:
+    if text is None:
+        return None
+    at_ms = _instant_ms(text, what=what)
+    if at_ms % MS_PER_DAY:
+        raise _Refused(f"{what} {iso_utc(at_ms)} is not a UTC day boundary")
+    return at_ms
+
+
+def _cmd_report(args: argparse.Namespace, *, now: Callable[[], datetime]) -> int:
+    coin: str = args.coin
+    if args.delta_alert_pct < 1:
+        raise _Refused(f"--delta-alert-pct must be at least 1, got {args.delta_alert_pct}")
+    if args.d5_days < 1:
+        raise _Refused(f"--d5-days must be at least 1, got {args.d5_days}")
+    since = _day_boundary(args.since, what="--since")
+    until = _day_boundary(args.until, what="--until")
+    perp_db, spot_db = Path(args.perp_db), Path(args.spot_db)
+    payloads = (
+        Path(args.payloads_dir) if args.payloads_dir else payload_dir(perp_db, args.perp_run_id)
+    )
+    run = spot_run(spot_db, args.spot_run_id)
+    token = SPOT_TOKENS[coin]
+    if token not in run.tokens:
+        raise _Refused(
+            f"spot run {args.spot_run_id!r} trades {', '.join(run.tokens)}, not {token}; "
+            f"it is not {coin}'s spot leg"
+        )
+    cycles = perp_cycles(perp_db, args.perp_run_id)
+    decisions = spot_decisions(spot_db, args.spot_run_id)
+    if not cycles and not decisions:
+        raise _Refused(
+            f"nothing to report: perp run {args.perp_run_id!r} has no decision cycle and spot "
+            f"run {args.spot_run_id!r} has no decision"
+        )
+    today = floor_day(epoch_ms(now(), what="the clock"))
+    first = min(
+        [floor_day(cycle.scheduled_ms) for cycle in cycles] + [at_ms for at_ms, _ in decisions]
+    )
+    since_ms = first if since is None else since
+    until_ms = today - MS_PER_DAY if until is None else until
+    if until_ms < since_ms:
+        if since is None and until is None:
+            raise _Refused(
+                f"nothing to report yet: the runs' first day is {iso_utc(first)[:10]} and no UTC "
+                f"day has finished since; pass --until for a day still running"
+            )
+        raise _Refused(
+            f"the span is empty: --until {iso_utc(until_ms)} is before --since {iso_utc(since_ms)}"
+        )
+    sidecars, problems = read_sidecars(payloads, coin=coin)
+    rows = build_rows(
+        coin=coin,
+        quote=run.quote,
+        since_ms=since_ms,
+        until_ms=until_ms,
+        funding=perp_funding(perp_db, args.perp_run_id, coin),
+        fees=perp_fees(perp_db, args.perp_run_id, coin),
+        snapshots=perp_snapshots(perp_db, args.perp_run_id, coin),
+        cycles=cycles,
+        sidecars=sidecars,
+        decisions=decisions,
+        valuations=spot_valuations(spot_db, args.spot_run_id),
+        fills=spot_fills(spot_db, args.spot_run_id),
+        targets=spot_targets(spot_db, run.target_source, token),
+    )
+    found = alerts(rows, delta_alert_pct=args.delta_alert_pct, d5_days=args.d5_days)
+    for line in format_report(
+        rows, found, problems, coin=coin, delta_alert_pct=args.delta_alert_pct, d5_days=args.d5_days
+    ):
+        print(line)
+    return 0
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -446,6 +592,8 @@ def main(
             return _cmd_signal(args, market_factory=market_factory, now=now)
         if args.command == "history":
             return _cmd_history(args)
+        if args.command == "report":
+            return _cmd_report(args, now=now)
         raise AssertionError(args.command)
     except (_Refused, HandoffError, SignalError, StoreReadError, StoreError, ExchangeError) as exc:
         print(f"carry: {exc}", file=sys.stderr)

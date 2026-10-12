@@ -356,7 +356,8 @@ null margin 到不了）、以及 `margin_quoted_number`（模型寫了數字但
 PnL，正是跨段對照要避免的汙染。等 cycle 自然回到空倉（或 AI 自己 flat 平倉）
 再執行下面的順序，讓舊段以 realized PnL 乾淨收尾。
 
-換段的實際順序——push `deploy/paper` 會觸發 workflow 自動 restart `hl-paper`
+換段的實際順序——push `deploy/paper` 會觸發 workflow 自動 restart `hl-paper`（carry sleeve 的
+`hl-paper-carry-eth` 若是 enabled 也一起 restart，見 `contrib/carry/RUNBOOK.md`）
 （`deploy/paper` 分支上的 `.github/workflows/deploy.yml`），而 run-id 在伺服器 systemd unit 的
 `ExecStart` 裡，**先 push 就會讓舊 run 直接跨過部署點跑新 code**，所以必須：
 

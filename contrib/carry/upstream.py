@@ -20,7 +20,16 @@ What is borrowed and why:
   URI spelling (``Path.as_uri`` is wrong for a UNC share and a relative
   path; the perp store opens through this one, so the carry read must too),
   and the venue error type (a fetch the venue refused is reported, not
-  tracebacked);
+  tracebacked); and, for the report, the file-target run's spellings
+  (``FILE_TARGET_MODEL`` on ``ai_inputs.model`` says the run decided from the
+  handoff and not from a model; the two rationale prefixes tell a cycle that
+  maintained because the document was unusable from one that merely sat
+  before the next boundary; the sidecar suffix names the file a cycle keeps
+  its document in), the payload directory layout (the sidecars live beside
+  the payloads, and that rule is the perp package's, not a copy), and the
+  two vocabularies the report classifies cycles by (``AttemptStatus`` for
+  how a cycle ended, ``RiskAction`` for what the gate did), so a member
+  added upstream is not a word this package silently fails to know;
 - from the research package: the research store and its funding walk
   (``backfill_funding`` pages the venue's capped endpoint forwards and
   loses nothing; ``StopReason`` says how it ended, and only a walk that
@@ -46,26 +55,41 @@ from contrib.autoresearch.ports import HistoryMarketData
 from contrib.autoresearch.store import ResearchStore, StoreError
 from contrib.autoresearch.vocabulary import SpecError, require_number
 from contrib.hyperliquid_perp.common.atomic_io import atomic_write_text
+from contrib.hyperliquid_perp.common.constants import (
+    FILE_TARGET_MODEL,
+    FILE_TARGET_PENDING_PREFIX,
+    FILE_TARGET_UNUSABLE_PREFIX,
+    HANDOFF_SIDECAR_SUFFIX,
+)
 from contrib.hyperliquid_perp.common.instants import epoch_ms, from_epoch_ms, parse_instant
+from contrib.hyperliquid_perp.common.store_layout import payload_dir
 from contrib.hyperliquid_perp.domains.perp.context_builder import (
     MIN_FUNDING_SAMPLES,
     funding_zscore,
 )
+from contrib.hyperliquid_perp.domains.perp.risk_gate import RiskAction
 from contrib.hyperliquid_perp.domains.perp.schema import FundingPoint
 from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import ExchangeError
+from contrib.hyperliquid_perp.persistence.repository import AttemptStatus
 from contrib.hyperliquid_perp.persistence.store_identity import sqlite_file_uri
 
 __all__ = [
     "BORROWED",
+    "FILE_TARGET_MODEL",
+    "FILE_TARGET_PENDING_PREFIX",
+    "FILE_TARGET_UNUSABLE_PREFIX",
     "FUNDING_INTERVAL_MS",
+    "HANDOFF_SIDECAR_SUFFIX",
     "MIN_FUNDING_SAMPLES",
     "MS_PER_DAY",
     "UPSTREAM_PACKAGES",
     "VENUE_BORROWED",
+    "AttemptStatus",
     "ExchangeError",
     "FundingPoint",
     "HistoryMarketData",
     "ResearchStore",
+    "RiskAction",
     "SpecError",
     "StopReason",
     "StoreError",
@@ -76,6 +100,7 @@ __all__ = [
     "funding_zscore",
     "load_market",
     "parse_instant",
+    "payload_dir",
     "render_fetch",
     "require_number",
     "sqlite_file_uri",
@@ -100,13 +125,20 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.vocabulary", "SpecError"),
     ("contrib.autoresearch.vocabulary", "require_number"),
     ("contrib.hyperliquid_perp.common.atomic_io", "atomic_write_text"),
+    ("contrib.hyperliquid_perp.common.constants", "FILE_TARGET_MODEL"),
+    ("contrib.hyperliquid_perp.common.constants", "FILE_TARGET_PENDING_PREFIX"),
+    ("contrib.hyperliquid_perp.common.constants", "FILE_TARGET_UNUSABLE_PREFIX"),
+    ("contrib.hyperliquid_perp.common.constants", "HANDOFF_SIDECAR_SUFFIX"),
     ("contrib.hyperliquid_perp.common.instants", "epoch_ms"),
     ("contrib.hyperliquid_perp.common.instants", "from_epoch_ms"),
     ("contrib.hyperliquid_perp.common.instants", "parse_instant"),
+    ("contrib.hyperliquid_perp.common.store_layout", "payload_dir"),
     ("contrib.hyperliquid_perp.domains.perp.context_builder", "MIN_FUNDING_SAMPLES"),
     ("contrib.hyperliquid_perp.domains.perp.context_builder", "funding_zscore"),
+    ("contrib.hyperliquid_perp.domains.perp.risk_gate", "RiskAction"),
     ("contrib.hyperliquid_perp.domains.perp.schema", "FundingPoint"),
     ("contrib.hyperliquid_perp.exchanges.hyperliquid.errors", "ExchangeError"),
+    ("contrib.hyperliquid_perp.persistence.repository", "AttemptStatus"),
     ("contrib.hyperliquid_perp.persistence.store_identity", "sqlite_file_uri"),
 )
 

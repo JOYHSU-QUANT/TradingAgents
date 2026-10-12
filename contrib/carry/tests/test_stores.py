@@ -71,7 +71,7 @@ def test_the_wrong_kind_of_store_is_an_error(tmp_path: Path):
 
 def test_a_value_that_is_not_a_number_is_an_error(tmp_path: Path):
     store = write_perp_store(tmp_path / "paper.db", [("2026-02-10T00:00:00+00:00", "r", "lots")])
-    with pytest.raises(StoreReadError, match="not a number"):
+    with pytest.raises(StoreReadError, match="is not a decimal"):
         perp_equity(store, "r")
 
 

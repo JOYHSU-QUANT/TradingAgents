@@ -8,6 +8,44 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ## [Unreleased]
 
+### Added
+
+- **`contrib/carry report`, the sleeve's schedule, and the deployment (carry
+  plan PR 4).** The last of the four. `python -m contrib.carry report --coin
+  ETH --perp-db … --perp-run-id … --spot-db … --spot-run-id …` reads the two
+  legs' stores (read-only, through `sqlite3` alone as before) and the perp
+  run's `<payload>.handoff.json` sidecars, and prints each UTC day of the
+  span: the perp leg's posted funding, fees and last cycle-end position; the
+  spot bar's decision, holding, swap cost (what went in less what came out
+  at the bar's prices) and gas; the hedge's net exposure in the coin and the
+  spot-close-to-mark basis; how the perp cycles ended (`applied`, `pending`,
+  `unusable`, `no_decision`, `engine`, with the gate's refusals counted);
+  then each ISO week and the span. The plan's lights print under the day:
+  `delta` when the legs differ by more than 10% of the larger (D7, read in
+  quantity so the two instants' price gap cannot light it), `held by D5`
+  when a leg maintained for want of a usable document three days running
+  (a `pending` cycle is the schedule, not a fault), `one-legged`,
+  `different documents` (the spot target's digest is not among the day's
+  sidecar digests) and `no sidecar`. The report changes nothing and exits
+  0 with lights (`grep ALERT`). `contrib/carry/schedule/` ships the
+  coordinator's `carry-signal.sh` (settings in a gitignored
+  `carry-signal.local.sh`, one retry five minutes after a failure through
+  `Restart=on-failure` rather than a second timer time, so a successful
+  run is never rerun and the two legs never read two versions of one
+  day's file), its 23:50 UTC timer, and `hl-paper-carry-eth.service`, a
+  second perp paper daemon with its own config, store and run id; the
+  deploy workflow runs the package's tests and restarts that daemon while
+  its unit is enabled (one the operator disabled stays down). The uniswap visit script now runs two chains
+  that do not stop each other — the judge chain as before, and a carry
+  chain (`target` then the carry run's `paper`, opted into with
+  `RUN_CARRY`) — so a judge outage cannot take the carry leg down nor a
+  missing handoff the AI run; the visit's exit code is the first that was
+  not 0. `contrib/carry/RUNBOOK.md` carries the host layout, the three
+  settings files, the units' install, the first day's order of operations
+  (coordinator, perp daemon, spot run, timer), the daily checks, what each
+  light means and how to stop. The stale-document policy, the handoff
+  schema and the venue packages' decision paths are unchanged.
+
 ### Fixed
 
 - **The env-overlay tests no longer leave their last `TRADINGAGENTS_*`

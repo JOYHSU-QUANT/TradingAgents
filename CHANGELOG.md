@@ -49,6 +49,12 @@ Breaking changes within the 0.x line are called out explicitly.
   schema this build must not open, or no `--run-id` in a store no daemon has
   scheduled in; 5 a store that cannot be read as a database or holds a state
   the model refuses; 2 unexpected.
+  Known trade-offs, left as they are: the one-line text fold duplicates the
+  Uniswap CLI's (the Uniswap package may not import `contrib/core`); the
+  mask matches exactly 20 or 32 bytes of `0x` hex, so a longer run shows its
+  tail; `safe_mode_events[].released_by` is an operator-typed name and is
+  read unmasked; a live run's kill-switch tail is mostly refresh rows, which
+  a poller filters by `event_type`.
 
 - **Secret scanning.** A new workflow, `secrets.yml`, runs gitleaks 8.30.1
   (the release binary, checksum-verified) over every commit of the history

@@ -5,7 +5,7 @@
 
 > 目前狀態：Phase 2 已完整可跑——market context + 未修改的引擎 + structured
 > target 契約 + 確定性 RiskGate + paper 執行引擎 + 4h scheduler／CLI（§4C 的
-> `paper`／`export`／`validate` 子命令）。paper run 下的是**本地模擬單**（SQLite
+> `paper`／`export`／`validate`／`status` 子命令）。paper run 下的是**本地模擬單**（SQLite
 > paper orders/fills），不碰交易所下單 endpoint——live 執行是 Phase 3 的事。
 
 所有指令都從 repo 根目錄 `TradingAgents/` 執行。
@@ -80,7 +80,7 @@ cp contrib/hyperliquid_perp/configs/hyperliquid.example.yaml \
 
 ```bash
 # 1) repo 根目錄 .env（gitignored）——長駐 run 推薦。本模組的 CLI 入口
-#    （legacy 與 paper/export/validate 子命令）啟動時都會載入它；
+#    （legacy 與 paper/export/validate/status 子命令）啟動時都會載入它；
 #    已 export 的環境變數永遠優先於檔案值。檔案必須是 UTF-8：
 echo "OPENROUTER_API_KEY=sk-or-..." >> .env
 #    （PowerShell 的 >> 預設寫 UTF-16，CLI 會警告後忽略該檔——改用：
@@ -195,6 +195,12 @@ python -m contrib.hyperliquid_perp export --run-id paper-BTC --output-dir export
 
 # 驗收器：13 項 summary 指標 + 鏈路完整性 + 可進 Phase 3 判定
 python -m contrib.hyperliquid_perp validate --run-id paper-BTC
+
+# 現況一眼看：scheduler 列與麵包屑、cycles 計數＋最近幾筆判決、模型分桶、ledger 與最近幾筆
+# snapshot、倉位（含 SL/TP）、最近幾筆 fills、kill switch／safe mode 事件尾段；
+# --run-id 省略＝scheduler_state 最新的 run，--json 印一份給機器讀的文件，--recent N 調尾段長度；
+# 只讀、不取 lease、daemon 不用停
+python -m contrib.hyperliquid_perp status --db paper_trading.db --run-id paper-BTC
 ```
 
 `paper` 每個 cycle 完成（含 `invalid_output`／`api_failed`）會先跑 accounting
@@ -261,6 +267,13 @@ event**（`failed their last backfill attempt (<lane>: N)`，schema v12／issue 
 config drift（聚合指標橫跨兩組參數），這些先前只在（已死的）process log 可見。
 前三條**互斥**、一列只進一條，判讀方式見 RUNBOOK §7。
 跑滿 30 cycles（約 5 天）後用它檢查驗收條件。
+
+`status` 的 exit code：`0` = 印出；`1` = store／run 不存在、schema 版本本 build 不開、
+或省略 `--run-id` 而 store 裡沒有任何 scheduler 列；`5` = 檔案開不成資料庫或內容讀不了
+（損壞檔、不可能的狀態——沒 ledger 列、safe-mode 或麵包屑三欄寫一半、flat 卻有 entry、
+completed 卻無判決、非有限數值——同 `validate` 的「先調查再相信」）；`2` = 其他。
+省略 `--run-id` 的預設只適合一個 daemon 寫的 store：同一個 store 跑兩個 run 時
+（RUNBOOK-live §7.3）「最新」會隨兩邊的 heartbeat 翻動，排程呼叫要指名 run。
 
 ## 5. 輸出去哪裡
 

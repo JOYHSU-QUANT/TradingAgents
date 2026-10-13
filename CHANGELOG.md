@@ -10,6 +10,52 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **`contrib/hyperliquid_perp status` (dashboard plan PR 2a).** A report-only
+  subcommand, `python -m contrib.hyperliquid_perp status [--run-id <id>]
+  [--db <store>] [--json] [--recent N]`, that reads one run's store in a single
+  read transaction (no lease, no migration; the daemon need not stop) into a
+  frozen model, `status.RunStatus`: the scheduler row (last and next decision,
+  the in-progress attempt, the lease heartbeat, the export / replay /
+  config-drift breadcrumbs, the safe mode the run is in), the decision attempts
+  by status (the four statuses always present, zero-filled) with the latest N
+  and their `ai_outputs` verdicts, the `(model, prompt_version)` buckets of
+  the prompts built, the ledger with the latest account snapshot and the
+  latest N snapshots, the current positions with their SL/TP and mirrored
+  liquidation price, the latest N fills, and the tails of the kill-switch and
+  safe-mode event logs. `--run-id` left out reads the run whose
+  `scheduler_state.updated_at` is newest (the one running, or the last that
+  ran). By default it prints one `key: value` line per fact plus one line per
+  recent cycle, fill and event, with model-written text folded to one line and
+  cut short; `--json` prints the same model field by field (`dataclasses.asdict`
+  is the whitelist), `Decimal` as exact text, instants as the store's ISO-8601
+  UTC text, `schema_version` (1, scoped to `source: hyperliquid_perp`) first.
+  Nothing from the run's config is copied out, and tests pin that the document
+  names no field like a key, secret, password, mnemonic or address, carries no
+  32-byte hex value and no float. The free-text columns (an attempt's error
+  message, the breadcrumbs' errors, the safe-mode reason and the events'
+  reason / detail / error, a verdict's reasons, a fill's reason) have any
+  `0x`-prefixed 20-byte or 32-byte hex folded to its first six and last four
+  characters, since an exchange refusal names the wallet it refused, and are
+  cut at 1000 characters (the store keeps them whole). Impossible states are
+  refused rather than defaulted — a run without its ledger row, a half-written
+  safe-mode trio or breadcrumb, a position whose size and entry price
+  disagree, a decided cycle without its verdict, an amount that is not a
+  finite number — while vocabulary words the build does not know pass
+  through. The default run is meant for a store one daemon writes; a store
+  holding two runs needs `--run-id`. The SQL is nine new readers (eight run-scoped, one store-wide
+  for the default run) in their tables' `persistence/repository` modules, so
+  the layering ratchet on SQL sites outside `persistence/` is unchanged. Exit
+  codes as `validate`: 0 printed; 1 a store or run that does not exist, a
+  schema this build must not open, or no `--run-id` in a store no daemon has
+  scheduled in; 5 a store that cannot be read as a database or holds a state
+  the model refuses; 2 unexpected.
+  Known trade-offs, left as they are: the one-line text fold duplicates the
+  Uniswap CLI's (the Uniswap package may not import `contrib/core`); the
+  mask matches exactly 20 or 32 bytes of `0x` hex, so a longer run shows its
+  tail; `safe_mode_events[].released_by` is an operator-typed name and is
+  read unmasked; a live run's kill-switch tail is mostly refresh rows, which
+  a poller filters by `event_type`.
+
 - **Secret scanning.** A new workflow, `secrets.yml`, runs gitleaks 8.30.1
   (the release binary, checksum-verified) over every commit of the history
   with `--redact`, on a push to any branch and on every PR. It does not gate

@@ -10,6 +10,7 @@ from ..models import PositionState
 from ._base import _dec_or_none, _encode, _iso_utc
 
 __all__ = [
+    "current_position_rows",
     "get_all_current_positions",
     "get_current_position",
     "get_position_protection",
@@ -202,3 +203,16 @@ def set_position_liquidation_price(
             symbol,
         ),
     )
+
+
+def current_position_rows(conn: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
+    """The run's ``current_positions`` rows whole, by symbol.
+
+    :func:`get_all_current_positions` decodes the accounting identity
+    (:class:`..models.PositionState`); ``status`` also wants the SL/TP prices,
+    the mirrored liquidation price and ``updated_at`` the row carries beside
+    it, in one read rather than one per symbol.
+    """
+    return conn.execute(
+        "SELECT * FROM current_positions WHERE run_id = ? ORDER BY symbol", (run_id,)
+    ).fetchall()

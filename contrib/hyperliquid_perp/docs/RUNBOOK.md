@@ -390,6 +390,7 @@ deploy 的 restart 不是修復（§3 的警告同樣適用）——先照 §5 �
 | 最新 CSV | `<db 目錄>/exports/paper-BTC/` + `manifest.json` | 每 cycle 更新 | `export_failed` 只記錄不影響交易 state；連續失敗查磁碟/權限 |
 | `REPLAY_UNVERIFIED.json` | 同上 export 目錄 | **不存在** | 存在 = 該批 CSV 未經 replay 驗證，先調查 store 再相信數字 |
 | 中途健檢 | `python -m contrib.hyperliquid_perp validate --run-id paper-BTC` | exit 4（一致、cycles 未滿） | exit 5 = integrity failure，停下來調查 |
+| 一眼看 run 的現況 | `python -m contrib.hyperliquid_perp status`（`--run-id` 省略＝正在跑的 run；`--json` 給機器讀、`--recent N` 調尾段長度；只讀、daemon 不用停） | `export: ok`／`replay: ok`、`safe_mode: none`、`next_decision_at` 在未來、最近的 cycle 是 `completed` | `replay: failed`／`mismatch`、`safe_mode:` 有值、連續 `api_failed`、`lease_heartbeat_at` 太舊＝daemon 沒在跳（對照 systemd）；host 層的 unit 狀態與 export 檔齡不在這裡：`systemctl status hl-paper` 與 `<db 目錄>/exports/<run_id>/manifest.json` 的時間 |
 | 落在哪個 prompt 桶 | stderr log 的 `prompt_regime: prompt_version=… context_shape=… format_fingerprint=…`（INFO） | 啟動後第一個寫下 payload 的 cycle 印一行；之後整段 run 不再出現 | 中途又印一行 = 三鍵翻桶了（段落出現／消失，見 §4 與 §7 的 position 列）；對照 `validate` 的 `prompt_regime:` 行，判讀時分段讀 |
 
 **Protection-only 模式**（log 會明講）：不開新 decision cycle，但 SL/TP 與監控

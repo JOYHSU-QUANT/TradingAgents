@@ -25,6 +25,7 @@ __all__ = [
     "PromptRegime",
     "UnstampedInput",
     "ai_inputs_without_format_fingerprint",
+    "attempt_status_counts",
     "count_decision_attempts",
     "find_in_progress_attempt",
     "get_decision_attempt",
@@ -34,7 +35,10 @@ __all__ = [
     "insert_decision_attempt",
     "insert_position_snapshot",
     "iter_in_progress_attempts",
+    "model_regimes",
     "prompt_regime_counts",
+    "recent_account_snapshots",
+    "recent_decision_cycles",
     "record_api_failed",
     "stamp_ai_input_format_fingerprint",
     "store_pending_response",
@@ -461,3 +465,74 @@ def record_api_failed(
         current_attempt_id=None,
         updated_at=timestamp,
     )
+
+
+# --------------------------------------------------------------------------
+# the ``status`` subcommand's readers over these tables (dashboard plan PR 2a)
+# --------------------------------------------------------------------------
+
+
+def attempt_status_counts(conn: sqlite3.Connection, run_id: str) -> dict[str, int]:
+    """How many of the run's decision attempts sit in each status, by status name.
+
+    Every status, as the store spells it — unlike :func:`count_decision_attempts`,
+    which counts the statuses a caller names and refuses one outside the
+    vocabulary.
+    """
+    rows = conn.execute(
+        "SELECT status, COUNT(*) AS n FROM decision_attempts WHERE run_id = ?"
+        " GROUP BY status ORDER BY status",
+        (run_id,),
+    ).fetchall()
+    return {str(row["status"]): int(row["n"]) for row in rows}
+
+
+def recent_decision_cycles(
+    conn: sqlite3.Connection, run_id: str, *, limit: int
+) -> list[sqlite3.Row]:
+    """The run's ``limit`` latest attempts, newest scheduled first, each with its verdict.
+
+    The ``ai_outputs`` row is joined through the attempt's ``output_id`` (the
+    try that reached the terminal status), so an attempt that never produced
+    a verdict (``api_failed``, in progress) carries ``NULL`` verdict columns.
+    """
+    return conn.execute(
+        "SELECT a.decision_attempt_id, a.scheduled_at, a.timestamp, a.status, a.error_type,"
+        " a.error_message, a.attempt_count, a.next_decision_at,"
+        " o.symbol, o.decision_mode, o.target_side, o.requested_target_margin_pct,"
+        " o.approved_target_margin_pct, o.risk_action, o.risk_reason, o.confidence,"
+        " o.mark_price, o.account_equity, o.order_created, o.no_order_reason, o.decision_reason"
+        " FROM decision_attempts a LEFT JOIN ai_outputs o ON o.output_id = a.output_id"
+        " WHERE a.run_id = ? ORDER BY a.scheduled_at DESC LIMIT ?",
+        (run_id, limit),
+    ).fetchall()
+
+
+def model_regimes(conn: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
+    """The run's ``ai_inputs`` rows bucketed by ``(model, prompt_version)``, first seen first.
+
+    One row per bucket: ``model``, ``prompt_version``, ``prompts`` (the rows
+    in it), ``first_at`` and ``last_at``. ``ai_inputs.model`` records the deep
+    model a prompt was built for (``file-target`` for a run that asks none,
+    ``common.constants.FILE_TARGET_MODEL``), so a run that changed model
+    mid-way reads as two buckets. Counted over the input rows — one per try that built a
+    prompt, so a cycle retried after an API failure counts once per try —
+    not over attempts, which :func:`prompt_regime_counts` counts.
+    """
+    return conn.execute(
+        "SELECT model, prompt_version, COUNT(*) AS prompts,"
+        " MIN(timestamp) AS first_at, MAX(timestamp) AS last_at"
+        " FROM ai_inputs WHERE run_id = ? GROUP BY model, prompt_version"
+        " ORDER BY MIN(timestamp), model, prompt_version",
+        (run_id,),
+    ).fetchall()
+
+
+def recent_account_snapshots(
+    conn: sqlite3.Connection, run_id: str, *, limit: int
+) -> list[sqlite3.Row]:
+    """The run's ``limit`` newest ``account_snapshots`` rows, newest first (by insertion)."""
+    return conn.execute(
+        "SELECT * FROM account_snapshots WHERE run_id = ? ORDER BY snapshot_id DESC LIMIT ?",
+        (run_id, limit),
+    ).fetchall()

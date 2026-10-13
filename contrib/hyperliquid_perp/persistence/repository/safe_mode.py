@@ -10,7 +10,12 @@ from contrib.core.enum_guard import check_enum
 from ._base import _insert
 from ._vocab import SAFE_MODE_EVENT_TYPES, SAFE_MODE_TYPES
 
-__all__ = ["has_safe_mode_reason_event", "insert_safe_mode_event", "iter_safe_mode_events"]
+__all__ = [
+    "has_safe_mode_reason_event",
+    "insert_safe_mode_event",
+    "iter_safe_mode_events",
+    "recent_safe_mode_events",
+]
 
 
 # --------------------------------------------------------------------------
@@ -96,3 +101,13 @@ def has_safe_mode_reason_event(
         ).fetchone()
         is not None
     )
+
+
+def recent_safe_mode_events(
+    conn: sqlite3.Connection, run_id: str, *, limit: int
+) -> list[sqlite3.Row]:
+    """The run's ``limit`` latest safe-mode events, newest first."""
+    return conn.execute(
+        "SELECT * FROM safe_mode_events WHERE run_id = ? ORDER BY event_id DESC LIMIT ?",
+        (run_id, limit),
+    ).fetchall()

@@ -11,6 +11,14 @@ The subcommands (plus full Phase 1/2 backward compatibility):
 - ``python -m contrib.hyperliquid_perp validate --run-id <id>`` — the acceptance
   report and verdict. A PAPER run gets the phase2-spec §5 report; a LIVE run gets
   the phase3-spec §20.3 / §21.4 report (the run's stored mode selects which).
+- ``python -m contrib.hyperliquid_perp status [--run-id <id>] [--db <store>]
+  [--json] [--recent N]`` — what the store says about one run right now: the
+  scheduler row, the cycles by status with the latest N and their verdicts,
+  the prompts' ``(model, prompt_version)`` buckets, the ledger with the latest
+  N snapshots, the positions, the latest N fills, the kill-switch and
+  safe-mode event tails. Lines by default, one JSON document with ``--json``;
+  ``--run-id`` left out reads the run whose scheduler row was touched last.
+  Reads only, no lease, no migration.
 - ``python -m contrib.hyperliquid_perp live --config <yaml>`` — the Phase 3
   startup skeleton (phase3-spec PR 1): load the ``live:`` config gates, verify
   the agent-wallet authorization, print the effective notional caps, and exit
@@ -31,7 +39,7 @@ run — are delegated verbatim to :mod:`.main`, whose behaviour is unchanged.
 A bare first argument that is not a known subcommand is an error (exit 1):
 the legacy CLI takes no positionals, so it can only be a subcommand typo.
 
-Exit codes: ``0`` success (for ``validate``: Phase-3 ready), ``1`` named
+Exit codes: ``0`` success (for ``validate``: Phase-3 ready; ``status``: printed), ``1`` named
 operator/config/environment errors — including a protection-only ``paper`` run
 that self-terminates after its position closes (final export written; the
 books never re-verified, the API key was never supplied, or the engine could
@@ -49,7 +57,8 @@ red/missing smoke test — curable by a ``live-smoke`` re-run;
 exit was not clean — each ``live.shutdown.ExitReason`` whose code is 4 names
 one way; ``safe-mode
 --status``: a safe mode is latched, recoverable OR manual — 4 means "latched",
-not "human action required"), ``5`` (``validate`` only) the
+not "human action required"), ``5`` (``validate``; for ``status`` the code means the store could
+not be read as a database or holds a state the model refuses) the
 run has integrity failures — orphans, snapshot or replay mismatches, or a
 store so corrupt the checks themselves cannot run ("the store is broken;
 investigate before trusting results"), ``130`` interrupted before a graceful
@@ -73,14 +82,14 @@ import sys
 from ..common.entry_argv import is_legacy_argv
 from ..config import load_dotenv_files
 from .live import _cmd_live
-from .offline import _cmd_export, _cmd_validate
+from .offline import _cmd_export, _cmd_status, _cmd_validate
 from .paper import _cmd_paper
 from .safe_mode import _cmd_safe_mode
 from .smoke import _cmd_live_smoke
 
 logger = logging.getLogger(__name__)
 
-_SUBCOMMANDS = ("paper", "export", "validate", "live", "live-smoke", "safe-mode")
+_SUBCOMMANDS = ("paper", "export", "validate", "status", "live", "live-smoke", "safe-mode")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -112,6 +121,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_export(rest)
         if command == "validate":
             return _cmd_validate(rest)
+        if command == "status":
+            return _cmd_status(rest)
         if command == "live":
             return _cmd_live(rest)
         if command == "live-smoke":

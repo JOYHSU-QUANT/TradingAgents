@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 from contextlib import contextmanager
 from datetime import datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -471,6 +472,79 @@ def echo_order_status_cloid(payload, cloid_hex):
         inner = {**payload["order"]["order"], "cloid": cloid_hex}
         return {**payload, "order": {**payload["order"], "order": inner}}
     return payload
+
+
+def insert_minimal_fill(conn, *, run_id: str, fill_id: str, timestamp: datetime, price: int):
+    """One fee-free simulated buy of 0.1 BTC at ``price``, in the caller's transaction."""
+    qty = Decimal("0.1")
+    repo.insert_fill(
+        conn,
+        fill_id=fill_id,
+        timestamp=timestamp,
+        mode="paper",
+        run_id=run_id,
+        order_id="o",
+        symbol="BTC",
+        side="buy",
+        fill_qty=qty,
+        fill_price=Decimal(price),
+        fill_notional=Decimal(price) * qty,
+        fee=Decimal(0),
+        fee_rate=Decimal(0),
+        realized_pnl_delta=Decimal(0),
+        liquidity_type="simulated",
+    )
+
+
+def insert_minimal_account_snapshot(conn, *, run_id: str, timestamp: datetime, **over):
+    """A flat 1000-USDC account snapshot, in the caller's transaction; ``over`` sets columns."""
+    fields = {
+        "wallet_balance": Decimal(1000),
+        "account_equity": Decimal(1000),
+        "available_balance": Decimal(1000),
+        "realized_pnl": Decimal(0),
+        "unrealized_pnl": Decimal(0),
+        "total_pnl": Decimal(0),
+        "total_fees": Decimal(0),
+        "net_funding_pnl": Decimal(0),
+        "total_position_notional": Decimal(0),
+        "effective_leverage": Decimal(0),
+        "used_initial_margin": Decimal(0),
+        "total_maintenance_margin": Decimal(0),
+        **over,
+    }
+    repo.insert_account_snapshot(conn, timestamp=timestamp, mode="paper", run_id=run_id, **fields)
+
+
+def insert_minimal_ai_output(conn, *, run_id: str, attempt_id: str, timestamp: datetime, **over):
+    """A ``maintain_current`` verdict for ``attempt_id``, stamped onto the attempt row.
+
+    The scheduler writes the ``ai_outputs`` row and the attempt's ``output_id``
+    in one step; a staged ``completed`` attempt needs both, or a reader that
+    checks the pairing refuses the store. ``over`` sets columns.
+    """
+    output_id = f"{attempt_id}#out1"
+    fields = {
+        "symbol": "BTC",
+        "decision_mode": "maintain_current",
+        "risk_action": "approved",
+        "order_created": False,
+        "no_order_reason": "maintain_current",
+        **over,
+    }
+    repo.insert_ai_output(
+        conn,
+        output_id=output_id,
+        timestamp=timestamp,
+        mode="paper",
+        run_id=run_id,
+        decision_attempt_id=attempt_id,
+        **fields,
+    )
+    conn.execute(
+        "UPDATE decision_attempts SET output_id = ? WHERE decision_attempt_id = ?",
+        (output_id, attempt_id),
+    )
 
 
 def insert_decision_attempts(db, outcomes, *, run_id="r", start: datetime, mode="paper"):

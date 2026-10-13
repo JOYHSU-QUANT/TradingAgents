@@ -17,7 +17,12 @@ from ._vocab import (
     SAFE_MODE_TYPES,
 )
 
-__all__ = ["get_scheduler_state", "iter_other_run_leases", "upsert_scheduler_state"]
+__all__ = [
+    "get_scheduler_state",
+    "iter_other_run_leases",
+    "latest_lease_run_id",
+    "upsert_scheduler_state",
+]
 
 
 def upsert_scheduler_state(
@@ -180,3 +185,16 @@ def iter_other_run_leases(conn: sqlite3.Connection, run_id: str) -> list[sqlite3
         "WHERE run_id != ? AND lock_pid IS NOT NULL AND lock_heartbeat_at IS NOT NULL",
         (run_id,),
     ).fetchall()
+
+
+def latest_lease_run_id(conn: sqlite3.Connection) -> str | None:
+    """The run whose scheduler row was touched last, or ``None`` in a store with none.
+
+    A daemon stamps its run's ``updated_at`` on every heartbeat, so the
+    freshest row is the segment that is running (or ran last): the run
+    ``status`` reads when ``--run-id`` is left out.
+    """
+    row = conn.execute(
+        "SELECT run_id FROM scheduler_state ORDER BY updated_at DESC, run_id LIMIT 1"
+    ).fetchone()
+    return None if row is None else str(row["run_id"])

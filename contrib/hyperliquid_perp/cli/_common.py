@@ -42,7 +42,7 @@ def _open_existing_db(
     ``migrate`` splits the callers by what they actually do:
 
     * ``False`` (default) for the genuinely REPORT-ONLY commands — ``validate``,
-      ``export``, ``live-smoke --gate-status``. They take no run lease, so
+      ``export``, ``status``, ``live-smoke --gate-status``. They take no run lease, so
       migrating would silently upgrade a store a running daemon owns, leaving
       that daemon writing through a schema it does not know. They refuse with
       instructions instead (2026-07-30 migration review). One exception to
@@ -160,8 +160,8 @@ def _existing_run_row(conn, run_id: str, db_label: str, *, not_found_hint: str =
     """The run's row, or ``None`` after printing the standard missing-run error.
 
     The one encoding of the "does this run exist" refusal, shared by every
-    read-style command (``validate``, ``live-smoke --gate-status``, and
-    ``live-smoke``'s real-run build) so a wording tweak cannot land on one
+    read-style command (``validate``, ``status``, ``live-smoke --gate-status``,
+    and ``live-smoke``'s real-run build) so a wording tweak cannot land on one
     surface and not the other. ``not_found_hint`` lets a caller that can offer
     a concrete remedy (e.g. "create it first with ...") append one without
     forking the base message (2026-07-30 simplify pass).

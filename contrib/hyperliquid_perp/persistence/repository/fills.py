@@ -25,6 +25,7 @@ __all__ = [
     "last_live_fill_time",
     "newest_live_fill_order_key",
     "posted_exchange_fee",
+    "recent_fills",
     "require_live_fill_basis",
 ]
 
@@ -466,4 +467,17 @@ def iter_live_fills(
         "SELECT * FROM fills WHERE run_id = ? AND mode = 'live' "
         "AND exchange_fill_key IS NOT NULL ORDER BY rowid",
         (run_id,),
+    ).fetchall()
+
+
+def recent_fills(conn: sqlite3.Connection, run_id: str, *, limit: int) -> list[sqlite3.Row]:
+    """The run's ``limit`` latest fills, newest first by timestamp (insertion breaks a tie).
+
+    By ``timestamp`` as :func:`last_fill_time` orders, not by ``rowid`` alone:
+    ``fills`` has a TEXT primary key, so its rowids are renumbered by a VACUUM
+    and reassigned by a dump-and-restore.
+    """
+    return conn.execute(
+        "SELECT * FROM fills WHERE run_id = ? ORDER BY timestamp DESC, rowid DESC LIMIT ?",
+        (run_id, limit),
     ).fetchall()

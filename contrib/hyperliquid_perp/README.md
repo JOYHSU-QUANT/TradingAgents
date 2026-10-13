@@ -11,7 +11,7 @@
 > 清算模型**（fills · fees · funding exactly-once · margin/liquidation · accounting
 > replay）以及 **paper 執行引擎**（TWAP/flip · SL/TP · paper 成交模擬 · market-data
 > 新鮮度／pause／gap-stop · market monitor，注入式 clock ＋ snapshot provider）皆已
-> 實作，**scheduler／CLI（`paper`·`export`·`validate` 子命令）／CSV export／驗收器**
+> 實作，**scheduler／CLI（`paper`·`export`·`validate`·`status` 子命令）／CSV export／驗收器**
 > 也已完成——Phase 2 全層可跑（操作見 [RUNBOOK](./docs/RUNBOOK.md)，設計見
 > [phase2-spec](./docs/phase2-spec.md)）。
 

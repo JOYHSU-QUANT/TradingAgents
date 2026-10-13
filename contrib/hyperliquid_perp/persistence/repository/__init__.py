@@ -58,6 +58,7 @@ from .decisions import (
     PromptRegime,
     UnstampedInput,
     ai_inputs_without_format_fingerprint,
+    attempt_status_counts,
     count_decision_attempts,
     find_in_progress_attempt,
     get_decision_attempt,
@@ -67,7 +68,10 @@ from .decisions import (
     insert_decision_attempt,
     insert_position_snapshot,
     iter_in_progress_attempts,
+    latest_account_snapshot,
+    model_regimes,
     prompt_regime_counts,
+    recent_decision_cycles,
     record_api_failed,
     stamp_ai_input_format_fingerprint,
     store_pending_response,
@@ -81,6 +85,7 @@ from .events import (
     iter_accounting_adjustment_events,
     iter_kill_switch_events,
     iter_protection_order_events,
+    recent_kill_switch_events,
 )
 from .fills import (
     count_duplicate_exchange_fill_keys,
@@ -95,6 +100,7 @@ from .fills import (
     last_live_fill_time,
     newest_live_fill_order_key,
     posted_exchange_fee,
+    recent_fills,
     require_live_fill_basis,
 )
 from .funding import (
@@ -133,6 +139,7 @@ from .plans import (
     update_execution_plan,
 )
 from .positions import (
+    current_position_rows,
     get_all_current_positions,
     get_current_position,
     get_position_protection,
@@ -150,8 +157,18 @@ from .reconciliation import (
     stamp_reconciliation_action_if_unset,
 )
 from .runs import get_run, get_run_seed_positions, insert_run, insert_run_seed_position
-from .safe_mode import has_safe_mode_reason_event, insert_safe_mode_event, iter_safe_mode_events
-from .scheduler import get_scheduler_state, iter_other_run_leases, upsert_scheduler_state
+from .safe_mode import (
+    has_safe_mode_reason_event,
+    insert_safe_mode_event,
+    iter_safe_mode_events,
+    recent_safe_mode_events,
+)
+from .scheduler import (
+    get_scheduler_state,
+    iter_other_run_leases,
+    latest_lease_run_id,
+    upsert_scheduler_state,
+)
 from .smoke import insert_smoke_test_result, iter_smoke_test_results, latest_smoke_test_results
 
 __all__ = [
@@ -179,7 +196,9 @@ __all__ = [
     "UnstampedInput",
     "active_protection_order",
     "ai_inputs_without_format_fingerprint",
+    "attempt_status_counts",
     "count_orders_by_role",
+    "current_position_rows",
     "find_in_progress_attempt",
     "get_accounting_adjustment_event",
     "get_all_current_positions",
@@ -240,12 +259,19 @@ __all__ = [
     "iter_unresolved_fill_sightings",
     "last_fill_time",
     "last_live_fill_time",
+    "latest_account_snapshot",
+    "latest_lease_run_id",
     "latest_smoke_test_results",
     "max_engine_seq",
+    "model_regimes",
     "newest_live_fill_order_key",
     "next_live_attempt_index",
     "posted_exchange_fee",
     "prompt_regime_counts",
+    "recent_decision_cycles",
+    "recent_fills",
+    "recent_kill_switch_events",
+    "recent_safe_mode_events",
     "require_current_account_state",
     "require_live_fill_basis",
     "set_funding_backfill_outcome",

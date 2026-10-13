@@ -927,6 +927,7 @@ _CLI_DISPATCH_TARGETS = frozenset(
         "_cmd_live_smoke",
         "_cmd_paper",
         "_cmd_safe_mode",
+        "_cmd_status",
         "_cmd_validate",
     }
 )

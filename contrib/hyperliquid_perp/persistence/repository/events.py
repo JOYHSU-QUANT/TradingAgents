@@ -23,6 +23,7 @@ __all__ = [
     "iter_accounting_adjustment_events",
     "iter_kill_switch_events",
     "iter_protection_order_events",
+    "recent_kill_switch_events",
 ]
 
 
@@ -189,4 +190,18 @@ def iter_accounting_adjustment_events(
         "SELECT * FROM accounting_adjustment_events WHERE run_id = ? AND target_id = ? "
         "ORDER BY rowid",
         (run_id, target_id),
+    ).fetchall()
+
+
+def recent_kill_switch_events(
+    conn: sqlite3.Connection, run_id: str, *, limit: int
+) -> list[sqlite3.Row]:
+    """The run's ``limit`` latest kill-switch events, newest first.
+
+    A live run refreshes its dead man's switch every tick and logs each one,
+    so unlike :func:`iter_kill_switch_events` this reads a tail.
+    """
+    return conn.execute(
+        "SELECT * FROM kill_switch_events WHERE run_id = ? ORDER BY event_id DESC LIMIT ?",
+        (run_id, limit),
     ).fetchall()

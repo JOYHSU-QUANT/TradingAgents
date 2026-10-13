@@ -1,7 +1,7 @@
 """``python -m contrib.hyperliquid_perp`` — the phase2-data §1.1 CLI entry.
 
-Dispatches to :mod:`.cli` (``paper`` / ``export`` / ``validate`` / ``live`` /
-``live-smoke`` / ``safe-mode``); empty argv and flag-style invocations are
+Dispatches to :mod:`.cli` (``paper`` / ``export`` / ``validate`` / ``status`` /
+``live`` / ``live-smoke`` / ``safe-mode``); empty argv and flag-style invocations are
 delegated to the legacy :mod:`.main` unchanged, so the Phase 1
 ``--context-only`` and single-shot engine invocations keep working. A bare
 unknown word is a subcommand typo — named error, exit 1 (:mod:`.cli` says so).

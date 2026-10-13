@@ -10,6 +10,34 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **`contrib/hyperliquid_perp status` (dashboard plan PR 2a).** A report-only
+  subcommand, `python -m contrib.hyperliquid_perp status [--run-id <id>]
+  [--db <store>] [--json] [--recent N]`, that reads one run's store in a single
+  read transaction (no lease, no migration; the daemon need not stop) into a
+  frozen model, `status.RunStatus`: the scheduler row (last and next decision,
+  the in-progress attempt, the lease heartbeat, the export / replay /
+  config-drift breadcrumbs, the safe mode the run is in), the decision attempts
+  by status with the latest N and their `ai_outputs` verdicts, the
+  `(model, prompt_version)` buckets of the prompts built, the ledger and the
+  latest account snapshot, the current positions with their SL/TP and mirrored
+  liquidation price, the latest N fills, and the tails of the kill-switch and
+  safe-mode event logs. `--run-id` left out reads the run whose
+  `scheduler_state.updated_at` is newest (the one running, or the last that
+  ran). By default it prints one `key: value` line per fact plus one line per
+  recent cycle, fill and event, with model-written text folded to one line and
+  cut short; `--json` prints the same model field by field (`dataclasses.asdict`
+  is the whitelist), `Decimal` as exact text, instants as the store's ISO-8601
+  UTC text, `schema_version` (1) first. Nothing from the run's config is copied
+  out, and tests pin that the document names no field like a key, secret,
+  password, mnemonic or address, carries no 32-byte hex value and no float.
+  Free text the store holds (an error message, a safe-mode detail, a decision's
+  reason) has any quoted 20-byte or 32-byte hex folded to its first six and
+  last four characters, since an exchange refusal names the wallet it refused.
+  The SQL is nine new run-scoped readers in their tables' `persistence/repository`
+  modules, so the layering ratchet on SQL sites outside `persistence/` is
+  unchanged. Exit codes as `validate`: 0 printed, 1 a missing store or run
+  (named), 5 a store whose content does not hold up, 2 unexpected.
+
 - **Secret scanning.** A new workflow, `secrets.yml`, runs gitleaks 8.30.1
   (the release binary, checksum-verified) over every commit of the history
   with `--redact`, on a push to any branch and on every PR. It does not gate

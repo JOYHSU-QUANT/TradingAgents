@@ -20,7 +20,7 @@ def test_unknown_bare_word_is_an_error_not_legacy_usage(capsys):
     assert cli_main(["expot"]) == 1
     err = capsys.readouterr().err
     assert "unknown subcommand 'expot'" in err
-    assert "paper" in err and "export" in err and "validate" in err
+    assert "paper" in err and "export" in err and "validate" in err and "status" in err
 
 
 def test_cli_main_loads_dotenv_on_every_invocation(monkeypatch):

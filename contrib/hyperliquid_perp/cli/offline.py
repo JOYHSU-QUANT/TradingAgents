@@ -1,4 +1,4 @@
-"""The offline subcommands over an existing store: ``export`` / ``validate``.
+"""The offline subcommands over an existing store: ``export`` / ``validate`` / ``status``.
 
 Report-only surfaces (phase2-data §1.1 / phase2-spec §5 / phase3-spec §20.3):
 they take no run lease and never migrate the store (see
@@ -14,10 +14,13 @@ from __future__ import annotations
 import argparse
 import sqlite3
 import sys
+from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ..common import store_layout
 from ..persistence.db import Database
+from ..status import DEFAULT_RECENT, read_status, status_json, status_lines
 from ._common import _existing_run_row, _open_existing_db
 
 
@@ -270,3 +273,97 @@ def _validate_live(db: Database, run_id: str) -> int:
     if report.live_ready:
         return 0
     return 5 if report.failures else 4
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _recent(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"--recent takes a whole number, got {text!r}") from None
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"--recent must be 0 or more, got {text!r}")
+    return value
+
+
+def _cmd_status(argv: list[str], *, now: Callable[[], datetime] = _utc_now) -> int:
+    """``status``: what the store says about one run, as lines or as ``--json``.
+
+    Report-only like ``validate``: no lease, no migration, one read
+    transaction. ``--run-id`` left out reads the run whose scheduler row was
+    touched last — the segment that is running, or ran last. The model, the
+    lines and the document are :mod:`..status`; ``now`` is the clock seam
+    behind the document's ``generated_at``. Exit 0 printed, 1 a store or run
+    named as missing, 5 a store that opened but whose content does not hold
+    up (``validate``'s verdict for the same failure), 2 anything else.
+    """
+    parser = argparse.ArgumentParser(
+        prog="python -m contrib.hyperliquid_perp status",
+        description=(
+            "Print what the store holds about one run: the scheduler row, the decision "
+            "cycles by status with the latest few and their verdicts, the models asked, "
+            "the ledger, the latest account snapshot, the positions, the latest fills and "
+            "the kill-switch and safe-mode event tails. Reads only; the daemon need not stop."
+        ),
+    )
+    parser.add_argument(
+        "--run-id",
+        help=(
+            "the run to read; default: the run whose scheduler row was updated last "
+            "(the one running, or the last one that ran)"
+        ),
+    )
+    parser.add_argument(
+        "--db",
+        default="paper_trading.db",
+        help="SQLite store path (a live run's store is usually live_trading.db).",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="print the status as one JSON document (schema_version first) instead of lines",
+    )
+    parser.add_argument(
+        "--recent",
+        type=_recent,
+        default=DEFAULT_RECENT,
+        metavar="N",
+        help=f"how many of the latest cycles, fills and events to carry (default {DEFAULT_RECENT})",
+    )
+    args = parser.parse_args(argv)
+
+    from ..persistence import repository as repo
+
+    db = _open_existing_db(args.db)
+    if db is None:
+        return 1
+    try:
+        with db, db.read_transaction() as conn:
+            run_id = args.run_id
+            if run_id is None:
+                run_id = repo.latest_lease_run_id(conn)
+                if run_id is None:
+                    print(
+                        f"error: no run in {args.db} has a scheduler row yet; pass --run-id, "
+                        "or --db if the run lives in another store",
+                        file=sys.stderr,
+                    )
+                    return 1
+            if _existing_run_row(conn, run_id, args.db) is None:
+                return 1
+            status = read_status(conn, run_id, now=now, recent=args.recent)
+    except (sqlite3.Error, ArithmeticError) as exc:
+        # The store opened but its content does not hold up — a malformed
+        # file, an I/O failure mid-read, a cell no Decimal accepts: the same
+        # "investigate the store" verdict ``validate`` gives, under its code.
+        print(f"error: store integrity failure — {exc}", file=sys.stderr)
+        return 5
+    if args.json:
+        print(status_json(status))
+    else:
+        for line in status_lines(status):
+            print(line)
+    return 0

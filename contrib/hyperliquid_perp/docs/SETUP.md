@@ -5,7 +5,7 @@
 
 > 目前狀態：Phase 2 已完整可跑——market context + 未修改的引擎 + structured
 > target 契約 + 確定性 RiskGate + paper 執行引擎 + 4h scheduler／CLI（§4C 的
-> `paper`／`export`／`validate` 子命令）。paper run 下的是**本地模擬單**（SQLite
+> `paper`／`export`／`validate`／`status` 子命令）。paper run 下的是**本地模擬單**（SQLite
 > paper orders/fills），不碰交易所下單 endpoint——live 執行是 Phase 3 的事。
 
 所有指令都從 repo 根目錄 `TradingAgents/` 執行。
@@ -80,7 +80,7 @@ cp contrib/hyperliquid_perp/configs/hyperliquid.example.yaml \
 
 ```bash
 # 1) repo 根目錄 .env（gitignored）——長駐 run 推薦。本模組的 CLI 入口
-#    （legacy 與 paper/export/validate 子命令）啟動時都會載入它；
+#    （legacy 與 paper/export/validate/status 子命令）啟動時都會載入它；
 #    已 export 的環境變數永遠優先於檔案值。檔案必須是 UTF-8：
 echo "OPENROUTER_API_KEY=sk-or-..." >> .env
 #    （PowerShell 的 >> 預設寫 UTF-16，CLI 會警告後忽略該檔——改用：

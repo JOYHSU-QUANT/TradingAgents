@@ -15,7 +15,7 @@ from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.runtime import accounting
 from contrib.hyperliquid_perp.status import SCHEMA_VERSION
 
-from ..conftest import insert_decision_attempts
+from ..conftest import insert_decision_attempts, insert_minimal_account_snapshot
 from .conftest import seed_db
 
 _T0 = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
@@ -106,6 +106,15 @@ def test_status_recent_caps_the_tails_and_refuses_a_negative(tmp_path, capsys):
     with pytest.raises(SystemExit):
         cli_main(["status", "--run-id", "r", "--db", str(path), "--recent", str(2**64)])
     assert "--recent must be at most" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        cli_main(["status", "--run-id", "r", "--db", str(path), "--recent", str(2**63)])
+    assert "--recent must be at most" in capsys.readouterr().err
+    # The two ends of the range are accepted.
+    assert cli_main(["status", "--run-id", "r", "--db", str(path), "--recent", "0"]) == 0
+    assert "recent cycles: none" in capsys.readouterr().out
+    largest = str(2**63 - 1)
+    assert cli_main(["status", "--run-id", "r", "--db", str(path), "--recent", largest]) == 0
+    assert "recent cycles (3, newest first):" in capsys.readouterr().out
 
 
 def test_status_names_a_store_whose_content_does_not_hold_up_under_validates_code(
@@ -130,6 +139,17 @@ def test_status_names_a_file_that_is_not_a_database_under_validates_code(tmp_pat
     garbage = tmp_path / "bad.db"
     garbage.write_bytes(b"not a database" * 100)
     assert cli_main(["status", "--run-id", "r", "--db", str(garbage)]) == 5
+    assert "store integrity failure" in capsys.readouterr().err
+
+
+def test_status_names_a_cell_no_decimal_accepts_under_validates_code(tmp_path, capsys):
+    path, db = seed_db(tmp_path)
+    with db.transaction() as conn:
+        insert_minimal_account_snapshot(
+            conn, run_id="r", timestamp=_T0, account_equity="not-a-number"
+        )
+    db.close()
+    assert cli_main(["status", "--run-id", "r", "--db", str(path)]) == 5
     assert "store integrity failure" in capsys.readouterr().err
 
 

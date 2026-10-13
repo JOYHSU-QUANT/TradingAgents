@@ -342,7 +342,10 @@ def _cmd_status(argv: list[str], *, now: Callable[[], datetime] = _utc_now) -> i
         type=_recent,
         default=DEFAULT_RECENT,
         metavar="N",
-        help=f"how many of the latest cycles, fills and events to carry (default {DEFAULT_RECENT})",
+        help=(
+            "how many of the latest cycles, snapshots, fills and events to carry "
+            f"(default {DEFAULT_RECENT})"
+        ),
     )
     args = parser.parse_args(argv)
 

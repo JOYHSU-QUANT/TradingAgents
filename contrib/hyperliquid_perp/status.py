@@ -103,15 +103,12 @@ _HEX_SECRET = re.compile(r"0x(?:[0-9a-fA-F]{64}|[0-9a-fA-F]{40})")
 # cannot have: a cycle that ended ``completed`` or ``invalid_output`` wrote
 # its ``ai_outputs`` row in the same step; one still ``in_progress`` or ended
 # ``api_failed`` never reached the model's answer. Spelled from the
-# vocabulary so a status added to it cannot land in neither set unseen.
+# vocabulary so a status added to it cannot land in neither set unseen;
+# tests/test_status.py pins the split against ``TERMINAL_ATTEMPT_STATUSES``.
 _DECIDED_STATUSES = frozenset(
     {repo.AttemptStatus.COMPLETED.value, repo.AttemptStatus.INVALID_OUTPUT.value}
 )
 _UNDECIDED_STATUSES = frozenset(status.value for status in repo.AttemptStatus) - _DECIDED_STATUSES
-_TERMINAL_WITHOUT_VERDICT = frozenset(repo.TERMINAL_ATTEMPT_STATUSES) - _DECIDED_STATUSES
-_API_FAILED_ONLY = frozenset({repo.AttemptStatus.API_FAILED.value})
-if _TERMINAL_WITHOUT_VERDICT != _API_FAILED_ONLY:
-    raise RuntimeError("the status verdict split drifted from repository.TERMINAL_ATTEMPT_STATUSES")
 
 
 @dataclass(frozen=True)

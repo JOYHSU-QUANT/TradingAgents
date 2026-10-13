@@ -16,6 +16,7 @@ from decimal import Decimal
 
 import pytest
 
+from contrib.hyperliquid_perp import status as status_module
 from contrib.hyperliquid_perp.paper import accounting as paper_accounting
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
@@ -376,6 +377,17 @@ def test_an_unknown_run_is_refused(db):
             "has an ai_outputs row",
         ),
         ("UPDATE scheduler_state SET safe_mode_reason = NULL WHERE run_id = 'r'", "safe mode"),
+        ("UPDATE scheduler_state SET safe_mode_entered_at = NULL WHERE run_id = 'r'", "safe mode"),
+        (
+            "UPDATE decision_attempts SET status = 'invalid_output', output_id = NULL"
+            " WHERE run_id = 'r' AND status = 'completed'",
+            "no ai_outputs row",
+        ),
+        (
+            "UPDATE decision_attempts SET status = 'in_progress'"
+            " WHERE run_id = 'r' AND status = 'completed'",
+            "has an ai_outputs row",
+        ),
     ],
 )
 def test_an_impossible_state_is_refused_not_defaulted(db, damage, said):
@@ -386,6 +398,49 @@ def test_an_impossible_state_is_refused_not_defaulted(db, damage, said):
         conn.execute(damage)
     with pytest.raises(ValueError, match=said):
         _read(db)
+
+
+def test_the_verdict_split_covers_the_terminal_vocabulary():
+    # Every terminal status either carries a verdict or is the API failure;
+    # a new terminal word must be placed on one side before it ships.
+    decided, undecided = status_module._DECIDED_STATUSES, status_module._UNDECIDED_STATUSES
+    assert decided == {"completed", "invalid_output"}
+    assert undecided == {"in_progress", "api_failed"}
+    assert frozenset(repo.TERMINAL_ATTEMPT_STATUSES) - decided == {"api_failed"}
+    assert decided | undecided == {status.value for status in repo.AttemptStatus}
+
+
+def test_a_status_word_this_build_does_not_know_passes_through(db):
+    # A daemon upgrade may write a word before the status tool learns it;
+    # the page must show it, not refuse the whole run.
+    _stage_a_busy_run(db)
+    with db.transaction() as conn:
+        conn.execute(
+            "UPDATE decision_attempts SET status = 'paused' WHERE run_id = 'r' AND status = ?",
+            ("api_failed",),
+        )
+    status = _read(db)
+    assert list(status.cycles.by_status.items()) == [
+        ("in_progress", 0),
+        ("completed", 2),
+        ("api_failed", 0),
+        ("invalid_output", 0),
+        ("paused", 1),
+    ]
+    assert status.cycles.recent[0].status == "paused"
+    paused = f"  {_at(8).isoformat()}  paused (try 2)"
+    assert any(line.startswith(paused) for line in status_lines(status))
+    # The same word beside a verdict passes through too: the pairing check
+    # only knows the words it knows.
+    with db.transaction() as conn:
+        conn.execute(
+            "UPDATE decision_attempts SET status = 'paused' WHERE run_id = 'r' AND status = ?",
+            ("completed",),
+        )
+    status = _read(db)
+    assert status.cycles.by_status["paused"] == 3
+    assert all(cycle.status == "paused" for cycle in status.cycles.recent)
+    assert status.cycles.recent[2].verdict is not None
 
 
 def test_the_clock_must_be_aware_and_is_spelled_in_utc(db):
@@ -576,6 +631,27 @@ def test_free_text_is_cut_at_the_limit_in_the_model_and_the_document(db):
     assert len(reason) == TEXT_LIMIT == 1000 and reason.endswith("yyy...")
     document = json.loads(status_json(status))
     assert document["cycles"]["recent"][2]["verdict"]["decision_reason"] == reason
+    with db.transaction() as conn:
+        conn.execute(
+            "UPDATE ai_outputs SET decision_reason = ? WHERE run_id = ?", ("w" * 1000, "r")
+        )
+    assert _read(db).cycles.recent[2].verdict.decision_reason == "w" * 1000  # whole at the limit
+
+
+def test_a_secret_across_the_cut_is_masked_before_it_is_cut(db):
+    # Masking runs before the cut: a key that straddles the limit must not
+    # leave its first hundreds of hex characters behind as a prefix.
+    _stage_a_busy_run(db)
+    for secret in (_AGENT_KEY, _WALLET):
+        with db.transaction() as conn:
+            conn.execute(
+                "UPDATE ai_outputs SET decision_reason = ? WHERE run_id = ?",
+                ("a" * 980 + secret + "z" * 50, "r"),
+            )
+        reason = _read(db).cycles.recent[2].verdict.decision_reason
+        assert len(reason) <= TEXT_LIMIT
+        assert secret not in reason and f"{secret[:6]}...{secret[-4:]}" in reason
+        assert re.search(r"0x[0-9a-fA-F]{8,}", reason) is None
 
 
 def test_the_document_and_the_lines_are_ascii_whatever_the_model_wrote(db):
@@ -686,6 +762,7 @@ def test_the_lines_say_every_part_in_one_line_each(db):
         "BTC maintain_current  requested n/a% approved n/a%  conf 0.6  approved  "
         "no order (maintain_current)"
     )
+    assert "(try" not in lines[index + 2]  # a first try is not labelled
     oldest = lines[index + 3]
     assert (
         "BTC long  requested 25% approved 20%  conf 0.7  clamped (max_target_margin_pct)  order"

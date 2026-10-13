@@ -628,7 +628,10 @@ class WeekRow:
 
     ``costs`` and ``net`` are the days' own summed (unpriced costs left
     out, counted in ``unpriced``); the three cost lines are shown apart,
-    each ``None`` when any day of the week could not price it.
+    each ``None`` when any day of the week could not price it. ``alerts``
+    counts the lights on the week's days. ``status.py`` serialises this
+    type as it is: a field changed here changes the document, and bumps
+    ``status.SCHEMA_VERSION``.
     """
 
     year: int
@@ -648,7 +651,13 @@ class WeekRow:
 
 @dataclass(frozen=True)
 class SpanTotals:
-    """The span's totals, as its last line says them (unpriced days' costs left out of ``costs``)."""
+    """The span's totals, as its last line says them.
+
+    Unpriced days' costs are left out of ``costs``; ``alerts`` counts the
+    lights and the unreadable sidecars together. ``status.py`` serialises
+    this type as it is: a field changed here changes the document, and
+    bumps ``status.SCHEMA_VERSION``.
+    """
 
     days: int
     days_in: int

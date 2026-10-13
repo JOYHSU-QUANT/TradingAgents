@@ -5,7 +5,8 @@
 - ``status`` prints what the store holds and its latest bars. With
   ``--run-id`` it goes on to print that run's holdings, value and return
   (measured as ``report`` measures it), and its latest decisions with when
-  each was made. It reads no chain.
+  each was made; ``--json`` prints the same, with everything ``report``
+  says, as one document (``status.py``). It reads no chain.
 - ``backtest`` replays the stored bars of a range through the engine as the
   run ``--run-id``. With ``--fills model``, the default, fills come from
   the offline model and no chain is read. With ``--fills quoter`` each swap
@@ -140,7 +141,6 @@ from typing import TYPE_CHECKING, Final
 from .agent.errors import AgentError, BarNotStored, JudgeUnavailable
 from .chain.errors import ChainError, RpcRejected, TransientChainError
 from .config import ConfigError, UniswapConfig, config_from_snapshot, load_config
-from .domain.bars import Finality
 from .domain.decimal_context import fixed_text, parse_decimal, plain
 from .domain.execution import ForkSettings
 from .domain.ledger import Ledger
@@ -165,10 +165,12 @@ from .status import (
     measured,
     outcome_counts,
     read_status,
+    reason_code_counts,
     run_header,
     status_json,
     status_lines,
     stored_run,
+    unsettled_count,
     verdicts_seen,
 )
 from .store.repository import Store, StoreBusy, StoreError, open_store
@@ -1035,28 +1037,16 @@ def _report(args: argparse.Namespace, out: Callable[[str], None]) -> int:
     )
     out(decided_span(len(decisions), _iso(decisions[0].time), _iso(decisions[-1].time)))
     out("decisions: " + outcome_counts(Counter(decision.outcome for decision in decisions)))
-    for outcome in (Outcome.SKIPPED_SUSPECT, Outcome.REJECTED, Outcome.PARTIAL):
-        codes = Counter(
-            decision.reason_code.value
-            for decision in decisions
-            if decision.outcome is outcome and decision.reason_code is not None
-        )
+    for outcome, codes in reason_code_counts(decisions).items():
         if codes:
-            out(f"{outcome.value}: {counts(codes)}")
+            out(f"{outcome}: {counts(codes)}")
     if config.verdicts is not None:
         seen = verdicts_seen(config.verdicts.source, len(config.traded_symbols), decisions)
         out(
             f"verdicts from {seen.source}: {seen.every} decided bar(s) saw one on every traded "
             f"token, {seen.some} on some, {seen.none} on none"
         )
-    # The report reads no bars, so it cannot tell whether such a reading held.
-    unsettled = sum(
-        1
-        for decision in decisions
-        if decision.seen is not None
-        and decision.seen.finality is Finality.PENDING
-        and not decision.suspect
-    )
+    unsettled = unsettled_count(decisions)
     if unsettled:
         out(
             f"{unsettled} bar(s) were decided on readings that were not final yet, and are "

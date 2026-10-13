@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import sys
 from decimal import Decimal
@@ -690,3 +691,65 @@ def test_report_of_a_run_that_reads_no_verdicts_prints_no_verdicts_line(node, tm
     code, lines = cli_report(db, "p")
     assert code == cli.EXIT_OK
     assert not any(line.startswith("verdicts from") for line in lines)
+
+
+# --- status --json of a paper run ---------------------------------------------------
+
+
+def _status_document(
+    node: FakeNode, db: Path, *extra: str, config: Path = _EXAMPLE, now: int = _TEN_PAST + 2 * DAY
+):
+    code, lines = _run(
+        node, "status", "--config", str(config), "--db", str(db), "--run-id", "p", "--json",
+        *extra, now=now,
+    )  # fmt: skip
+    assert code == cli.EXIT_OK
+    return json.loads(lines[0])
+
+
+def test_status_json_of_a_paper_run_carries_the_clock_and_what_the_visit_decided_on(
+    node, tmp_path
+):
+    db = tmp_path / "store.db"
+    _paper(node, db, *_OPENING)
+
+    run = _status_document(node, db)["run"]
+    assert (run["mode"], run["decided"]) == ("paper", 1)
+    assert run["clock"] == {
+        "state": "behind",
+        "now": "2024-01-03T00:10:00Z",
+        "last_decided": "2024-01-01T00:00:00Z",
+        "latest_boundary": "2024-01-03T00:00:00Z",
+        "undecided": 2,
+    }
+    # The visit decided the bar on a reading the chain had not finalised yet.
+    assert run["unsettled"] == 1
+    assert run["recent_valuations"] == [
+        {"time": "2024-01-01T00:00:00Z", "total_value": run["value"]}
+    ]
+    assert _status_document(node, db, now=_TEN_PAST)["run"]["clock"] == {
+        "state": "up_to_date",
+        "now": "2024-01-01T00:10:00Z",
+        "last_decided": "2024-01-01T00:00:00Z",
+        "latest_boundary": "2024-01-01T00:00:00Z",
+        "undecided": 0,
+    }
+    ahead = _status_document(node, db, now=FIRST_DAY - 5)["run"]["clock"]
+    assert (ahead["state"], ahead["undecided"]) == ("ahead", 0)
+
+
+def test_status_json_of_a_run_reading_targets_says_what_the_store_holds_now(node, tmp_path):
+    db, carry = tmp_path / "store.db", targeted_config(tmp_path)
+    assert _paper(node, db, *_OPENING, config=carry)[0] == cli.EXIT_OK
+    (decision,) = _status_document(node, db, config=carry)["run"]["recent_decisions"]
+    assert decision["targets_now"] == {"WETH": None} and decision["verdicts"] is None
+
+    handoff = tmp_path / "handoff-eth.json"
+    write_handoff(handoff, handoff_document(as_of=FIRST_DAY, weight="0.4"))
+    on = ("--config", str(carry), "--db", str(db))
+    assert _run(node, "target", *on, "--handoff", str(handoff), now=_TEN_PAST)[0] == cli.EXIT_OK
+    document = _status_document(node, db, config=carry)
+    (decision,) = document["run"]["recent_decisions"]
+    assert decision["targets_now"] == {"WETH": "0.4"}  # the store now, not what the bar saw
+    (coverage,) = document["store"]["coverage"]
+    assert (coverage["what"], coverage["complete"], coverage["of"]) == ("targets", 1, 1)

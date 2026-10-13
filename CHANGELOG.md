@@ -18,27 +18,41 @@ Breaking changes within the 0.x line are called out explicitly.
   header, decided bars by outcome, the paper clock state, holdings and value,
   the return, drawdown, turnover and costs as `report` measures them, the
   verdicts seen, and the latest decisions with what each saw and what the
-  store now holds); the lines `status` has always printed are now rendered
-  from that model (byte for byte, the existing tests pin them), and `--json`
-  prints the same model as one ASCII document with `schema_version` (1) and
-  `source: uniswap_v3` first, `Decimal` as exact text, instants as
-  `2024-01-01T00:00:00Z`. A decision reason is masked for a `0x`-prefixed 20-
-  or 32-byte hex and cut at 1000 characters; nothing from the run config
-  snapshot is copied out beyond the strategy name and the quote. The shared
+  store now holds, plus what only `report` said: the reason codes behind
+  the skipped, rejected and partial decisions, the bars decided on readings
+  not final yet, and a tail of the run's valuations); the lines `status` has
+  always printed are now rendered from that model (unchanged, the existing
+  tests pin them, except that a decision reason and a metrics error are now
+  masked and cut in the lines as well), and `--json` prints the same model
+  as one ASCII document with `schema_version` (1) and `source: uniswap_v3`
+  first, `Decimal` as exact text, instants as `2024-01-01T00:00:00Z`. A
+  decision reason and a metrics error are masked for a `0x`-prefixed 20- or
+  32-byte hex and cut at 1000 characters; from the run config snapshot only
+  the strategy name, the quote, the verdict source and the traded symbols
+  are copied out. Each model class refuses, in `__post_init__`, a pairing of
+  fields no store can produce, as the Hyperliquid model does. The shared
   helpers `report` also uses (`measured`, `run_header`, `decided_span`,
-  `outcome_counts`, `verdicts_seen`) moved to `status.py`; the line helpers
+  `outcome_counts`, `verdicts_seen`, `reason_code_counts`,
+  `unsettled_count`) live in `status.py`; the line helpers
   `one_ascii_line` and `counts` live in `domain/text.py` and `after` beside
   `utc_text` in `domain/times.py`. Carry: `report --json` prints the report as one document
-  (`source: carry`): each UTC day with both legs, the delta and basis, the
-  cycle kinds, the stance, D5, and its lights; the unreadable sidecars; the
-  ISO weeks; the span. The span totals are one value (`report.span_totals`)
-  that both the last line and the document read; a light's sentence and an
-  unreadable sidecar's reason are masked and cut as the other documents are,
-  and a problem names the sidecar's file, not where the host keeps it. Each
-  package's document keeps its own ISO-8601 UTC instant spelling (Hyperliquid
-  the store's `+00:00` text with microseconds, carry `+00:00` to the second,
-  Uniswap `Z`); a reader parses all three with `datetime.fromisoformat`. The
-  `/paper-status` skill reads the three documents instead of ad hoc SQL.
+  (`source: carry`) whose envelope names the two runs and the span: each UTC
+  day with both legs, the delta and basis, the cycle kinds, the stance, D5,
+  and its lights; the unreadable sidecars; the ISO weeks; the span; and,
+  with `--handoff <file>`, the coordinator's latest handoff (what the legs
+  act on and the reading it was decided from, not its `params` or `equity`)
+  or why it could not be read. The span totals are one value
+  (`report.span_totals`) that both the last line and the document read; a
+  light's sentence, an unreadable sidecar's reason and a handoff error are
+  masked and cut as the other documents are, and a problem names the
+  sidecar's file, not where the host keeps it. Each package's document
+  keeps its own ISO-8601 UTC instant spelling (Hyperliquid the store's
+  `+00:00` text, with the clock's microseconds when it has them; carry
+  `+00:00` to the second; Uniswap `Z`); a reader parses all three with
+  `datetime.fromisoformat`. Every tail in the three documents is in the
+  order its lines print it (Uniswap's and carry's oldest first,
+  Hyperliquid's newest first). The `/paper-status` skill reads the three
+  documents instead of ad hoc SQL.
 
 - **`contrib/hyperliquid_perp status` (dashboard plan PR 2a).** A report-only
   subcommand, `python -m contrib.hyperliquid_perp status [--run-id <id>]

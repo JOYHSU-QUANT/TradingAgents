@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
+from contrib.carry import status as status_module
 from contrib.carry.cli import main
-from contrib.carry.handoff import iso_utc
+from contrib.carry.handoff import iso_utc, read_handoff
 from contrib.carry.report import (
     Alert,
     AlertKind,
@@ -24,7 +26,7 @@ from contrib.carry.report import (
     read_sidecars,
     weeks,
 )
-from contrib.carry.status import report_status
+from contrib.carry.status import AlertStatus, report_status
 from contrib.carry.stores import (
     CycleKind,
     PerpCycle,
@@ -911,6 +913,19 @@ _SPAN_FIELDS = (
     "alerts",
     "held_by_d5",
 )
+_HANDOFF_FIELDS = (
+    "path",
+    "as_of",
+    "written_at",
+    "action",
+    "perp_side",
+    "margin_pct",
+    "spot_token",
+    "spot_weight",
+    "read_at",
+    "funding_hourly",
+    "z",
+)
 # The document's shape at status.SCHEMA_VERSION 1. A path added, removed or
 # moved changes this set; change it together with the version.
 _SCHEMA_1_PATHS = {
@@ -919,8 +934,15 @@ _SCHEMA_1_PATHS = {
     "generated_at",
     "coin",
     "token",
+    "perp_run_id",
+    "spot_run_id",
+    "since",
+    "until",
     "delta_alert_pct",
     "d5_days",
+    "handoff",
+    *(f"handoff.{field}" for field in _HANDOFF_FIELDS),
+    "handoff_error",
     "days",
     *(f"days[].{field}" for field in _DAY_FIELDS),
     *(f"days[].cycles.{kind.value}" for kind in CycleKind),
@@ -936,10 +958,17 @@ _SCHEMA_1_PATHS = {
 }
 
 
+def _write_handoff(tmp_path: Path, document: object) -> Path:
+    handoff = tmp_path / "handoff-ETH.json"
+    handoff.write_text(json.dumps(document), encoding="utf-8")
+    return handoff
+
+
 def test_the_command_prints_the_report_as_one_document(tmp_path: Path, capsys):
     perp, spot, payloads = _books(tmp_path)
     (payloads / "bad.handoff.json").write_text("{", encoding="utf-8")
-    argv, now = _report(perp, spot, "--json")
+    handoff = _write_handoff(tmp_path, handoff_document(as_of_ms=day(43)))
+    argv, now = _report(perp, spot, "--json", "--handoff", str(handoff))
     assert main(argv, now=now) == 0
     text = capsys.readouterr().out
     assert text.isascii()
@@ -948,9 +977,29 @@ def test_the_command_prints_the_report_as_one_document(tmp_path: Path, capsys):
     assert (document["schema_version"], document["source"]) == (1, "carry")
     assert document["generated_at"] == "2026-02-14T03:00:00+00:00"
     assert (document["coin"], document["token"]) == ("ETH", "WETH")
+    assert (document["perp_run_id"], document["spot_run_id"]) == (PERP_RUN, SPOT_RUN)
+    assert (document["since"], document["until"]) == ("2026-02-10", "2026-02-13")
     assert (document["delta_alert_pct"], document["d5_days"]) == (10, 3)
     assert _paths(document) == _SCHEMA_1_PATHS
     assert not [path for path, value in _nodes(document) if isinstance(value, float)]
+    secret = re.compile(r"key|secret|password|mnemonic|address", re.IGNORECASE)
+    assert not [path for path in _paths(document) if secret.search(path.rsplit(".", 1)[-1])]
+
+    # The coordinator's file: what the legs act on and the reading, not params or equity.
+    assert document["handoff_error"] is None
+    assert document["handoff"] == {
+        "path": "handoff-ETH.json",
+        "as_of": "2026-02-13T00:00:00+00:00",
+        "written_at": "2026-02-12T23:50:00+00:00",
+        "action": "enter",
+        "perp_side": "short",
+        "margin_pct": 30,
+        "spot_token": "WETH",
+        "spot_weight": str(read_handoff(handoff).spot_weight),
+        "read_at": "2026-02-12T23:00:00+00:00",
+        "funding_hourly": "0.00002",
+        "z": "2.0",
+    }
 
     first, _, third, fourth = document["days"]
     assert (first["boundary"], first["intent_in"], first["perp_funding"]) == (
@@ -1028,29 +1077,162 @@ def test_the_document_and_the_lines_say_the_same_span(tmp_path: Path, capsys):
     )
 
 
-def test_the_document_clock_must_be_aware():
+def _status(rows, found=(), problems=(), *, now=None, **changes):
+    """``report_status`` over a span of day 40 by default, the clock at day 44."""
+    fields = {
+        "coin": "ETH",
+        "perp_run_id": PERP_RUN,
+        "spot_run_id": SPOT_RUN,
+        "since_ms": day(40),
+        "until_ms": day(40) if not rows else rows[-1].boundary_ms,
+        "delta_alert_pct": 10,
+        "d5_days": 3,
+        "handoff": None,
+        "now": from_epoch_ms(day(44)) if now is None else now,
+    }
+    return report_status(list(rows), list(found), list(problems), **{**fields, **changes})
+
+
+def test_the_document_clock_is_aware_and_spelled_to_the_second_in_utc():
     with pytest.raises(ValueError, match="aware"):
-        report_status(
-            [], [], [], coin="ETH", delta_alert_pct=10, d5_days=3, now=datetime(2026, 2, 14)
-        )
-    empty = report_status(
-        [], [], [], coin="ETH", delta_alert_pct=10, d5_days=3, now=from_epoch_ms(day(44))
-    )
+        _status([], now=datetime(2026, 2, 14))
+    taipei = timezone(timedelta(hours=8))
+    status = _status([], now=datetime(2026, 2, 14, 11, 0, 0, 123456, tzinfo=taipei))
+    assert status.generated_at == "2026-02-14T03:00:00+00:00"
+    empty = _status([])
     assert (empty.days, empty.weeks, empty.span.days, empty.span.net) == ((), (), 0, Decimal(0))
+    assert (empty.handoff, empty.handoff_error) == (None, None)
 
 
 def test_the_documents_free_text_is_masked_and_cut(tmp_path: Path):
-    # A sidecar that failed validation can echo a value; a light names
-    # digests only, but goes through the same fold.
+    # A sidecar that failed validation can echo a value, and so can the
+    # handoff; a light names digests only, but goes through the same fold.
     wallet, key = "0x" + "12" * 20, "0x" + "ab" * 32
     problems = [
         SidecarProblem(tmp_path / "x.handoff.json", f"bad {wallet} and {key}"),
         SidecarProblem(tmp_path / "y.handoff.json", "z" * 1500),
     ]
-    status = report_status(
-        [], [], problems, coin="ETH", delta_alert_pct=10, d5_days=3, now=from_epoch_ms(day(44))
-    )
+    row = _row(day(40))
+    found = [Alert(day(40), AlertKind.DELTA, f"net exposure seen by {wallet}")]
+    handoff = _write_handoff(tmp_path, {"version": 1, "coin": wallet})
+    status = _status([row], found, problems, handoff=handoff)
     first, second = status.problems
     assert (first.path, first.reason) == ("x.handoff.json", "bad 0x1212...1212 and 0xabab...abab")
     assert len(second.reason) == 1000 and second.reason.endswith("zzz...")
-    assert status.span.alerts == 2
+    assert status.days[0].alerts == (AlertStatus("delta", "net exposure seen by 0x1212...1212"),)
+    assert status.handoff is None
+    assert status.handoff_error == (
+        "handoff-ETH.json: coin must be one of ['BTC', 'ETH'], got '0x1212...1212'"
+    )
+    assert status.span.alerts == 3  # the light and the two sidecars; the handoff is not a light
+    # Masked before it is cut: a key straddling the cut leaves no hex behind.
+    assert status_module._text("a" * 990 + key) == "a" * 990 + "0xabab...."
+    straddling = status_module._text("a" * 940 + key + "z" * 100)
+    assert len(straddling) == 1000 and "0xabab...abab" in straddling
+    assert "ababab" not in straddling
+
+
+def test_a_day_carries_every_field_of_its_row():
+    # Three days with nothing alike: in, out, unknown; the perp read twice on
+    # the first day, the spot bar closing above the first mark.
+    rows = _rows(
+        since_ms=day(40),
+        until_ms=day(42),
+        funding=[(day(40) + 2 * MS_PER_HOUR, Decimal("1.5"))],
+        pending_funding=[day(40) + 3 * MS_PER_HOUR],
+        fees=[(day(40) + MS_PER_HOUR, Decimal("0.25"))],
+        snapshots=[
+            _snapshot(day(40) + MS_PER_HOUR, "10000", "-0.9", "3000"),
+            _snapshot(day(40) + 23 * MS_PER_HOUR, "10100", "-0.8", "3100"),
+        ],
+        cycles=[
+            PerpCycle(day(40) + 5 * MINUTE, CycleKind.APPLIED, RiskAction.APPROVED),
+            PerpCycle(day(40) + 4 * MS_PER_HOUR, CycleKind.APPLIED, RiskAction.REJECTED),
+            PerpCycle(day(40) + 23 * MS_PER_HOUR, CycleKind.PENDING, None),
+        ],
+        decisions=[(day(40), "hold")],
+        valuations=[_valuation(day(40), {"WETH": "0.9"}, {"WETH": "3030"}, "2727")],
+        targets=[SpotTarget(day(40), Decimal("0.3"), A), SpotTarget(day(41), Decimal(0), B)],
+    )
+    status = _status(rows)
+    first, second, third = status.days
+    assert [d.intent_in for d in status.days] == [True, False, None]
+    assert status.span.days_in == 1
+    row = rows[0]
+    assert dataclasses.asdict(first) == {
+        "boundary": "2026-02-10",
+        "intent_in": True,
+        "perp_funding": Decimal("1.5"),
+        "perp_funding_pending": 1,
+        "perp_fees": Decimal("0.25"),
+        "spot_swap_cost": row.spot_swap_cost,
+        "spot_gas_eth": row.spot_gas_eth,
+        "spot_gas_cost": row.spot_gas_cost,
+        "costs": Decimal("0.25"),
+        "net": Decimal("1.25"),
+        "unpriced": row.spot_swap_cost is None or row.spot_gas_cost is None,
+        "perp_size": Decimal("-0.8"),
+        "perp_mark": Decimal("3100"),
+        "perp_as_of": None,
+        "perp_equity": Decimal("10100"),
+        "spot_qty": Decimal("0.9"),
+        "spot_price": Decimal("3030"),
+        "spot_as_of": None,
+        "spot_equity": Decimal("2727"),
+        "delta": Decimal("0.1"),
+        "delta_share": Decimal("0.1") / Decimal("0.9"),
+        "basis": Decimal("0.01"),
+        "cycles": {"applied": 2, "pending": 1, "unusable": 0, "no_decision": 0, "engine": 0},
+        "refused": 1,
+        "spot_outcome": "hold",
+        "spot_target": Decimal("0.3"),
+        "held_by_d5": False,
+        "alerts": (),
+    }
+    # Days 41 and 42 carry day 40's readings, and say when they were read.
+    assert (second.perp_as_of, second.spot_as_of) == (
+        "2026-02-10T23:00:00+00:00",
+        "2026-02-10T00:00:00+00:00",
+    )
+    assert (third.perp_equity, third.spot_equity) == (Decimal("10100"), Decimal("2727"))
+    assert (third.perp_mark, third.spot_price, third.basis) == (Decimal("3100"), Decimal("3030"), None)
+    assert third.spot_outcome is None and third.cycles["applied"] == 0
+
+
+def test_the_command_without_a_handoff_carries_none_and_an_unreadable_one_says_why(
+    tmp_path: Path, capsys
+):
+    perp, spot, _ = _books(tmp_path)
+    argv, now = _report(perp, spot, "--json")
+    assert main(argv, now=now) == 0
+    document = json.loads(capsys.readouterr().out)
+    assert (document["handoff"], document["handoff_error"]) == (None, None)
+    handoff = tmp_path / "handoff-ETH.json"
+    handoff.write_text("{", encoding="utf-8")
+    assert main([*argv, "--handoff", str(handoff)], now=now) == 0
+    document = json.loads(capsys.readouterr().out)
+    assert document["handoff"] is None
+    assert document["handoff_error"].startswith("handoff-ETH.json: not JSON")
+    assert str(tmp_path) not in document["handoff_error"]
+
+
+def test_the_document_refuses_what_the_report_cannot_produce():
+    row = _row(day(40))
+    with pytest.raises(ValueError, match="since"):
+        _status([row], since_ms=day(39))
+    with pytest.raises(ValueError, match="after"):
+        _status([], since_ms=day(41), until_ms=day(40))
+    status = _status([row])
+    day_status = status.days[0]
+    with pytest.raises(ValueError, match="unpriced"):
+        dataclasses.replace(day_status, unpriced=True)
+    with pytest.raises(ValueError, match="refuses"):
+        dataclasses.replace(day_status, refused=5)
+    with pytest.raises(ValueError, match="kind"):
+        dataclasses.replace(day_status, cycles={"applied": 1})
+    with pytest.raises(ValueError, match="carried"):
+        dataclasses.replace(day_status, perp_as_of="2026-02-09T23:00:00+00:00", perp_equity=None)
+    with pytest.raises(ValueError, match="kind"):
+        AlertStatus("delta!", "x")
+    with pytest.raises(ValueError, match="counts"):
+        dataclasses.replace(status, days=())

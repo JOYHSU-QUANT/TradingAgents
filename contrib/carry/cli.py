@@ -259,6 +259,14 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print the report as one JSON document (schema_version and source first)",
     )
+    report.add_argument(
+        "--handoff",
+        metavar="FILE",
+        help=(
+            "with --json, also carry the coordinator's handoff document at FILE (what the legs "
+            "act on and the reading it was decided from; unreadable, the document says why)"
+        ),
+    )
     report.add_argument("--since", metavar="DAY", help="first day (a UTC day boundary)")
     report.add_argument(
         "--until", metavar="DAY", help="last day (a UTC day boundary); default: yesterday"
@@ -590,8 +598,13 @@ def _cmd_report(args: argparse.Namespace, *, now: Callable[[], datetime]) -> int
             found,
             problems,
             coin=coin,
+            perp_run_id=args.perp_run_id,
+            spot_run_id=args.spot_run_id,
+            since_ms=since_ms,
+            until_ms=until_ms,
             delta_alert_pct=args.delta_alert_pct,
             d5_days=args.d5_days,
+            handoff=None if args.handoff is None else Path(args.handoff),
             now=now_at,
         )
         print(report_json(status))

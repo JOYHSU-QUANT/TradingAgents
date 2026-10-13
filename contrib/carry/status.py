@@ -5,20 +5,32 @@ model — :func:`.report.build_rows` gives one :class:`~.report.BookDay` per
 UTC day, :func:`.report.alerts` the lights, :func:`.report.weeks` the ISO
 weeks, :func:`.report.span_totals` the span — and this module is its
 document form: :func:`report_status` folds those into a :class:`ReportStatus`
-(a frozen tree of dataclasses whose fields are what the report lines say),
-and :func:`report_json` renders it field by field (``dataclasses.asdict`` is
+(a frozen tree of dataclasses whose fields are what the report lines say,
+under an envelope that names the two runs it reconciles and the span it
+covers, and, when asked, the coordinator's latest handoff), and
+:func:`report_json` renders it field by field (``dataclasses.asdict`` is
 the whitelist), ``Decimal`` as its exact text, days as ``2026-02-10``,
-instants as this package spells them (``2026-02-10T00:20:00+00:00``: each
-package's document keeps its own ISO-8601 UTC spelling, and a reader parses
-them with ``datetime.fromisoformat``), ASCII throughout. The document opens
-with ``schema_version`` and ``source``; the version is scoped to this
-package's documents, and a change to a field's name, place or meaning bumps
-:data:`SCHEMA_VERSION` (``tests/test_report.py`` pins the field paths).
+instants as this package spells them (``2026-02-10T00:20:00+00:00``, to the
+second: each package's document keeps its own ISO-8601 UTC spelling, and a
+reader parses them with ``datetime.fromisoformat``), ASCII throughout. The
+document opens with ``schema_version`` and ``source``; the version is scoped
+to this package's documents, and a change to a field's name, place or
+meaning bumps :data:`SCHEMA_VERSION` (``tests/test_report.py`` pins the
+field paths). ``days`` and ``weeks`` are oldest first, as the lines print
+them; a reader takes ``[-1]`` as the latest.
 
 The free text the document carries — a light's sentence, the reason a
-sidecar could not be read — is masked for a ``0x``-prefixed 20- or 32-byte
-hex and cut at :data:`TEXT_LIMIT`, as the other packages' documents are; a
-sidecar problem names the file, not where it sits on the host.
+sidecar or the handoff could not be read — is masked for a ``0x``-prefixed
+20- or 32-byte hex and cut at :data:`TEXT_LIMIT`, as the other packages'
+documents are; a sidecar problem and the handoff name their file, not where
+it sits on the host. Of the handoff, the document copies out what the two
+legs act on (the action, the perp side and margin, the spot token and
+weight) and the reading it was decided from; not its ``params`` nor its
+``equity`` block.
+
+Each model class refuses, in ``__post_init__``, a pairing of its own fields
+that the report cannot produce, so a document built by hand cannot be
+half-filled.
 """
 
 from __future__ import annotations
@@ -31,9 +43,10 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from .handoff import SPOT_TOKENS, iso_utc
+from .handoff import SPOT_TOKENS, HandoffError, iso_utc, read_handoff
 from .report import (
     Alert,
+    AlertKind,
     BookDay,
     SidecarProblem,
     SpanTotals,
@@ -50,6 +63,7 @@ __all__ = [
     "TEXT_LIMIT",
     "AlertStatus",
     "DayStatus",
+    "HandoffStatus",
     "ProblemStatus",
     "ReportStatus",
     "report_json",
@@ -64,14 +78,25 @@ TEXT_LIMIT = 1000
 # A 32-byte hex (a key) or a 20-byte hex (an address) in free text, the longer
 # shape first; folded to its first six and last four characters.
 _HEX_SECRET = re.compile(r"0x(?:[0-9a-fA-F]{64}|[0-9a-fA-F]{40})")
+_KINDS = frozenset(kind.value for kind in AlertKind)
+_CYCLE_KINDS = frozenset(kind.value for kind in CycleKind)
 
 
 @dataclass(frozen=True)
 class AlertStatus:
-    """One light on a day: its kind (as the report spells it) and its sentence."""
+    """One light on a day: its kind and its sentence.
+
+    ``kind`` is one of ``delta``, ``one-legged``, ``different documents``,
+    ``no sidecar``, ``held by D5``, ``silent day``, ``sidecar not read``,
+    as the report spells them.
+    """
 
     kind: str
     text: str
+
+    def __post_init__(self) -> None:
+        if self.kind not in _KINDS:
+            raise ValueError(f"kind must be one of {sorted(_KINDS)}, got {self.kind!r}")
 
 
 @dataclass(frozen=True)
@@ -79,12 +104,22 @@ class DayStatus:
     """One UTC day of the hedged book, as the report's three lines say it.
 
     ``intent_in`` is the day's stance (``True`` in, ``False`` out, ``None``
-    unknown). ``perp_as_of`` / ``spot_as_of`` are set when the leg had no
-    reading on the day and the last known one is carried, and name the
-    instant it was read. ``cycles`` counts every cycle kind (``applied``,
-    ``pending``, ``unusable``, ``no_decision``, ``engine``), zero when none.
-    ``delta`` is the net exposure in the coin and ``delta_share`` its share
-    of the larger leg (``None`` when neither leg holds anything).
+    unknown). ``costs`` is the day's priced costs and ``net`` its funding
+    less those; a swap or gas the day's valuation could not price is
+    ``None``, left out of both and flagged by ``unpriced``. A leg's
+    ``*_as_of`` is set when it had no reading on the day and the last known
+    one is carried, and names the instant that was read; a leg never read
+    has ``*_equity`` ``None`` (and a size or quantity of zero, which is
+    also what flat reads). ``delta`` is the net exposure in the coin and
+    ``delta_share`` its share of the larger leg as a fraction (``0.1`` is
+    10%, against the document's ``delta_alert_pct`` in percent); ``None``
+    when neither leg holds anything. ``perp_funding_pending`` counts the
+    settlements not yet in ``perp_funding``. ``cycles`` counts every cycle
+    kind (``applied``, ``pending``, ``unusable``, ``no_decision``,
+    ``engine``), zero when none, and ``refused`` is how many of the applied
+    ones the gate refused (a part of ``applied``, not another kind).
+    ``spot_outcome`` is the spot bar's decision outcome as the spot store
+    spells it, ``None`` for an undecided bar.
     """
 
     boundary: str
@@ -116,6 +151,22 @@ class DayStatus:
     held_by_d5: bool
     alerts: tuple[AlertStatus, ...]
 
+    def __post_init__(self) -> None:
+        if self.unpriced != (self.spot_swap_cost is None or self.spot_gas_cost is None):
+            raise ValueError(
+                "a day is unpriced exactly when a swap or gas cost could not be priced"
+            )
+        if set(self.cycles) != _CYCLE_KINDS:
+            raise ValueError(f"cycles count every kind, {sorted(_CYCLE_KINDS)}")
+        if not 0 <= self.refused <= self.cycles[CycleKind.APPLIED.value]:
+            raise ValueError("the gate refuses applied cycles only")
+        for leg, as_of, equity in (
+            ("perp", self.perp_as_of, self.perp_equity),
+            ("spot", self.spot_as_of, self.spot_equity),
+        ):
+            if as_of is not None and equity is None:
+                raise ValueError(f"a carried {leg} reading is a reading: its equity is known")
+
 
 @dataclass(frozen=True)
 class ProblemStatus:
@@ -126,11 +177,49 @@ class ProblemStatus:
 
 
 @dataclass(frozen=True)
+class HandoffStatus:
+    """The coordinator's handoff as the document carries it: what the legs act on, and the reading.
+
+    ``as_of`` is the boundary it decides and ``written_at`` when it was
+    written. ``action`` is ``enter`` / ``hold`` / ``exit`` / ``stay_out``,
+    ``perp_side`` ``short`` or ``flat`` with ``margin_pct`` (0 while out),
+    and ``spot_weight`` the spot leg's target weight of ``spot_token``.
+    The reading the handoff was decided from — ``read_at``, the
+    ``funding_hourly`` rate and its ``z`` score (the handoff's float, as
+    its shortest exact text) — is ``None`` for a stay-out decided without
+    one.
+    """
+
+    path: str
+    as_of: str
+    written_at: str
+    action: str
+    perp_side: str
+    margin_pct: int
+    spot_token: str
+    spot_weight: Decimal
+    read_at: str | None
+    funding_hourly: Decimal | None
+    z: Decimal | None
+
+    def __post_init__(self) -> None:
+        if len({value is None for value in (self.read_at, self.funding_hourly, self.z)}) != 1:
+            raise ValueError("a reading is carried whole, or not at all")
+
+
+@dataclass(frozen=True)
 class ReportStatus:
     """The report as a document: the days with their lights, the problems, the weeks, the span.
 
-    ``weeks`` and ``span`` are the report's own :class:`~.report.WeekRow` and
-    :class:`~.report.SpanTotals`, carried as they are.
+    The envelope names the two runs (``perp_run_id``, ``spot_run_id``) and
+    the span (``since`` to ``until``, UTC days, both ends in) the report
+    covers; ``days`` holds one entry per day of it. ``handoff`` is the
+    coordinator's latest handoff when the report was asked to read one and
+    could, ``handoff_error`` why it could not, and both are ``None`` when it
+    was not asked. ``weeks`` and ``span`` are the report's own
+    :class:`~.report.WeekRow` and :class:`~.report.SpanTotals`, carried as
+    they are; ``span.alerts`` counts the lights and the problems together,
+    where a day's and a week's ``alerts`` count lights alone.
     """
 
     schema_version: int
@@ -138,12 +227,31 @@ class ReportStatus:
     generated_at: str
     coin: str
     token: str
+    perp_run_id: str
+    spot_run_id: str
+    since: str
+    until: str
     delta_alert_pct: int
     d5_days: int
+    handoff: HandoffStatus | None
+    handoff_error: str | None
     days: tuple[DayStatus, ...]
     problems: tuple[ProblemStatus, ...]
     weeks: tuple[WeekRow, ...]
     span: SpanTotals
+
+    def __post_init__(self) -> None:
+        if self.handoff is not None and self.handoff_error is not None:
+            raise ValueError("the handoff was read, or could not be; not both")
+        if self.span.days != len(self.days):
+            raise ValueError("the span counts the days carried")
+        if self.days and (self.days[0].boundary, self.days[-1].boundary) != (
+            self.since,
+            self.until,
+        ):
+            raise ValueError("the days run from since to until")
+        if self.until < self.since:
+            raise ValueError("the span ends on or after the day it starts")
 
 
 def _text(value: str) -> str:
@@ -187,29 +295,67 @@ def _day(row: BookDay, lights: Sequence[Alert]) -> DayStatus:
     )
 
 
+def _handoff(path: Path) -> tuple[HandoffStatus | None, str | None]:
+    """The handoff at ``path`` as the document carries it, or why it could not be read."""
+    try:
+        found = read_handoff(path)
+    except HandoffError as exc:
+        return None, _text(str(exc).replace(str(path), path.name))
+    reading = found.reading
+    return HandoffStatus(
+        path=path.name,
+        as_of=iso_utc(found.as_of_ms),
+        written_at=iso_utc(found.written_at_ms),
+        action=found.action.value,
+        perp_side=found.perp_side,
+        margin_pct=found.margin_pct,
+        spot_token=found.spot_token,
+        spot_weight=found.spot_weight,
+        read_at=None if reading is None else iso_utc(reading.at_ms),
+        funding_hourly=None if reading is None else reading.current,
+        z=None if reading is None else Decimal(repr(reading.z)),
+    ), None
+
+
 def report_status(
     rows: Sequence[BookDay],
     found: Sequence[Alert],
     problems: Sequence[SidecarProblem],
     *,
     coin: str,
+    perp_run_id: str,
+    spot_run_id: str,
+    since_ms: int,
+    until_ms: int,
     delta_alert_pct: int,
     d5_days: int,
+    handoff: Path | None,
     now: datetime,
 ) -> ReportStatus:
-    """The report over ``rows`` as a document; ``now`` (aware) is its ``generated_at``."""
+    """The report over ``rows`` (the days from ``since_ms`` to ``until_ms``) as a document.
+
+    ``now`` (aware) is its ``generated_at``; ``handoff`` is the coordinator's
+    handoff file to carry, or ``None`` to carry none.
+    """
     if now.tzinfo is None:
         raise ValueError("the report clock must give an aware datetime")
     by_day = alerts_by_day(found)
     totals = span_totals(rows, found, problems)
+    carried, error = (None, None) if handoff is None else _handoff(handoff)
     return ReportStatus(
         schema_version=SCHEMA_VERSION,
         source=SOURCE,
-        generated_at=now.astimezone(timezone.utc).isoformat(),
+        generated_at=now.astimezone(timezone.utc).isoformat(timespec="seconds"),
         coin=coin,
         token=SPOT_TOKENS[coin],
+        perp_run_id=perp_run_id,
+        spot_run_id=spot_run_id,
+        since=iso_utc(since_ms)[:10],
+        until=iso_utc(until_ms)[:10],
         delta_alert_pct=delta_alert_pct,
         d5_days=d5_days,
+        handoff=carried,
+        handoff_error=error,
         days=tuple(_day(row, by_day.get(row.boundary_ms, ())) for row in rows),
         problems=tuple(ProblemStatus(Path(p.path).name, _text(p.reason)) for p in problems),
         weeks=tuple(weeks(rows, found)),

@@ -8,7 +8,10 @@ the coverage of verdicts and targets; the run's header, how many bars it
 decided and how they ended, whether a paper run is up to date with the
 clock, its holdings and value, the return and costs as ``report`` measures
 them, and its latest decisions with what each saw and what the store now
-holds for it). :func:`status_lines` renders those lines from the model, and
+holds for it; and, so that the document is the whole ``report``, the
+reason codes behind the skipped, rejected and partial decisions, how many
+bars were decided on readings not final yet, and a tail of the run's
+valuations). :func:`status_lines` renders those lines from the model, and
 :func:`status_json` the same model as one document, field by field
 (``dataclasses.asdict`` is the whitelist), ``Decimal`` as its exact text,
 instants as this package spells them (``2024-01-01T00:00:00Z``: each
@@ -18,9 +21,21 @@ with ``schema_version`` and ``source``: the version is scoped to this
 package's documents, and a change to a field's name, place or meaning bumps
 :data:`SCHEMA_VERSION` (``tests/test_cli.py`` pins the field paths).
 
-Nothing from the run's config snapshot is copied out beyond the strategy's
-name and the quote; a decision's reason (engine text) is masked for a
-``0x``-prefixed 20- or 32-byte hex and cut at :data:`TEXT_LIMIT`.
+From the run's config snapshot the document copies out only the strategy's
+name, the quote, the verdict source and the traded symbols (the keys of a
+decision's ``verdicts`` and ``targets_now``). The free text it carries — a
+decision's reason (engine text) and a metrics error — is masked for a
+``0x``-prefixed 20- or 32-byte hex and cut at :data:`TEXT_LIMIT`; the lines
+print the masked text too, the one way they differ from what ``status``
+printed before the model. Every tail in the document (``latest_bars``,
+``recent_valuations``, ``recent_decisions``) is in the order its lines print
+it, oldest first; a reader takes ``[-1]`` as the latest.
+
+Each model class refuses, in ``__post_init__``, a pairing of its own fields
+that no store can produce (a complete bar without its block, a decided run
+without its holdings, a clock ``behind`` with nothing undecided): a reader
+building one by hand, or a second reader of the store, cannot emit a
+half-filled document.
 """
 
 from __future__ import annotations
@@ -34,6 +49,7 @@ from decimal import Decimal
 
 from .config import UniswapConfig, config_from_snapshot
 from .constants import WRAPPED_NATIVE, pool_key
+from .domain.bars import Finality
 from .domain.decimal_context import fixed_text, plain, price_text
 from .domain.ledger import Ledger
 from .domain.metrics import Curve, MetricsError, RunMetrics, measurable, run_metrics
@@ -62,15 +78,18 @@ __all__ = [
     "RunStatus",
     "Status",
     "StoreStatus",
+    "ValuationPoint",
     "VerdictsSeen",
     "decided_span",
     "measured",
     "outcome_counts",
     "read_status",
+    "reason_code_counts",
     "run_header",
     "status_json",
     "status_lines",
     "stored_run",
+    "unsettled_count",
     "verdicts_seen",
 ]
 
@@ -82,6 +101,12 @@ TEXT_LIMIT = 1000
 # A 32-byte hex (a key) or a 20-byte hex (an address) in free text, the longer
 # shape first; folded to its first six and last four characters.
 _HEX_SECRET = re.compile(r"0x(?:[0-9a-fA-F]{64}|[0-9a-fA-F]{40})")
+# The outcomes that say why, in the order report lists them.
+_REASONED = (Outcome.SKIPPED_SUSPECT, Outcome.REJECTED, Outcome.PARTIAL)
+_MODES = frozenset(mode.value for mode in RunMode)
+_OUTCOMES = frozenset(outcome.value for outcome in Outcome)
+_FINALITIES = frozenset(finality.value for finality in Finality)
+_CLOCK_STATES = frozenset({"up_to_date", "behind", "ahead"})
 
 
 # --- the model ----------------------------------------------------------------
@@ -89,20 +114,33 @@ _HEX_SECRET = re.compile(r"0x(?:[0-9a-fA-F]{64}|[0-9a-fA-F]{40})")
 
 @dataclass(frozen=True)
 class PoolExtent:
-    """How many readings a pool has, and the boundaries of the first and the last."""
+    """How many readings a pool has, and the boundaries of the first and the last (``None`` with none)."""
 
     pool: str
     readings: int
     first: str | None
     last: str | None
 
+    def __post_init__(self) -> None:
+        if self.readings < 0:
+            raise ValueError(f"a pool has a count of readings, got {self.readings}")
+        empty = self.readings == 0
+        if (self.first is None) != empty or (self.last is None) != empty:
+            raise ValueError(
+                "a pool with readings has a first and a last boundary; one without, neither"
+            )
+
 
 @dataclass(frozen=True)
 class BarStatus:
     """One of the latest boundaries: the bar there, or ``complete`` False when a pool lacks a reading.
 
-    ``finality`` is ``pending`` or ``final``; ``flags`` are ``<pool>:<flag>``
-    for every data-check flag on a pool's reading.
+    A complete bar carries its ``close_block``, ``prices``, ``finality``
+    (``pending``, ``final`` or ``reorged``, that of the reading furthest
+    from final) and whether it is ``suspect``; ``flags`` are
+    ``<pool>:<flag>`` for every data-check flag on a pool's reading. An
+    incomplete one carries the boundary alone: ``None`` and empty for the
+    rest.
     """
 
     time: str
@@ -113,16 +151,45 @@ class BarStatus:
     suspect: bool | None
     flags: tuple[str, ...]
 
+    def __post_init__(self) -> None:
+        if self.complete:
+            if self.close_block is None or self.finality is None or self.suspect is None:
+                raise ValueError("a complete bar has its close block, finality and suspect flag")
+            if self.finality not in _FINALITIES:
+                raise ValueError(
+                    f"finality must be one of {sorted(_FINALITIES)}, got {self.finality!r}"
+                )
+        elif (
+            self.close_block is not None
+            or self.finality is not None
+            or self.suspect is not None
+            or self.prices
+            or self.flags
+        ):
+            raise ValueError("an incomplete bar carries its boundary alone")
+
 
 @dataclass(frozen=True)
 class Coverage:
-    """Of the latest bars, how many have a verdict (or a target) from the config's source for every token."""
+    """Of the latest bars, how many have a verdict (or a target) from the config's source for every token.
+
+    ``of`` counts the complete bars among ``latest_bars`` (an incomplete
+    boundary has nothing to judge), not ``len(latest_bars)``; ``complete``
+    is how many of those have one for every traded token, and
+    ``per_token`` how many have one for each.
+    """
 
     what: str
     source: str
     complete: int
     of: int
     per_token: dict[str, int]
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.complete <= self.of:
+            raise ValueError(f"complete ({self.complete}) is of the {self.of} bar(s) counted")
+        if any(not self.complete <= count <= self.of for count in self.per_token.values()):
+            raise ValueError("a token has one on every complete bar, and on no more than counted")
 
 
 @dataclass(frozen=True)
@@ -147,7 +214,12 @@ class Holdings:
 
 @dataclass(frozen=True)
 class CurveStatus:
-    """A value over the measured bars: start, end, the change as a fraction, the deepest fall."""
+    """A value over the measured bars: start, end, and two fractions.
+
+    ``total_return`` is the change from start to end as a fraction of the
+    start and ``max_drawdown`` the deepest fall from an earlier peak as a
+    fraction of that peak: ``0.25`` is 25%.
+    """
 
     start: Decimal
     end: Decimal
@@ -168,7 +240,12 @@ class CostsStatus:
 
 @dataclass(frozen=True)
 class Metrics:
-    """The run as ``report`` measures it, over the bars that could be measured."""
+    """The run as ``report`` measures it, over the bars that could be measured.
+
+    ``bars`` counts the valuations the return is measured on and
+    ``suspect_left_out`` those dropped because their bar was suspect when
+    decided; together they are the run's valuations (one per decided bar).
+    """
 
     bars: int
     measured_from: str
@@ -200,10 +277,22 @@ class Clock:
     latest_boundary: str
     undecided: int
 
+    def __post_init__(self) -> None:
+        if self.state not in _CLOCK_STATES:
+            raise ValueError(f"state must be one of {sorted(_CLOCK_STATES)}, got {self.state!r}")
+        if self.undecided < 0 or (self.undecided > 0) != (self.state == "behind"):
+            raise ValueError("a run is behind by the boundaries left undecided, and only then")
+
 
 @dataclass(frozen=True)
 class VerdictsSeen:
-    """How many decided bars saw a verdict on every traded token, on some, on none (``REVIEW`` counts as seen)."""
+    """How many decided bars saw a verdict on every traded token, on some, on none.
+
+    A ``REVIEW`` counts as seen. The three add up to the decided bars less
+    those skipped as suspect (nothing was decided on them, and no judge was
+    asked); a decision stored before verdicts were kept counts under
+    ``none``.
+    """
 
     source: str
     every: int
@@ -217,11 +306,17 @@ class DecisionStatus:
 
     ``outcome`` is one of ``skipped_suspect``, ``hold``, ``no_trade``,
     ``filled``, ``rejected``, ``partial``; ``reason_code`` and ``reason`` are
-    carried by a rejected, a partial or a skipped decision. ``verdicts`` maps
-    each traded token to the rating the decision saw (``none`` for no
-    verdict, ``changed`` when the store now holds another), and
-    ``targets_now`` to the weight the store holds NOW at the bar; both are
-    ``None`` for a run whose config reads none.
+    carried by a rejected, a partial or a skipped decision. ``decided_at``
+    and ``delay_seconds`` (``decided_at`` less the bar's boundary, negative
+    for a backtest that decided a bar before its boundary) are set together,
+    and both ``None`` for a decision stored before the time was kept.
+    ``verdicts`` maps each traded token to the rating the decision saw, or
+    one of two words: ``none`` for no verdict, ``changed`` when the store
+    now holds another; it is ``None`` for a run whose config reads none and
+    for a decision stored before verdicts were kept, even when the run's
+    ``verdicts_seen`` is set. ``targets_now`` maps each traded token to the
+    weight the store holds NOW at the bar (``None`` for a token with no
+    target there), and is ``None`` for a run whose config reads none.
     """
 
     time: str
@@ -233,6 +328,20 @@ class DecisionStatus:
     verdicts: dict[str, str] | None
     targets_now: dict[str, Decimal | None] | None
 
+    def __post_init__(self) -> None:
+        if self.outcome not in _OUTCOMES:
+            raise ValueError(f"outcome must be one of {sorted(_OUTCOMES)}, got {self.outcome!r}")
+        if (self.decided_at is None) != (self.delay_seconds is None):
+            raise ValueError("decided_at and delay_seconds are kept together, or neither")
+
+
+@dataclass(frozen=True)
+class ValuationPoint:
+    """The run's value after one bar's step, in the quote, gas left out."""
+
+    time: str
+    total_value: Decimal
+
 
 @dataclass(frozen=True)
 class RunStatus:
@@ -240,11 +349,19 @@ class RunStatus:
 
     ``mode`` is ``backtest`` / ``paper`` / ``fork`` / ``live``; ``fills`` is
     where its fills come from (``model`` / ``quoter`` / ``chain``).
-    ``clock`` is read for a paper run with a decided bar; ``holdings``,
-    ``value`` and ``metrics`` need a decided bar too (``metrics_error`` says
-    why ``metrics`` is ``None`` when a return could not be measured).
-    ``recent_decisions`` are the latest few, oldest first as the lines print
-    them.
+    ``decided`` counts every decided bar and ``outcomes`` says how they
+    ended (every outcome listed, zero when none); ``reason_codes`` counts,
+    for the skipped, rejected and partial ones, the code each gave;
+    ``unsettled`` is how many were decided on a reading that was not final
+    yet. With no decided bar the rest is ``None`` and empty. With one:
+    ``holdings``, ``holdings_at`` and ``value`` are the valuation after the
+    last decided bar; exactly one of ``metrics`` (the run as ``report``
+    measures it) and ``metrics_error`` (why it could not be measured) is
+    set; ``clock`` is set for a paper run and for no other mode;
+    ``verdicts_seen`` is set when the run's config reads verdicts;
+    ``recent_decisions`` and ``recent_valuations`` are the latest ``--bars``
+    of the decided bars (so no longer than ``decided``), oldest first as
+    the lines print them.
     """
 
     run_id: str
@@ -259,6 +376,8 @@ class RunStatus:
     first_decided: str | None
     last_decided: str | None
     outcomes: dict[str, int]
+    reason_codes: dict[str, dict[str, int]]
+    unsettled: int
     clock: Clock | None
     holdings: Holdings | None
     holdings_at: str | None
@@ -267,6 +386,42 @@ class RunStatus:
     metrics_error: str | None
     verdicts_seen: VerdictsSeen | None
     recent_decisions: tuple[DecisionStatus, ...]
+    recent_valuations: tuple[ValuationPoint, ...]
+
+    def __post_init__(self) -> None:
+        if self.mode not in _MODES:
+            raise ValueError(f"mode must be one of {sorted(_MODES)}, got {self.mode!r}")
+        if set(self.outcomes) != _OUTCOMES or sum(self.outcomes.values()) != self.decided:
+            raise ValueError("outcomes list every outcome and add up to the decided bars")
+        if set(self.reason_codes) != {outcome.value for outcome in _REASONED}:
+            raise ValueError("reason codes are counted for the skipped, rejected and partial bars")
+        if not 0 <= self.unsettled <= self.decided:
+            raise ValueError("the bars decided on a reading not final yet are among the decided")
+        standing = (
+            self.first_decided,
+            self.last_decided,
+            self.holdings,
+            self.holdings_at,
+            self.value,
+        )
+        if self.decided == 0:
+            later = (self.clock, self.metrics, self.metrics_error, self.verdicts_seen)
+            tails = (self.recent_decisions, self.recent_valuations)
+            if any(field is not None for field in standing + later) or any(tails):
+                raise ValueError(
+                    "a run that decided nothing has no span, clock, holdings, measure or tail"
+                )
+            return
+        if any(field is None for field in standing):
+            raise ValueError("a decided run has its span and the valuation after its last bar")
+        if (self.metrics is None) == (self.metrics_error is None):
+            raise ValueError("a decided run is measured, or says why it could not be")
+        if (self.clock is not None) != (self.mode == RunMode.PAPER.value):
+            raise ValueError("the clock is read for a paper run, and for no other")
+        if not 0 < len(self.recent_decisions) <= self.decided:
+            raise ValueError("the recent decisions are a non-empty tail of the decided bars")
+        if not 0 < len(self.recent_valuations) <= self.decided:
+            raise ValueError("the recent valuations are a non-empty tail of the decided bars")
 
 
 @dataclass(frozen=True)
@@ -308,6 +463,41 @@ def run_header(
 
 def decided_span(decided: int, first: str, last: str) -> str:
     return f"{decided} bar(s) decided from {first} to {last}"
+
+
+def reason_code_counts(decisions: Sequence[Decision]) -> dict[str, dict[str, int]]:
+    """For each outcome that says why (skipped, rejected, partial), its reason codes counted.
+
+    As ``report`` lists them; an outcome with no decision has an empty
+    count.
+    """
+    return {
+        outcome.value: dict(
+            sorted(
+                Counter(
+                    decision.reason_code.value
+                    for decision in decisions
+                    if decision.outcome is outcome and decision.reason_code is not None
+                ).items()
+            )
+        )
+        for outcome in _REASONED
+    }
+
+
+def unsettled_count(decisions: Sequence[Decision]) -> int:
+    """How many bars were decided on a reading that was not final yet (a suspect one skipped is not counted).
+
+    Neither ``status`` nor ``report`` reads the bars back, so neither can
+    tell whether such a reading held.
+    """
+    return sum(
+        1
+        for decision in decisions
+        if decision.seen is not None
+        and decision.seen.finality is Finality.PENDING
+        and not decision.suspect
+    )
 
 
 def measured(
@@ -533,6 +723,7 @@ def _read_run(store: Store, run_id: str, latest: int, now: int) -> RunStatus:
     metrics_error: str | None = None
     seen: VerdictsSeen | None = None
     recent: tuple[DecisionStatus, ...] = ()
+    values: tuple[ValuationPoint, ...] = ()
     if decisions:
         valuations = store.valuations(run_id)
         if not valuations or valuations[-1].time != decisions[-1].time:
@@ -556,6 +747,10 @@ def _read_run(store: Store, run_id: str, latest: int, now: int) -> RunStatus:
         if config.verdicts is not None:
             seen = verdicts_seen(config.verdicts.source, len(config.traded_symbols), decisions)
         recent = tuple(_decision(store, config, decision) for decision in decisions[-latest:])
+        values = tuple(
+            ValuationPoint(utc_text(valuation.time), valuation.total_value)
+            for valuation in valuations[-latest:]
+        )
     return RunStatus(
         run_id=run.run_id,
         mode=run.mode.value,
@@ -569,6 +764,8 @@ def _read_run(store: Store, run_id: str, latest: int, now: int) -> RunStatus:
         first_decided=utc_text(decisions[0].time) if decisions else None,
         last_decided=utc_text(decisions[-1].time) if decisions else None,
         outcomes={outcome.value: found.get(outcome, 0) for outcome in Outcome},
+        reason_codes=reason_code_counts(decisions),
+        unsettled=unsettled_count(decisions),
         clock=clock,
         holdings=holdings,
         holdings_at=holdings_at,
@@ -577,6 +774,7 @@ def _read_run(store: Store, run_id: str, latest: int, now: int) -> RunStatus:
         metrics_error=metrics_error,
         verdicts_seen=seen,
         recent_decisions=recent,
+        recent_valuations=values,
     )
 
 
@@ -590,10 +788,13 @@ def read_status(
 ) -> Status:
     """The store under ``config`` and, when ``run_id`` is given, that run, read in the caller's view.
 
-    ``bars`` is how many of the latest bars, and of the run's latest
-    decisions, to carry. Raises :class:`~.store.repository.StoreError` for a
-    run the store does not hold.
+    ``bars`` (at least 1) is how many of the latest bars, and of the run's
+    latest decisions and valuations, to carry. Raises
+    :class:`~.store.repository.StoreError` for a run the store does not
+    hold.
     """
+    if bars < 1:
+        raise ValueError(f"bars must be at least 1, got {bars}")
     moment = int(now())
     return Status(
         schema_version=SCHEMA_VERSION,
@@ -650,17 +851,21 @@ def _clock_line(clock: Clock) -> str:
         )
     if clock.state == "up_to_date":
         return "up to date: the latest boundary that has passed is decided"
-    return (
-        f"behind: {clock.undecided} boundary(ies) after the last decided bar have passed "
-        f"undecided, the latest at {clock.latest_boundary}; a visit decides them, and the visit "
-        f"log says what stopped one"
-    )
+    if clock.state == "behind":
+        return (
+            f"behind: {clock.undecided} boundary(ies) after the last decided bar have passed "
+            f"undecided, the latest at {clock.latest_boundary}; a visit decides them, and the "
+            f"visit log says what stopped one"
+        )
+    raise ValueError(f"no line for the clock state {clock.state!r}")
 
 
 def _value_line(run: RunStatus) -> str:
+    # The narrowing below restates what RunStatus.__post_init__ holds for a decided run.
     assert run.value is not None
     value = f"value {fixed_text(run.value)} {run.quote}"
     if run.metrics is None:
+        assert run.metrics_error is not None
         return f"{value}; return not measured ({one_ascii_line(run.metrics_error)})"
     change = fixed_text(run.metrics.strategy.total_return * 100, signed=True)
     return (
@@ -713,13 +918,13 @@ def _run_lines(run: RunStatus) -> list[str]:
     if not run.decided:
         lines.append(f"no bar decided yet; opening balances {_holdings_text(run.opening)}")
         return lines
-    assert run.first_decided is not None and run.last_decided is not None
+    assert run.first_decided is not None and run.last_decided is not None  # narrowing only
     lines.append(
         decided_span(run.decided, run.first_decided, run.last_decided) + ": " + counts(run.outcomes)
     )
     if run.clock is not None:
         lines.append(_clock_line(run.clock))
-    assert run.holdings is not None  # a decided bar has its valuation
+    assert run.holdings is not None
     lines.append(f"holdings after the bar at {run.holdings_at}: {_holdings_text(run.holdings)}")
     lines.append(_value_line(run))
     lines.append(f"latest {len(run.recent_decisions)} decision(s):")

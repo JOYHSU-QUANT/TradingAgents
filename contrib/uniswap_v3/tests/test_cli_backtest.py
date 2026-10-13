@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sqlite3
@@ -14,11 +15,12 @@ from pathlib import Path
 import pytest
 
 from contrib.uniswap_v3 import cli
-from contrib.uniswap_v3.config import load_config
+from contrib.uniswap_v3.config import config_from_snapshot, load_config
 from contrib.uniswap_v3.domain.bars import Finality
 from contrib.uniswap_v3.domain.metrics import run_metrics
 from contrib.uniswap_v3.domain.types import RunMode
 from contrib.uniswap_v3.engine.step import start_run
+from contrib.uniswap_v3.status import measured
 from contrib.uniswap_v3.store.repository import Store, open_store
 from contrib.uniswap_v3.tests.fakes.engine import ledger as _ledger
 from contrib.uniswap_v3.tests.fakes.node import (
@@ -508,3 +510,60 @@ def test_a_run_that_is_not_there_or_has_decided_nothing_exits_1(db, capsys):
     code, lines = _report(db, "idle")
     assert code == cli.EXIT_FAILED and lines == []
     assert capsys.readouterr().err == "failed: the run has no valuation to measure it on\n"
+
+
+def _curve_document(curve) -> dict[str, str]:
+    return {
+        "start": str(curve.start),
+        "end": str(curve.end),
+        "total_return": str(curve.total_return),
+        "max_drawdown": str(curve.max_drawdown),
+    }
+
+
+@pytest.mark.parametrize(
+    "run_id, opening",
+    [
+        ("bt", _OPENING),
+        # Some WETH to start with: the opening balances move with the price.
+        ("mixed", ("--balance", "USDC=5000", "--balance", "WETH=2", "--gas-eth", "1")),
+    ],
+)
+def test_status_json_carries_the_report_metrics_leaf_by_leaf(db, run_id, opening):
+    _backtest(db, *opening, run_id=run_id)
+    code, lines = _run(
+        "status", "--config", str(_EXAMPLE), "--db", str(db), "--run-id", run_id, "--json"
+    )
+    assert code == cli.EXIT_OK
+    found = json.loads(lines[0])["run"]["metrics"]
+    with open_store(db, create=False) as store, store.reading():
+        run = store.run(run_id)
+        decisions, valuations = store.decisions(run_id), store.valuations(run_id)
+        fills = store.fills(run_id)
+    _, metrics = measured(run, config_from_snapshot(run.config), decisions, valuations, fills)
+    assert found == {
+        "bars": 4,
+        "measured_from": "2024-01-01T00:00:00Z",
+        "measured_to": "2024-01-04T00:00:00Z",
+        "suspect_left_out": 0,
+        "strategy": _curve_document(metrics.strategy),
+        "opening_held": _curve_document(metrics.opening_held),
+        "all_quote": _curve_document(metrics.all_quote),
+        "rebalances": 3,
+        "swaps": 6,
+        "traded_value": str(metrics.traded_value),
+        "turnover": str(metrics.turnover),
+        "costs": {
+            "pool_fees": str(metrics.costs.pool_fees),
+            "slippage": str(metrics.costs.slippage),
+            "gas": str(metrics.costs.gas),
+            "gas_eth": str(metrics.costs.gas_eth),
+            "total": str(metrics.costs.total),
+        },
+    }
+    # The fixture tells the leaves apart, so a swapped pair would show.
+    assert found["strategy"]["end"] != found["opening_held"]["end"]
+    assert found["strategy"]["max_drawdown"] != "0" and found["traded_value"] != found["turnover"]
+    assert len({found["costs"][c] for c in ("pool_fees", "slippage", "gas", "gas_eth")}) == 4
+    if run_id == "mixed":
+        assert found["opening_held"] != found["all_quote"]

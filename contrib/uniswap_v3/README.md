@@ -134,6 +134,7 @@ contrib/uniswap_v3/
                         fork run 的錢包（wallet.py）
   store/                SQLite schema（含版本號與 migration）與讀寫；bar、判斷（verdict）與目標（target）的載入
   handoff.py            讀 carry 協調者的交接檔（只讀 spot 那塊；檔案就是契約，不 import contrib/carry）
+  status.py             `status` 的讀取模型：store 段＋run 段（含 `report` 的全部）→ 文字行與 `--json` 文件
   agent/                問 TradingAgents 要判斷的那一層（唯一 import 上游引擎的地方，測試除外）：設定（agent 區塊）、
                         代幣→ticker、現貨脈絡、judge（上游 graph 的包裝＋不打模型的 fake）、sidecar 與列的寫入、
                         一次 visit 的問法
@@ -189,7 +190,7 @@ attempt 或隔天的 visit 連同當天一起補決策（Hold），D5 的警告�
 | 指令 | 做什麼 | 讀鏈 |
 |---|---|---|
 | `backfill --config C --db D --from 2022-01-01 [--to …] [--dry-run]` | 把一段 bar 讀進 store；可重複執行，已有的不重讀 | 是（archive） |
-| `status --config C --db D [--bars N] [--run-id R]` | store 的範圍與最近 N 根 bar；設定檔有 `verdicts`／`targets` 區塊時各印一行最近 N 根有判斷／目標的覆蓋率；加 `--run-id` 再印該 run 的持倉、價值、報酬與最近 N 筆決策（含決策時間，讀判斷的 run 附每筆看到每個交易代幣的評等：`WBTC=none, WETH=Buy`，store 裡的判斷與決策看到的不同——事後補進、改了或刪了——印 `changed`）；paper run 另印跟不跟得上時鐘 | 否 |
+| `status --config C --db D [--bars N] [--run-id R] [--json]` | store 的範圍與最近 N 根 bar；設定檔有 `verdicts`／`targets` 區塊時各印一行最近 N 根有判斷／目標的覆蓋率；加 `--run-id` 再印該 run 的持倉、價值、報酬與最近 N 筆決策（含決策時間，讀判斷的 run 附每筆看到每個交易代幣的評等：`WBTC=none, WETH=Buy`，store 裡的判斷與決策看到的不同——事後補進、改了或刪了——印 `changed`）；paper run 另印跟不跟得上時鐘；`--json` 把 store 段與 run 段印成一份 JSON 文件（`schema_version`、`source: uniswap_v3` 在最前；run 段含 `report` 的全部：報酬／回撤／周轉／成本指標、各 outcome 的 reason code 計數、`unsettled`，另加最近 N 筆 valuation `recent_valuations`；欄位變動要 bump `status.SCHEMA_VERSION`），給 dashboard 的 exporter 與 `/paper-status` 讀；決策 reason 與量不出報酬的原因兩種自由文字會遮 `0x` 地址／金鑰、截 1000 字，文字版也是 | 否 |
 | `backtest --config C --db D --run-id R --from … [--to …] [--fills model\|quoter] [--balance USDC=10000 … --gas-eth 0.5]` | 用 store 的 bar 跑回測；新 run 要給起始餘額 | 只有 `--fills quoter` |
 | `paper --config C --db D --run-id R [--balance … --gas-eth …]` | paper 的一次 visit：補讀上次之後的 bar 並逐根決策；讀判斷的 run 這次決策的 bar 裡有代幣沒評等（沒判斷或 `REVIEW`）時 stderr 警告一行；讀目標的 run 這次決策的 bar 裡有代幣沒目標（持倉不動）時也警告一行（都是 replay 的 summary 數的，回測不警告） | 是 |
 | `fork --config C --db D --run-id R --from … [--to …] [--fork-url http://127.0.0.1:8545] [--balance … --gas-eth …]` | 用 store 的 bar 跑 fork run：每根要交易的 bar 在本機 anvil 分叉上簽名送出，前後對帳；有未結 send 時印出對照、結束碼 1 | 只讀分叉（分叉向 archive 節點取狀態） |

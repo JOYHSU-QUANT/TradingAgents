@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Final
 
-__all__ = ["DATE_ONLY", "FILE_STAMP", "ISO_SECONDS", "utc_text"]
+__all__ = ["DATE_ONLY", "FILE_STAMP", "ISO_SECONDS", "after", "utc_text"]
 
 #: ``2024-01-01T00:00:00Z``, as the command line prints a time.
 ISO_SECONDS: Final = "%Y-%m-%dT%H:%M:%SZ"
@@ -18,3 +18,13 @@ DATE_ONLY: Final = "%Y-%m-%d"
 def utc_text(time: int, pattern: str = ISO_SECONDS) -> str:
     """``time``, epoch seconds, as UTC text in ``pattern``."""
     return datetime.fromtimestamp(time, tz=timezone.utc).strftime(pattern)
+
+
+def after(seconds: int) -> str:
+    """A span of seconds as ``[-][<days>d ]HH:MM:SS``."""
+    sign = "-" if seconds < 0 else ""
+    days, rest = divmod(abs(seconds), 86_400)
+    hours, rest = divmod(rest, 3_600)
+    minutes, rest = divmod(rest, 60)
+    clock = f"{hours:02}:{minutes:02}:{rest:02}"
+    return f"{sign}{days}d {clock}" if days else f"{sign}{clock}"

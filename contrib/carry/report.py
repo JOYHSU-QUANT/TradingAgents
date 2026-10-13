@@ -99,19 +99,22 @@ from .stores import (
 from .upstream import HANDOFF_SIDECAR_SUFFIX, MS_PER_DAY, RiskAction, from_epoch_ms
 
 __all__ = [
-    "DEFAULT_D5_DAYS",
-    "DEFAULT_DELTA_ALERT_PCT",
-    "GAS_TOKEN",
     "Alert",
     "AlertKind",
     "BookDay",
+    "DEFAULT_D5_DAYS",
+    "DEFAULT_DELTA_ALERT_PCT",
+    "GAS_TOKEN",
     "Sidecar",
     "SidecarProblem",
+    "SpanTotals",
     "WeekRow",
     "alerts",
+    "alerts_by_day",
     "build_rows",
     "format_report",
     "read_sidecars",
+    "span_totals",
     "weeks",
 ]
 
@@ -625,7 +628,10 @@ class WeekRow:
 
     ``costs`` and ``net`` are the days' own summed (unpriced costs left
     out, counted in ``unpriced``); the three cost lines are shown apart,
-    each ``None`` when any day of the week could not price it.
+    each ``None`` when any day of the week could not price it. ``alerts``
+    counts the lights on the week's days. ``status.py`` serialises this
+    type as it is: a field changed here changes the document, and bumps
+    ``status.SCHEMA_VERSION``.
     """
 
     year: int
@@ -641,6 +647,51 @@ class WeekRow:
     unpriced: int
     funding_pending: int
     alerts: int
+
+
+@dataclass(frozen=True)
+class SpanTotals:
+    """The span's totals, as its last line says them.
+
+    Unpriced days' costs are left out of ``costs``; ``alerts`` counts the
+    lights and the unreadable sidecars together. ``status.py`` serialises
+    this type as it is: a field changed here changes the document, and
+    bumps ``status.SCHEMA_VERSION``.
+    """
+
+    days: int
+    days_in: int
+    funding: Decimal
+    funding_pending: int
+    costs: Decimal
+    unpriced: int
+    net: Decimal
+    alerts: int
+    held_by_d5: int
+
+
+def span_totals(
+    rows: Sequence[BookDay], found: Sequence[Alert], problems: Sequence[SidecarProblem]
+) -> SpanTotals:
+    """The span over ``rows``: days in, funding (pending settlements counted apart), costs, net, lights, D5 days."""
+    funding = sum((row.perp_funding for row in rows), _ZERO)
+    costs = sum((row.costs for row in rows), _ZERO)
+    return SpanTotals(
+        days=len(rows),
+        days_in=sum(1 for row in rows if row.intent_in),
+        funding=funding,
+        funding_pending=sum(row.perp_funding_pending for row in rows),
+        costs=costs,
+        unpriced=sum(1 for row in rows if row.unpriced),
+        net=funding - costs,
+        alerts=len(found) + len(problems),
+        held_by_d5=sum(1 for row in rows if row.held_by_d5),
+    )
+
+
+def alerts_by_day(found: Sequence[Alert]) -> dict[int, list[Alert]]:
+    """The lights grouped by the day they are on, in their order."""
+    return _group(found, lambda alert: alert.boundary_ms)
 
 
 def _iso_week(row: BookDay) -> tuple[int, int]:
@@ -770,7 +821,7 @@ def format_report(
             f"D5 lights at {d5_days} days)"
         )
     ]
-    by_day = _group(found, lambda alert: alert.boundary_ms)
+    by_day = alerts_by_day(found)
     for row in rows:
         lines.extend(_day_lines(row, coin))
         for alert in by_day.get(row.boundary_ms, []):
@@ -789,18 +840,15 @@ def format_report(
             f"{_money(week.spot_gas_cost)}){_unpriced_note(week.unpriced)}  "
             f"net {_money(week.net)}  alerts {week.alerts}"
         )
-    days_in = sum(1 for row in rows if row.intent_in)
-    funding = sum((row.perp_funding for row in rows), _ZERO)
-    costs = sum((row.costs for row in rows), _ZERO)
-    unpriced = sum(1 for row in rows if row.unpriced)
-    pending_count = sum(row.perp_funding_pending for row in rows)
+    span = span_totals(rows, found, problems)
     pending_note = (
-        f" ({pending_count} settlement(s) still pending, not counted)" if pending_count else ""
+        f" ({span.funding_pending} settlement(s) still pending, not counted)"
+        if span.funding_pending
+        else ""
     )
     lines.append(
-        f"span: {days_in} of {len(rows)} day(s) in; funding {_money(funding)}{pending_note}, "
-        f"costs {_money(costs)}{_unpriced_note(unpriced)}, net {_money(funding - costs)}; "
-        f"{len(found) + len(problems)} alert(s), "
-        f"{sum(1 for row in rows if row.held_by_d5)} day(s) held by D5"
+        f"span: {span.days_in} of {span.days} day(s) in; funding {_money(span.funding)}"
+        f"{pending_note}, costs {_money(span.costs)}{_unpriced_note(span.unpriced)}, "
+        f"net {_money(span.net)}; {span.alerts} alert(s), {span.held_by_d5} day(s) held by D5"
     )
     return lines

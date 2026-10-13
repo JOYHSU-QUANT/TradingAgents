@@ -11,18 +11,19 @@ unit is running, how old the export files are — is for an exporter that
 adds host facts around this document, and nothing from the run's config is
 copied out: the config names the wallet and the keys, and a status is for a
 page that should never see them. Free text the store holds (an error
-message, a breadcrumb's error, a safe-mode reason or detail, a verdict's
-reasons, a fill's reason) can still quote one — an exchange refusal names
+message, a breadcrumb's error, a safe-mode reason or detail, an event's
+detail or error, a verdict's reasons, a fill's reason) can still quote one — an exchange refusal names
 the wallet it refused — so every column read through :func:`_text_or_none`
 has a ``0x``-prefixed 20-byte or 32-byte hex folded to its first six and
 last four characters, and is cut at :data:`TEXT_LIMIT` characters. Ids,
 instants and vocabulary words are read as they are.
 
 Impossible states are refused, not defaulted: a run without its opening
-ledger row, a safe-mode trio half written, a position whose size and entry
-price disagree, a decided cycle without its verdict. Each raises
-``ValueError``; the CLI turns it into ``validate``'s "investigate the store"
-exit code. Vocabulary words (an attempt status, a gate action, an event
+ledger row, a safe-mode trio or an export / replay / config-drift breadcrumb
+half written, a position whose size and entry price disagree, a decided
+cycle without its verdict (or an undecided one with a verdict), an amount
+that is not a finite number. Each raises ``ValueError``; the CLI turns it
+into ``validate``'s "investigate the store" exit code. Vocabulary words (an attempt status, a gate action, an event
 type) pass through as stored: a word this build does not know is shown, not
 refused, so a page keeps working across a daemon upgrade.
 
@@ -117,7 +118,8 @@ class Breadcrumb:
 
     ``status`` is ``ok`` / ``failed`` for the export, ``ok`` / ``mismatch`` /
     ``failed`` for the replay and ``ok`` / ``drift`` for the config drift, or
-    ``None`` before the first pass.
+    ``None`` before the first pass — and then ``at`` and ``error`` are
+    ``None`` too: the daemon stamps the three together.
     """
 
     status: str | None
@@ -127,7 +129,13 @@ class Breadcrumb:
 
 @dataclass(frozen=True)
 class Scheduler:
-    """The run's ``scheduler_state`` row: where the cycle clock stands and what last happened."""
+    """The run's ``scheduler_state`` row: where the cycle clock stands and what last happened.
+
+    ``in_progress_attempt_id`` is set exactly while one attempt is
+    ``in_progress`` (the daemon writes the pointer and the attempt row in one
+    transaction and clears it with the terminal status), so it names the
+    cycle ``cycles.by_status["in_progress"]`` counts.
+    """
 
     last_decision_at: str | None
     next_decision_at: str | None
@@ -262,11 +270,20 @@ class AccountSnapshot:
 
 @dataclass(frozen=True)
 class Account:
-    """The ledger, the latest snapshot (``None`` before the first) and the latest few, newest first."""
+    """The ledger, the latest snapshot (``None`` before the first) and the latest few, newest first.
+
+    ``recent_snapshots`` is the tail ``--recent`` asks for, ``snapshot`` its
+    first row; the latest is carried even when the tail is asked to be
+    empty, so a reader can tell "no snapshot yet" from "tail suppressed".
+    """
 
     ledger: Ledger
     snapshot: AccountSnapshot | None
     recent_snapshots: tuple[AccountSnapshot, ...]
+
+    def __post_init__(self) -> None:
+        if self.recent_snapshots and self.recent_snapshots[0] != self.snapshot:
+            raise ValueError("the latest account snapshot is not the first of the recent ones")
 
 
 @dataclass(frozen=True)
@@ -331,7 +348,10 @@ class SafeModeEvent:
 
 @dataclass(frozen=True)
 class RunStatus:
-    """What the store says about one run; the document ``status --json`` prints."""
+    """What the store says about one run; the document ``status --json`` prints.
+
+    ``mode`` is ``paper`` or ``live``, as the run was created.
+    """
 
     schema_version: int
     source: str
@@ -356,8 +376,15 @@ class RunStatus:
 
 
 def _dec(value: Any) -> Decimal:
-    """A stored amount, exact: the store keeps Decimals as their text."""
-    return Decimal(value)
+    """A stored amount, exact: the store keeps Decimals as their text.
+
+    ``NaN`` and the infinities parse as Decimals, but no writer produces
+    them, and a reader that compared one would never trip an alert.
+    """
+    amount = Decimal(value)
+    if not amount.is_finite():
+        raise ValueError(f"a stored amount is not a finite number: {value!r}")
+    return amount
 
 
 def _dec_or_none(value: Any) -> Decimal | None:
@@ -387,11 +414,15 @@ def _str_or_none(value: Any) -> str | None:
 
 
 def _breadcrumb(row: sqlite3.Row, what: str) -> Breadcrumb:
-    return Breadcrumb(
-        status=_str_or_none(row[f"last_{what}_status"]),
-        at=_str_or_none(row[f"last_{what}_at"]),
-        error=_text_or_none(row[f"last_{what}_error"]),
-    )
+    status = _str_or_none(row[f"last_{what}_status"])
+    at = _str_or_none(row[f"last_{what}_at"])
+    error = _text_or_none(row[f"last_{what}_error"])
+    if (status is None) != (at is None) or (status is None and error is not None):
+        raise ValueError(
+            f"the {what} breadcrumb of run {row['run_id']!r} is half written "
+            f"(status {status!r}, at {at!r}, error {error!r})"
+        )
+    return Breadcrumb(status=status, at=at, error=error)
 
 
 def _scheduler(row: sqlite3.Row | None) -> Scheduler | None:
@@ -410,16 +441,20 @@ def _scheduler(row: sqlite3.Row | None) -> Scheduler | None:
 
 
 def _safe_mode(row: sqlite3.Row | None) -> SafeMode | None:
-    if row is None or row["safe_mode_type"] is None:
+    if row is None:
         return None
+    mode_type = _str_or_none(row["safe_mode_type"])
     reason = _text_or_none(row["safe_mode_reason"])
     entered_at = _str_or_none(row["safe_mode_entered_at"])
-    if reason is None or entered_at is None:
+    present = [value for value in (mode_type, reason, entered_at) if value is not None]
+    if not present:
+        return None
+    if len(present) != 3:
         raise ValueError(
-            f"the scheduler row of run {row['run_id']!r} has a safe mode without its reason "
-            "or its entry instant"
+            f"the scheduler row of run {row['run_id']!r} has a safe mode half written "
+            f"(type {mode_type!r}, reason {reason!r}, entered {entered_at!r})"
         )
-    return SafeMode(type=str(row["safe_mode_type"]), reason=reason, entered_at=entered_at)
+    return SafeMode(type=str(mode_type), reason=str(reason), entered_at=str(entered_at))
 
 
 def _verdict(row: sqlite3.Row) -> Verdict | None:
@@ -590,10 +625,10 @@ def read_status(
         models=tuple(_model_bucket(row) for row in repo.model_regimes(conn, run_id)),
         account=Account(
             ledger=Ledger(
-                wallet_balance=ledger.wallet_balance,
-                realized_pnl=ledger.realized_pnl,
-                total_fees=ledger.total_fees,
-                net_funding_pnl=ledger.net_funding_pnl,
+                wallet_balance=_dec(ledger.wallet_balance),
+                realized_pnl=_dec(ledger.realized_pnl),
+                total_fees=_dec(ledger.total_fees),
+                net_funding_pnl=_dec(ledger.net_funding_pnl),
             ),
             snapshot=snapshots[0] if snapshots else None,
             recent_snapshots=snapshots[:recent],

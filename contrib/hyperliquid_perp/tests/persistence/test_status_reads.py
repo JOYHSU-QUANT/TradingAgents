@@ -1,6 +1,6 @@
 """The repository readers behind ``status`` (dashboard plan PR 2a).
 
-Each reader is run-scoped, ordered as its docstring says, and capped where it
+Each run-scoped reader is ordered as its docstring says and capped where it
 says it is; the suite stages two runs so a forgotten run filter shows.
 """
 
@@ -49,8 +49,10 @@ def _at(hours: int) -> datetime:
 def test_the_latest_lease_is_the_scheduler_row_touched_last(db):
     assert repo.latest_lease_run_id(db.conn) is None
     with db.transaction() as conn:
-        repo.upsert_scheduler_state(conn, "other", updated_at=_at(1))
+        # "r" is inserted first: at a tie SQLite would otherwise visit it
+        # first and the tie-break below could not be told from luck.
         repo.upsert_scheduler_state(conn, "r", updated_at=_at(2))
+        repo.upsert_scheduler_state(conn, "other", updated_at=_at(1))
     assert repo.latest_lease_run_id(db.conn) == "r"
     with db.transaction() as conn:
         # A later heartbeat on the other run moves it.
@@ -102,8 +104,9 @@ def test_recent_cycles_come_newest_first_capped_with_their_verdict(db):
 
 def test_model_regimes_bucket_the_input_rows_first_seen_first(db):
     with db.transaction() as conn:
+        # The first-seen bucket sorts last by name, so first-seen order shows.
         for i, (model, version) in enumerate(
-            [("deep-a", "v6"), ("deep-a", "v6"), ("deep-b", "v6"), ("deep-a", "v6")]
+            [("deep-b", "v6"), ("deep-b", "v6"), ("deep-a", "v6"), ("deep-b", "v6")]
         ):
             repo.insert_ai_input(
                 conn,
@@ -120,8 +123,8 @@ def test_model_regimes_bucket_the_input_rows_first_seen_first(db):
         )
     buckets = repo.model_regimes(db.conn, "r")
     assert [(b["model"], b["prompt_version"], b["prompts"]) for b in buckets] == [
-        ("deep-a", "v6", 3),
-        ("deep-b", "v6", 1),
+        ("deep-b", "v6", 3),
+        ("deep-a", "v6", 1),
     ]
     assert (buckets[0]["first_at"], buckets[0]["last_at"]) == (
         _at(0).isoformat(),

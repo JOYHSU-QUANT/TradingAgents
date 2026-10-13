@@ -38,9 +38,11 @@ Breaking changes within the 0.x line are called out explicitly.
   characters, since an exchange refusal names the wallet it refused, and are
   cut at 1000 characters (the store keeps them whole). Impossible states are
   refused rather than defaulted — a run without its ledger row, a half-written
-  safe-mode trio, a position whose size and entry price disagree, a decided
-  cycle without its verdict — while vocabulary words the build does not know
-  pass through. The SQL is nine new readers (eight run-scoped, one store-wide
+  safe-mode trio or breadcrumb, a position whose size and entry price
+  disagree, a decided cycle without its verdict, an amount that is not a
+  finite number — while vocabulary words the build does not know pass
+  through. The default run is meant for a store one daemon writes; a store
+  holding two runs needs `--run-id`. The SQL is nine new readers (eight run-scoped, one store-wide
   for the default run) in their tables' `persistence/repository` modules, so
   the layering ratchet on SQL sites outside `persistence/` is unchanged. Exit
   codes as `validate`: 0 printed; 1 a store or run that does not exist, a

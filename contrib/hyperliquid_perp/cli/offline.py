@@ -301,7 +301,9 @@ def _cmd_status(argv: list[str], *, now: Callable[[], datetime] = _utc_now) -> i
 
     Report-only like ``validate``: no lease, no migration, one read
     transaction. ``--run-id`` left out reads the run whose scheduler row was
-    touched last — the segment that is running, or ran last. The model, the
+    touched last — the segment that is running, or ran last; in a store two
+    daemons write (RUNBOOK-live §7.3) that flips with their heartbeats, so a
+    caller that polls names the run. The model, the
     lines and the document are :mod:`..status`; ``now`` is the clock seam
     behind the document's ``generated_at``. Exit 0 printed; 1 a store that
     does not exist or that this build must not open (a schema it does not
@@ -324,7 +326,8 @@ def _cmd_status(argv: list[str], *, now: Callable[[], datetime] = _utc_now) -> i
         "--run-id",
         help=(
             "the run to read; default: the run whose scheduler row was updated last "
-            "(the one running, or the last one that ran)"
+            "(the one running, or the last one that ran). The default is for a store one "
+            "daemon writes; name the run when a store holds more than one"
         ),
     )
     parser.add_argument(

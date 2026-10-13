@@ -258,11 +258,7 @@ replay／snapshot 重算 raise、甚至檔案根本不是 SQLite，都算「先�
 `1` = 操作錯誤（db／run 不存在，以及其他幾種 `--db` 打錯法——指到別人的資料庫、
 目錄、不是普通檔案的東西、或一個打不開來讀的檔；各列見 RUNBOOK-live §8）。
 `cycle_count` 只計 `completed`／`invalid_output`
-（`api_failed` 另計為 `api_failed_count`，不算進 30 輪門檻）。
-`status` 的 exit code：`0` = 印出；`1` = store／run 不存在、schema 版本本 build 不開、
-或省略 `--run-id` 而 store 裡沒有任何 scheduler 列；`5` = 檔案開不成資料庫或內容讀不了
-（損壞檔、不可能的狀態——沒 ledger 列、flat 卻有 entry、completed 卻無判決——同 `validate`
-的「先調查再相信」）；`2` = 其他。報告另有不影響
+（`api_failed` 另計為 `api_failed_count`，不算進 30 輪門檻）。報告另有不影響
 exit code 的 `warning:` 行——settlement 過後 6 小時仍 pending 的 funding event
 （其 P&L 依 never-fabricate 恆不入帳，總額因此偏少）、`funding_timestamp` 解不開的
 pending event（壞掉的列，要修 store）、**上次 backfill 真的試過而且失敗的 pending
@@ -271,6 +267,13 @@ event**（`failed their last backfill attempt (<lane>: N)`，schema v12／issue 
 config drift（聚合指標橫跨兩組參數），這些先前只在（已死的）process log 可見。
 前三條**互斥**、一列只進一條，判讀方式見 RUNBOOK §7。
 跑滿 30 cycles（約 5 天）後用它檢查驗收條件。
+
+`status` 的 exit code：`0` = 印出；`1` = store／run 不存在、schema 版本本 build 不開、
+或省略 `--run-id` 而 store 裡沒有任何 scheduler 列；`5` = 檔案開不成資料庫或內容讀不了
+（損壞檔、不可能的狀態——沒 ledger 列、safe-mode 或麵包屑三欄寫一半、flat 卻有 entry、
+completed 卻無判決、非有限數值——同 `validate` 的「先調查再相信」）；`2` = 其他。
+省略 `--run-id` 的預設只適合一個 daemon 寫的 store：同一個 store 跑兩個 run 時
+（RUNBOOK-live §7.3）「最新」會隨兩邊的 heartbeat 翻動，排程呼叫要指名 run。
 
 ## 5. 輸出去哪裡
 

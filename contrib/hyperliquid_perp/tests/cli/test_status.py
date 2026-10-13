@@ -121,7 +121,7 @@ def test_status_names_a_store_whose_content_does_not_hold_up_under_validates_cod
     tmp_path, capsys, monkeypatch
 ):
     # The store opened; what it holds could not be read. validate's exit 5,
-    # not the exit-2 crash lane: PR 3's exporter keys its alert on the code.
+    # not the exit-2 crash lane: a poller keys its alert on the code.
     path, db = seed_db(tmp_path)
     db.close()
 

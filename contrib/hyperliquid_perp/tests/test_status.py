@@ -47,6 +47,9 @@ _NOW = datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc)
 # Synthetic credential shapes the staged config carries and the document must not.
 _AGENT_KEY = "0x" + "ab" * 32
 _WALLET = "0x" + "12" * 20
+# An EIP-55 checksummed address and an upper-case key: mixed-case hex masks too.
+_CHECKSUM_WALLET = "0x" + "aB3F" * 10
+_UPPER_KEY = "0x" + "CD" * 32
 _ZERO_COUNTS = {"in_progress": 0, "completed": 0, "api_failed": 0, "invalid_output": 0}
 
 
@@ -140,6 +143,16 @@ def _stage_a_busy_run(db: Database) -> None:
             model="deep-a",
             prompt_version="v6",
         )
+        repo.insert_ai_input(
+            conn,
+            input_id="r|in|2",
+            timestamp=_at(4),
+            mode="paper",
+            run_id="r",
+            symbol="BTC",
+            model="deep-a",
+            prompt_version="v6",
+        )
         insert_minimal_account_snapshot(
             conn, run_id="r", timestamp=_at(1), account_equity=D(1001), unrealized_pnl=D(1)
         )
@@ -178,7 +191,7 @@ def _stage_a_busy_run(db: Database) -> None:
             safe_mode_type="recoverable",
             safe_mode_reason="ws_disconnect",
             safe_mode_entered_at=_at(9),
-            updated_at=_at(9),
+            updated_at=_at(10),
         )
         repo.insert_kill_switch_event(
             conn,
@@ -242,7 +255,11 @@ def test_a_busy_run_reads_every_part_from_the_store(db):
     assert oldest.verdict.approved_target_margin_pct == D(20)
     assert oldest.verdict.order_created is True
     assert oldest.verdict.decision_reason.startswith("Momentum\tis  up.\n")
-    assert [(m.model, m.prompt_version, m.prompts) for m in status.models] == [("deep-a", "v6", 1)]
+    assert [(m.model, m.prompt_version, m.prompts) for m in status.models] == [("deep-a", "v6", 2)]
+    assert (status.models[0].first_at, status.models[0].last_at) == (
+        _at(0).isoformat(),
+        _at(4).isoformat(),
+    )
     scheduler = status.scheduler
     assert (scheduler.last_decision_at, scheduler.next_decision_at) == (
         _at(8).isoformat(),
@@ -251,7 +268,7 @@ def test_a_busy_run_reads_every_part_from_the_store(db):
     assert scheduler.in_progress_attempt_id == decision_attempt_id("r", _at(8))
     assert (scheduler.lease_heartbeat_at, scheduler.updated_at) == (
         _at(9).isoformat(),
-        _at(9).isoformat(),
+        _at(10).isoformat(),
     )
     assert scheduler.export == Breadcrumb("ok", _at(8).isoformat(), None)
     assert scheduler.replay == Breadcrumb("failed", _at(8).isoformat(), "books unverifiable")
@@ -378,6 +395,15 @@ def test_an_unknown_run_is_refused(db):
         ),
         ("UPDATE scheduler_state SET safe_mode_reason = NULL WHERE run_id = 'r'", "safe mode"),
         ("UPDATE scheduler_state SET safe_mode_entered_at = NULL WHERE run_id = 'r'", "safe mode"),
+        ("UPDATE scheduler_state SET safe_mode_type = NULL WHERE run_id = 'r'", "safe mode"),
+        ("UPDATE scheduler_state SET last_export_at = NULL WHERE run_id = 'r'", "breadcrumb"),
+        ("UPDATE scheduler_state SET last_export_status = NULL WHERE run_id = 'r'", "breadcrumb"),
+        (
+            "UPDATE scheduler_state SET last_config_drift_error = 'x' WHERE run_id = 'r'",
+            "breadcrumb",
+        ),
+        ("UPDATE current_account_state SET wallet_balance = 'NaN' WHERE run_id = 'r'", "finite"),
+        ("UPDATE account_snapshots SET total_pnl = 'Infinity' WHERE run_id = 'r'", "finite"),
         (
             "UPDATE decision_attempts SET status = 'invalid_output', output_id = NULL"
             " WHERE run_id = 'r' AND status = 'completed'",
@@ -398,6 +424,20 @@ def test_an_impossible_state_is_refused_not_defaulted(db, damage, said):
         conn.execute(damage)
     with pytest.raises(ValueError, match=said):
         _read(db)
+
+
+def test_a_cleared_breadcrumb_or_safe_mode_reads_as_none(db):
+    # All three columns NULL is the "not yet" / "released" state, not a half.
+    _stage_a_busy_run(db)
+    with db.transaction() as conn:
+        conn.execute(
+            "UPDATE scheduler_state SET last_export_status = NULL, last_export_at = NULL,"
+            " safe_mode_type = NULL, safe_mode_reason = NULL, safe_mode_entered_at = NULL"
+            " WHERE run_id = 'r'"
+        )
+    status = _read(db)
+    assert status.scheduler.export == Breadcrumb(None, None, None)
+    assert status.safe_mode is None
 
 
 def test_the_verdict_split_covers_the_terminal_vocabulary():
@@ -642,7 +682,7 @@ def test_a_secret_across_the_cut_is_masked_before_it_is_cut(db):
     # Masking runs before the cut: a key that straddles the limit must not
     # leave its first hundreds of hex characters behind as a prefix.
     _stage_a_busy_run(db)
-    for secret in (_AGENT_KEY, _WALLET):
+    for secret in (_AGENT_KEY, _WALLET, _CHECKSUM_WALLET, _UPPER_KEY):
         with db.transaction() as conn:
             conn.execute(
                 "UPDATE ai_outputs SET decision_reason = ? WHERE run_id = ?",
@@ -669,6 +709,14 @@ def test_the_document_and_the_lines_are_ascii_whatever_the_model_wrote(db):
     assert json.loads(text)["cycles"]["recent"][2]["verdict"]["decision_reason"] == ("Range — café")
     (line,) = [line for line in status_lines(status) if "| Range" in line]
     assert line.isascii() and line.endswith("| Range \\u2014 caf\\xe9")
+    # A control character could do anything to a terminal: it prints as "?".
+    with db.transaction() as conn:
+        conn.execute(
+            "UPDATE ai_outputs SET decision_reason = ? WHERE output_id = ?",
+            ("red \x1b[31m bell \x07 end", f"{decision_attempt_id('r', _at(0))}#out1"),
+        )
+    (line,) = [line for line in status_lines(_read(db)) if "| red" in line]
+    assert line.endswith("| red ?[31m bell ? end")
 
 
 _SECRET_FIELD = re.compile(r"key|secret|password|mnemonic|address", re.IGNORECASE)
@@ -696,20 +744,32 @@ def test_free_text_masks_a_quoted_address_or_key_wherever_it_is_read(db):
     # quote a key; the store keeps the text, the status folds the hex — in
     # every free-text column, not a hand-picked few.
     _stage_a_busy_run(db)
-    quoted = f"User or API Wallet {_WALLET} does not exist (key {_AGENT_KEY})"
+    quoted = (
+        f"User or API Wallet {_WALLET} does not exist (key {_AGENT_KEY}); "
+        f"nor {_CHECKSUM_WALLET} (key {_UPPER_KEY})"
+    )
     with db.transaction() as conn:
+        # The config-drift breadcrumb has no pass staged; give it one so its
+        # error column is a legitimate place to quote the wallet.
+        repo.upsert_scheduler_state(
+            conn, "r", last_config_drift_status="drift", last_config_drift_at=_at(8)
+        )
         for table, column in _FREE_TEXT_COLUMNS:
             conn.execute(f"UPDATE {table} SET {column} = ? WHERE run_id = ?", (quoted, "r"))
     status = _read(db)
-    masked = "User or API Wallet 0x1212...1212 does not exist (key 0xabab...abab)"
+    masked = (
+        "User or API Wallet 0x1212...1212 does not exist (key 0xabab...abab); "
+        "nor 0xaB3F...aB3F (key 0xCDCD...CDCD)"
+    )
     assert status.cycles.recent[0].error_message == masked
     assert status.cycles.recent[2].verdict.decision_reason == masked
     assert status.safe_mode.reason == masked
     assert status.scheduler.replay.error == masked
     strings = [value for _, value in _nodes(asdict(status)) if isinstance(value, str)]
     assert masked in strings
-    assert not [value for value in strings if _WALLET in value or _AGENT_KEY in value]
-    assert not [line for line in status_lines(status) if _WALLET in line or _AGENT_KEY in line]
+    secrets = (_WALLET, _AGENT_KEY, _CHECKSUM_WALLET, _UPPER_KEY)
+    assert not [value for value in strings if any(secret in value for secret in secrets)]
+    assert not [line for line in status_lines(status) if any(s in line for s in secrets)]
 
 
 def test_the_document_names_no_secret_field_and_carries_no_key_or_address(db):
@@ -732,14 +792,20 @@ def test_the_document_names_no_secret_field_and_carries_no_key_or_address(db):
 def test_the_lines_say_every_part_in_one_line_each(db):
     _stage_a_busy_run(db)
     lines = status_lines(_read(db))
-    text = "\n".join(lines)
     assert lines[0] == "run_id: r"
+    assert f"created_at: {_T0.isoformat()}" in lines
+    assert "initial_balance_usdc: 1000" in lines
+    assert f"store_schema_version: {STORE_SCHEMA_VERSION}" in lines
+    assert f"scheduler_updated_at: {_at(10).isoformat()}" in lines
     assert f"last_decision_at: {_at(8).isoformat()}" in lines
     assert f"next_decision_at: {_at(12).isoformat()}" in lines
     assert f"in_progress_attempt: {decision_attempt_id('r', _at(8))}" in lines
     assert f"lease_heartbeat_at: {_at(9).isoformat()}" in lines
     assert "cycles: 3 (in_progress 0, completed 2, api_failed 1, invalid_output 0)" in lines
-    assert f"model: deep-a prompt_version=v6 prompts=1 first={_at(0).isoformat()}" in text
+    assert (
+        f"model: deep-a prompt_version=v6 prompts=2 first={_at(0).isoformat()} "
+        f"last={_at(4).isoformat()}"
+    ) in lines
     assert f"replay: failed at {_at(8).isoformat()} (books unverifiable)" in lines
     assert "config_drift: n/a" in lines
     assert f"safe_mode: recoverable since {_at(9).isoformat()} (ws_disconnect)" in lines

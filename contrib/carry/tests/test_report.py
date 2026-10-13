@@ -1214,6 +1214,38 @@ def test_the_command_without_a_handoff_carries_none_and_an_unreadable_one_says_w
     assert document["handoff"] is None
     assert document["handoff_error"].startswith("handoff-ETH.json: not JSON")
     assert str(tmp_path) not in document["handoff_error"]
+    # Without --json the lines have no place for it, so the flag is refused, not dropped.
+    text_argv = [arg for arg in argv if arg != "--json"]
+    assert main([*text_argv, "--handoff", str(handoff)], now=now) == 1
+    assert "--handoff goes with --json" in capsys.readouterr().err
+
+
+def test_a_stay_out_without_a_z_score_and_another_coins_file_are_told_apart(tmp_path: Path):
+    # Too few samples: the coordinator stays out and the handoff says z is null.
+    document = handoff_document(as_of_ms=day(43), side="flat")
+    document["signal"] = {**document["signal"], "z": None, "samples": 12}
+    status = _status([], handoff=_write_handoff(tmp_path, document))
+    assert status.handoff_error is None and status.handoff is not None
+    assert (status.handoff.action, status.handoff.perp_side, status.handoff.spot_weight) == (
+        "stay_out",
+        "flat",
+        Decimal(0),
+    )
+    assert (status.handoff.read_at, status.handoff.funding_hourly, status.handoff.z) == (
+        "2026-02-12T23:00:00+00:00",
+        Decimal("0.00002"),
+        None,
+    )
+    # BTC's file is not ETH's handoff, as the coordinator's own memory would refuse it.
+    other = {**handoff_document(as_of_ms=day(43)), "coin": "BTC"}
+    other["spot"] = {"token": "WBTC", "weight": other["spot"]["weight"]}
+    status = _status([], handoff=_write_handoff(tmp_path, other))
+    assert status.handoff is None
+    assert status.handoff_error == "handoff-ETH.json is BTC's handoff, not ETH's"
+    # An instant too large to spell is "could not be read", not a crash.
+    huge = {**handoff_document(as_of_ms=day(43)), "written_at_ms": 10**30}
+    status = _status([], handoff=_write_handoff(tmp_path, huge))
+    assert status.handoff is None and status.handoff_error is not None
 
 
 def test_the_document_refuses_what_the_report_cannot_produce():

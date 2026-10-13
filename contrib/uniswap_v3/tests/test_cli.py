@@ -998,7 +998,8 @@ def _clock(state: str, undecided: int) -> Clock:
         {"recent_decisions": ()},
         {"recent_valuations": ()},
         {"recent_valuations": (ValuationPoint(_T0, Decimal(1)),) * 2},
-        {"decided": 0},
+        # Decided nothing, yet standing: the outcomes agree, the rest must not be set.
+        {"decided": 0, "outcomes": dict.fromkeys(_OUTCOMES, 0)},
     ],
 )
 def test_a_decided_run_refuses_a_half_filled_model(changes):

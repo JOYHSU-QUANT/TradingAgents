@@ -536,6 +536,8 @@ def _cmd_report(args: argparse.Namespace, *, now: Callable[[], datetime]) -> int
         raise _Refused(f"--delta-alert-pct must be at least 1, got {args.delta_alert_pct}")
     if args.d5_days < 1:
         raise _Refused(f"--d5-days must be at least 1, got {args.d5_days}")
+    if args.handoff is not None and not args.json:
+        raise _Refused("--handoff goes with --json: the lines have no place for the handoff")
     since = _day_boundary(args.since, what="--since")
     until = _day_boundary(args.until, what="--until")
     perp_db, spot_db = Path(args.perp_db), Path(args.spot_db)

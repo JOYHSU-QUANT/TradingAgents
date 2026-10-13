@@ -184,10 +184,11 @@ class HandoffStatus:
     written. ``action`` is ``enter`` / ``hold`` / ``exit`` / ``stay_out``,
     ``perp_side`` ``short`` or ``flat`` with ``margin_pct`` (0 while out),
     and ``spot_weight`` the spot leg's target weight of ``spot_token``.
-    The reading the handoff was decided from — ``read_at``, the
-    ``funding_hourly`` rate and its ``z`` score (the handoff's float, as
-    its shortest exact text) — is ``None`` for a stay-out decided without
-    one.
+    The reading the handoff was decided from — ``read_at`` and the
+    ``funding_hourly`` rate — is ``None`` for a stay-out decided without
+    one; its ``z`` score (the handoff's float, as its shortest exact text)
+    is ``None`` as well when the window could not give one (too few
+    samples, or no deviation), which is itself a stay-out.
     """
 
     path: str
@@ -203,8 +204,10 @@ class HandoffStatus:
     z: Decimal | None
 
     def __post_init__(self) -> None:
-        if len({value is None for value in (self.read_at, self.funding_hourly, self.z)}) != 1:
+        if (self.read_at is None) != (self.funding_hourly is None):
             raise ValueError("a reading is carried whole, or not at all")
+        if self.read_at is None and self.z is not None:
+            raise ValueError("a z score comes from a reading")
 
 
 @dataclass(frozen=True)
@@ -295,26 +298,34 @@ def _day(row: BookDay, lights: Sequence[Alert]) -> DayStatus:
     )
 
 
-def _handoff(path: Path) -> tuple[HandoffStatus | None, str | None]:
-    """The handoff at ``path`` as the document carries it, or why it could not be read."""
+def _handoff(path: Path, coin: str) -> tuple[HandoffStatus | None, str | None]:
+    """``coin``'s handoff at ``path`` as the document carries it, or why it could not be read.
+
+    Another coin's file is not read as this one's, as the coordinator's
+    own memory refuses it. An instant too large to spell, or a file nested
+    too deep to parse, is "could not be read" too, not a crash.
+    """
     try:
         found = read_handoff(path)
-    except HandoffError as exc:
+        if found.coin != coin:
+            raise HandoffError(f"{path} is {found.coin}'s handoff, not {coin}'s")
+        reading = found.reading
+        status = HandoffStatus(
+            path=path.name,
+            as_of=iso_utc(found.as_of_ms),
+            written_at=iso_utc(found.written_at_ms),
+            action=found.action.value,
+            perp_side=found.perp_side,
+            margin_pct=found.margin_pct,
+            spot_token=found.spot_token,
+            spot_weight=found.spot_weight,
+            read_at=None if reading is None else iso_utc(reading.at_ms),
+            funding_hourly=None if reading is None else reading.current,
+            z=None if reading is None or reading.z is None else Decimal(repr(reading.z)),
+        )
+    except (HandoffError, OverflowError, RecursionError) as exc:
         return None, _text(str(exc).replace(str(path), path.name))
-    reading = found.reading
-    return HandoffStatus(
-        path=path.name,
-        as_of=iso_utc(found.as_of_ms),
-        written_at=iso_utc(found.written_at_ms),
-        action=found.action.value,
-        perp_side=found.perp_side,
-        margin_pct=found.margin_pct,
-        spot_token=found.spot_token,
-        spot_weight=found.spot_weight,
-        read_at=None if reading is None else iso_utc(reading.at_ms),
-        funding_hourly=None if reading is None else reading.current,
-        z=None if reading is None else Decimal(repr(reading.z)),
-    ), None
+    return status, None
 
 
 def report_status(
@@ -341,7 +352,7 @@ def report_status(
         raise ValueError("the report clock must give an aware datetime")
     by_day = alerts_by_day(found)
     totals = span_totals(rows, found, problems)
-    carried, error = (None, None) if handoff is None else _handoff(handoff)
+    carried, error = (None, None) if handoff is None else _handoff(handoff, coin)
     return ReportStatus(
         schema_version=SCHEMA_VERSION,
         source=SOURCE,

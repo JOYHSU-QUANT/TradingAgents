@@ -279,6 +279,11 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# The largest SQLite LIMIT; above it the bind itself fails, which would read
+# as a broken store rather than a typo.
+_MAX_RECENT = 2**63 - 1
+
+
 def _recent(text: str) -> int:
     try:
         value = int(text)
@@ -286,6 +291,8 @@ def _recent(text: str) -> int:
         raise argparse.ArgumentTypeError(f"--recent takes a whole number, got {text!r}") from None
     if value < 0:
         raise argparse.ArgumentTypeError(f"--recent must be 0 or more, got {text!r}")
+    if value > _MAX_RECENT:
+        raise argparse.ArgumentTypeError(f"--recent must be at most {_MAX_RECENT}, got {text!r}")
     return value
 
 
@@ -296,9 +303,13 @@ def _cmd_status(argv: list[str], *, now: Callable[[], datetime] = _utc_now) -> i
     transaction. ``--run-id`` left out reads the run whose scheduler row was
     touched last — the segment that is running, or ran last. The model, the
     lines and the document are :mod:`..status`; ``now`` is the clock seam
-    behind the document's ``generated_at``. Exit 0 printed, 1 a store or run
-    named as missing, 5 a store that opened but whose content does not hold
-    up (``validate``'s verdict for the same failure), 2 anything else.
+    behind the document's ``generated_at``. Exit 0 printed; 1 a store that
+    does not exist or that this build must not open (a schema it does not
+    know), a run the store does not hold, or no ``--run-id`` in a store no
+    daemon has scheduled in; 5 a store that cannot be opened as a database
+    or whose content does not hold up (``validate``'s verdict for the same
+    failures: a malformed file, an I/O failure mid-read, a cell no Decimal
+    accepts, an impossible state the model refuses); 2 anything else.
     """
     parser = argparse.ArgumentParser(
         prog="python -m contrib.hyperliquid_perp status",
@@ -337,10 +348,10 @@ def _cmd_status(argv: list[str], *, now: Callable[[], datetime] = _utc_now) -> i
 
     from ..persistence import repository as repo
 
-    db = _open_existing_db(args.db)
-    if db is None:
-        return 1
     try:
+        db = _open_existing_db(args.db)
+        if db is None:
+            return 1
         with db, db.read_transaction() as conn:
             run_id = args.run_id
             if run_id is None:
@@ -355,10 +366,12 @@ def _cmd_status(argv: list[str], *, now: Callable[[], datetime] = _utc_now) -> i
             if _existing_run_row(conn, run_id, args.db) is None:
                 return 1
             status = read_status(conn, run_id, now=now, recent=args.recent)
-    except (sqlite3.Error, ArithmeticError) as exc:
-        # The store opened but its content does not hold up — a malformed
-        # file, an I/O failure mid-read, a cell no Decimal accepts: the same
-        # "investigate the store" verdict ``validate`` gives, under its code.
+    except (sqlite3.Error, ArithmeticError, ValueError) as exc:
+        # The store does not hold up — a file that is not a database, a
+        # malformed one, an I/O failure mid-read, a cell no Decimal accepts,
+        # a state the model refuses as impossible: the same "investigate the
+        # store" verdict ``validate`` gives, under its code (see its comment
+        # on why an unopenable file belongs here and not under exit 1).
         print(f"error: store integrity failure — {exc}", file=sys.stderr)
         return 5
     if args.json:

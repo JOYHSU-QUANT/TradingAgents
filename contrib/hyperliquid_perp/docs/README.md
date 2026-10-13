@@ -144,7 +144,7 @@ TradingAgents/
         │   └── hyperliquid.local.yaml     🔒 gitignored
         ├── docs/
         ├── ports.py
-        ├── status.py                      # `status` 子命令的讀取模型：一個 run 在 store 裡的現況（frozen dataclass → 文字行／`--json`；SQL 是 persistence/repository 各 table 模組的 `recent_*`／`latest_*` 讀函式）
+        ├── status.py                      # `status` 子命令的讀取模型：一個 run 在 store 裡的現況（frozen dataclass → 文字行／`--json`；SQL 是 persistence/repository 各 table 模組新增的讀函式）
         ├── engine_bridge.py               # main/cli 共用的組裝層（context build/engine config；guards 在 domains/perp/context_guards.py）
         ├── main.py
         ├── .gitignore
@@ -214,7 +214,7 @@ gate 區塊（mode / allow_real_orders / safety 等，見 phase3-spec §24）—
 | `paper/scheduler.py` | ✅ | 4h rolling cycle · deterministic `decision_attempt_id` · 3-attempt retry（10s/30s，跨重啟延續）· `invalid_output` fail-closed · `ai_inputs`/`ai_outputs`/`decision_attempts` audit rows（phase2-spec §3／§3.1）。 |
 | `paper/reconcile.py` | ✅ | 重啟 reconciliation 九步：canceled_restart + residual · pending funding 以 stored basis 補帳 · replay 不一致時 flat 拒絕啟動／非 flat 轉 protection-only（引擎續守 SL/TP、halt 新決策）· 取消到未完成 plan 時立即開新 cycle（phase2-execution §1.2）。 |
 | `paper/validation.py` | ✅ | 驗收器：13 項 summary 指標 · orphan／snapshot／replay 鏈路檢查 · 可進 Phase 3 判定（phase2-spec §5）。 |
-| `status.py`＋CLI `status` 子命令 | ✅ | dashboard 計畫 PR 2a 的讀取模型：`read_status` 在一個 read transaction 內把一個 run 在 store 裡的現況讀成 frozen dataclass 樹 `RunStatus`（欄位清單見該模組的 dataclass；SQL 是 `persistence/repository` 各 table 模組新增的九個 run-scoped 讀函式，`test_layering` 的 SQL 站點棘輪不動）。`status_json` 逐欄輸出（`dataclasses.asdict`＝白名單、Decimal 印精確字串、純 ASCII、`schema_version` 在最前；欄位變動要 bump `SCHEMA_VERSION`，`tests/test_status.py` 釘住全部欄位路徑），`status_lines` 給人看（`key: value` 行＋每筆 cycle／fill／事件一行，自由文字摺成一行 ASCII 並截短）。**不複製 run 的 config**，自由文字裡的 20／32-byte hex 一律遮成前 6 後 4；測試釘住沒有名字像 key／secret／password／mnemonic／address 的欄位、沒有 32-byte hex 值、沒有 float。CLI `status [--run-id] [--db] [--json] [--recent N]`：report-only（不取 lease、不 migrate），`--run-id` 省略＝`scheduler_state.updated_at` 最新的 run；exit 0／1（store 或 run 不存在）／5（store 內容讀不了，同 `validate`）。host 層（unit 狀態、export 檔齡）留給 PR 3 的 exporter。 |
+| `status.py`＋CLI `status` 子命令 | ✅ | dashboard 計畫 PR 2a 的讀取模型：`read_status` 在一個 read transaction 內把一個 run 在 store 裡的現況讀成 frozen dataclass 樹 `RunStatus`（欄位清單見該模組的 dataclass；SQL 是 `persistence/repository` 各 table 模組新增的讀函式——八個 run-scoped、一個全 store 找預設 run——`test_layering` 的 SQL 站點棘輪不動）。`status_json` 逐欄輸出（`dataclasses.asdict`＝白名單、Decimal 印精確字串、純 ASCII、`schema_version`＋`source: hyperliquid_perp` 在最前、版號只管這個套件的文件；欄位變動要 bump `SCHEMA_VERSION`，`tests/test_status.py` 釘住全部欄位路徑），`status_lines` 給人看（`key: value` 行＋每筆 cycle／snapshot／fill／事件一行，自由文字摺成一行 ASCII 並截短）。**不複製 run 的 config**；自由文字欄（attempt 的 error message、麵包屑的 error、safe-mode reason、事件的 reason／detail／error、判決的 reason 類、fill reason）裡 `0x` 開頭的 20／32-byte hex 遮成前 6 後 4、並截到 1000 字（store 保留全文）；id／時戳／詞彙字照原樣。不可能的狀態（沒 ledger 列、safe-mode 三欄寫一半、倉位 size 與 entry 不合、completed 卻無判決）raise 而不是填預設值；詞彙欄讀到不認識的字照印不拒絕。測試釘住沒有名字像 key／secret／password／mnemonic／address 的欄位、沒有 32-byte hex 值、沒有 float。CLI `status [--run-id] [--db] [--json] [--recent N]`：report-only（不取 lease、不 migrate），`--run-id` 省略＝`scheduler_state.updated_at` 最新的 run；exit 0／1（store 或 run 不存在、schema 本 build 不開、或省略 `--run-id` 而沒有任何 scheduler 列）／5（檔案開不成資料庫或內容讀不了，同 `validate`）。host 層（unit 狀態、export 檔齡）留給 exporter。 |
 | `runtime/` | ✅ | paper／live 共用的執行核心（refactor plan v2 T1）：住在 `persistence` 之上、兩個引擎之下；兩個引擎只從這裡與 `ports.py` 借共用碼；共用清單只寫在 phase3-spec §2.1，由 `tests/common/test_layering.py` 的棘輪凍結。 |
 | `runtime/accounting.py` | ✅ | §6 account 公式 · `compute_fill_effect`（模型 fee/realized）與 `compute_live_fill_effect`（交易所 closedPnl/fee，phase3-spec §15）· `initialize_run` genesis · accounting replay（**依 run mode 分流**：paper 用模型 fee/realized；live 用交易所 closedPnl/fee、依交易所時間排序、並折算 accounting adjustments——`adjustment_ledger_delta` 是 live posting 與 replay 共用的唯一定義）（phase2-execution §6、phase3-spec §15）。 |
 | `runtime/clock.py`＋`runtime/market_feed.py` | ✅ | `WallClock`／`ManualClock`（`ports.Clock` 的兩個實作）；`PortSnapshotProvider`／`ScriptedSnapshotProvider` 與 `SnapshotResult` 家族（`ports.SnapshotProvider` 的實作與回傳型別）：市場快照的新鮮度記帳（execution §1.1／§5.2）。 |
@@ -225,7 +225,7 @@ gate 區塊（mode / allow_real_orders / safety 等，見 phase3-spec §24）—
 | `runtime/genesis.py` | ✅ | `write_genesis(...)`：把 lane 的 `--create` 輸入（開帳餘額、seed 倉位、config subset）轉成那一次 `accounting.initialize_run` 呼叫。 |
 | `runtime/run_lock.py` | ✅ | 單實例 lease（`scheduler_state` 的 pid + heartbeat）：同一 run 同時只允許一個 process（paper daemon 或 live loop），防重複啟動互相取消活單、雙倍 AI 花費。 |
 | `runtime/no_decision.py` | ✅ | no-decision 升級政策（issue #50／#122）：streak 門檻、`decision_attempts` 查詢、shortfall 措辭、每 cycle 的 log 升級；兩個 validator 與兩個 running loop 共用。從 `common/` 搬來——它認得 store 的表形狀，不該住在 import 圖最底層。 |
-| `cli/` + `__main__.py` | ✅ | `python -m contrib.hyperliquid_perp paper / export / validate`；空 argv／旗標式呼叫原樣委派 legacy `main.py`（`--context-only` 不變），未知裸字具名報錯 exit 1；迴圈運行中 SIGTERM 與 Ctrl-C 同樣走收尾 export（啟動／reconciliation 階段收到則 exit 130、無收尾 export）。 |
+| `cli/` + `__main__.py` | ✅ | `python -m contrib.hyperliquid_perp paper / export / validate / status / live / live-smoke / safe-mode`；空 argv／旗標式呼叫原樣委派 legacy `main.py`（`--context-only` 不變），未知裸字具名報錯 exit 1；迴圈運行中 SIGTERM 與 Ctrl-C 同樣走收尾 export（啟動／reconciliation 階段收到則 exit 130、無收尾 export）。 |
 
 ### Phase 3 — live execution
 

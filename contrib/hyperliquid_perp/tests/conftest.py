@@ -516,6 +516,37 @@ def insert_minimal_account_snapshot(conn, *, run_id: str, timestamp: datetime, *
     repo.insert_account_snapshot(conn, timestamp=timestamp, mode="paper", run_id=run_id, **fields)
 
 
+def insert_minimal_ai_output(conn, *, run_id: str, attempt_id: str, timestamp: datetime, **over):
+    """A ``maintain_current`` verdict for ``attempt_id``, stamped onto the attempt row.
+
+    The scheduler writes the ``ai_outputs`` row and the attempt's ``output_id``
+    in one step; a staged ``completed`` attempt needs both, or a reader that
+    checks the pairing refuses the store. ``over`` sets columns.
+    """
+    output_id = f"{attempt_id}#out1"
+    fields = {
+        "symbol": "BTC",
+        "decision_mode": "maintain_current",
+        "risk_action": "approved",
+        "order_created": False,
+        "no_order_reason": "maintain_current",
+        **over,
+    }
+    repo.insert_ai_output(
+        conn,
+        output_id=output_id,
+        timestamp=timestamp,
+        mode="paper",
+        run_id=run_id,
+        decision_attempt_id=attempt_id,
+        **fields,
+    )
+    conn.execute(
+        "UPDATE decision_attempts SET output_id = ? WHERE decision_attempt_id = ?",
+        (output_id, attempt_id),
+    )
+
+
 def insert_decision_attempts(db, outcomes, *, run_id="r", start: datetime, mode="paper"):
     """Insert one decision_attempts row per outcome, on the 4h grid.
 

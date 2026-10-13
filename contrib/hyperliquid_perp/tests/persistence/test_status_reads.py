@@ -20,6 +20,7 @@ from contrib.hyperliquid_perp.runtime import accounting
 from ..conftest import (
     insert_decision_attempts,
     insert_minimal_account_snapshot,
+    insert_minimal_ai_output,
     insert_minimal_fill,
 )
 
@@ -55,6 +56,11 @@ def test_the_latest_lease_is_the_scheduler_row_touched_last(db):
         # A later heartbeat on the other run moves it.
         repo.upsert_scheduler_state(conn, "other", updated_at=_at(3))
     assert repo.latest_lease_run_id(db.conn) == "other"
+    with db.transaction() as conn:
+        # The same instant on both: the run id breaks the tie, so the answer
+        # does not depend on which row SQLite happens to visit first.
+        repo.upsert_scheduler_state(conn, "r", updated_at=_at(3))
+    assert repo.latest_lease_run_id(db.conn) == "other"
 
 
 def test_attempt_status_counts_are_run_scoped_and_by_status_name(db):
@@ -67,26 +73,18 @@ def test_attempt_status_counts_are_run_scoped_and_by_status_name(db):
 def test_recent_cycles_come_newest_first_capped_with_their_verdict(db):
     insert_decision_attempts(db, ["completed", "api_failed", "completed"], start=_T0)
     insert_decision_attempts(db, ["completed"], run_id="other", start=_T0)
-    first = decision_attempt_id("r", _at(0))
     with db.transaction() as conn:
-        conn.execute(
-            "UPDATE decision_attempts SET output_id = ? WHERE decision_attempt_id = ?",
-            ("r|out|1", first),
-        )
-        repo.insert_ai_output(
+        insert_minimal_ai_output(
             conn,
-            output_id="r|out|1",
-            timestamp=_at(0),
-            mode="paper",
             run_id="r",
-            decision_attempt_id=first,
-            symbol="BTC",
+            attempt_id=decision_attempt_id("r", _at(0)),
+            timestamp=_at(0),
             decision_mode="set_target",
             target_side="long",
             approved_target_margin_pct=D(20),
-            risk_action="approved",
             account_equity=D(1000),
             order_created=True,
+            no_order_reason=None,
             decision_reason="a reason",
         )
     rows = repo.recent_decision_cycles(db.conn, "r", limit=2)
@@ -137,13 +135,16 @@ def _snapshot(conn, run_id: str, at: datetime, equity: str) -> None:
     insert_minimal_account_snapshot(conn, run_id=run_id, timestamp=at, account_equity=D(equity))
 
 
-def test_the_latest_account_snapshot_is_the_runs_last_inserted_row(db):
-    assert repo.latest_account_snapshot(db.conn, "r") is None
+def test_recent_account_snapshots_come_last_inserted_first_and_run_scoped(db):
+    assert repo.recent_account_snapshots(db.conn, "r", limit=5) == []
     with db.transaction() as conn:
         _snapshot(conn, "r", _at(0), "1000")
         _snapshot(conn, "r", _at(1), "1010")
         _snapshot(conn, "other", _at(2), "900")
-    assert repo.latest_account_snapshot(db.conn, "r")["account_equity"] == "1010"
+    recent = repo.recent_account_snapshots(db.conn, "r", limit=5)
+    assert [row["account_equity"] for row in recent] == ["1010", "1000"]
+    (newest,) = repo.recent_account_snapshots(db.conn, "r", limit=1)
+    assert newest["account_equity"] == "1010"
 
 
 def test_current_position_rows_carry_protection_and_the_mirrored_liquidation(db):

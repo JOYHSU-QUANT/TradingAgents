@@ -1,33 +1,43 @@
 """``status``: what one run's store says about it right now, as a model, lines and JSON.
 
-The dashboard plan's reading model (PR 2a). :func:`read_status` reads a run
-inside the caller's read transaction into a :class:`RunStatus` — a frozen
-tree of dataclasses, every field of which is a value the store holds about
-the run (the classes below are the inventory; the SQL is the ``recent_*``,
-``latest_*`` and ``*_rows`` readers of :mod:`.persistence.repository`).
+The dashboard plan's reading model. :func:`read_status` reads a run inside
+the caller's read transaction into a :class:`RunStatus` — a frozen tree of
+dataclasses, every field of which is a value the store holds about the run
+(the classes below are the inventory; the SQL is the readers this module
+calls on :mod:`.persistence.repository`).
 
 The model carries only what the store knows. The host — whether the daemon's
-unit is running, how old the export files are — is the exporter's to add
-(plan PR 3), and nothing from the run's config is copied out: the config
-names the wallet and the keys, and a status is for a page that should never
-see them. Free text the store holds (an error message, a safe-mode detail, a
-decision's reason) can still quote one — an exchange refusal names the wallet
-it refused — so every text value passes :func:`_masked`, which folds a
-20-byte or 32-byte hex string to its first six and last four characters.
+unit is running, how old the export files are — is for an exporter that
+adds host facts around this document, and nothing from the run's config is
+copied out: the config names the wallet and the keys, and a status is for a
+page that should never see them. Free text the store holds (an error
+message, a breadcrumb's error, a safe-mode reason or detail, a verdict's
+reasons, a fill's reason) can still quote one — an exchange refusal names
+the wallet it refused — so every column read through :func:`_text_or_none`
+has a ``0x``-prefixed 20-byte or 32-byte hex folded to its first six and
+last four characters, and is cut at :data:`TEXT_LIMIT` characters. Ids,
+instants and vocabulary words are read as they are.
+
+Impossible states are refused, not defaulted: a run without its opening
+ledger row, a safe-mode trio half written, a position whose size and entry
+price disagree, a decided cycle without its verdict. Each raises
+``ValueError``; the CLI turns it into ``validate``'s "investigate the store"
+exit code. Vocabulary words (an attempt status, a gate action, an event
+type) pass through as stored: a word this build does not know is shown, not
+refused, so a page keeps working across a daemon upgrade.
 
 :func:`status_json` renders the model field by field (``dataclasses.asdict``:
 the field list IS the whitelist; a value not in a dataclass is not printed),
 ``Decimal`` as its exact text and instants as the ISO-8601 UTC text the store
 keeps; the document is ASCII (``json.dumps`` escapes the rest), so a console
 or a pipe on any code page carries it. The document opens with
-``schema_version``; a change to a field's name, place or meaning bumps
-:data:`SCHEMA_VERSION`, and ``tests/test_status.py`` pins the field paths so
-the bump cannot be forgotten. :func:`status_lines` is the same model for an
-operator's eyes — one ``key: value`` line per fact as ``validate`` prints, and
-one line per recent cycle, fill and event — with the free text the model wrote
-(a decision's reason, an error message) folded to one printable ASCII line and
-cut short; the JSON keeps it whole, and the page that shows it treats it as
-what it is, text a model produced.
+``schema_version`` and ``source``: the version is scoped to this package's
+documents (another package's status has its own), and a change to a field's
+name, place or meaning bumps :data:`SCHEMA_VERSION`; ``tests/test_status.py``
+pins the field paths so the bump cannot be forgotten. :func:`status_lines` is
+the same model for an operator's eyes — one ``key: value`` line per fact as
+``validate`` prints, and one line per recent cycle, snapshot, fill and event —
+with free text folded to one printable ASCII line and cut shorter still.
 """
 
 from __future__ import annotations
@@ -37,16 +47,19 @@ import re
 import sqlite3
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
 from .persistence import repository as repo
 from .persistence.db import stored_schema_version
+from .persistence.models import PositionState
 
 __all__ = [
     "DEFAULT_RECENT",
     "SCHEMA_VERSION",
+    "SOURCE",
+    "TEXT_LIMIT",
     "Account",
     "AccountSnapshot",
     "Breadcrumb",
@@ -55,7 +68,7 @@ __all__ = [
     "Fill",
     "KillSwitchEvent",
     "Ledger",
-    "Model",
+    "ModelBucket",
     "Position",
     "RunStatus",
     "SafeMode",
@@ -67,22 +80,48 @@ __all__ = [
     "status_lines",
 ]
 
-# The JSON document's version. Bump it when a field is added, removed, renamed,
-# moved or re-typed; the field-path pin in tests/test_status.py changes with it.
+# The document's version, scoped to SOURCE. Bump it when a field is added,
+# removed, renamed, moved or re-typed; the field-path pin in
+# tests/test_status.py changes with it.
 SCHEMA_VERSION = 1
-# How many recent cycles, fills and events a status carries unless told otherwise.
+# What the document says produced it, so a reader handed the file alone
+# knows which package's schema (and version) to read it with.
+SOURCE = "hyperliquid_perp"
+# How many recent cycles, snapshots, fills and events a status carries unless
+# told otherwise.
 DEFAULT_RECENT = 10
-# The longest a model's or an error's free text runs on an operator line.
+# The longest a free-text value runs in the model (and so in the document):
+# nothing reads a verdict's reason whole, and the store keeps it whole.
+TEXT_LIMIT = 1000
+# The longest the same text runs on an operator line.
 _LINE_TEXT_LIMIT = 160
 # A 32-byte hex (an agent key) or a 20-byte hex (a wallet address) quoted in
 # free text; the longer shape first so a key is not read as an address plus
 # a tail. Masked to its first six and last four characters (plan §4).
 _HEX_SECRET = re.compile(r"0x(?:[0-9a-fA-F]{64}|[0-9a-fA-F]{40})")
+# The attempt statuses the scheduler writes a verdict for, and the ones it
+# cannot have: a cycle that ended ``completed`` or ``invalid_output`` wrote
+# its ``ai_outputs`` row in the same step; one still ``in_progress`` or ended
+# ``api_failed`` never reached the model's answer. Spelled from the
+# vocabulary so a status added to it cannot land in neither set unseen.
+_DECIDED_STATUSES = frozenset(
+    {repo.AttemptStatus.COMPLETED.value, repo.AttemptStatus.INVALID_OUTPUT.value}
+)
+_UNDECIDED_STATUSES = frozenset(status.value for status in repo.AttemptStatus) - _DECIDED_STATUSES
+_TERMINAL_WITHOUT_VERDICT = frozenset(repo.TERMINAL_ATTEMPT_STATUSES) - _DECIDED_STATUSES
+_API_FAILED_ONLY = frozenset({repo.AttemptStatus.API_FAILED.value})
+if _TERMINAL_WITHOUT_VERDICT != _API_FAILED_ONLY:
+    raise RuntimeError("the status verdict split drifted from repository.TERMINAL_ATTEMPT_STATUSES")
 
 
 @dataclass(frozen=True)
 class Breadcrumb:
-    """A ``scheduler_state`` ``last_*_status`` / ``_error`` / ``_at`` triple."""
+    """A ``scheduler_state`` ``last_*_status`` / ``_error`` / ``_at`` triple.
+
+    ``status`` is ``ok`` / ``failed`` for the export, ``ok`` / ``mismatch`` /
+    ``failed`` for the replay and ``ok`` / ``drift`` for the config drift, or
+    ``None`` before the first pass.
+    """
 
     status: str | None
     at: str | None
@@ -105,16 +144,26 @@ class Scheduler:
 
 @dataclass(frozen=True)
 class SafeMode:
-    """The safe mode the run is latched in (``None`` on the status when it is in none)."""
+    """The safe mode the run is latched in (``None`` on the status when it is in none).
+
+    ``type`` is ``recoverable`` or ``manual``. The three columns are written
+    together, so a latched run always has all three.
+    """
 
     type: str
-    reason: str | None
-    entered_at: str | None
+    reason: str
+    entered_at: str
 
 
 @dataclass(frozen=True)
 class Verdict:
-    """The ``ai_outputs`` row a cycle ended with: what the model asked and what the gate said."""
+    """The ``ai_outputs`` row a cycle ended with: what the model asked and what the gate said.
+
+    ``decision_mode`` is ``set_target`` or ``maintain_current``; ``target_side``
+    is ``long`` / ``short`` / ``flat`` for a ``set_target`` and ``None`` otherwise;
+    ``risk_action`` is the gate's word (``approved``, ``clamped``, ``rejected``,
+    ``invalid_fail_closed`` …, as ``domains.perp.risk_gate.RiskAction`` spells it).
+    """
 
     symbol: str
     decision_mode: str
@@ -133,7 +182,13 @@ class Verdict:
 
 @dataclass(frozen=True)
 class Cycle:
-    """One ``decision_attempts`` row, with its verdict when it reached one."""
+    """One ``decision_attempts`` row, with its verdict when it reached one.
+
+    ``status`` is ``in_progress``, ``completed``, ``api_failed`` or
+    ``invalid_output``. ``verdict`` is present exactly for the two decided
+    statuses; ``None`` means the cycle is still running or never got an
+    answer, not that it failed.
+    """
 
     scheduled_at: str
     timestamp: str
@@ -144,10 +199,25 @@ class Cycle:
     next_decision_at: str | None
     verdict: Verdict | None
 
+    def __post_init__(self) -> None:
+        if self.status in _DECIDED_STATUSES and self.verdict is None:
+            raise ValueError(
+                f"the {self.status} cycle scheduled {self.scheduled_at} has no ai_outputs row"
+            )
+        if self.status in _UNDECIDED_STATUSES and self.verdict is not None:
+            raise ValueError(
+                f"the {self.status} cycle scheduled {self.scheduled_at} has an ai_outputs row"
+            )
+
 
 @dataclass(frozen=True)
 class Cycles:
-    """The run's attempts: how many in each status, and the latest few, newest first."""
+    """The run's attempts: how many in each status, and the latest few, newest first.
+
+    ``by_status`` always carries the four statuses the scheduler writes
+    (zero when the run has none), in the vocabulary's order, and then any
+    word this build does not know.
+    """
 
     total: int
     by_status: dict[str, int]
@@ -155,8 +225,12 @@ class Cycles:
 
 
 @dataclass(frozen=True)
-class Model:
-    """One ``(model, prompt_version)`` bucket of the prompts the run built."""
+class ModelBucket:
+    """One ``(model, prompt_version)`` bucket of the ``ai_inputs`` rows the run wrote.
+
+    ``prompts`` counts the rows as :func:`repository.model_regimes` counts
+    them (once per try, so the buckets need not sum to ``cycles.total``).
+    """
 
     model: str | None
     prompt_version: str | None
@@ -177,7 +251,7 @@ class Ledger:
 
 @dataclass(frozen=True)
 class AccountSnapshot:
-    """The latest ``account_snapshots`` row: the account valued at that instant's mark."""
+    """An ``account_snapshots`` row: the account valued at that instant's mark."""
 
     timestamp: str
     account_equity: Decimal
@@ -191,15 +265,21 @@ class AccountSnapshot:
 
 @dataclass(frozen=True)
 class Account:
-    """The ledger (``None`` before the opening row) and the latest snapshot (``None`` before the first)."""
+    """The ledger, the latest snapshot (``None`` before the first) and the latest few, newest first."""
 
-    ledger: Ledger | None
+    ledger: Ledger
     snapshot: AccountSnapshot | None
+    recent_snapshots: tuple[AccountSnapshot, ...]
 
 
 @dataclass(frozen=True)
 class Position:
-    """A ``current_positions`` row: signed size (``0`` is flat), entry, protection, mirrored liquidation."""
+    """A ``current_positions`` row: signed size (``0`` is flat), entry, protection, mirrored liquidation.
+
+    A flat position has no entry price and a held one has a positive one:
+    the reader builds the accounting identity (``models.PositionState``)
+    from the row first, so its invariant refuses a damaged row.
+    """
 
     symbol: str
     size: Decimal
@@ -213,7 +293,11 @@ class Position:
 
 @dataclass(frozen=True)
 class Fill:
-    """A ``fills`` row, the columns paper and live share."""
+    """A ``fills`` row, the columns paper and live share.
+
+    ``side`` is ``buy`` or ``sell``; ``liquidity_type`` is ``maker``, ``taker``
+    or ``simulated``.
+    """
 
     timestamp: str
     symbol: str
@@ -228,7 +312,7 @@ class Fill:
 
 @dataclass(frozen=True)
 class KillSwitchEvent:
-    """A ``kill_switch_events`` row."""
+    """A ``kill_switch_events`` row (``event_type`` as ``repository.KILL_SWITCH_EVENT_TYPES``)."""
 
     timestamp: str
     event_type: str
@@ -238,7 +322,7 @@ class KillSwitchEvent:
 
 @dataclass(frozen=True)
 class SafeModeEvent:
-    """A ``safe_mode_events`` row."""
+    """A ``safe_mode_events`` row (``event_type`` as ``repository.SAFE_MODE_EVENT_TYPES``)."""
 
     timestamp: str
     event_type: str
@@ -253,6 +337,7 @@ class RunStatus:
     """What the store says about one run; the document ``status --json`` prints."""
 
     schema_version: int
+    source: str
     generated_at: str
     run_id: str
     mode: str
@@ -262,7 +347,7 @@ class RunStatus:
     scheduler: Scheduler | None
     safe_mode: SafeMode | None
     cycles: Cycles
-    models: tuple[Model, ...]
+    models: tuple[ModelBucket, ...]
     account: Account
     positions: tuple[Position, ...]
     recent_fills: tuple[Fill, ...]
@@ -288,18 +373,26 @@ def _masked(text: str) -> str:
 
 
 def _text_or_none(value: Any) -> str | None:
-    """A stored text column, or ``None``; free text passes :func:`_masked`.
+    """A free-text column, or ``None``: masked, and cut at :data:`TEXT_LIMIT`.
 
-    Every text value goes through here — an id or an instant has no hex of
-    those lengths in it, so the mask only ever touches free text.
+    The one path for text that a person or a model wrote (the module
+    docstring lists the columns); ids, instants and vocabulary words are
+    read with ``str`` and never come through here.
     """
-    return None if value is None else _masked(str(value))
+    if value is None:
+        return None
+    text = _masked(str(value))
+    return text if len(text) <= TEXT_LIMIT else text[: TEXT_LIMIT - 3] + "..."
+
+
+def _str_or_none(value: Any) -> str | None:
+    return None if value is None else str(value)
 
 
 def _breadcrumb(row: sqlite3.Row, what: str) -> Breadcrumb:
     return Breadcrumb(
-        status=_text_or_none(row[f"last_{what}_status"]),
-        at=_text_or_none(row[f"last_{what}_at"]),
+        status=_str_or_none(row[f"last_{what}_status"]),
+        at=_str_or_none(row[f"last_{what}_at"]),
         error=_text_or_none(row[f"last_{what}_error"]),
     )
 
@@ -308,10 +401,10 @@ def _scheduler(row: sqlite3.Row | None) -> Scheduler | None:
     if row is None:
         return None
     return Scheduler(
-        last_decision_at=_text_or_none(row["last_decision_at"]),
-        next_decision_at=_text_or_none(row["next_decision_at"]),
-        in_progress_attempt_id=_text_or_none(row["current_attempt_id"]),
-        lease_heartbeat_at=_text_or_none(row["lock_heartbeat_at"]),
+        last_decision_at=_str_or_none(row["last_decision_at"]),
+        next_decision_at=_str_or_none(row["next_decision_at"]),
+        in_progress_attempt_id=_str_or_none(row["current_attempt_id"]),
+        lease_heartbeat_at=_str_or_none(row["lock_heartbeat_at"]),
         updated_at=str(row["updated_at"]),
         export=_breadcrumb(row, "export"),
         replay=_breadcrumb(row, "replay"),
@@ -322,11 +415,14 @@ def _scheduler(row: sqlite3.Row | None) -> Scheduler | None:
 def _safe_mode(row: sqlite3.Row | None) -> SafeMode | None:
     if row is None or row["safe_mode_type"] is None:
         return None
-    return SafeMode(
-        type=str(row["safe_mode_type"]),
-        reason=_text_or_none(row["safe_mode_reason"]),
-        entered_at=_text_or_none(row["safe_mode_entered_at"]),
-    )
+    reason = _text_or_none(row["safe_mode_reason"])
+    entered_at = _str_or_none(row["safe_mode_entered_at"])
+    if reason is None or entered_at is None:
+        raise ValueError(
+            f"the scheduler row of run {row['run_id']!r} has a safe mode without its reason "
+            "or its entry instant"
+        )
+    return SafeMode(type=str(row["safe_mode_type"]), reason=reason, entered_at=entered_at)
 
 
 def _verdict(row: sqlite3.Row) -> Verdict | None:
@@ -335,7 +431,7 @@ def _verdict(row: sqlite3.Row) -> Verdict | None:
     return Verdict(
         symbol=str(row["symbol"]),
         decision_mode=str(row["decision_mode"]),
-        target_side=_text_or_none(row["target_side"]),
+        target_side=_str_or_none(row["target_side"]),
         requested_target_margin_pct=_dec_or_none(row["requested_target_margin_pct"]),
         approved_target_margin_pct=_dec_or_none(row["approved_target_margin_pct"]),
         risk_action=str(row["risk_action"]),
@@ -354,27 +450,30 @@ def _cycle(row: sqlite3.Row) -> Cycle:
         scheduled_at=str(row["scheduled_at"]),
         timestamp=str(row["timestamp"]),
         status=str(row["status"]),
-        error_type=_text_or_none(row["error_type"]),
+        error_type=_str_or_none(row["error_type"]),
         error_message=_text_or_none(row["error_message"]),
         attempt_count=int(row["attempt_count"]),
-        next_decision_at=_text_or_none(row["next_decision_at"]),
+        next_decision_at=_str_or_none(row["next_decision_at"]),
         verdict=_verdict(row),
     )
 
 
-def _model(row: sqlite3.Row) -> Model:
-    return Model(
-        model=_text_or_none(row["model"]),
-        prompt_version=_text_or_none(row["prompt_version"]),
+def _by_status(counts: Mapping[str, int]) -> dict[str, int]:
+    """The four statuses in vocabulary order, zero-filled, then any unknown word."""
+    return {**{status.value: 0 for status in repo.AttemptStatus}, **counts}
+
+
+def _model_bucket(row: sqlite3.Row) -> ModelBucket:
+    return ModelBucket(
+        model=_str_or_none(row["model"]),
+        prompt_version=_str_or_none(row["prompt_version"]),
         prompts=int(row["prompts"]),
         first_at=str(row["first_at"]),
         last_at=str(row["last_at"]),
     )
 
 
-def _snapshot(row: sqlite3.Row | None) -> AccountSnapshot | None:
-    if row is None:
-        return None
+def _snapshot(row: sqlite3.Row) -> AccountSnapshot:
     return AccountSnapshot(
         timestamp=str(row["timestamp"]),
         account_equity=_dec(row["account_equity"]),
@@ -388,11 +487,17 @@ def _snapshot(row: sqlite3.Row | None) -> AccountSnapshot | None:
 
 
 def _position(row: sqlite3.Row) -> Position:
-    return Position(
-        symbol=str(row["symbol"]),
+    identity = PositionState(
+        coin=str(row["symbol"]),
         size=_dec(row["size"]),
         entry_price=_dec_or_none(row["entry_price"]),
         realized_pnl=_dec(row["realized_pnl"]),
+    )
+    return Position(
+        symbol=identity.coin,
+        size=identity.size,
+        entry_price=identity.entry_price,
+        realized_pnl=identity.realized_pnl,
         stop_loss_price=_dec_or_none(row["stop_loss_price"]),
         take_profit_price=_dec_or_none(row["take_profit_price"]),
         exchange_liquidation_price=_dec_or_none(row["exchange_liquidation_price"]),
@@ -427,11 +532,19 @@ def _safe_mode_event(row: sqlite3.Row) -> SafeModeEvent:
     return SafeModeEvent(
         timestamp=str(row["timestamp"]),
         event_type=str(row["event_type"]),
-        safe_mode_type=_text_or_none(row["safe_mode_type"]),
+        safe_mode_type=_str_or_none(row["safe_mode_type"]),
         reason=_text_or_none(row["reason"]),
-        released_by=_text_or_none(row["released_by"]),
+        released_by=_str_or_none(row["released_by"]),
         detail=_text_or_none(row["detail"]),
     )
+
+
+def _generated_at(now: Callable[[], datetime]) -> str:
+    """The read instant as the store spells instants: aware, in UTC."""
+    moment = now()
+    if moment.tzinfo is None:
+        raise ValueError("the status clock must give an aware datetime")
+    return moment.astimezone(timezone.utc).isoformat()
 
 
 def read_status(
@@ -443,19 +556,26 @@ def read_status(
 ) -> RunStatus:
     """The run's status, read inside the caller's read transaction (one snapshot).
 
-    ``recent`` caps the cycles, fills and events carried. Raises ``ValueError``
-    for a run the store does not hold; the CLI refuses that by name before
-    calling, in the wording every read-style subcommand shares.
+    ``recent`` caps the cycles, snapshots, fills and events carried. Raises
+    ``ValueError`` for a run the store does not hold (the CLI refuses that by
+    name before calling, in the wording every read-style subcommand shares)
+    and for the impossible states the module docstring lists.
     """
     run = repo.get_run(conn, run_id)
     if run is None:
         raise ValueError(f"run {run_id!r} does not exist")
     scheduler_row = repo.get_scheduler_state(conn, run_id)
-    by_status = repo.attempt_status_counts(conn, run_id)
-    ledger = repo.get_current_account_state(conn, run_id)
+    by_status = _by_status(repo.attempt_status_counts(conn, run_id))
+    ledger = repo.require_current_account_state(conn, run_id)
+    # One read for the tail and the latest: the tail's first row is the
+    # latest, read even when the tail itself is asked to be empty.
+    snapshots = tuple(
+        _snapshot(row) for row in repo.recent_account_snapshots(conn, run_id, limit=max(recent, 1))
+    )
     return RunStatus(
         schema_version=SCHEMA_VERSION,
-        generated_at=now().isoformat(),
+        source=SOURCE,
+        generated_at=_generated_at(now),
         run_id=run_id,
         mode=str(run["mode"]),
         created_at=str(run["created_at"]),
@@ -470,17 +590,16 @@ def read_status(
                 _cycle(row) for row in repo.recent_decision_cycles(conn, run_id, limit=recent)
             ),
         ),
-        models=tuple(_model(row) for row in repo.model_regimes(conn, run_id)),
+        models=tuple(_model_bucket(row) for row in repo.model_regimes(conn, run_id)),
         account=Account(
-            ledger=None
-            if ledger is None
-            else Ledger(
+            ledger=Ledger(
                 wallet_balance=ledger.wallet_balance,
                 realized_pnl=ledger.realized_pnl,
                 total_fees=ledger.total_fees,
                 net_funding_pnl=ledger.net_funding_pnl,
             ),
-            snapshot=_snapshot(repo.latest_account_snapshot(conn, run_id)),
+            snapshot=snapshots[0] if snapshots else None,
+            recent_snapshots=snapshots[:recent],
         ),
         positions=tuple(_position(row) for row in repo.current_position_rows(conn, run_id)),
         recent_fills=tuple(_fill(row) for row in repo.recent_fills(conn, run_id, limit=recent)),
@@ -540,18 +659,12 @@ def _counts(by_status: Mapping[str, int]) -> str:
     return ", ".join(f"{status} {count}" for status, count in by_status.items()) or "none"
 
 
-def _side(size: Decimal) -> str:
-    return "long" if size > 0 else "short"
-
-
 def _position_line(position: Position) -> str:
     if position.size == 0:
         core = f"{position.symbol} flat"
     else:
-        core = (
-            f"{position.symbol} {_side(position.size)} {abs(position.size)} "
-            f"entry {_fmt(position.entry_price)}"
-        )
+        side = "long" if position.size > 0 else "short"
+        core = f"{position.symbol} {side} {abs(position.size)} entry {position.entry_price}"
     return (
         f"{core} realized {position.realized_pnl} sl {_fmt(position.stop_loss_price)} "
         f"tp {_fmt(position.take_profit_price)} liq {_fmt(position.exchange_liquidation_price)} "
@@ -578,6 +691,15 @@ def _cycle_line(cycle: Cycle) -> str:
     return f"{line}  | {_one_line(verdict.decision_reason)}" if verdict.decision_reason else line
 
 
+def _snapshot_text(snapshot: AccountSnapshot) -> str:
+    return (
+        f"equity {snapshot.account_equity} available {snapshot.available_balance} "
+        f"unrealized {snapshot.unrealized_pnl} total_pnl {snapshot.total_pnl} "
+        f"notional {snapshot.total_position_notional} "
+        f"leverage {_fmt(snapshot.effective_leverage)} margin_ratio {_fmt(snapshot.margin_ratio)}"
+    )
+
+
 def _fill_line(fill: Fill) -> str:
     line = (
         f"  {fill.timestamp}  {fill.symbol} {fill.side} {fill.fill_qty} @ {fill.fill_price}  "
@@ -599,7 +721,7 @@ def _listing(title: str, lines: list[str], *, of: int | None = None) -> list[str
 
 
 def status_lines(status: RunStatus) -> list[str]:
-    """The status for an operator: ``key: value`` lines, then the recent cycles, fills and events."""
+    """The status for an operator: ``key: value`` lines, then the recent cycles, snapshots, fills and events."""
     lines = [
         f"run_id: {status.run_id}",
         f"mode: {status.mode}",
@@ -623,11 +745,12 @@ def status_lines(status: RunStatus) -> list[str]:
             f"config_drift: {_breadcrumb_line(scheduler.config_drift)}",
         ]
     safe_mode = status.safe_mode
-    if safe_mode is None:
-        lines.append("safe_mode: none")
-    else:
-        line = f"safe_mode: {safe_mode.type} since {safe_mode.entered_at or 'n/a'}"
-        lines.append(f"{line} ({_one_line(safe_mode.reason)})" if safe_mode.reason else line)
+    lines.append(
+        "safe_mode: none"
+        if safe_mode is None
+        else f"safe_mode: {safe_mode.type} since {safe_mode.entered_at} "
+        f"({_one_line(safe_mode.reason)})"
+    )
     lines.append(f"cycles: {status.cycles.total} ({_counts(status.cycles.by_status)})")
     if status.models:
         lines += [
@@ -639,22 +762,21 @@ def status_lines(status: RunStatus) -> list[str]:
         lines.append("model: none (no prompt built yet)")
     ledger, snapshot = status.account.ledger, status.account.snapshot
     lines.append(
-        "ledger: none"
-        if ledger is None
-        else f"ledger: wallet {ledger.wallet_balance} realized {ledger.realized_pnl} "
+        f"ledger: wallet {ledger.wallet_balance} realized {ledger.realized_pnl} "
         f"fees {ledger.total_fees} funding {ledger.net_funding_pnl}"
     )
     lines.append(
         "snapshot: none"
         if snapshot is None
-        else f"snapshot: at {snapshot.timestamp} equity {snapshot.account_equity} "
-        f"available {snapshot.available_balance} unrealized {snapshot.unrealized_pnl} "
-        f"total_pnl {snapshot.total_pnl} notional {snapshot.total_position_notional} "
-        f"leverage {_fmt(snapshot.effective_leverage)} margin_ratio {_fmt(snapshot.margin_ratio)}"
+        else f"snapshot: at {snapshot.timestamp} {_snapshot_text(snapshot)}"
     )
     lines += [f"position: {_position_line(p)}" for p in status.positions] or ["position: none"]
     lines += _listing(
         "recent cycles", [_cycle_line(c) for c in status.cycles.recent], of=status.cycles.total
+    )
+    lines += _listing(
+        "recent snapshots",
+        [f"  {s.timestamp}  {_snapshot_text(s)}" for s in status.account.recent_snapshots],
     )
     lines += _listing("recent fills", [_fill_line(f) for f in status.recent_fills])
     lines += _listing(

@@ -11,13 +11,14 @@ The subcommands (plus full Phase 1/2 backward compatibility):
 - ``python -m contrib.hyperliquid_perp validate --run-id <id>`` — the acceptance
   report and verdict. A PAPER run gets the phase2-spec §5 report; a LIVE run gets
   the phase3-spec §20.3 / §21.4 report (the run's stored mode selects which).
-- ``python -m contrib.hyperliquid_perp status [--run-id <id>] [--db <store>] [--json]``
-  — what the store says about one run right now (dashboard plan PR 2a): the
-  scheduler row, the cycles by status with the latest few and their verdicts,
-  the models asked, the ledger and latest snapshot, the positions, the latest
-  fills, the kill-switch and safe-mode event tails. Lines by default, one JSON
-  document with ``--json``; ``--run-id`` left out reads the run whose
-  scheduler row was touched last. Reads only, no lease, no migration.
+- ``python -m contrib.hyperliquid_perp status [--run-id <id>] [--db <store>]
+  [--json] [--recent N]`` — what the store says about one run right now: the
+  scheduler row, the cycles by status with the latest N and their verdicts,
+  the prompts' ``(model, prompt_version)`` buckets, the ledger with the latest
+  N snapshots, the positions, the latest N fills, the kill-switch and
+  safe-mode event tails. Lines by default, one JSON document with ``--json``;
+  ``--run-id`` left out reads the run whose scheduler row was touched last.
+  Reads only, no lease, no migration.
 - ``python -m contrib.hyperliquid_perp live --config <yaml>`` — the Phase 3
   startup skeleton (phase3-spec PR 1): load the ``live:`` config gates, verify
   the agent-wallet authorization, print the effective notional caps, and exit
@@ -56,8 +57,8 @@ red/missing smoke test — curable by a ``live-smoke`` re-run;
 exit was not clean — each ``live.shutdown.ExitReason`` whose code is 4 names
 one way; ``safe-mode
 --status``: a safe mode is latched, recoverable OR manual — 4 means "latched",
-not "human action required"), ``5`` (``validate``, and ``status`` for a store whose
-content it cannot read) the
+not "human action required"), ``5`` (``validate``; for ``status`` the code means the store could
+not be read as a database or holds a state the model refuses) the
 run has integrity failures — orphans, snapshot or replay mismatches, or a
 store so corrupt the checks themselves cannot run ("the store is broken;
 investigate before trusting results"), ``130`` interrupted before a graceful

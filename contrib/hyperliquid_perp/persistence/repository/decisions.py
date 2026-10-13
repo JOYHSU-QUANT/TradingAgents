@@ -35,9 +35,9 @@ __all__ = [
     "insert_decision_attempt",
     "insert_position_snapshot",
     "iter_in_progress_attempts",
-    "latest_account_snapshot",
     "model_regimes",
     "prompt_regime_counts",
+    "recent_account_snapshots",
     "recent_decision_cycles",
     "record_api_failed",
     "stamp_ai_input_format_fingerprint",
@@ -513,8 +513,9 @@ def model_regimes(conn: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
 
     One row per bucket: ``model``, ``prompt_version``, ``prompts`` (the rows
     in it), ``first_at`` and ``last_at``. ``ai_inputs.model`` records the deep
-    model a prompt was built for, so a run that changed model mid-way reads
-    as two buckets. Counted over the input rows — one per try that built a
+    model a prompt was built for (``file-target`` for a run that asks none,
+    ``common.constants.FILE_TARGET_MODEL``), so a run that changed model
+    mid-way reads as two buckets. Counted over the input rows — one per try that built a
     prompt, so a cycle retried after an API failure counts once per try —
     not over attempts, which :func:`prompt_regime_counts` counts.
     """
@@ -527,9 +528,11 @@ def model_regimes(conn: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
     ).fetchall()
 
 
-def latest_account_snapshot(conn: sqlite3.Connection, run_id: str) -> sqlite3.Row | None:
-    """The run's newest ``account_snapshots`` row (by insertion), or ``None`` before the first."""
+def recent_account_snapshots(
+    conn: sqlite3.Connection, run_id: str, *, limit: int
+) -> list[sqlite3.Row]:
+    """The run's ``limit`` newest ``account_snapshots`` rows, newest first (by insertion)."""
     return conn.execute(
-        "SELECT * FROM account_snapshots WHERE run_id = ? ORDER BY snapshot_id DESC LIMIT 1",
-        (run_id,),
-    ).fetchone()
+        "SELECT * FROM account_snapshots WHERE run_id = ? ORDER BY snapshot_id DESC LIMIT ?",
+        (run_id, limit),
+    ).fetchall()

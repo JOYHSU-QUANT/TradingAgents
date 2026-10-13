@@ -1,15 +1,16 @@
 """The ``status`` reading model: what it reads, how the document is shaped, what it must not carry.
 
-Dashboard plan PR 2a. The document's field paths are pinned here against
-``SCHEMA_VERSION``; the plan's security rules (§4) are pinned as tests: no
-field named like a secret, no 32-byte hex value, nothing from the run's
-config.
+The document's field paths are pinned here against ``SCHEMA_VERSION``; the
+plan's security rules (§4) are pinned as tests: no field named like a secret,
+no 32-byte hex value, nothing from the run's config, a quoted address or key
+masked wherever free text is read.
 """
 
 from __future__ import annotations
 
 import json
 import re
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -19,17 +20,25 @@ from contrib.hyperliquid_perp.paper import accounting as paper_accounting
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.ids import decision_attempt_id
+from contrib.hyperliquid_perp.persistence.models import PositionState
 from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION as STORE_SCHEMA_VERSION
 from contrib.hyperliquid_perp.runtime import accounting
 from contrib.hyperliquid_perp.status import (
     SCHEMA_VERSION,
+    SOURCE,
+    TEXT_LIMIT,
     Breadcrumb,
     read_status,
     status_json,
     status_lines,
 )
 
-from .conftest import insert_decision_attempts, insert_minimal_account_snapshot
+from .conftest import (
+    insert_decision_attempts,
+    insert_minimal_account_snapshot,
+    insert_minimal_ai_output,
+    insert_minimal_fill,
+)
 
 D = Decimal
 _T0 = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
@@ -37,6 +46,7 @@ _NOW = datetime(2026, 7, 7, 0, 0, tzinfo=timezone.utc)
 # Synthetic credential shapes the staged config carries and the document must not.
 _AGENT_KEY = "0x" + "ab" * 32
 _WALLET = "0x" + "12" * 20
+_ZERO_COUNTS = {"in_progress": 0, "completed": 0, "api_failed": 0, "invalid_output": 0}
 
 
 def _now() -> datetime:
@@ -67,11 +77,11 @@ def db():
 
 
 def _stage_a_busy_run(db: Database) -> None:
-    """Three cycles (the newest failed), one fill, a snapshot, protection, events, breadcrumbs."""
+    """Three cycles (long, maintain, then a retried failure), a fill, two snapshots, protection, events, breadcrumbs."""
     insert_decision_attempts(
         db, ["completed", "completed", ("api_failed", "rate_limit")], start=_T0
     )
-    first = decision_attempt_id("r", _at(0))
+    first, second, third = (decision_attempt_id("r", _at(h)) for h in (0, 4, 8))
     paper_accounting.post_fill(
         db,
         run_id="r",
@@ -87,22 +97,11 @@ def _stage_a_busy_run(db: Database) -> None:
         fill_reason="entry",
     )
     with db.transaction() as conn:
-        conn.execute(
-            "UPDATE decision_attempts SET output_id = ? WHERE decision_attempt_id = ?",
-            ("r|out|1", first),
-        )
-        conn.execute(
-            "UPDATE decision_attempts SET error_message = ? WHERE decision_attempt_id = ?",
-            ("429 from the gateway\nafter 3 tries", decision_attempt_id("r", _at(8))),
-        )
-        repo.insert_ai_output(
+        insert_minimal_ai_output(
             conn,
-            output_id="r|out|1",
-            timestamp=_at(0),
-            mode="paper",
             run_id="r",
-            decision_attempt_id=first,
-            symbol="BTC",
+            attempt_id=first,
+            timestamp=_at(0),
             decision_mode="set_target",
             target_side="long",
             requested_target_margin_pct=D(25),
@@ -113,7 +112,22 @@ def _stage_a_busy_run(db: Database) -> None:
             mark_price=D(50000),
             account_equity=D(1000),
             order_created=True,
+            no_order_reason=None,
             decision_reason="Momentum\tis  up.\n" + "x" * 200,
+        )
+        insert_minimal_ai_output(
+            conn, run_id="r", attempt_id=second, timestamp=_at(4), confidence=D("0.6")
+        )
+        conn.execute(
+            "UPDATE decision_attempts SET error_message = ?, attempt_count = 2"
+            " WHERE decision_attempt_id = ?",
+            ("429 from the gateway\nafter 3 tries", third),
+        )
+        # Distinct non-zero accumulators, so a swapped column shows.
+        conn.execute(
+            "UPDATE current_account_state SET realized_pnl = '7', net_funding_pnl = '-2'"
+            " WHERE run_id = ?",
+            ("r",),
         )
         repo.insert_ai_input(
             conn,
@@ -126,9 +140,12 @@ def _stage_a_busy_run(db: Database) -> None:
             prompt_version="v6",
         )
         insert_minimal_account_snapshot(
+            conn, run_id="r", timestamp=_at(1), account_equity=D(1001), unrealized_pnl=D(1)
+        )
+        insert_minimal_account_snapshot(
             conn,
             run_id="r",
-            timestamp=_at(1),
+            timestamp=_at(2),
             wallet_balance=D("999.95"),
             account_equity=D("1004.95"),
             available_balance=D("504.95"),
@@ -144,12 +161,13 @@ def _stage_a_busy_run(db: Database) -> None:
         repo.set_position_protection(
             conn, "r", "BTC", stop_loss_price=D(48000), take_profit_price=D(55000)
         )
+        repo.set_position_liquidation_price(conn, "r", "BTC", D(30000))
         repo.upsert_scheduler_state(
             conn,
             "r",
             last_decision_at=_at(8),
             next_decision_at=_at(12),
-            current_attempt_id=None,
+            current_attempt_id=third,
             lock_heartbeat_at=_at(9),
             last_export_status="ok",
             last_export_at=_at(8),
@@ -188,14 +206,16 @@ def _read(db: Database, **kwargs):
 def test_a_fresh_run_reads_as_empty_but_present(db):
     status = _read(db)
     assert (status.run_id, status.mode, status.created_at) == ("r", "paper", _T0.isoformat())
+    assert status.source == SOURCE == "hyperliquid_perp"
     assert status.initial_balance_usdc == D(1000)
     assert status.store_schema_version == STORE_SCHEMA_VERSION
     assert status.generated_at == _NOW.isoformat()
     assert status.scheduler is None and status.safe_mode is None
-    assert (status.cycles.total, status.cycles.by_status, status.cycles.recent) == (0, {}, ())
+    assert (status.cycles.total, status.cycles.recent) == (0, ())
+    assert status.cycles.by_status == _ZERO_COUNTS
     assert status.models == ()
     assert status.account.ledger.wallet_balance == D(1000)
-    assert status.account.snapshot is None
+    assert status.account.snapshot is None and status.account.recent_snapshots == ()
     assert status.positions == status.recent_fills == ()
     assert status.kill_switch_events == status.safe_mode_events == ()
 
@@ -204,30 +224,80 @@ def test_a_busy_run_reads_every_part_from_the_store(db):
     _stage_a_busy_run(db)
     status = _read(db)
     assert status.cycles.total == 3
-    assert status.cycles.by_status == {"api_failed": 1, "completed": 2}
-    newest, _, oldest = status.cycles.recent
+    assert status.cycles.by_status == {**_ZERO_COUNTS, "completed": 2, "api_failed": 1}
+    newest, middle, oldest = status.cycles.recent
     assert (newest.status, newest.error_type, newest.verdict) == ("api_failed", "rate_limit", None)
-    assert newest.error_message == "429 from the gateway\nafter 3 tries"
+    assert (newest.error_message, newest.attempt_count) == (
+        "429 from the gateway\nafter 3 tries",
+        2,
+    )
+    assert (middle.status, middle.verdict.decision_mode, middle.verdict.order_created) == (
+        "completed",
+        "maintain_current",
+        False,
+    )
+    assert middle.verdict.no_order_reason == "maintain_current"
     assert oldest.verdict.target_side == "long"
     assert oldest.verdict.approved_target_margin_pct == D(20)
     assert oldest.verdict.order_created is True
     assert oldest.verdict.decision_reason.startswith("Momentum\tis  up.\n")
     assert [(m.model, m.prompt_version, m.prompts) for m in status.models] == [("deep-a", "v6", 1)]
-    assert status.scheduler.lease_heartbeat_at == _at(9).isoformat()
-    assert status.scheduler.export == Breadcrumb("ok", _at(8).isoformat(), None)
-    assert status.scheduler.replay == Breadcrumb("failed", _at(8).isoformat(), "books unverifiable")
-    assert status.scheduler.config_drift == Breadcrumb(None, None, None)
-    assert (status.safe_mode.type, status.safe_mode.reason) == ("recoverable", "ws_disconnect")
-    assert status.account.ledger.total_fees == D("0.05")
-    assert status.account.snapshot.account_equity == D("1004.95")
-    assert status.account.snapshot.margin_ratio == D(40)
+    scheduler = status.scheduler
+    assert (scheduler.last_decision_at, scheduler.next_decision_at) == (
+        _at(8).isoformat(),
+        _at(12).isoformat(),
+    )
+    assert scheduler.in_progress_attempt_id == decision_attempt_id("r", _at(8))
+    assert (scheduler.lease_heartbeat_at, scheduler.updated_at) == (
+        _at(9).isoformat(),
+        _at(9).isoformat(),
+    )
+    assert scheduler.export == Breadcrumb("ok", _at(8).isoformat(), None)
+    assert scheduler.replay == Breadcrumb("failed", _at(8).isoformat(), "books unverifiable")
+    assert scheduler.config_drift == Breadcrumb(None, None, None)
+    assert (status.safe_mode.type, status.safe_mode.reason, status.safe_mode.entered_at) == (
+        "recoverable",
+        "ws_disconnect",
+        _at(9).isoformat(),
+    )
+    ledger = status.account.ledger
+    assert (
+        ledger.wallet_balance,
+        ledger.realized_pnl,
+        ledger.total_fees,
+        ledger.net_funding_pnl,
+    ) == (
+        D("999.95"),
+        D(7),
+        D("0.05"),
+        D(-2),
+    )
+    snapshot = status.account.snapshot
+    assert asdict(snapshot) == {
+        "timestamp": _at(2).isoformat(),
+        "account_equity": D("1004.95"),
+        "available_balance": D("504.95"),
+        "unrealized_pnl": D(5),
+        "total_pnl": D("4.95"),
+        "total_position_notional": D(505),
+        "effective_leverage": D("0.5"),
+        "margin_ratio": D(40),
+    }
+    assert [s.timestamp for s in status.account.recent_snapshots] == [
+        _at(2).isoformat(),
+        _at(1).isoformat(),
+    ]
+    assert status.account.recent_snapshots[0] == snapshot
     (position,) = status.positions
     assert (position.size, position.entry_price, position.stop_loss_price) == (
         D("0.01"),
         D(50000),
         D(48000),
     )
-    assert position.exchange_liquidation_price is None
+    assert (position.take_profit_price, position.exchange_liquidation_price) == (
+        D(55000),
+        D(30000),
+    )
     (fill,) = status.recent_fills
     assert (fill.side, fill.fill_qty, fill.fill_reason) == ("buy", D("0.01"), "entry")
     (kill,) = status.kill_switch_events
@@ -244,17 +314,86 @@ def test_a_busy_run_reads_every_part_from_the_store(db):
     )
 
 
-def test_recent_caps_the_cycles_fills_and_events_but_not_the_counts(db):
+def test_a_scheduled_run_in_no_safe_mode_reads_none(db):
+    with db.transaction() as conn:
+        repo.upsert_scheduler_state(conn, "r", next_decision_at=_at(4), updated_at=_at(1))
+    status = _read(db)
+    assert status.scheduler.next_decision_at == _at(4).isoformat()
+    assert status.safe_mode is None
+    assert "safe_mode: none" in status_lines(status)
+    assert json.loads(status_json(status))["safe_mode"] is None
+
+
+def test_recent_caps_every_tail_but_not_the_counts(db):
     _stage_a_busy_run(db)
-    status = _read(db, recent=1)
-    assert len(status.cycles.recent) == 1 and status.cycles.total == 3
+    with db.transaction() as conn:
+        for i in range(3):
+            insert_minimal_fill(
+                conn, run_id="r", fill_id=f"r|f|{i + 1}", timestamp=_at(10 + i), price=50000
+            )
+            insert_minimal_account_snapshot(conn, run_id="r", timestamp=_at(10 + i))
+            repo.insert_kill_switch_event(
+                conn, run_id="r", event_type="kill_switch_refreshed", timestamp=_at(10 + i)
+            )
+            repo.insert_safe_mode_event(
+                conn,
+                run_id="r",
+                event_type="safe_mode_reason_added",
+                safe_mode_type="recoverable",
+                reason=f"reason {i}",
+                timestamp=_at(10 + i),
+            )
+    status = _read(db, recent=2)
+    assert len(status.cycles.recent) == 2 and status.cycles.total == 3
     assert status.cycles.recent[0].status == "api_failed"
-    assert _read(db, recent=0).cycles.recent == ()
+    assert len(status.account.recent_snapshots) == 2
+    assert len(status.recent_fills) == 2
+    assert len(status.kill_switch_events) == len(status.safe_mode_events) == 2
+    assert status.account.snapshot.timestamp == _at(12).isoformat()
+    empty = _read(db, recent=0)
+    assert empty.cycles.recent == empty.recent_fills == empty.account.recent_snapshots == ()
+    assert empty.account.snapshot is not None  # the latest is not a tail
 
 
 def test_an_unknown_run_is_refused(db):
     with db.read_transaction() as conn, pytest.raises(ValueError, match="'ghost' does not exist"):
         read_status(conn, "ghost", now=_now)
+
+
+@pytest.mark.parametrize(
+    ("damage", "said"),
+    [
+        ("DELETE FROM current_account_state WHERE run_id = 'r'", "no account state"),
+        ("UPDATE current_positions SET entry_price = NULL WHERE run_id = 'r'", "entry_price"),
+        ("UPDATE current_positions SET size = '0' WHERE run_id = 'r'", "entry_price"),
+        (
+            "UPDATE decision_attempts SET output_id = NULL WHERE run_id = 'r' AND status = 'completed'",
+            "no ai_outputs row",
+        ),
+        (
+            "UPDATE decision_attempts SET output_id = (SELECT output_id FROM ai_outputs LIMIT 1)"
+            " WHERE run_id = 'r' AND status = 'api_failed'",
+            "has an ai_outputs row",
+        ),
+        ("UPDATE scheduler_state SET safe_mode_reason = NULL WHERE run_id = 'r'", "safe mode"),
+    ],
+)
+def test_an_impossible_state_is_refused_not_defaulted(db, damage, said):
+    # Each is a state no writer produces; a status that showed it as a quiet
+    # value would hide a damaged store behind a healthy-looking page.
+    _stage_a_busy_run(db)
+    with db.transaction() as conn:
+        conn.execute(damage)
+    with pytest.raises(ValueError, match=said):
+        _read(db)
+
+
+def test_the_clock_must_be_aware_and_is_spelled_in_utc(db):
+    with db.read_transaction() as conn:
+        with pytest.raises(ValueError, match="aware"):
+            read_status(conn, "r", now=lambda: datetime(2026, 7, 7))
+        tokyo = datetime(2026, 7, 7, 9, tzinfo=timezone(timedelta(hours=9)))
+        assert read_status(conn, "r", now=lambda: tokyo).generated_at == _NOW.isoformat()
 
 
 # --- the document -------------------------------------------------------------
@@ -276,11 +415,23 @@ def _paths(document) -> set[str]:
     return {path for path, _ in _nodes(document) if not path.endswith("[]")}
 
 
+_SNAPSHOT_FIELDS = (
+    "timestamp",
+    "account_equity",
+    "available_balance",
+    "unrealized_pnl",
+    "total_pnl",
+    "total_position_notional",
+    "effective_leverage",
+    "margin_ratio",
+)
+
 # The document's shape at SCHEMA_VERSION 1. A path added, removed or moved
 # changes this set; change it together with ``status.SCHEMA_VERSION``, and the
 # exporter and the page that read the document with it.
 _SCHEMA_1_PATHS = {
     "schema_version",
+    "source",
     "generated_at",
     "run_id",
     "mode",
@@ -312,8 +463,10 @@ _SCHEMA_1_PATHS = {
     "cycles",
     "cycles.total",
     "cycles.by_status",
-    "cycles.by_status.api_failed",
+    "cycles.by_status.in_progress",
     "cycles.by_status.completed",
+    "cycles.by_status.api_failed",
+    "cycles.by_status.invalid_output",
     "cycles.recent",
     "cycles.recent[].scheduled_at",
     "cycles.recent[].timestamp",
@@ -349,14 +502,9 @@ _SCHEMA_1_PATHS = {
     "account.ledger.total_fees",
     "account.ledger.net_funding_pnl",
     "account.snapshot",
-    "account.snapshot.timestamp",
-    "account.snapshot.account_equity",
-    "account.snapshot.available_balance",
-    "account.snapshot.unrealized_pnl",
-    "account.snapshot.total_pnl",
-    "account.snapshot.total_position_notional",
-    "account.snapshot.effective_leverage",
-    "account.snapshot.margin_ratio",
+    *(f"account.snapshot.{field}" for field in _SNAPSHOT_FIELDS),
+    "account.recent_snapshots",
+    *(f"account.recent_snapshots[].{field}" for field in _SNAPSHOT_FIELDS),
     "positions",
     "positions[].symbol",
     "positions[].size",
@@ -396,23 +544,38 @@ def test_the_document_has_exactly_the_schema_1_paths(db):
     document = json.loads(status_json(_read(db)))
     assert SCHEMA_VERSION == 1
     assert document["schema_version"] == SCHEMA_VERSION
-    assert list(document)[:2] == ["schema_version", "generated_at"]
+    assert list(document)[:3] == ["schema_version", "source", "generated_at"]
     assert _paths(document) == _SCHEMA_1_PATHS
 
 
-def test_the_document_keeps_decimals_exact_and_free_text_whole(db):
+def test_the_document_keeps_decimals_exact_and_free_text_up_to_the_limit(db):
     _stage_a_busy_run(db)
     status = _read(db)
     document = json.loads(status_json(status))
     assert document["initial_balance_usdc"] == "1000"
     assert document["account"]["snapshot"]["account_equity"] == "1004.95"
+    assert document["account"]["recent_snapshots"][1]["account_equity"] == "1001"
+    assert document["cycles"]["by_status"] == {**_ZERO_COUNTS, "completed": 2, "api_failed": 1}
     assert document["cycles"]["recent"][2]["verdict"]["approved_target_margin_pct"] == "20"
     assert document["cycles"]["recent"][2]["verdict"]["order_created"] is True
     assert document["cycles"]["recent"][2]["verdict"]["decision_reason"] == (
         "Momentum\tis  up.\n" + "x" * 200
     )
     assert document["cycles"]["recent"][0]["error_message"] == "429 from the gateway\nafter 3 tries"
-    assert document["positions"][0]["exchange_liquidation_price"] is None
+    assert document["positions"][0]["exchange_liquidation_price"] == "30000"
+
+
+def test_free_text_is_cut_at_the_limit_in_the_model_and_the_document(db):
+    _stage_a_busy_run(db)
+    with db.transaction() as conn:
+        conn.execute(
+            "UPDATE ai_outputs SET decision_reason = ? WHERE run_id = ?", ("y" * 1500, "r")
+        )
+    status = _read(db)
+    reason = status.cycles.recent[2].verdict.decision_reason
+    assert len(reason) == TEXT_LIMIT == 1000 and reason.endswith("yyy...")
+    document = json.loads(status_json(status))
+    assert document["cycles"]["recent"][2]["verdict"]["decision_reason"] == reason
 
 
 def test_the_document_and_the_lines_are_ascii_whatever_the_model_wrote(db):
@@ -421,54 +584,55 @@ def test_the_document_and_the_lines_are_ascii_whatever_the_model_wrote(db):
     _stage_a_busy_run(db)
     with db.transaction() as conn:
         conn.execute(
-            "UPDATE ai_outputs SET decision_reason = ? WHERE run_id = ?",
-            ("Range \u2014 caf\u00e9", "r"),
+            "UPDATE ai_outputs SET decision_reason = ? WHERE output_id = ?",
+            ("Range — café", f"{decision_attempt_id('r', _at(0))}#out1"),
         )
     status = _read(db)
     text = status_json(status)
     assert text.isascii() and "Range \\u2014 caf\\u00e9" in text
-    assert json.loads(text)["cycles"]["recent"][2]["verdict"]["decision_reason"] == (
-        "Range \u2014 caf\u00e9"
-    )
+    assert json.loads(text)["cycles"]["recent"][2]["verdict"]["decision_reason"] == ("Range — café")
     (line,) = [line for line in status_lines(status) if "| Range" in line]
     assert line.isascii() and line.endswith("| Range \\u2014 caf\\xe9")
 
 
 _SECRET_FIELD = re.compile(r"key|secret|password|mnemonic|address", re.IGNORECASE)
 _HEX_32_BYTES = re.compile(r"0x[0-9a-fA-F]{64}")
+# Every column the readers expose that a person, a model or an exchange wrote.
+_FREE_TEXT_COLUMNS = (
+    ("decision_attempts", "error_message"),
+    ("ai_outputs", "decision_reason"),
+    ("ai_outputs", "risk_reason"),
+    ("ai_outputs", "no_order_reason"),
+    ("fills", "fill_reason"),
+    ("kill_switch_events", "detail"),
+    ("kill_switch_events", "error_message"),
+    ("safe_mode_events", "reason"),
+    ("safe_mode_events", "detail"),
+    ("scheduler_state", "safe_mode_reason"),
+    ("scheduler_state", "last_export_error"),
+    ("scheduler_state", "last_replay_error"),
+    ("scheduler_state", "last_config_drift_error"),
+)
 
 
-def test_free_text_masks_a_quoted_address_or_key_everywhere_it_is_read(db):
+def test_free_text_masks_a_quoted_address_or_key_wherever_it_is_read(db):
     # An exchange refusal quotes the wallet it refused, and a traceback can
-    # quote a key; the store keeps the text, the status folds the hex.
+    # quote a key; the store keeps the text, the status folds the hex — in
+    # every free-text column, not a hand-picked few.
     _stage_a_busy_run(db)
     quoted = f"User or API Wallet {_WALLET} does not exist (key {_AGENT_KEY})"
     with db.transaction() as conn:
-        conn.execute(
-            "UPDATE decision_attempts SET error_message = ? WHERE run_id = ? AND status = ?",
-            (quoted, "r", "api_failed"),
-        )
-        conn.execute("UPDATE ai_outputs SET decision_reason = ? WHERE run_id = ?", (quoted, "r"))
-        conn.execute(
-            "UPDATE kill_switch_events SET error_message = ? WHERE run_id = ?", (quoted, "r")
-        )
-        conn.execute("UPDATE safe_mode_events SET detail = ? WHERE run_id = ?", (quoted, "r"))
-        repo.upsert_scheduler_state(
-            conn,
-            "r",
-            safe_mode_type="recoverable",
-            safe_mode_reason=quoted,
-            safe_mode_entered_at=_at(9),
-            last_replay_error=quoted,
-        )
+        for table, column in _FREE_TEXT_COLUMNS:
+            conn.execute(f"UPDATE {table} SET {column} = ? WHERE run_id = ?", (quoted, "r"))
     status = _read(db)
     masked = "User or API Wallet 0x1212...1212 does not exist (key 0xabab...abab)"
     assert status.cycles.recent[0].error_message == masked
     assert status.cycles.recent[2].verdict.decision_reason == masked
-    assert status.kill_switch_events[0].error_message == masked
-    assert status.safe_mode_events[0].detail == masked
     assert status.safe_mode.reason == masked
     assert status.scheduler.replay.error == masked
+    strings = [value for _, value in _nodes(asdict(status)) if isinstance(value, str)]
+    assert masked in strings
+    assert not [value for value in strings if _WALLET in value or _AGENT_KEY in value]
     assert not [line for line in status_lines(status) if _WALLET in line or _AGENT_KEY in line]
 
 
@@ -494,20 +658,34 @@ def test_the_lines_say_every_part_in_one_line_each(db):
     lines = status_lines(_read(db))
     text = "\n".join(lines)
     assert lines[0] == "run_id: r"
-    assert "cycles: 3 (api_failed 1, completed 2)" in lines
+    assert f"last_decision_at: {_at(8).isoformat()}" in lines
+    assert f"next_decision_at: {_at(12).isoformat()}" in lines
+    assert f"in_progress_attempt: {decision_attempt_id('r', _at(8))}" in lines
+    assert f"lease_heartbeat_at: {_at(9).isoformat()}" in lines
+    assert "cycles: 3 (in_progress 0, completed 2, api_failed 1, invalid_output 0)" in lines
     assert f"model: deep-a prompt_version=v6 prompts=1 first={_at(0).isoformat()}" in text
     assert f"replay: failed at {_at(8).isoformat()} (books unverifiable)" in lines
     assert "config_drift: n/a" in lines
     assert f"safe_mode: recoverable since {_at(9).isoformat()} (ws_disconnect)" in lines
     # Amounts print as the store keeps them, exact and unrounded.
-    assert "ledger: wallet 999.950000 realized 0 fees 0.050000 funding 0" in lines
+    assert "ledger: wallet 999.950000 realized 7 fees 0.050000 funding -2" in lines
+    assert (
+        f"snapshot: at {_at(2).isoformat()} equity 1004.95 available 504.95 unrealized 5 "
+        "total_pnl 4.95 notional 505 leverage 0.5 margin_ratio 40"
+    ) in lines
     (position,) = [line for line in lines if line.startswith("position:")]
     assert position.startswith(
-        "position: BTC long 0.01 entry 50000 realized 0 sl 48000 tp 55000 liq n/a"
+        "position: BTC long 0.01 entry 50000 realized 0 sl 48000 tp 55000 liq 30000"
     )
     index = lines.index("recent cycles (3, newest first):")
-    assert lines[index + 1].startswith(f"  {_at(8).isoformat()}  api_failed  rate_limit  429 from")
+    assert lines[index + 1].startswith(
+        f"  {_at(8).isoformat()}  api_failed (try 2)  rate_limit  429 from"
+    )
     assert "429 from the gateway after 3 tries" in lines[index + 1]
+    assert lines[index + 2].endswith(
+        "BTC maintain_current  requested n/a% approved n/a%  conf 0.6  approved  "
+        "no order (maintain_current)"
+    )
     oldest = lines[index + 3]
     assert (
         "BTC long  requested 25% approved 20%  conf 0.7  clamped (max_target_margin_pct)  order"
@@ -516,6 +694,9 @@ def test_the_lines_say_every_part_in_one_line_each(db):
     # The reason is one line, cut short with a marker.
     assert "| Momentum is up. xxx" in oldest and oldest.endswith("...")
     assert "\n" not in oldest and "\t" not in oldest
+    index = lines.index("recent snapshots (2, newest first):")
+    assert lines[index + 1].startswith(f"  {_at(2).isoformat()}  equity 1004.95 available 504.95")
+    assert lines[index + 2].startswith(f"  {_at(1).isoformat()}  equity 1001 available 1000")
     assert (
         f"  {_at(0).isoformat()}  BTC buy 0.01 @ 50000  fee 0.050000  realized 0  simulated  (entry)"
         in lines
@@ -527,19 +708,33 @@ def test_the_lines_say_every_part_in_one_line_each(db):
     )
 
 
+def test_the_lines_show_a_short_and_a_flat_position_as_such(db):
+    with db.transaction() as conn:
+        repo.upsert_current_position(
+            conn, "r", PositionState(coin="ETH", size=D("-0.02"), entry_price=D(3000))
+        )
+        repo.upsert_current_position(conn, "r", PositionState.flat("SOL", realized_pnl=D(3)))
+    lines = [line for line in status_lines(_read(db)) if line.startswith("position:")]
+    assert lines[0].startswith(
+        "position: ETH short 0.02 entry 3000 realized 0 sl n/a tp n/a liq n/a"
+    )
+    assert lines[1].startswith("position: SOL flat realized 3 sl n/a tp n/a liq n/a")
+
+
 def test_the_lines_of_a_fresh_run_say_none_rather_than_nothing(db):
     lines = status_lines(_read(db))
     for expected in (
         "scheduler: none (no cycle scheduled yet)",
         "safe_mode: none",
-        "cycles: 0 (none)",
+        "cycles: 0 (in_progress 0, completed 0, api_failed 0, invalid_output 0)",
         "model: none (no prompt built yet)",
+        "ledger: wallet 1000 realized 0 fees 0 funding 0",
         "snapshot: none",
         "position: none",
         "recent cycles: none",
+        "recent snapshots: none",
         "recent fills: none",
         "kill_switch_events: none",
         "safe_mode_events: none",
     ):
         assert expected in lines
-

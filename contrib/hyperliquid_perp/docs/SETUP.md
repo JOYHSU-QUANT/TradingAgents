@@ -195,6 +195,12 @@ python -m contrib.hyperliquid_perp export --run-id paper-BTC --output-dir export
 
 # 驗收器：13 項 summary 指標 + 鏈路完整性 + 可進 Phase 3 判定
 python -m contrib.hyperliquid_perp validate --run-id paper-BTC
+
+# 現況一眼看：scheduler 列與麵包屑、cycles 計數＋最近幾筆判決、模型分桶、ledger 與最近幾筆
+# snapshot、倉位（含 SL/TP）、最近幾筆 fills、kill switch／safe mode 事件尾段；
+# --run-id 省略＝scheduler_state 最新的 run，--json 印一份給機器讀的文件，--recent N 調尾段長度；
+# 只讀、不取 lease、daemon 不用停
+python -m contrib.hyperliquid_perp status --db paper_trading.db --run-id paper-BTC
 ```
 
 `paper` 每個 cycle 完成（含 `invalid_output`／`api_failed`）會先跑 accounting
@@ -252,7 +258,11 @@ replay／snapshot 重算 raise、甚至檔案根本不是 SQLite，都算「先�
 `1` = 操作錯誤（db／run 不存在，以及其他幾種 `--db` 打錯法——指到別人的資料庫、
 目錄、不是普通檔案的東西、或一個打不開來讀的檔；各列見 RUNBOOK-live §8）。
 `cycle_count` 只計 `completed`／`invalid_output`
-（`api_failed` 另計為 `api_failed_count`，不算進 30 輪門檻）。報告另有不影響
+（`api_failed` 另計為 `api_failed_count`，不算進 30 輪門檻）。
+`status` 的 exit code：`0` = 印出；`1` = store／run 不存在、schema 版本本 build 不開、
+或省略 `--run-id` 而 store 裡沒有任何 scheduler 列；`5` = 檔案開不成資料庫或內容讀不了
+（損壞檔、不可能的狀態——沒 ledger 列、flat 卻有 entry、completed 卻無判決——同 `validate`
+的「先調查再相信」）；`2` = 其他。報告另有不影響
 exit code 的 `warning:` 行——settlement 過後 6 小時仍 pending 的 funding event
 （其 P&L 依 never-fabricate 恆不入帳，總額因此偏少）、`funding_timestamp` 解不開的
 pending event（壞掉的列，要修 store）、**上次 backfill 真的試過而且失敗的 pending

@@ -130,7 +130,7 @@ import argparse
 import sys
 import time as _time
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -140,16 +140,15 @@ from typing import TYPE_CHECKING, Final
 from .agent.errors import AgentError, BarNotStored, JudgeUnavailable
 from .chain.errors import ChainError, RpcRejected, TransientChainError
 from .config import ConfigError, UniswapConfig, config_from_snapshot, load_config
-from .constants import WRAPPED_NATIVE, pool_key
 from .domain.bars import Finality
-from .domain.decimal_context import fixed_text, parse_decimal, plain, price_text
+from .domain.decimal_context import fixed_text, parse_decimal, plain
 from .domain.execution import ForkSettings
 from .domain.ledger import Ledger
-from .domain.metrics import Curve, MetricsError, RunMetrics, measurable, run_metrics
-from .domain.records import Decision, FillRecord, Outcome, RunRecord, Valuation
+from .domain.metrics import Curve, MetricsError
+from .domain.records import Outcome
 from .domain.targets import Target, TargetRecord
+from .domain.text import counts, one_ascii_line
 from .domain.times import utc_text
-from .domain.types import RunMode
 from .domain.verdicts import RATINGS, Rating, bytes_digest
 from .engine.backtest import BacktestRangeError, BacktestSummary, run_backtest
 from .engine.executors import QuoteExecutor
@@ -161,10 +160,18 @@ from .handoff import (
     read_handoff,
     target_from_document,
 )
-from .store.bar_source import load_bar
+from .status import (
+    decided_span,
+    measured,
+    outcome_counts,
+    read_status,
+    run_header,
+    status_json,
+    status_lines,
+    stored_run,
+    verdicts_seen,
+)
 from .store.repository import Store, StoreBusy, StoreError, open_store
-from .store.target_source import load_targets
-from .store.verdict_source import load_verdicts
 
 if TYPE_CHECKING:
     from .agent.graph import Judge
@@ -246,18 +253,6 @@ _iso = utc_text
 _fixed = fixed_text
 
 
-def _one_ascii_line(text: object) -> str:
-    """``text`` as one printable line.
-
-    A line that quotes what a node said need not be ASCII, which a console
-    may be unable to print; a line break in it would read as a second line,
-    and a control character could do anything to a terminal.
-    """
-    line = " ".join(str(text).split())
-    printable = "".join(char if char.isprintable() else "?" for char in line)
-    return printable.encode("ascii", "backslashreplace").decode()
-
-
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m contrib.uniswap_v3", description="Uniswap v3 spot execution."
@@ -304,6 +299,11 @@ def _parser() -> argparse.ArgumentParser:
         "--run-id",
         type=_run_id,
         help="also print this run's holdings, value, return and latest decisions",
+    )
+    status.add_argument(
+        "--json",
+        action="store_true",
+        help="print the same as one JSON document (schema_version and source first)",
     )
 
     def add_run(command: argparse.ArgumentParser) -> None:
@@ -472,7 +472,7 @@ def _backfill(args: argparse.Namespace, out: Callable[[str], None], now: Callabl
             config,
             start=args.start,
             end=end,
-            report=lambda time, text: out(f"{_iso(time)}  {_one_ascii_line(text)}"),
+            report=lambda time, text: out(f"{_iso(time)}  {one_ascii_line(text)}"),
         )
     out(
         f"wrote {summary.written} bar(s); {summary.already_stored} already stored, "
@@ -497,270 +497,15 @@ def _backfill(args: argparse.Namespace, out: Callable[[str], None], now: Callabl
     return EXIT_OK
 
 
-def _coverage_lines(store: Store, config: UniswapConfig, times: Sequence[int]) -> list[str]:
-    """How many of the bars at ``times`` have a verdict, and a target, from the config's sources for every token, and how many each token has.
-
-    One line per source the config reads. ``times`` are the boundaries that
-    make a bar: one that lacks a pool's reading is never decided, so a
-    verdict or a target missing there is nothing missing.
-    """
-    lines = []
-    for settings, load, what in (
-        (config.verdicts, load_verdicts, "verdicts"),
-        (config.targets, load_targets, "targets"),
-    ):
-        if settings is None:
-            continue
-        per_token = dict.fromkeys(sorted(config.traded_symbols), 0)
-        complete = 0
-        for time in times:
-            # Already cut to the traded tokens, so every one is a token counted here.
-            said = load(store, config, time)
-            for symbol in said:
-                per_token[symbol] += 1
-            complete += len(said) == len(per_token)
-        counts = ", ".join(f"{symbol} {count}" for symbol, count in per_token.items())
-        lines.append(
-            f"{what} from {settings.source}: {complete} of the latest {len(times)} bar(s) have "
-            f"one for every token ({counts})"
-        )
-    return lines
-
-
-def _status_lines(store: Store, config: UniswapConfig, bars: int) -> list[str]:
-    interval = config.bars.interval_seconds
-    lines = [f"chain {config.chain_id}, {interval}-second bars, prices in {config.quote.symbol}"]
-    times: set[int] = set()
-    for pool in config.pools:
-        count, first, last = store.extent(config.chain_id, pool.address, interval)
-        span = "" if first is None or last is None else f", {_iso(first)} to {_iso(last)}"
-        lines.append(f"{pool_key(pool)}: {count} reading(s){span}")
-        times.update(store.latest_times(config.chain_id, pool.address, interval, bars))
-    with_bar: list[int] = []
-    for time in sorted(times)[-bars:]:
-        stored = load_bar(store, config, time)
-        if stored is None:
-            lines.append(f"{_iso(time)}  incomplete: a configured pool has no reading")
-            continue
-        with_bar.append(time)
-        prices = "  ".join(
-            f"{symbol} {price_text(price)}" for symbol, price in sorted(stored.bar.prices.items())
-        )
-        flags = [
-            f"{pool_key(pool)}:{flag.value}"
-            for pool, found in zip(config.pools, stored.flags, strict=True)
-            for flag in sorted(found, key=lambda flag: flag.value)
-        ]
-        lines.append(
-            f"{_iso(time)}  block {stored.bar.close_block}  {prices}  {stored.finality.value}  "
-            f"{'suspect' if stored.bar.suspect else 'ok'}  flags: {', '.join(flags) or 'none'}"
-        )
-    return lines + _coverage_lines(store, config, with_bar)
-
-
-def _after(seconds: int) -> str:
-    """A span of seconds as ``[-][<days>d ]HH:MM:SS``."""
-    sign = "-" if seconds < 0 else ""
-    days, rest = divmod(abs(seconds), 86_400)
-    hours, rest = divmod(rest, 3_600)
-    minutes, rest = divmod(rest, 60)
-    clock = f"{hours:02}:{minutes:02}:{rest:02}"
-    return f"{sign}{days}d {clock}" if days else f"{sign}{clock}"
-
-
-def _measured(
-    run: RunRecord,
-    config: UniswapConfig,
-    decisions: Sequence[Decision],
-    valuations: Sequence[Valuation],
-    fills: Sequence[FillRecord],
-) -> tuple[list[Valuation], RunMetrics]:
-    """The valuations a run is measured on, and the run, started under ``config``, measured on them.
-
-    As ``report`` measures it.
-    """
-    measured = measurable(decisions, valuations)
-    metrics = run_metrics(
-        quote=run.quote,
-        gas_token=WRAPPED_NATIVE[config.chain_id].symbol,
-        opening=run.ledger,
-        valuations=measured,
-        fills=fills,
-        fee_rates={pool.address: pool.fee_rate for pool in config.pools},
-    )
-    return measured, metrics
-
-
-def _stored_run(store: Store, run_id: str) -> RunRecord:
-    run = store.run(run_id)
-    if run is None:
-        raise StoreError(f"there is no run {run_id!r} in the store")
-    return run
-
-
-def _run_header(run: RunRecord) -> str:
-    forked = (
-        ""
-        if run.fork_block is None
-        else f" (the fork was at block {run.fork_block} when it started)"
-    )
-    return (
-        f"run {_one_ascii_line(run.run_id)}: {run.mode.value}{forked}, fills from the "
-        f"{run.fills.value}, {_one_ascii_line(run.strategy)}, values in {run.quote}"
-    )
-
-
-def _decided_span(decisions: Sequence[Decision]) -> str:
-    return (
-        f"{len(decisions)} bar(s) decided from {_iso(decisions[0].time)} to "
-        f"{_iso(decisions[-1].time)}"
-    )
-
-
-def _saw(store: Store, config: UniswapConfig, decision: Decision) -> str:
-    """What the decision saw of each traded token's verdict, as ``<token>=<rating>``; nothing for a run that reads none.
-
-    The rating is read back from the store at the decision's bar and matched
-    by the digest the decision kept.
-    A token the decision saw no verdict on reads ``none``, and one whose
-    verdict the store now holds differently from what the decision saw, or
-    did not hold then, or does not hold now, reads ``changed``: the same
-    difference a replay warns of.
-    """
-    if decision.verdicts is None:
-        return ""
-    if config.verdicts is None:
-        raise StoreError(
-            f"the decision at {decision.time} saw verdicts, and the run's config reads none"
-        )
-    now = load_verdicts(store, config, decision.time)
-    seen = []
-    for symbol in sorted(config.traded_symbols):
-        kept, held = decision.verdicts.get(symbol), now.get(symbol)
-        if kept is None and held is None:
-            seen.append(f"{symbol}=none")
-        elif kept is not None and held is not None and held.digest == kept:
-            seen.append(f"{symbol}={held.rating.value}")
-        else:
-            seen.append(f"{symbol}=changed")
-    return f"  verdicts: {', '.join(seen)}"
-
-
-def _aimed(store: Store, config: UniswapConfig, decision: Decision) -> str:
-    """The targets the store holds NOW at the decision's bar, as ``<token>=<weight>``; nothing for a run that reads none.
-
-    "Now", not "saw": a decision keeps no target digest, so a target
-    written after the bar was decided reads the same as one it followed.
-    A token with no target reads ``none``.
-    """
-    if config.targets is None:
-        return ""
-    held = load_targets(store, config, decision.time)
-    now = [
-        f"{symbol}={plain(held[symbol].weight) if symbol in held else 'none'}"
-        for symbol in sorted(config.traded_symbols)
-    ]
-    return f"  targets now: {', '.join(now)}"
-
-
-def _why(decision: Decision) -> str:
-    """A rejected or a skipped decision's reason, as `` (<reason>)``; nothing for another."""
-    return "" if decision.reason is None else f" ({_one_ascii_line(decision.reason)})"
-
-
-def _behind(config: UniswapConfig, last: int, now: int) -> str:
-    """How far a paper run whose latest decided bar is at ``last`` is behind the clock at ``now``."""
-    interval = config.bars.interval_seconds
-    latest = now - now % interval
-    if latest < last:
-        return (
-            f"the clock is behind the run: it is at {_iso(now)}, and the run has decided the "
-            f"bar at {_iso(last)}"
-        )
-    if latest == last:
-        return "up to date: the latest boundary that has passed is decided"
-    return (
-        f"behind: {(latest - last) // interval} boundary(ies) after the last decided bar have "
-        f"passed undecided, the latest at {_iso(latest)}; a visit decides them, and the visit "
-        f"log says what stopped one"
-    )
-
-
-def _value_line(
-    run: RunRecord,
-    config: UniswapConfig,
-    decisions: Sequence[Decision],
-    valuations: Sequence[Valuation],
-    fills: Sequence[FillRecord],
-) -> str:
-    """The run's latest value, and its return as ``report`` measures it, or why it has none."""
-    value = f"value {_fixed(valuations[-1].total_value)} {run.quote}"
-    try:
-        measured, metrics = _measured(run, config, decisions, valuations, fills)
-    except MetricsError as exc:
-        return f"{value}; return not measured ({_one_ascii_line(exc)})"
-    change = _fixed(metrics.strategy.total_return * 100, signed=True)
-    return (
-        f"{value}; return {change}% from {_iso(measured[0].time)} to "
-        f"{_iso(measured[-1].time)}, after gas, as report measures it"
-    )
-
-
-def _run_status_lines(store: Store, run_id: str, latest: int, now: int) -> list[str]:
-    """A run's state at ``now``: its holdings, value and return, and its ``latest`` decisions.
-
-    A paper run is also said to be up to date with the clock, or behind it,
-    and its decisions to have been made so long after their boundaries.
-    """
-    run = _stored_run(store, run_id)
-    decisions = store.decisions(run_id)
-    lines = [f"{_run_header(run)}, started {_iso(run.created_at)}"]
-    if not decisions:
-        lines.append(f"no bar decided yet; opening balances {holdings_text(run.ledger)}")
-        return lines
-    valuations = store.valuations(run_id)
-    if not valuations or valuations[-1].time != decisions[-1].time:
-        raise StoreError(f"the decision of run {run_id!r} at {decisions[-1].time} has no valuation")
-    config = config_from_snapshot(run.config)
-    paper = run.mode is RunMode.PAPER
-    lines.append(
-        f"{_decided_span(decisions)}: "
-        + _outcome_counts(Counter(decision.outcome for decision in decisions))
-    )
-    if paper:
-        lines.append(_behind(config, decisions[-1].time, now))
-    last = valuations[-1]
-    lines.append(f"holdings after the bar at {_iso(last.time)}: {holdings_text(last.ledger)}")
-    lines.append(_value_line(run, config, decisions, valuations, store.fills(run_id)))
-    lines.append(f"latest {min(latest, len(decisions))} decision(s):")
-    for decision in decisions[-latest:]:
-        if decision.decided_at is None:
-            when = "decided at a time that was not kept"
-        elif paper:
-            # How late the visit came. A backtest decides its bars long after, by design.
-            when = (
-                f"decided {_iso(decision.decided_at)}, "
-                f"{_after(decision.decided_at - decision.time)} after the boundary"
-            )
-        else:
-            when = f"decided {_iso(decision.decided_at)}"
-        lines.append(
-            f"{_iso(decision.time)}  {decision.outcome.value}  {when}"
-            f"{_saw(store, config, decision)}"
-            f"{_aimed(store, config, decision)}"
-            f"{_why(decision)}"
-        )
-    return lines
-
-
 def _status(args: argparse.Namespace, out: Callable[[str], None], now: Callable[[], float]) -> int:
     config = _config(args)
     # One view for all the reads: a paper visit may be writing meanwhile.
     with open_store(args.db, create=False) as store, store.reading():
-        lines = _status_lines(store, config, args.bars)
-        if args.run_id is not None:
-            lines += _run_status_lines(store, args.run_id, args.bars, int(now()))
-    for line in lines:
+        status = read_status(store, config, bars=args.bars, run_id=args.run_id, now=now)
+    if args.json:
+        out(status_json(status))
+        return EXIT_OK
+    for line in status_lines(status):
         out(line)
     return EXIT_OK
 
@@ -787,15 +532,6 @@ def _opening(args: argparse.Namespace, config: UniswapConfig) -> Ledger | None:
         return Ledger(balances=balances, gas_eth=args.gas_eth)
     except ValueError as exc:
         raise ConfigError(f"the opening balances cannot be held ({exc})") from exc
-
-
-def _counts(counts: Mapping[str, int]) -> str:
-    return ", ".join(f"{name} {count}" for name, count in sorted(counts.items()))
-
-
-def _outcome_counts(counts: Mapping[Outcome, int]) -> str:
-    """Every outcome with its count, those that did not occur at zero."""
-    return _counts({outcome.value: counts.get(outcome, 0) for outcome in Outcome})
 
 
 def _quoting(config: UniswapConfig, command: str) -> tuple[Rpc, QuoteExecutor]:
@@ -853,11 +589,11 @@ def _replayed(
     and of those left partial, which hold a wallet half rebalanced.
     """
     out(
-        f"run {_one_ascii_line(run_id)}: {summary.boundaries} boundary(ies) from {_iso(summary.start)} to "
+        f"run {one_ascii_line(run_id)}: {summary.boundaries} boundary(ies) from {_iso(summary.start)} to "
         f"{_iso(summary.end)}: {summary.decided} decided, {summary.already_decided} already "
         f"decided, {len(summary.missing)} without a bar"
     )
-    out(_outcome_counts(summary.outcomes))
+    out(outcome_counts(summary.outcomes))
     warnings = []
     if summary.missing:
         later = (
@@ -951,7 +687,7 @@ def _paper(args: argparse.Namespace, out: Callable[[str], None], now: Callable[[
             )
     except BackfillRangeError as exc:
         # The clock puts the latest boundary where no bar can be read.
-        print(f"failed: {_one_ascii_line(exc)}", file=sys.stderr)
+        print(f"failed: {one_ascii_line(exc)}", file=sys.stderr)
         return EXIT_FAILED
     read = summary.read
     out(
@@ -985,9 +721,10 @@ def _paper(args: argparse.Namespace, out: Callable[[str], None], now: Callable[[
             )
         return EXIT_OK
     made = summary.replayed is not None and summary.replayed.decided
+    why = "" if decision.reason is None else f" ({one_ascii_line(decision.reason)})"
     out(
         f"the bar at {_iso(summary.latest)} {'is decided' if made else 'was already decided'}: "
-        f"{decision.outcome.value}{_why(decision)}"
+        f"{decision.outcome.value}{why}"
     )
     return EXIT_OK
 
@@ -1002,7 +739,7 @@ def _reconciliation_lines(found: Reconciliation | None) -> list[str]:
         f"{len(send.legs)} leg(s) filled"
     ]
     if send.failure is not None:
-        lines.append(f"stopped by: {_one_ascii_line(send.failure)}")
+        lines.append(f"stopped by: {one_ascii_line(send.failure)}")
     for leg in send.legs:
         lines.append(
             f"leg {leg.leg}: {plain(leg.amount_in)} {leg.token_in} for {plain(leg.amount_out)} "
@@ -1067,14 +804,14 @@ def _fork(args: argparse.Namespace, out: Callable[[str], None], now: Callable[[]
                 fork_block=fork.fork_block() if store.run(args.run_id) is None else None,
             )
         except UnsettledSend as exc:
-            print(f"failed: {_one_ascii_line(exc)}", file=sys.stderr)
+            print(f"failed: {one_ascii_line(exc)}", file=sys.stderr)
             try:
                 found = reconcile_open_send(store, config, wallet, args.run_id)
             except Exception as failed:
                 # The run needs a person either way: not a reason to say "try again later".
                 print(
                     f"the open send could not be set beside the wallet: "
-                    f"{type(failed).__name__}: {_one_ascii_line(failed)}",
+                    f"{type(failed).__name__}: {one_ascii_line(failed)}",
                     file=sys.stderr,
                 )
                 return EXIT_FAILED
@@ -1092,15 +829,15 @@ def _asked_line(asked: Asked) -> str:
     if not asked.asked_now:
         return (
             f"{asked.symbol} ({asked.ticker}): already stored: {rating}, model "
-            f"{_one_ascii_line(record.model)}, asked {_iso(record.asked_at)}"
+            f"{one_ascii_line(record.model)}, asked {_iso(record.asked_at)}"
         )
     words = (
         "no words kept"
         if record.sidecar_path is None
-        else f"words in {_one_ascii_line(record.sidecar_path)}"
+        else f"words in {one_ascii_line(record.sidecar_path)}"
     )
     return (
-        f"{asked.symbol} ({asked.ticker}): {rating}, model {_one_ascii_line(record.model)}, "
+        f"{asked.symbol} ({asked.ticker}): {rating}, model {one_ascii_line(record.model)}, "
         f"{asked.elapsed_seconds:.0f} s, {words}"
     )
 
@@ -1151,7 +888,7 @@ def _verdict(args: argparse.Namespace, out: Callable[[str], None], now: Callable
                 file=sys.stderr,
             )
 
-    out(f"verdicts of {_one_ascii_line(source)} at {_iso(at)} (trade date {trade_date_of(at)}):")
+    out(f"verdicts of {one_ascii_line(source)} at {_iso(at)} (trade date {trade_date_of(at)}):")
     with open_store(args.db, create=False) as store:
         summary = ask_verdicts(
             store, config, judge, time=at, home=home, now=present, report=recorded
@@ -1182,7 +919,7 @@ def _runs_reading(store: Store, source: str, time: int) -> list[str]:
     return [
         run_id
         for run_id in store.runs_decided_at(time)
-        if (reads := config_from_snapshot(_stored_run(store, run_id).config).targets) is not None
+        if (reads := config_from_snapshot(stored_run(store, run_id).config).targets) is not None
         and reads.source == source
     ]
 
@@ -1218,11 +955,11 @@ def _target(args: argparse.Namespace, out: Callable[[str], None], now: Callable[
         written_at=present,
         digest=bytes_digest(raw),
     )
-    did = f", {_one_ascii_line(found.action)}" if found.action else ""
+    did = f", {one_ascii_line(found.action)}" if found.action else ""
     with open_store(args.db, create=False) as store:
         out(
-            f"target of {_one_ascii_line(settings.source)} at {_iso(found.as_of)} from "
-            f"{_one_ascii_line(args.handoff.name)} ({_one_ascii_line(found.coin)}{did}):"
+            f"target of {one_ascii_line(settings.source)} at {_iso(found.as_of)} from "
+            f"{one_ascii_line(args.handoff.name)} ({one_ascii_line(found.coin)}{did}):"
         )
         # The insert is the check: a row already there, by an earlier visit or one
         # running beside this, is refused by the store and read back.
@@ -1243,7 +980,7 @@ def _target(args: argparse.Namespace, out: Callable[[str], None], now: Callable[
                 print(
                     f"warning: the target is written, and whether a run reading "
                     f"{settings.source} had already decided the bar at {_iso(found.as_of)} "
-                    f"could not be told ({_one_ascii_line(exc)})",
+                    f"could not be told ({one_ascii_line(exc)})",
                     file=sys.stderr,
                 )
             else:
@@ -1251,7 +988,7 @@ def _target(args: argparse.Namespace, out: Callable[[str], None], now: Callable[
                     print(
                         f"warning: {len(decided)} run(s) reading {settings.source} have already "
                         f"decided the bar at {_iso(found.as_of)} "
-                        f"({', '.join(map(_one_ascii_line, decided))}); the target written now "
+                        f"({', '.join(map(one_ascii_line, decided))}); the target written now "
                         f"does not change those decisions",
                         file=sys.stderr,
                     )
@@ -1276,36 +1013,28 @@ def _curve_line(name: str, curve: Curve) -> str:
     return f"{name:<18}{_fixed(curve.start):>14}{_fixed(curve.end):>14}{change:>11}{fall:>14}"
 
 
-def _verdicts_seen(source: str, traded: int, decisions: Sequence[Decision]) -> str:
-    """How many decided bars saw a verdict on every one of the ``traded`` tokens, on some and on none.
-
-    A ``REVIEW`` counts as seen, as ``status`` counts it: the judge was
-    asked and answered. What a strategy made of each bar is its own policy
-    (``ai_gated_weights`` takes no new risk on a token without a rating). A
-    bar skipped as suspect is not counted: nothing was decided on it, and no
-    judge is asked about it.
-    """
-    seen = [len(decision.verdicts or {}) for decision in decisions if not decision.suspect]
-    every, none = seen.count(traded), seen.count(0)
-    return (
-        f"verdicts from {source}: {every} decided bar(s) saw one on every traded token, "
-        f"{len(seen) - every - none} on some, {none} on none"
-    )
-
-
 def _report(args: argparse.Namespace, out: Callable[[str], None]) -> int:
     # One view for all the reads: a backtest may be writing the run meanwhile.
     with open_store(args.db, create=False) as store, store.reading():
-        run = _stored_run(store, args.run_id)
+        run = stored_run(store, args.run_id)
         decisions = store.decisions(args.run_id)
         valuations = store.valuations(args.run_id)
         fills = store.fills(args.run_id)
     config = config_from_snapshot(run.config)
-    measured, metrics = _measured(run, config, decisions, valuations, fills)
+    measured_on, metrics = measured(run, config, decisions, valuations, fills)
     quote = run.quote
-    out(_run_header(run))
-    out(_decided_span(decisions))
-    out("decisions: " + _outcome_counts(Counter(decision.outcome for decision in decisions)))
+    out(
+        run_header(
+            run_id=run.run_id,
+            mode=run.mode.value,
+            fork_block=run.fork_block,
+            fills=run.fills.value,
+            strategy=run.strategy,
+            quote=run.quote,
+        )
+    )
+    out(decided_span(len(decisions), _iso(decisions[0].time), _iso(decisions[-1].time)))
+    out("decisions: " + outcome_counts(Counter(decision.outcome for decision in decisions)))
     for outcome in (Outcome.SKIPPED_SUSPECT, Outcome.REJECTED, Outcome.PARTIAL):
         codes = Counter(
             decision.reason_code.value
@@ -1313,9 +1042,13 @@ def _report(args: argparse.Namespace, out: Callable[[str], None]) -> int:
             if decision.outcome is outcome and decision.reason_code is not None
         )
         if codes:
-            out(f"{outcome.value}: {_counts(codes)}")
+            out(f"{outcome.value}: {counts(codes)}")
     if config.verdicts is not None:
-        out(_verdicts_seen(config.verdicts.source, len(config.traded_symbols), decisions))
+        seen = verdicts_seen(config.verdicts.source, len(config.traded_symbols), decisions)
+        out(
+            f"verdicts from {seen.source}: {seen.every} decided bar(s) saw one on every traded "
+            f"token, {seen.some} on some, {seen.none} on none"
+        )
     # The report reads no bars, so it cannot tell whether such a reading held.
     unsettled = sum(
         1
@@ -1329,8 +1062,8 @@ def _report(args: argparse.Namespace, out: Callable[[str], None]) -> int:
             f"{unsettled} bar(s) were decided on readings that were not final yet, and are "
             f"measured as they were decided"
         )
-    days = Decimal(measured[-1].time - measured[0].time) / 86_400
-    suspect = len(valuations) - len(measured)
+    days = Decimal(measured_on[-1].time - measured_on[0].time) / 86_400
+    suspect = len(valuations) - len(measured_on)
     left_out = f"; {suspect} suspect bar(s) left out" if suspect else ""
     out(f"measured on {metrics.bars} bar(s) over {_fixed(days)} day(s){left_out}")
     out(f"{'':<18}{'start':>14}{'end':>14}{'return':>11}{'max drawdown':>14}")
@@ -1389,7 +1122,7 @@ def main(
         # the store, a judge that did not answer for a reason that may pass,
         # and a handoff not yet written or not yet in its window, are the
         # same: a later visit asks.
-        print(f"try again later: {_one_ascii_line(exc)}", file=sys.stderr)
+        print(f"try again later: {one_ascii_line(exc)}", file=sys.stderr)
         return EXIT_RETRY
     except (
         AgentError,
@@ -1404,5 +1137,5 @@ def main(
     ) as exc:
         # OSError: a local file that could not be written or read, the sidecar
         # beside the store first of all; the chain reader wraps its own.
-        print(f"failed: {_one_ascii_line(exc)}", file=sys.stderr)
+        print(f"failed: {one_ascii_line(exc)}", file=sys.stderr)
         return EXIT_FAILED

@@ -56,6 +56,7 @@ from .report import (
     read_sidecars,
 )
 from .signal import OUT, Action, Params, Reading, Side, SignalError, advance, decide, read
+from .status import report_json, report_status
 from .stores import (
     Equity,
     StoreReadError,
@@ -252,6 +253,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "where the perp run keeps its payloads and handoff sidecars; default: the perp "
             "package's layout, <perp-db dir>/payloads/<perp-run-id>"
         ),
+    )
+    report.add_argument(
+        "--json",
+        action="store_true",
+        help="print the report as one JSON document (schema_version and source first)",
     )
     report.add_argument("--since", metavar="DAY", help="first day (a UTC day boundary)")
     report.add_argument(
@@ -542,7 +548,10 @@ def _cmd_report(args: argparse.Namespace, *, now: Callable[[], datetime]) -> int
             f"nothing to report: perp run {args.perp_run_id!r} has no decision cycle and spot "
             f"run {args.spot_run_id!r} has no decision"
         )
-    today = floor_day(epoch_ms(now(), what="the clock"))
+    # One reading of the clock: the span's last day and the document's
+    # generated_at must come from the same instant.
+    now_at = now()
+    today = floor_day(epoch_ms(now_at, what="the clock"))
     first = min(
         [floor_day(cycle.scheduled_ms) for cycle in cycles] + [at_ms for at_ms, _ in decisions]
     )
@@ -575,6 +584,18 @@ def _cmd_report(args: argparse.Namespace, *, now: Callable[[], datetime]) -> int
         targets=spot_targets(spot_db, run.target_source, token),
     )
     found = alerts(rows, delta_alert_pct=args.delta_alert_pct, d5_days=args.d5_days)
+    if args.json:
+        status = report_status(
+            rows,
+            found,
+            problems,
+            coin=coin,
+            delta_alert_pct=args.delta_alert_pct,
+            d5_days=args.d5_days,
+            now=now_at,
+        )
+        print(report_json(status))
+        return 0
     for line in format_report(
         rows, found, problems, coin=coin, delta_alert_pct=args.delta_alert_pct, d5_days=args.d5_days
     ):

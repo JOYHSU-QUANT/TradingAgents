@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import json
+import re
 import sqlite3
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
-from contrib.uniswap_v3 import cli
+from contrib.uniswap_v3 import cli, status as status_module
 from contrib.uniswap_v3.chain import rpc as chain_rpc
 from contrib.uniswap_v3.chain.errors import RpcConfigError
+from contrib.uniswap_v3.config import load_config
 from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS
+from contrib.uniswap_v3.domain.metrics import MetricsError
+from contrib.uniswap_v3.domain.records import Decision, Outcome, SkipCode
+from contrib.uniswap_v3.domain.text import one_ascii_line
 from contrib.uniswap_v3.domain.verdicts import Rating
 from contrib.uniswap_v3.store.repository import open_store
 from contrib.uniswap_v3.tests.fakes.node import (
@@ -147,9 +154,7 @@ def test_a_range_that_cannot_be_backfilled_exits_1(node, tmp_path, capsys):
     assert not (tmp_path / "store.db").exists()
 
 
-def test_a_node_that_fails_a_read_exits_3_and_a_wrong_answer_exits_1(
-    node, tmp_path, capsys
-):
+def test_a_node_that_fails_a_read_exits_3_and_a_wrong_answer_exits_1(node, tmp_path, capsys):
     db = tmp_path / "store.db"
     close = block_at(FIRST_DAY + DAY) - 1
     node.errors[close] = {"code": 429, "message": "too many requests"}
@@ -196,7 +201,7 @@ def test_what_a_node_said_is_reported_on_one_ascii_line(node, tmp_path, capsys):
     assert "vieux" in lines[2] and lines[2].isascii() and "\n" not in lines[2]
     capsys.readouterr()
     noisy = "vieux" + chr(0xE9) + chr(10) + "forged  line" + chr(27) + "[2J"
-    assert cli._one_ascii_line(noisy) == "vieux" + chr(92) + "xe9 forged line?[2J"
+    assert one_ascii_line(noisy) == "vieux" + chr(92) + "xe9 forged line?[2J"
 
 
 def test_a_time_the_platform_cannot_print_back_is_refused(monkeypatch, capsys):
@@ -562,3 +567,268 @@ def test_a_replay_warns_of_decided_bars_whose_verdicts_changed_since(node, tmp_p
     ) in err
     with open_store(db) as store:
         assert store.decision("reads", FIRST_DAY + DAY).verdicts == {}
+
+
+# --- status --json ---------------------------------------------------------
+
+
+def _nodes(value, prefix: str = ""):
+    """Every ``(path, value)`` in a document, list items under ``path[]``."""
+    if prefix:
+        yield prefix, value
+    if isinstance(value, dict):
+        for key, child in value.items():
+            yield from _nodes(child, f"{prefix}.{key}" if prefix else key)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _nodes(child, f"{prefix}[]")
+
+
+def _paths(document) -> set[str]:
+    return {path for path, _ in _nodes(document) if not path.endswith("[]")}
+
+
+_CURVE = ("start", "end", "total_return", "max_drawdown")
+_OUTCOMES = ("skipped_suspect", "hold", "no_trade", "filled", "rejected", "partial")
+# The document's shape at status.SCHEMA_VERSION 1. A path added, removed or
+# moved changes this set; change it together with the version.
+_SCHEMA_1_PATHS = {
+    "schema_version",
+    "source",
+    "generated_at",
+    "store",
+    "store.chain_id",
+    "store.interval_seconds",
+    "store.quote",
+    "store.pools",
+    "store.pools[].pool",
+    "store.pools[].readings",
+    "store.pools[].first",
+    "store.pools[].last",
+    "store.latest_bars",
+    "store.latest_bars[].time",
+    "store.latest_bars[].complete",
+    "store.latest_bars[].close_block",
+    "store.latest_bars[].prices",
+    "store.latest_bars[].prices.WBTC",
+    "store.latest_bars[].prices.WETH",
+    "store.latest_bars[].finality",
+    "store.latest_bars[].suspect",
+    "store.latest_bars[].flags",
+    "store.coverage",
+    "store.coverage[].what",
+    "store.coverage[].source",
+    "store.coverage[].complete",
+    "store.coverage[].of",
+    "store.coverage[].per_token",
+    "store.coverage[].per_token.WBTC",
+    "store.coverage[].per_token.WETH",
+    "run",
+    "run.run_id",
+    "run.mode",
+    "run.fills",
+    "run.strategy",
+    "run.quote",
+    "run.created_at",
+    "run.fork_block",
+    "run.opening",
+    "run.opening.balances",
+    "run.opening.balances.USDC",
+    "run.opening.balances.WBTC",
+    "run.opening.balances.WETH",
+    "run.opening.gas_eth",
+    "run.decided",
+    "run.first_decided",
+    "run.last_decided",
+    "run.outcomes",
+    *(f"run.outcomes.{outcome}" for outcome in _OUTCOMES),
+    "run.clock",
+    "run.holdings",
+    "run.holdings.balances",
+    "run.holdings.balances.USDC",
+    "run.holdings.balances.WBTC",
+    "run.holdings.balances.WETH",
+    "run.holdings.gas_eth",
+    "run.holdings_at",
+    "run.value",
+    "run.metrics",
+    "run.metrics.bars",
+    "run.metrics.measured_from",
+    "run.metrics.measured_to",
+    "run.metrics.suspect_left_out",
+    "run.metrics.strategy",
+    *(f"run.metrics.strategy.{c}" for c in _CURVE),
+    "run.metrics.opening_held",
+    *(f"run.metrics.opening_held.{c}" for c in _CURVE),
+    "run.metrics.all_quote",
+    *(f"run.metrics.all_quote.{c}" for c in _CURVE),
+    "run.metrics.rebalances",
+    "run.metrics.swaps",
+    "run.metrics.traded_value",
+    "run.metrics.turnover",
+    "run.metrics.costs",
+    *(f"run.metrics.costs.{c}" for c in ("pool_fees", "slippage", "gas", "gas_eth", "total")),
+    "run.metrics_error",
+    "run.verdicts_seen",
+    "run.verdicts_seen.source",
+    "run.verdicts_seen.every",
+    "run.verdicts_seen.some",
+    "run.verdicts_seen.none",
+    "run.recent_decisions",
+    "run.recent_decisions[].time",
+    "run.recent_decisions[].outcome",
+    "run.recent_decisions[].decided_at",
+    "run.recent_decisions[].delay_seconds",
+    "run.recent_decisions[].reason_code",
+    "run.recent_decisions[].reason",
+    "run.recent_decisions[].verdicts",
+    "run.recent_decisions[].verdicts.WBTC",
+    "run.recent_decisions[].verdicts.WETH",
+    "run.recent_decisions[].targets_now",
+}
+
+
+def _status_document(db: Path, *extra: str):
+    code, lines = _status(db, "--json", *extra)
+    assert code == cli.EXIT_OK
+    (text,) = lines
+    assert text.isascii()
+    return json.loads(text)
+
+
+def test_status_json_is_the_lines_model_as_one_document(node, tmp_path):
+    db = tmp_path / "store.db"
+    _backfill(db)
+    with open_store(db) as store:
+        for said in (record("WETH", 0), record("WBTC", 0), record("WBTC", 2)):
+            store.insert_verdict(said)
+    reading = _reading_verdicts(tmp_path)
+    assert _backtest_reading(reading, db, "reads") == cli.EXIT_OK
+
+    argv = ("status", "--config", str(reading), "--db", str(db), "--run-id", "reads", "--bars", "3")
+    code, lines = _run(*argv, "--json")
+    assert code == cli.EXIT_OK
+    document = json.loads(lines[0])
+    assert list(document)[:3] == ["schema_version", "source", "generated_at"]
+    assert document["schema_version"] == status_module.SCHEMA_VERSION == 1
+    assert document["source"] == "uniswap_v3"
+    assert _paths(document) == _SCHEMA_1_PATHS
+    store = document["store"]
+    assert [p["pool"] for p in store["pools"]] == ["USDC/WETH-500", "WBTC/WETH-500"]
+    assert store["pools"][0]["readings"] == 3
+    assert store["pools"][0]["first"] == "2024-01-01T00:00:00Z"
+    assert all(bar["complete"] for bar in store["latest_bars"])
+    assert store["coverage"][0]["what"] == "verdicts"
+    run = document["run"]
+    assert (run["run_id"], run["mode"], run["fills"], run["decided"]) == (
+        "reads",
+        "backtest",
+        "model",
+        3,
+    )
+    assert run["clock"] is None  # a backtest is not read against the clock
+    assert run["metrics"]["bars"] == 3 and run["metrics_error"] is None
+    assert run["verdicts_seen"] == {
+        "source": "test-judge",
+        "every": 1,
+        "some": 1,
+        "none": 1,
+    }
+    assert [d["verdicts"] for d in run["recent_decisions"]] == [
+        {"WBTC": "Buy", "WETH": "Buy"},
+        {"WBTC": "none", "WETH": "none"},
+        {"WBTC": "Buy", "WETH": "none"},
+    ]
+    assert all(d["targets_now"] is None for d in run["recent_decisions"])
+    # The same reading, as lines, is what status has always printed.
+    _, as_lines = _run(*argv)
+    assert as_lines[0] == "chain 1, 86400-second bars, prices in USDC"
+    assert as_lines[-4] == "latest 3 decision(s):"
+
+
+def test_status_json_without_a_run_carries_the_store_alone(node, tmp_path):
+    db = tmp_path / "store.db"
+    _backfill(db)
+    document = _status_document(db, "--bars", "2")
+    assert document["run"] is None
+    assert len(document["store"]["latest_bars"]) == 2
+    assert document["store"]["coverage"] == []
+
+
+def test_status_json_names_no_secret_field_and_carries_no_float(node, tmp_path):
+    db = tmp_path / "store.db"
+    _backfill(db)
+    assert _backtest_reading(_EXAMPLE, db, "plain") == cli.EXIT_OK
+    document = _status_document(db, "--run-id", "plain")
+    secret = re.compile(r"key|secret|password|mnemonic|address", re.IGNORECASE)
+    assert not [path for path in _paths(document) if secret.search(path.rsplit(".", 1)[-1])]
+    assert not [path for path, value in _nodes(document) if isinstance(value, float)]
+    assert Decimal(document["run"]["value"]) > 0
+    assert Decimal(document["run"]["metrics"]["strategy"]["start"]) == 10000
+
+
+def test_the_clock_states_of_a_paper_run():
+    config = load_config(_EXAMPLE)
+    last = FIRST_DAY + DAY  # the run decided 2024-01-02
+    assert status_module._clock(config, last, last + 600).state == "up_to_date"
+    behind = status_module._clock(config, last, last + 2 * DAY + 5)
+    assert (behind.state, behind.undecided, behind.latest_boundary) == (
+        "behind",
+        2,
+        "2024-01-04T00:00:00Z",
+    )
+    assert status_module._clock(config, last, last - 5).state == "ahead"
+
+
+def test_a_skipped_decisions_reason_code_reason_and_delay_reach_the_model():
+    config = load_config(_EXAMPLE)
+    wallet = "0x" + "12" * 20
+    decision = Decision(
+        time=FIRST_DAY,
+        outcome=Outcome.SKIPPED_SUSPECT,
+        close_block=1,
+        reason=f"a reading reorged (seen by {wallet})",
+        reason_code=SkipCode.REORGED,
+        decided_at=FIRST_DAY + 90,
+    )
+    # The run reads neither verdicts nor targets, so no store is consulted.
+    found = status_module._decision(None, config, decision)
+    assert (found.outcome, found.reason_code, found.delay_seconds) == (
+        "skipped_suspect",
+        "reorged",
+        90,
+    )
+    assert found.reason == "a reading reorged (seen by 0x1212...1212)"
+    assert found.verdicts is None and found.targets_now is None
+    line = status_module._decision_line(found, paper=True)
+    assert line.endswith(
+        "decided 2024-01-01T00:01:30Z, 00:01:30 after the boundary "
+        "(a reading reorged (seen by 0x1212...1212))"
+    )
+
+
+def test_a_run_whose_return_cannot_be_measured_says_why_in_both_forms(node, tmp_path, monkeypatch):
+    db = tmp_path / "store.db"
+    _backfill(db)
+    assert _backtest_reading(_EXAMPLE, db, "plain") == cli.EXIT_OK
+
+    def _unmeasurable(*args, **kwargs):
+        raise MetricsError("no bar could be measured")
+
+    monkeypatch.setattr(status_module, "measured", _unmeasurable)
+    document = _status_document(db, "--run-id", "plain")
+    assert document["run"]["metrics"] is None
+    assert document["run"]["metrics_error"] == "no bar could be measured"
+    code, lines = _status(db, "--run-id", "plain")
+    assert code == cli.EXIT_OK
+    assert any(line.endswith("; return not measured (no bar could be measured)") for line in lines)
+
+
+def test_a_decisions_reason_is_masked_and_cut_in_the_model():
+    key, wallet = "0x" + "ab" * 32, "0x" + "Cd" * 20
+    assert status_module._text(f"refused by {wallet} with {key}") == (
+        "refused by 0xCdCd...CdCd with 0xabab...abab"
+    )
+    cut = status_module._text("a" * 990 + key)
+    assert len(cut) == status_module.TEXT_LIMIT and key not in cut and cut.endswith("...")
+    assert status_module._text(None) is None

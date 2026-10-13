@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import sqlite3
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -16,12 +17,14 @@ from contrib.carry.report import (
     Alert,
     AlertKind,
     Sidecar,
+    SidecarProblem,
     alerts,
     build_rows,
     format_report,
     read_sidecars,
     weeks,
 )
+from contrib.carry.status import report_status
 from contrib.carry.stores import (
     CycleKind,
     PerpCycle,
@@ -831,3 +834,223 @@ def test_a_spot_config_snapshot_the_report_cannot_read_is_refused(tmp_path: Path
         argv, now = _report(perp, spot)
         assert main(argv, now=now) == 1
         assert said in capsys.readouterr().err
+
+
+# --- report --json ----------------------------------------------------------
+
+
+def _nodes(value, prefix: str = ""):
+    """Every ``(path, value)`` in a document, list items under ``path[]``."""
+    if prefix:
+        yield prefix, value
+    if isinstance(value, dict):
+        for key, child in value.items():
+            yield from _nodes(child, f"{prefix}.{key}" if prefix else key)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _nodes(child, f"{prefix}[]")
+
+
+def _paths(document) -> set[str]:
+    return {path for path, _ in _nodes(document) if not path.endswith("[]")}
+
+
+_DAY_FIELDS = (
+    "boundary",
+    "intent_in",
+    "perp_funding",
+    "perp_funding_pending",
+    "perp_fees",
+    "spot_swap_cost",
+    "spot_gas_eth",
+    "spot_gas_cost",
+    "costs",
+    "net",
+    "unpriced",
+    "perp_size",
+    "perp_mark",
+    "perp_as_of",
+    "perp_equity",
+    "spot_qty",
+    "spot_price",
+    "spot_as_of",
+    "spot_equity",
+    "delta",
+    "delta_share",
+    "basis",
+    "cycles",
+    "refused",
+    "spot_outcome",
+    "spot_target",
+    "held_by_d5",
+    "alerts",
+)
+_WEEK_FIELDS = (
+    "year",
+    "week",
+    "days",
+    "days_in",
+    "funding",
+    "funding_pending",
+    "perp_fees",
+    "spot_swap_cost",
+    "spot_gas_cost",
+    "costs",
+    "net",
+    "unpriced",
+    "alerts",
+)
+_SPAN_FIELDS = (
+    "days",
+    "days_in",
+    "funding",
+    "funding_pending",
+    "costs",
+    "unpriced",
+    "net",
+    "alerts",
+    "held_by_d5",
+)
+# The document's shape at status.SCHEMA_VERSION 1. A path added, removed or
+# moved changes this set; change it together with the version.
+_SCHEMA_1_PATHS = {
+    "schema_version",
+    "source",
+    "generated_at",
+    "coin",
+    "token",
+    "delta_alert_pct",
+    "d5_days",
+    "days",
+    *(f"days[].{field}" for field in _DAY_FIELDS),
+    *(f"days[].cycles.{kind.value}" for kind in CycleKind),
+    "days[].alerts[].kind",
+    "days[].alerts[].text",
+    "problems",
+    "problems[].path",
+    "problems[].reason",
+    "weeks",
+    *(f"weeks[].{field}" for field in _WEEK_FIELDS),
+    "span",
+    *(f"span.{field}" for field in _SPAN_FIELDS),
+}
+
+
+def test_the_command_prints_the_report_as_one_document(tmp_path: Path, capsys):
+    perp, spot, payloads = _books(tmp_path)
+    (payloads / "bad.handoff.json").write_text("{", encoding="utf-8")
+    argv, now = _report(perp, spot, "--json")
+    assert main(argv, now=now) == 0
+    text = capsys.readouterr().out
+    assert text.isascii()
+    document = json.loads(text)
+    assert list(document)[:3] == ["schema_version", "source", "generated_at"]
+    assert (document["schema_version"], document["source"]) == (1, "carry")
+    assert document["generated_at"] == "2026-02-14T03:00:00+00:00"
+    assert (document["coin"], document["token"]) == ("ETH", "WETH")
+    assert (document["delta_alert_pct"], document["d5_days"]) == (10, 3)
+    assert _paths(document) == _SCHEMA_1_PATHS
+    assert not [path for path, value in _nodes(document) if isinstance(value, float)]
+
+    first, _, third, fourth = document["days"]
+    assert (first["boundary"], first["intent_in"], first["perp_funding"]) == (
+        "2026-02-10",
+        True,
+        "1.15",
+    )
+    assert (first["perp_funding_pending"], first["perp_fees"], first["spot_swap_cost"]) == (
+        1,
+        "0.45",
+        "4.5",
+    )
+    assert (first["spot_gas_eth"], first["net"], first["unpriced"]) == ("0.001", "-6.795", False)
+    assert (first["perp_size"], first["perp_mark"], first["spot_qty"], first["spot_price"]) == (
+        "-0.9",
+        "3010",
+        "0.9",
+        "2995",
+    )
+    assert (first["delta"], first["cycles"]["applied"], first["cycles"]["pending"]) == (
+        "0.0",
+        6,
+        1,
+    )
+    assert (first["spot_outcome"], first["spot_target"], first["held_by_d5"]) == (
+        "filled",
+        "0.3",
+        False,
+    )
+    assert first["alerts"] == [] and first["perp_as_of"] is None and first["spot_as_of"] is None
+    assert [alert["kind"] for alert in third["alerts"]] == ["delta", "one-legged"]
+    assert third["alerts"][0]["text"].startswith("net exposure -0.9000 of the coin")
+    assert third["held_by_d5"] is True
+    # Both legs flat at the end of the last day: no share, the perp mark gone.
+    assert (fourth["delta_share"], fourth["perp_mark"], fourth["intent_in"]) == (None, None, None)
+    assert fourth["cycles"] == {
+        "applied": 0,
+        "pending": 0,
+        "unusable": 4,
+        "no_decision": 1,
+        "engine": 0,
+    }
+
+    (problem,) = document["problems"]
+    assert problem["path"] == "bad.handoff.json"  # the name, not where the host keeps it
+    (week,) = document["weeks"]
+    assert (week["year"], week["week"], week["days"], week["days_in"]) == (2026, 7, 4, 2)
+    assert (week["funding"], week["funding_pending"], week["alerts"]) == ("4.03", 1, 2)
+    span = document["span"]
+    assert span == {
+        "days": 4,
+        "days_in": 2,
+        "funding": "4.03",
+        "funding_pending": 1,
+        "costs": "20.945",
+        "unpriced": 0,
+        "net": "-16.915",
+        "alerts": 3,
+        "held_by_d5": 2,
+    }
+
+
+def test_the_document_and_the_lines_say_the_same_span(tmp_path: Path, capsys):
+    perp, spot, _ = _books(tmp_path)
+    argv, now = _report(perp, spot)
+    assert main(argv, now=now) == 0
+    last = capsys.readouterr().out.splitlines()[-1]
+    assert main([*argv, "--json"], now=now) == 0
+    span = json.loads(capsys.readouterr().out)["span"]
+    assert last == (
+        f"span: {span['days_in']} of {span['days']} day(s) in; funding "
+        f"{Decimal(span['funding']):.4f} ({span['funding_pending']} settlement(s) still pending, "
+        f"not counted), costs {Decimal(span['costs']):.4f}, net {Decimal(span['net']):.4f}; "
+        f"{span['alerts']} alert(s), {span['held_by_d5']} day(s) held by D5"
+    )
+
+
+def test_the_document_clock_must_be_aware():
+    with pytest.raises(ValueError, match="aware"):
+        report_status(
+            [], [], [], coin="ETH", delta_alert_pct=10, d5_days=3, now=datetime(2026, 2, 14)
+        )
+    empty = report_status(
+        [], [], [], coin="ETH", delta_alert_pct=10, d5_days=3, now=from_epoch_ms(day(44))
+    )
+    assert (empty.days, empty.weeks, empty.span.days, empty.span.net) == ((), (), 0, Decimal(0))
+
+
+def test_the_documents_free_text_is_masked_and_cut(tmp_path: Path):
+    # A sidecar that failed validation can echo a value; a light names
+    # digests only, but goes through the same fold.
+    wallet, key = "0x" + "12" * 20, "0x" + "ab" * 32
+    problems = [
+        SidecarProblem(tmp_path / "x.handoff.json", f"bad {wallet} and {key}"),
+        SidecarProblem(tmp_path / "y.handoff.json", "z" * 1500),
+    ]
+    status = report_status(
+        [], [], problems, coin="ETH", delta_alert_pct=10, d5_days=3, now=from_epoch_ms(day(44))
+    )
+    first, second = status.problems
+    assert (first.path, first.reason) == ("x.handoff.json", "bad 0x1212...1212 and 0xabab...abab")
+    assert len(second.reason) == 1000 and second.reason.endswith("zzz...")
+    assert status.span.alerts == 2

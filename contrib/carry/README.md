@@ -104,8 +104,10 @@ python -m contrib.carry report --coin ETH \
     --perp-db <paper_trading.db> --perp-run-id carry-ETH-1 \
     --spot-db <uniswap paper.db> --spot-run-id paper-carry-1 \
     [--payloads-dir <perp payloads/carry-ETH-1>] [--since 2026-10-20] [--until 2026-11-16] \
-    [--delta-alert-pct 10] [--d5-days 3]
+    [--delta-alert-pct 10] [--d5-days 3] [--json]
 ```
+
+`--json` 把同一份報告印成一份 JSON 文件（`schema_version`、`source: carry` 在最前；每天一筆：各腿的 funding／費用／持有／delta／basis／cycle 種類計數／亮燈，再加讀不出來的 sidecar、ISO 週表與合計），給 dashboard 的 exporter 與 `/paper-status` 讀；欄位變動要 bump `status.SCHEMA_VERSION`。
 
 兩邊帳本的對帳（計畫 §3.5），每個 UTC 日一列、三行，之後每個 ISO 週一行合計、最後整段合計。唯讀，daemon 不用停；
 store 可以是伺服器上的，也可以是快照下來的（perp 的 sidecar 目錄跟著 `--payloads-dir` 走，預設是 perp 套件的佈局

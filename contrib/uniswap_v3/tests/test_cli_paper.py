@@ -12,6 +12,7 @@ import pytest
 from contrib.uniswap_v3 import cli
 from contrib.uniswap_v3.chain import rpc as chain_rpc
 from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS
+from contrib.uniswap_v3.domain.times import after
 from contrib.uniswap_v3.domain.verdicts import Rating
 from contrib.uniswap_v3.store.repository import open_store
 from contrib.uniswap_v3.tests.fakes.node import (
@@ -493,7 +494,7 @@ def test_status_of_a_run_that_is_not_there_exits_1(node, tmp_path, capsys):
     [(0, "00:00:00"), (600, "00:10:00"), (86_400 + 61, "1d 00:01:01"), (-90, "-00:01:30")],
 )
 def test_a_decision_is_said_to_be_made_a_span_after_its_boundary(seconds, text):
-    assert cli._after(seconds) == text
+    assert after(seconds) == text
 
 
 def test_status_of_a_backtest_says_when_it_decided_and_not_how_late(node, tmp_path):

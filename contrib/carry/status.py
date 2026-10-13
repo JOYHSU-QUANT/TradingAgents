@@ -192,7 +192,8 @@ class HandoffStatus:
     for a handoff decided without one (a stay-out, or a hold while in);
     its ``z`` score (the handoff's float, as its shortest exact text) is
     ``None`` as well when the window could not give one (too few samples,
-    or no deviation), which keeps the book where it is.
+    or no deviation), which rules out a z-based entry or exit (a book that
+    is in can still be exited on the recent mean).
     """
 
     path: str

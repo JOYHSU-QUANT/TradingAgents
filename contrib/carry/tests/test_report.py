@@ -26,7 +26,7 @@ from contrib.carry.report import (
     read_sidecars,
     weeks,
 )
-from contrib.carry.status import AlertStatus, report_status
+from contrib.carry.status import AlertStatus, HandoffStatus, report_status
 from contrib.carry.stores import (
     CycleKind,
     PerpCycle,
@@ -1045,6 +1045,8 @@ def test_the_command_prints_the_report_as_one_document(tmp_path: Path, capsys):
 
     (problem,) = document["problems"]
     assert problem["path"] == "bad.handoff.json"  # the name, not where the host keeps it
+    assert problem["reason"].startswith("bad.handoff.json: not JSON")
+    assert str(tmp_path) not in problem["reason"]
     (week,) = document["weeks"]
     assert (week["year"], week["week"], week["days"], week["days_in"]) == (2026, 7, 4, 2)
     assert (week["funding"], week["funding_pending"], week["alerts"]) == ("4.03", 1, 2)
@@ -1242,9 +1244,25 @@ def test_a_stay_out_without_a_z_score_and_another_coins_file_are_told_apart(tmp_
     status = _status([], handoff=_write_handoff(tmp_path, other))
     assert status.handoff is None
     assert status.handoff_error == "handoff-ETH.json is BTC's handoff, not ETH's"
-    # An instant too large to spell is "could not be read", not a crash.
+    # An instant too large to spell, an equity too large to weigh, a file
+    # nested too deep: "could not be read", not a crash.
     huge = {**handoff_document(as_of_ms=day(43)), "written_at_ms": 10**30}
     status = _status([], handoff=_write_handoff(tmp_path, huge))
+    assert status.handoff is None and status.handoff_error is not None
+    heavy = handoff_document(as_of_ms=day(43))
+    heavy["equity"] = {
+        "perp": "1E+999990",
+        "perp_at_ms": day(42),
+        "perp_at": iso_utc(day(42)),
+        "spot": "1E-999990",
+        "spot_at_ms": day(42),
+        "spot_at": iso_utc(day(42)),
+    }
+    status = _status([], handoff=_write_handoff(tmp_path, heavy))
+    assert status.handoff is None and status.handoff_error is not None
+    deep = tmp_path / "handoff-ETH.json"
+    deep.write_text("[" * 100_000, encoding="utf-8")
+    status = _status([], handoff=deep)
     assert status.handoff is None and status.handoff_error is not None
 
 
@@ -1264,7 +1282,30 @@ def test_the_document_refuses_what_the_report_cannot_produce():
         dataclasses.replace(day_status, cycles={"applied": 1})
     with pytest.raises(ValueError, match="carried"):
         dataclasses.replace(day_status, perp_as_of="2026-02-09T23:00:00+00:00", perp_equity=None)
+    with pytest.raises(ValueError, match="carried"):
+        dataclasses.replace(day_status, spot_as_of="2026-02-09T00:00:00+00:00", spot_equity=None)
     with pytest.raises(ValueError, match="kind"):
         AlertStatus("delta!", "x")
     with pytest.raises(ValueError, match="counts"):
         dataclasses.replace(status, days=())
+
+
+def test_the_handoff_section_refuses_what_the_coordinator_cannot_write(tmp_path: Path):
+    status = _status([], handoff=_write_handoff(tmp_path, handoff_document(as_of_ms=day(43))))
+    entry = status.handoff
+    assert isinstance(entry, HandoffStatus) and entry.action == "enter"
+    with pytest.raises(ValueError, match="not both"):
+        dataclasses.replace(status, handoff_error="x")
+    with pytest.raises(ValueError, match="whole"):
+        dataclasses.replace(entry, funding_hourly=None)
+    with pytest.raises(ValueError, match="z score"):
+        dataclasses.replace(entry, read_at=None, funding_hourly=None)
+    with pytest.raises(ValueError, match="entry carries"):
+        dataclasses.replace(entry, read_at=None, funding_hourly=None, z=None)
+    with pytest.raises(ValueError, match="action"):
+        dataclasses.replace(entry, action="buy")
+    with pytest.raises(ValueError, match="perp_side"):
+        dataclasses.replace(entry, perp_side="long")
+    # A hold decided without a reading is legitimate, and so is a stay-out.
+    held = dataclasses.replace(entry, action="hold", read_at=None, funding_hourly=None, z=None)
+    assert held.read_at is None

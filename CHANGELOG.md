@@ -29,8 +29,8 @@ Breaking changes within the 0.x line are called out explicitly.
   decision reason and a metrics error are masked for a `0x`-prefixed 20- or
   32-byte hex and cut at 1000 characters; from the run config snapshot only
   the strategy name, the quote, the verdict source and the traded symbols
-  are copied out. Each model class refuses, in `__post_init__`, a pairing of
-  fields no store can produce, as the Hyperliquid model does. The shared
+  are copied out. The model classes with a pairing to guard refuse it in
+  `__post_init__`, as the Hyperliquid model does. The shared
   helpers `report` also uses (`measured`, `run_header`, `decided_span`,
   `outcome_counts`, `verdicts_seen`, `reason_code_counts`,
   `unsettled_count`) live in `status.py`; the line helpers
@@ -49,9 +49,11 @@ Breaking changes within the 0.x line are called out explicitly.
   keeps its own ISO-8601 UTC instant spelling (Hyperliquid the store's
   `+00:00` text, with the clock's microseconds when it has them; carry
   `+00:00` to the second; Uniswap `Z`); a reader parses all three with
-  `datetime.fromisoformat`. Every tail in the three documents is in the
-  order its lines print it (Uniswap's and carry's oldest first,
-  Hyperliquid's newest first). The `/paper-status` skill reads the three
+  `datetime.fromisoformat` (the `Z` form on Python 3.11+, or after replacing
+  the `Z` with `+00:00`). Every tail in the three documents is in the order
+  its lines print it (Uniswap's and carry's oldest first, Hyperliquid's
+  newest first; Uniswap's document-only `recent_valuations` oldest first
+  too). The `/paper-status` skill reads the three
   documents instead of ad hoc SQL.
 
 - **`contrib/hyperliquid_perp status` (dashboard plan PR 2a).** A report-only

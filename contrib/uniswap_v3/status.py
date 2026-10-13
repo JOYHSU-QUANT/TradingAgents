@@ -16,7 +16,8 @@ valuations). :func:`status_lines` renders those lines from the model, and
 (``dataclasses.asdict`` is the whitelist), ``Decimal`` as its exact text,
 instants as this package spells them (``2024-01-01T00:00:00Z``: each
 package's document keeps its own ISO-8601 UTC spelling, and a reader parses
-them with ``datetime.fromisoformat``), ASCII throughout. The document opens
+them with ``datetime.fromisoformat`` — on Python 3.11+ for this ``Z`` form;
+before that, replace the ``Z`` with ``+00:00`` first), ASCII throughout. The document opens
 with ``schema_version`` and ``source``: the version is scoped to this
 package's documents, and a change to a field's name, place or meaning bumps
 :data:`SCHEMA_VERSION` (``tests/test_cli.py`` pins the field paths).
@@ -28,14 +29,14 @@ decision's reason (engine text) and a metrics error — is masked for a
 ``0x``-prefixed 20- or 32-byte hex and cut at :data:`TEXT_LIMIT`; the lines
 print the masked text too, the one way they differ from what ``status``
 printed before the model. Every tail in the document (``latest_bars``,
-``recent_valuations``, ``recent_decisions``) is in the order its lines print
-it, oldest first; a reader takes ``[-1]`` as the latest.
+``recent_decisions``, and ``recent_valuations``, which no line prints) is
+oldest first, as the lines print the first two; a reader takes ``[-1]`` as
+the latest.
 
-Each model class refuses, in ``__post_init__``, a pairing of its own fields
-that no store can produce (a complete bar without its block, a decided run
-without its holdings, a clock ``behind`` with nothing undecided): a reader
-building one by hand, or a second reader of the store, cannot emit a
-half-filled document.
+The model classes with a pairing to guard refuse it in ``__post_init__``
+(a complete bar without its block, a decided run without its holdings, a
+clock ``behind`` with nothing undecided): a reader building one by hand, or
+a second reader of the store, cannot emit a half-filled document.
 """
 
 from __future__ import annotations

@@ -6,6 +6,7 @@ import json
 import re
 import sqlite3
 import sys
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS
 from contrib.uniswap_v3.domain.metrics import MetricsError
 from contrib.uniswap_v3.domain.records import Decision, Outcome, SkipCode
 from contrib.uniswap_v3.domain.text import one_ascii_line
+from contrib.uniswap_v3.domain.times import utc_text
 from contrib.uniswap_v3.domain.verdicts import Rating
 from contrib.uniswap_v3.status import (
     BarStatus,
@@ -769,6 +771,19 @@ def test_status_json_is_the_lines_model_as_one_document(node, tmp_path):
         d["time"] for d in run["recent_decisions"]
     ]
     assert run["recent_valuations"][-1]["total_value"] == run["value"]
+    # Every instant parses, once the Z this package spells is the +00:00 Python 3.10 reads.
+    instants = [v for _, v in _nodes(document) if isinstance(v, str) and v.endswith("Z")]
+    assert len(instants) > 10
+    for instant in instants:
+        parsed = datetime.fromisoformat(instant.replace("Z", "+00:00"))
+        assert utc_text(int(parsed.timestamp())) == instant
+    # The tails are cut to --bars: two of the three decided bars, the same two.
+    _, fewer = _run(*argv[:-1], "2", "--json")
+    tail = json.loads(fewer[0])["run"]
+    assert [v["time"] for v in tail["recent_valuations"]] == [
+        d["time"] for d in tail["recent_decisions"]
+    ]
+    assert len(tail["recent_valuations"]) == 2 and tail["decided"] == 3
     # The same reading, as lines, is what status has always printed.
     _, as_lines = _run(*argv)
     assert as_lines[0] == "chain 1, 86400-second bars, prices in USDC"
@@ -1071,3 +1086,26 @@ def test_the_clock_line_knows_every_state():
     object.__setattr__(unknown, "state", "late")
     with pytest.raises(ValueError, match="late"):
         status_module._clock_line(unknown)
+
+
+def test_reason_codes_are_counted_per_outcome_in_code_order():
+    def skipped(day: int, code: SkipCode) -> Decision:
+        return Decision(
+            time=FIRST_DAY + day * DAY,
+            outcome=Outcome.SKIPPED_SUSPECT,
+            close_block=1,
+            reason=code.value,
+            reason_code=code,
+        )
+
+    # Inserted in reverse order: the count still lists the codes by name.
+    decisions = [
+        skipped(0, SkipCode.REORGED),
+        skipped(1, SkipCode.CLOSE_BLOCK_MISMATCH),
+        skipped(2, SkipCode.REORGED),
+        Decision(time=FIRST_DAY + 3 * DAY, outcome=Outcome.HOLD, close_block=1),
+    ]
+    found = status_module.reason_code_counts(decisions)
+    assert list(found) == ["skipped_suspect", "rejected", "partial"]
+    assert list(found["skipped_suspect"].items()) == [("close_block_mismatch", 1), ("reorged", 2)]
+    assert (found["rejected"], found["partial"]) == ({}, {})

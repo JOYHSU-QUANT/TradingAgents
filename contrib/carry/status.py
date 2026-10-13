@@ -28,9 +28,9 @@ legs act on (the action, the perp side and margin, the spot token and
 weight) and the reading it was decided from; not its ``params`` nor its
 ``equity`` block.
 
-Each model class refuses, in ``__post_init__``, a pairing of its own fields
-that the report cannot produce, so a document built by hand cannot be
-half-filled.
+The model classes with a pairing to guard refuse it in ``__post_init__``
+(a day unpriced with every cost priced, a handoff read and unreadable at
+once), so a document built by hand cannot be half-filled.
 """
 
 from __future__ import annotations
@@ -55,6 +55,7 @@ from .report import (
     span_totals,
     weeks,
 )
+from .signal import Action
 from .stores import CycleKind
 
 __all__ = [
@@ -79,6 +80,8 @@ TEXT_LIMIT = 1000
 # shape first; folded to its first six and last four characters.
 _HEX_SECRET = re.compile(r"0x(?:[0-9a-fA-F]{64}|[0-9a-fA-F]{40})")
 _KINDS = frozenset(kind.value for kind in AlertKind)
+_ACTIONS = frozenset(action.value for action in Action)
+_SIDES = frozenset({"short", "flat"})
 _CYCLE_KINDS = frozenset(kind.value for kind in CycleKind)
 
 
@@ -185,10 +188,11 @@ class HandoffStatus:
     ``perp_side`` ``short`` or ``flat`` with ``margin_pct`` (0 while out),
     and ``spot_weight`` the spot leg's target weight of ``spot_token``.
     The reading the handoff was decided from — ``read_at`` and the
-    ``funding_hourly`` rate — is ``None`` for a stay-out decided without
-    one; its ``z`` score (the handoff's float, as its shortest exact text)
-    is ``None`` as well when the window could not give one (too few
-    samples, or no deviation), which is itself a stay-out.
+    ``funding_hourly`` rate — is carried by every entry, and is ``None``
+    for a handoff decided without one (a stay-out, or a hold while in);
+    its ``z`` score (the handoff's float, as its shortest exact text) is
+    ``None`` as well when the window could not give one (too few samples,
+    or no deviation), which keeps the book where it is.
     """
 
     path: str
@@ -204,10 +208,16 @@ class HandoffStatus:
     z: Decimal | None
 
     def __post_init__(self) -> None:
+        if self.action not in _ACTIONS:
+            raise ValueError(f"action must be one of {sorted(_ACTIONS)}, got {self.action!r}")
+        if self.perp_side not in _SIDES:
+            raise ValueError(f"perp_side must be one of {sorted(_SIDES)}, got {self.perp_side!r}")
         if (self.read_at is None) != (self.funding_hourly is None):
             raise ValueError("a reading is carried whole, or not at all")
         if self.read_at is None and self.z is not None:
             raise ValueError("a z score comes from a reading")
+        if self.action == Action.ENTER.value and self.read_at is None:
+            raise ValueError("an entry carries the reading it was decided from")
 
 
 @dataclass(frozen=True)
@@ -263,6 +273,11 @@ def _text(value: str) -> str:
     return text if len(text) <= TEXT_LIMIT else text[: TEXT_LIMIT - 3] + "..."
 
 
+def _named(reason: str, path: Path) -> str:
+    """``reason`` with the file named, not placed: its host path folded to its name, then masked."""
+    return _text(reason.replace(str(path), path.name))
+
+
 def _day(row: BookDay, lights: Sequence[Alert]) -> DayStatus:
     net, share = row.delta
     perp_state, spot_state = row.perp_state, row.spot_state
@@ -302,8 +317,9 @@ def _handoff(path: Path, coin: str) -> tuple[HandoffStatus | None, str | None]:
     """``coin``'s handoff at ``path`` as the document carries it, or why it could not be read.
 
     Another coin's file is not read as this one's, as the coordinator's
-    own memory refuses it. An instant too large to spell, or a file nested
-    too deep to parse, is "could not be read" too, not a crash.
+    own memory refuses it. An instant too large to spell, an equity too
+    large to weigh, or a file nested too deep to parse, is "could not be
+    read" too, not a crash.
     """
     try:
         found = read_handoff(path)
@@ -323,8 +339,8 @@ def _handoff(path: Path, coin: str) -> tuple[HandoffStatus | None, str | None]:
             funding_hourly=None if reading is None else reading.current,
             z=None if reading is None or reading.z is None else Decimal(repr(reading.z)),
         )
-    except (HandoffError, OverflowError, RecursionError) as exc:
-        return None, _text(str(exc).replace(str(path), path.name))
+    except (HandoffError, ArithmeticError, RecursionError) as exc:
+        return None, _named(str(exc), path)
     return status, None
 
 
@@ -368,7 +384,9 @@ def report_status(
         handoff=carried,
         handoff_error=error,
         days=tuple(_day(row, by_day.get(row.boundary_ms, ())) for row in rows),
-        problems=tuple(ProblemStatus(Path(p.path).name, _text(p.reason)) for p in problems),
+        problems=tuple(
+            ProblemStatus(Path(p.path).name, _named(p.reason, Path(p.path))) for p in problems
+        ),
         weeks=tuple(weeks(rows, found)),
         span=totals,
     )

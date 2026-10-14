@@ -181,16 +181,17 @@ Breaking changes within the 0.x line are called out explicitly.
   failure for the daemon's `export_failed` log) takes the same verdict;
   an `ExportError` over an unknown run is still exit 1, and so is a lock
   held past `busy_timeout` wherever in the command it hits (the open, the
-  backfill pass, the read-out). The verdict is told by SQLite's result code,
-  not by exception class — `persistence.db_types.is_store_integrity_error`
-  (IOERR, CORRUPT, NOTADB; before Python 3.11 the bare `DatabaseError`
-  class or the words `I/O error`) beside `is_lock_error` (BUSY, LOCKED;
-  the words `is locked`) — because a failing disk is an `OperationalError`
-  like a lock, a read-only file or a full disk. So under
-  `--backfill-format-fingerprint` a corrupt store or a failing disk now
-  reaches the exit-5 verdict, while a lock, a file that denies the write
-  and a full disk keep the pass's named exit 1 (issues #210 / #235: a
-  permission never reads as a broken ledger). The verdict's wording and
+  backfill pass, the read-out). The verdict is positive and told by
+  SQLite's result code, not by exception class —
+  `persistence.db_types.is_store_integrity_error`: IOERR (the whole
+  family, shm/lock sub-codes included), CORRUPT, NOTADB; before Python
+  3.11 the bare `DatabaseError` class or the words `I/O error` — because a
+  failing disk is an `OperationalError` like a lock, a read-only file or a
+  full disk, and an error the classifier does not know is a named exit 1,
+  never the verdict. So under `--backfill-format-fingerprint` a corrupt
+  store or a failing disk now reaches the exit-5 verdict, while a lock, a
+  file that denies the write and a full disk keep the pass's named exit 1
+  (issues #210 / #235: a permission never reads as a broken ledger). The verdict's wording and
   code live in one helper (`_store_integrity_failure`) that `validate` and
   `status` route through as well, and the backfill branch is its own
   function (`_backfill_fingerprints`). The CLI docstring, RUNBOOK §6 and

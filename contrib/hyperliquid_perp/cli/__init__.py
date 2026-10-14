@@ -65,8 +65,8 @@ for a ``--db`` that is not a SQLite database, is corrupt, or sits on a disk
 that fails while it is read, and ``status`` also for a state its model
 refuses; ``export`` alone names a lock held past ``busy_timeout``, wherever
 in the command it hits, as exit 1 (``validate`` and ``status`` give it 5),
-``130`` interrupted before a graceful
-lane could take over (Ctrl-C in ``export``/``validate``/``live``/``live-smoke``
+``130`` interrupted before a graceful lane could take over (Ctrl-C in
+``export``/``validate``/``live``/``live-smoke``
 or during ``paper`` startup/reconciliation — SIGTERM likewise once ``paper``,
 ``live`` or ``live-smoke`` has installed its handler; once the ``paper`` loop
 runs, both signals take the shutdown-export lane instead of ``130``). For

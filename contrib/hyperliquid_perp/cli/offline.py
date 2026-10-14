@@ -20,7 +20,7 @@ from pathlib import Path
 
 from ..common import store_layout
 from ..persistence.db import Database
-from ..persistence.db_types import is_lock_error, is_store_integrity_error
+from ..persistence.db_types import is_store_integrity_error
 from ..status import DEFAULT_RECENT, read_status, status_json, status_lines
 from ._common import _existing_run_row, _open_existing_db
 
@@ -237,14 +237,15 @@ def _cmd_export(argv: list[str]) -> int:
         print(f"error: export_failed — {exc}", file=sys.stderr)
         return 1
     except sqlite3.Error as exc:
-        # The open itself (the path guards in ``_open_existing_db`` have
-        # already named every refusal outside the store): not SQLite, or
-        # corrupt, is the shared exit-5 verdict (issue #357). One rule for a
-        # lock wherever in the command it hits: the named exit 1.
-        if is_lock_error(exc):
-            print(f"error: export_failed — {exc}", file=sys.stderr)
-            return 1
-        return _store_integrity_failure(exc)
+        # The open itself, past the path guards of ``_open_existing_db``:
+        # not SQLite, or corrupt, is the shared exit-5 verdict (issue #357).
+        # The same positive rule as the two lanes above, so a lock — or any
+        # refusal outside the store — is the named exit 1 wherever in the
+        # command it hits.
+        if is_store_integrity_error(exc):
+            return _store_integrity_failure(exc)
+        print(f"error: export_failed — {exc}", file=sys.stderr)
+        return 1
     for path in paths:
         print(path)
     return 0

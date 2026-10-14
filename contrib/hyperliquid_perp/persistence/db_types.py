@@ -1,8 +1,8 @@
 """Names :mod:`.db` and :mod:`.store_identity` share, and what a SQLite error means.
 
 The error every refused open raises, the constants the two modules have to
-agree on, and the two classifiers of a ``sqlite3.Error`` the CLI routes exit
-codes on: a lock, and a store that is itself broken.
+agree on, and the one classifier of a ``sqlite3.Error`` the CLI routes an
+exit code on: a store that is itself broken.
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ __all__ = [
     "BUSY_TIMEOUT_MS",
     "IN_MEMORY",
     "SchemaVersionError",
-    "is_lock_error",
     "is_store_integrity_error",
 ]
 
@@ -32,27 +31,12 @@ IN_MEMORY = ":memory:"
 # The table ``db.apply_migrations`` records each applied version in.
 BOOKKEEPING_TABLE = "schema_migrations"
 
-# SQLite's primary result codes. The low byte of an error's code is its kind;
-# the rest says which case of it the error is. "Another connection holds it":
-# BUSY (5) and LOCKED (6). "The store itself is broken": IOERR (10, the disk
-# fails under it), CORRUPT (11), NOTADB (26, the file is not a database).
-_LOCK_CODES = frozenset({5, 6})
+# SQLite's primary result codes for "the store itself is broken": IOERR (10,
+# the disk fails under it — the whole family, its shm/lock sub-codes
+# included), CORRUPT (11), NOTADB (26, the file is not a database). The low
+# byte of an error's code is its kind; the rest says which case of it the
+# error is.
 _INTEGRITY_CODES = frozenset({10, 11, 26})
-
-
-def is_lock_error(error: sqlite3.Error) -> bool:
-    """Whether SQLite refused because another connection holds the database or a table.
-
-    By result code, not by class: a lock and a failing disk (``disk I/O
-    error``) are both ``OperationalError``, and a caller that names the lock
-    as a retryable refusal must not call the disk the same thing. Before
-    Python 3.11 an error carries no code, only SQLite's words, which are then
-    looked for.
-    """
-    code = getattr(error, "sqlite_errorcode", None)
-    if code is None:
-        return "is locked" in str(error)
-    return code & 0xFF in _LOCK_CODES
 
 
 def is_store_integrity_error(error: sqlite3.Error) -> bool:
@@ -61,11 +45,13 @@ def is_store_integrity_error(error: sqlite3.Error) -> bool:
 
     The verdict the report-only commands exit 5 on ("investigate the store
     before trusting results"), told apart from everything SQLite refuses for
-    a reason outside the store — a lock, a file that denies writes, a full
-    disk, a ``-wal``/``-shm`` it cannot create — which stay the caller's
-    named refusals (issues #210 / #235: a permission must never read as a
-    broken ledger). Positive, so an error this function does not know is
-    NOT the verdict. Before Python 3.11 an error carries no code: CORRUPT
+    a reason outside the store — a lock (BUSY / LOCKED), a file that denies
+    writes (READONLY), a full disk (FULL), a ``-wal``/``-shm`` it cannot
+    create (CANTOPEN) — which stay the caller's named refusals (issues #210
+    / #235: a permission must never read as a broken ledger). Positive, so
+    an error this function does not know is NOT the verdict. By result
+    code, not by class: a lock, a denied write and a failing disk are all
+    ``OperationalError``. Before Python 3.11 an error carries no code: CORRUPT
     and NOTADB arrive as the bare ``DatabaseError`` class and a failing disk
     as an ``OperationalError`` whose words say so.
     """

@@ -495,7 +495,9 @@ python -m contrib.hyperliquid_perp validate --run-id paper-BTC
 檔案拒絕寫入、磁碟滿、`-wal`／`-shm` 建不出來，照 #210／#235 的規則這些永遠不印成帳本問題）、
 `5` `store integrity failure`——`--db` 指到的檔**在、守衛也放行、卻不是 SQLite 或內容壞掉**（截斷、損壞、
 別的格式），或磁碟在讀到一半／backfill 那一趟底下 I/O 失敗（`disk I/O error`；它跟鎖、唯讀、磁碟滿同屬
-`OperationalError`，所以是用 SQLite 的結果碼**正向**認 IOERR／CORRUPT／NOTADB 三種，不認識的一律不算）。跟 `validate`／`status`
+`OperationalError`，所以是用 SQLite 的結果碼**正向**認 IOERR／CORRUPT／NOTADB 三種，不認識的一律不算。
+IOERR 是整個家族——含 `-shm` 長不大、檔案鎖呼叫失敗那些子碼——所以極端情況下磁碟快滿也可能落在這裡：
+`-wal` 寫入沒位子是 FULL（exit 1），但 wal-index 要長一段時沒位子是 IOERR_SHMSIZE（exit 5）；看到就先查磁碟）。跟 `validate`／`status`
 對同一種檔是同一個判決（issue #357 之前 `export` 會落到 `main()` 的最後手段：traceback＋
 `fatal: unexpected error`、exit 2——那個碼的意思是「工具本身有 bug」，照 exit code 分流的健檢會走錯路）。
 

@@ -211,8 +211,9 @@ def read_journal_errors(unit: str, *, runner: Runner) -> int | None:
     """How many ``err``-or-worse lines ``unit`` wrote to the journal in the last day.
 
     ``None`` when the journal is not readable: ``journalctl`` failed, or
-    answered nothing but a hint on stderr (the trader user outside the
-    journal group).
+    counted no error line while putting a hint on stderr (the trader user
+    outside the journal group; its own ``-- No entries --`` line, on either
+    stream, is neither an error nor a hint).
     """
     # Not --quiet: it would also silence the hint that tells a user outside the
     # journal group from an empty journal.
@@ -225,7 +226,8 @@ def read_journal_errors(unit: str, *, runner: Runner) -> int | None:
     count = sum(
         1 for line in result.stdout.splitlines() if line.strip() and not line.startswith("-- ")
     )
-    if count == 0 and result.stderr.strip():
+    hint = any(line.strip() and not line.startswith("-- ") for line in result.stderr.splitlines())
+    if count == 0 and hint:
         # A user outside the journal group gets exit 0, "-- No entries --" and
         # a hint on stderr: that is not a count of zero.
         return None

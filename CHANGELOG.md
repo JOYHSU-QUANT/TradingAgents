@@ -35,8 +35,8 @@ Breaking changes within the 0.x line are called out explicitly.
   known to be active and never while the segment-switch marker is present,
   and what a tick cannot judge — a line whose document could not be read or
   whose rules failed, a unit `systemctl` could not show — keeps the
-  conditions it held, so a failed look never mails a false all-clear. A letter names
-  only which line, what state and when (`tests/test_mail.py` holds that no
+  conditions it held, so a failed look never mails a false all-clear. A letter
+  names only which line, what state and when (`tests/test_mail.py` holds that no
   decimal text or hex of any document reaches one); the account is SMTP 587
   STARTTLS from the repo-root `.env`'s `DASHBOARD_*` names (nothing else in the
   file is read; a refusal names the name, never a value); an optional

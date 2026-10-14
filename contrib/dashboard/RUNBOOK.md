@@ -132,7 +132,7 @@ systemctl list-timers dashboard-exporter.timer --no-pager
 | `<uni>:behind` | 日界線過了 3.5 小時還沒 decide（三個 visit 時段都過了） | visit log；手動 `paper-visit.sh` 一次 |
 | `<uni>:clock_ahead` | store 的 clock 跑在時鐘前面（不可能狀態） | 主機時鐘或 store 有問題，先 `validate` |
 | `<uni>:no_decision` | run 開了 48 小時一根都沒 decide | run 開錯 id 或 visit 根本沒跑 |
-| `<uni>:no_run` | 文件裡沒有 run（run id 不在 store） | 查 `exporter.local.yaml` 的 `run_id` |
+| `<uni>:no_run` | 文件裡沒有 run：`status` 沒帶 `--run-id` 才會這樣，exporter 一定會帶（run id 不在 store 是 `read_failed`） | 套件行為變了，回報 |
 | `carry:handoff_stale` | 00:30Z 過了交接檔還是昨天的 | 協調者沒跑成：`carry-signal.log`；兩腿照舊維持（D5） |
 | `carry:handoff_unreadable` | report 讀不到交接檔 | 路徑／權限；協調者第一次還沒跑完也會 |
 | `carry:held_by_d5` | report 最新一天亮 `held by D5`（held 連續天數到了 carry 線的 `d5_days`，預設 3，exporter 以 `--d5-days` 傳給 report） | carry RUNBOOK §6：協調者連三天沒給可用交接檔 |

@@ -263,7 +263,8 @@ def test_a_header_or_credential_the_library_cannot_encode_is_a_mail_error():
         def login(self, user, password):
             password.encode("ascii")
 
-    with pytest.raises(MailError, match="UnicodeEncodeError"):
+    with pytest.raises(MailError, match="UnicodeEncodeError") as caught:
         send_mail(accented, subject="s", body="b", now=NOW, smtp_factory=AsciiOnlySMTP)
+    assert "\u00e4" not in str(caught.value) and "position" not in str(caught.value)
     with pytest.raises(MailError, match="ValueError"):
         send_mail(SETTINGS, subject="bad\rheader", body="b", now=NOW, smtp_factory=FakeSMTP)

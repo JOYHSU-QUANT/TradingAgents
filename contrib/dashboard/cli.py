@@ -9,8 +9,8 @@ first alert needs them.
 Exit codes: ``0`` done (an ``export`` whose lines failed to read is still
 done: the failures are in ``exporter.json`` and, as alerts, in the mail);
 ``1`` a setting that cannot be used — the YAML, the ``.env`` names, a state
-file this build cannot read, a ``test-mail`` without a mail account or whose
-send failed; ``2`` usage; ``3`` an ``export`` that ran whole but could not
+file this build cannot read, a ``test-mail`` without a mail account, whose
+send failed or had a recipient refused; ``2`` usage; ``3`` an ``export`` that ran whole but could not
 send a letter (or a recipient was refused), so the unit shows as failed
 until a tick sends again.
 

@@ -91,6 +91,10 @@ def send_mail(
             smtp.ehlo()
             smtp.login(settings.user, settings.password)
             refused = smtp.send_message(message)
+    except UnicodeEncodeError as exc:
+        # The library spells out the character it could not encode: a
+        # character of the account name or the password. Not repeated.
+        raise MailError("UnicodeEncodeError: the account name or password is not ASCII") from exc
     except (smtplib.SMTPException, OSError, ValueError) as exc:
         text = str(exc).replace(settings.password, "***") if settings.password else str(exc)
         raise MailError(f"{type(exc).__name__}: {text}") from exc

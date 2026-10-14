@@ -40,7 +40,7 @@ python -m contrib.dashboard test-mail --config ...   # one letter through the ac
 the repository root's). Exit `0` done (a line that failed to read is still
 "done": it is in `exporter.json` and in the mail); `1` a setting that cannot
 be used, a state file this build cannot read, a `test-mail` with no account
-or whose send failed; `2` usage; `3` an `export` that ran whole but could not
+or whose send failed or had a recipient refused; `2` usage; `3` an `export` that ran whole but could not
 send a letter (or a recipient was refused), so the unit shows as failed until
 a tick sends again.
 
@@ -93,7 +93,7 @@ Thresholds are the YAML's `thresholds:`; the defaults were decided 2026-10-14.
 | `<uni line>:behind` | the clock is `behind` and the latest boundary passed more than `uniswap_behind_hours` (3.5) ago |
 | `<uni line>:clock_ahead` | the clock is `ahead` |
 | `<uni line>:no_decision` | no bar decided `uniswap_no_decision_hours` (48) after the run was created |
-| `<uni line>:no_run` | the document carries no run (the run id is not in the store) |
+| `<uni line>:no_run` | the document carries no run: `status` ran without `--run-id`, which the exporter never does (a run id the store does not hold is `read_failed`) |
 | `carry:handoff_stale` | the handoff decides a day before today and the clock is past `handoff_due_utc` (00:30) |
 | `carry:handoff_unreadable` | the report could not read the handoff |
 | `carry:held_by_d5` | the report lights `held by D5` on its newest day (it does once a held streak reaches the carry line's `d5_days`, 3, which the exporter passes as `--d5-days`) |

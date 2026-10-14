@@ -57,11 +57,11 @@ red/missing smoke test — curable by a ``live-smoke`` re-run;
 exit was not clean — each ``live.shutdown.ExitReason`` whose code is 4 names
 one way; ``safe-mode
 --status``: a safe mode is latched, recoverable OR manual — 4 means "latched",
-not "human action required"), ``5`` (``validate``; for ``status`` the code means the store could
-not be read as a database or holds a state the model refuses) the
-run has integrity failures — orphans, snapshot or replay mismatches, or a
+not "human action required"), ``5`` (``validate``) the run has integrity failures — orphans, snapshot or replay mismatches, or a
 store so corrupt the checks themselves cannot run ("the store is broken;
-investigate before trusting results"), ``130`` interrupted before a graceful
+investigate before trusting results") — ``export`` and ``status`` share the
+code and its wording for a ``--db`` that is not a SQLite database or fails
+while it is read, and ``status`` also for a state its model refuses, ``130`` interrupted before a graceful
 lane could take over (Ctrl-C in ``export``/``validate``/``live``/``live-smoke``
 or during ``paper`` startup/reconciliation — SIGTERM likewise once ``paper``,
 ``live`` or ``live-smoke`` has installed its handler; once the ``paper`` loop

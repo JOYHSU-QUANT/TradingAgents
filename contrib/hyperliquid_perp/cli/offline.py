@@ -20,6 +20,7 @@ from pathlib import Path
 
 from ..common import store_layout
 from ..persistence.db import Database
+from ..persistence.db_types import is_lock_error
 from ..status import DEFAULT_RECENT, read_status, status_json, status_lines
 from ._common import _existing_run_row, _open_existing_db
 
@@ -40,6 +41,119 @@ def _every_payload_missing(report) -> bool:
         and bool(report.missing_payload)
         and not (report.unreadable or report.unverified)
     )
+
+
+def _store_integrity_failure(exc: BaseException) -> int:
+    """The exit-5 verdict of the report-only commands: "the store is broken;
+    investigate before trusting results".
+
+    One wording and one code for ``export`` / ``validate`` / ``status``: a
+    ``--db`` that exists and passes the path guards but is not SQLite, a
+    corrupt one, an I/O failure mid-read, a cell or state the reading model
+    refuses. A store that could not be OPENED is the opposite verdict (named
+    exit 1, see :func:`._common._open_existing_db`) and mostly never reaches
+    here — "mostly", because a file that is not a database raises plain
+    ``DatabaseError`` rather than the ``OperationalError`` those guards narrow
+    themselves to, and that IS an integrity verdict: telling an operator whose
+    disk is rotting that they mistyped ``--db`` is the error this split
+    exists to avoid.
+    """
+    print(f"error: store integrity failure — {exc}", file=sys.stderr)
+    return 5
+
+
+def _backfill_fingerprints(
+    db: Database, *, db_path: str, run_id: str, payload_root: Path | None
+) -> bool:
+    """``export --backfill-format-fingerprint``: the pass, then the hints.
+
+    True when the pass was REFUSED (its message already printed) and the
+    export must not run; False when it may go on — the pass ran, or was
+    skipped over an unknown run, which ``export_run`` refuses in the one
+    ``export_failed`` wording this command has always used (a "stamped=0"
+    line about a typo would only compete with it). Only a lock is this
+    pass's refusal; a corrupt store or a failing disk is left to the caller's
+    exit-5 verdict, with or without the flag.
+    """
+    from ..persistence import repository as repo
+    from ..persistence.backfill import backfill_format_fingerprints
+
+    # The layout the daemons write (cli/paper.py, cli/live.py,
+    # cli/smoke.py, all through common.store_layout): this run's
+    # payloads beside THIS store. A copy that moved the db and its
+    # payloads together lands there, so it is the reader's second try
+    # without a flag, and the directory every hint below names.
+    beside = store_layout.payload_dir(db_path, run_id)
+    retried_beside = False
+
+    def _pass(root: Path | None):
+        report = backfill_format_fingerprints(db, run_id=run_id, payload_root=root)
+        print(report.summary(run_id), file=sys.stderr)
+        return report
+
+    try:
+        known = repo.get_run(db.conn, run_id) is not None
+        report = _pass(payload_root) if known else None
+        if (
+            report is not None
+            and payload_root is None
+            and _every_payload_missing(report)
+            and beside.is_dir()
+        ):
+            # Nothing at the recorded paths, and a directory in the
+            # daemon's layout beside the store: read there before
+            # asking for --payload-root. Safe to run the pass twice —
+            # the first stamped nothing, and only NULL cells are ever
+            # written, so the second sees the same rows. Said on
+            # stderr, so a stamped line after a missing_payload line
+            # is not read as a contradiction.
+            retried_beside = True
+            print(
+                "note: every payload is missing at its recorded path; reading "
+                f"them under the directory beside this store instead ({beside})",
+                file=sys.stderr,
+            )
+            report = _pass(beside)
+    except sqlite3.Error as exc:
+        # The pass takes the store's write lock (RUNBOOK §6 says a
+        # running daemon is fine): a lock held past busy_timeout is a
+        # named refusal here, not a traceback exit 2.
+        if not is_lock_error(exc):
+            raise
+        print(f"error: format_fingerprint backfill failed — {exc}", file=sys.stderr)
+        return True
+    if report is not None and _every_payload_missing(report):
+        # Only when the counts make the sentence true (see the
+        # predicate): which sentence depends on where the pass looked.
+        layout = f"<db dir>/{store_layout.PAYLOADS_DIRNAME}/"
+        if payload_root is not None:
+            print(
+                f"hint: no payload under --payload-root {str(payload_root)!r} "
+                "matched a recorded file name; the daemon writes them under "
+                f"{layout}{run_id}/ (here: {beside}) — point at that run's "
+                "own directory",
+                file=sys.stderr,
+            )
+        elif retried_beside:
+            print(
+                f"hint: no payload beside this store ({beside}) matched a recorded "
+                f"file name either; a copy that did not keep the daemon's "
+                f"{layout}<run-id>/ layout needs --payload-root pointing at that "
+                "run's payload directory",
+                file=sys.stderr,
+            )
+        else:
+            # ``is_dir()`` is false for a missing path AND for a file
+            # of that name, so "no payload directory" is the sentence
+            # that is true in both cases.
+            print(
+                "hint: every payload is missing at its recorded path, and there "
+                f"is no payload directory beside this store at {beside}; a store "
+                "copied off the host that wrote it needs --payload-root pointing "
+                "at that run's payload directory",
+                file=sys.stderr,
+            )
+    return False
 
 
 def _cmd_export(argv: list[str]) -> int:
@@ -94,96 +208,30 @@ def _cmd_export(argv: list[str]) -> int:
 
     from ..persistence.export import ExportError, export_run
 
-    db = _open_existing_db(args.db)
-    if db is None:
-        return 1
-    with db:
-        if args.backfill_format_fingerprint:
-            from ..persistence import repository as repo
-            from ..persistence.backfill import backfill_format_fingerprints
-
-            # The layout the daemons write (cli/paper.py, cli/live.py,
-            # cli/smoke.py, all through common.store_layout): this run's
-            # payloads beside THIS store. A copy that moved the db and its
-            # payloads together lands there, so it is the reader's second try
-            # without a flag, and the directory every hint below names.
-            beside = store_layout.payload_dir(args.db, args.run_id)
-            retried_beside = False
-
-            def _pass(root: Path | None):
-                report = backfill_format_fingerprints(db, run_id=args.run_id, payload_root=root)
-                print(report.summary(args.run_id), file=sys.stderr)
-                return report
-
-            # Skipped silently over an unknown run: export_run below refuses
-            # it in the one ``export_failed`` wording this command has always
-            # used, and a "stamped=0" line about a typo would only compete
-            # with it.
-            try:
-                known = repo.get_run(db.conn, args.run_id) is not None
-                report = _pass(payload_root) if known else None
-                if (
-                    report is not None
-                    and payload_root is None
-                    and _every_payload_missing(report)
-                    and beside.is_dir()
-                ):
-                    # Nothing at the recorded paths, and a directory in the
-                    # daemon's layout beside the store: read there before
-                    # asking for --payload-root. Safe to run the pass twice —
-                    # the first stamped nothing, and only NULL cells are ever
-                    # written, so the second sees the same rows. Said on
-                    # stderr, so a stamped line after a missing_payload line
-                    # is not read as a contradiction.
-                    retried_beside = True
-                    print(
-                        "note: every payload is missing at its recorded path; reading "
-                        f"them under the directory beside this store instead ({beside})",
-                        file=sys.stderr,
-                    )
-                    report = _pass(beside)
-            except sqlite3.Error as exc:
-                # The pass takes the store's write lock (RUNBOOK §6 says a
-                # running daemon is fine): a lock held past busy_timeout is a
-                # named refusal here, not a traceback exit 2.
-                print(f"error: format_fingerprint backfill failed — {exc}", file=sys.stderr)
-                return 1
-            if report is not None and _every_payload_missing(report):
-                # Only when the counts make the sentence true (see the
-                # predicate): which sentence depends on where the pass looked.
-                layout = f"<db dir>/{store_layout.PAYLOADS_DIRNAME}/"
-                if args.payload_root is not None:
-                    print(
-                        f"hint: no payload under --payload-root {args.payload_root!r} "
-                        "matched a recorded file name; the daemon writes them under "
-                        f"{layout}{args.run_id}/ (here: {beside}) — point at that run's "
-                        "own directory",
-                        file=sys.stderr,
-                    )
-                elif retried_beside:
-                    print(
-                        f"hint: no payload beside this store ({beside}) matched a recorded "
-                        f"file name either; a copy that did not keep the daemon's "
-                        f"{layout}<run-id>/ layout needs --payload-root pointing at that "
-                        "run's payload directory",
-                        file=sys.stderr,
-                    )
-                else:
-                    # ``is_dir()`` is false for a missing path AND for a file
-                    # of that name, so "no payload directory" is the sentence
-                    # that is true in both cases.
-                    print(
-                        "hint: every payload is missing at its recorded path, and there "
-                        f"is no payload directory beside this store at {beside}; a store "
-                        "copied off the host that wrote it needs --payload-root pointing "
-                        "at that run's payload directory",
-                        file=sys.stderr,
-                    )
-        try:
-            paths = export_run(db, run_id=args.run_id, output_dir=args.output_dir)
-        except ExportError as exc:
-            print(f"error: export_failed — {exc}", file=sys.stderr)
+    try:
+        db = _open_existing_db(args.db)
+        if db is None:
             return 1
+        with db:
+            if args.backfill_format_fingerprint and _backfill_fingerprints(
+                db, db_path=args.db, run_id=args.run_id, payload_root=payload_root
+            ):
+                return 1
+            paths = export_run(db, run_id=args.run_id, output_dir=args.output_dir)
+    except ExportError as exc:
+        # ``export_run`` wraps every failure (§1.1) so the daemon can log
+        # ``export_failed`` and keep trading; here the cause decides. A store
+        # that fails while the CSVs are read out is the integrity verdict; a
+        # lock is the named refusal the backfill pass gives it; anything else
+        # (an unknown run, the output directory) is the refusal it always was.
+        cause = exc.__cause__
+        if isinstance(cause, sqlite3.Error) and not is_lock_error(cause):
+            return _store_integrity_failure(exc)
+        print(f"error: export_failed — {exc}", file=sys.stderr)
+        return 1
+    except sqlite3.Error as exc:
+        # Not SQLite, or corrupt: the shared exit-5 verdict (issue #357).
+        return _store_integrity_failure(exc)
     for path in paths:
         print(path)
     return 0
@@ -235,14 +283,9 @@ def _cmd_validate(argv: list[str]) -> int:
         # log beside it), and ``Database`` names the one it cannot open as a
         # store even though it reads (#235) — all of them
         # ``SchemaVersionError``, which the open above turns into a named exit
-        # 1. "Mostly", because one open failure still lands here and should: a
-        # file that is not a SQLite database, and a corrupt one, raise plain
-        # ``DatabaseError`` rather than the ``OperationalError`` those guards
-        # narrow themselves to, and that IS an integrity verdict — telling an
-        # operator whose disk is rotting that they mistyped ``--db`` is the
-        # error this split exists to avoid.
-        print(f"error: store integrity failure — {exc}", file=sys.stderr)
-        return 5
+        # 1. For the one open failure that still lands here, and should, see
+        # ``_store_integrity_failure``.
+        return _store_integrity_failure(exc)
     for line in report.summary_lines():
         print(line)
     if report.phase3_ready:
@@ -375,11 +418,9 @@ def _cmd_status(argv: list[str], *, now: Callable[[], datetime] = _utc_now) -> i
     except (sqlite3.Error, ArithmeticError, ValueError) as exc:
         # The store does not hold up — a file that is not a database, a
         # malformed one, an I/O failure mid-read, a cell no Decimal accepts,
-        # a state the model refuses as impossible: the same "investigate the
-        # store" verdict ``validate`` gives, under its code (see its comment
-        # on why an unopenable file belongs here and not under exit 1).
-        print(f"error: store integrity failure — {exc}", file=sys.stderr)
-        return 5
+        # a state the model refuses as impossible: the verdict ``validate``
+        # gives, see ``_store_integrity_failure``.
+        return _store_integrity_failure(exc)
     if args.json:
         print(status_json(status))
     else:

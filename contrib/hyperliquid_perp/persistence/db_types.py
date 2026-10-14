@@ -6,7 +6,15 @@ agree on.
 
 from __future__ import annotations
 
-__all__ = ["BOOKKEEPING_TABLE", "BUSY_TIMEOUT_MS", "IN_MEMORY", "SchemaVersionError"]
+import sqlite3
+
+__all__ = [
+    "BOOKKEEPING_TABLE",
+    "BUSY_TIMEOUT_MS",
+    "IN_MEMORY",
+    "SchemaVersionError",
+    "is_lock_error",
+]
 
 
 # PR3 runs a 30s market-monitor loop and a 4h scheduler cycle against the same
@@ -21,6 +29,26 @@ IN_MEMORY = ":memory:"
 
 # The table ``db.apply_migrations`` records each applied version in.
 BOOKKEEPING_TABLE = "schema_migrations"
+
+# SQLite's primary result codes for "another connection holds it": BUSY (5)
+# and LOCKED (6). The low byte of an error's code is its kind; the rest says
+# which case of it the error is.
+_LOCK_CODES = frozenset({5, 6})
+
+
+def is_lock_error(error: sqlite3.Error) -> bool:
+    """Whether SQLite refused because another connection holds the database or a table.
+
+    By result code, not by class: a lock and a failing disk (``disk I/O
+    error``) are both ``OperationalError``, and a caller that names the lock
+    as a retryable refusal must not call the disk the same thing. Before
+    Python 3.11 an error carries no code, only SQLite's words, which are then
+    looked for.
+    """
+    code = getattr(error, "sqlite_errorcode", None)
+    if code is None:
+        return "is locked" in str(error)
+    return code & 0xFF in _LOCK_CODES
 
 
 class SchemaVersionError(RuntimeError):

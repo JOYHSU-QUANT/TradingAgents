@@ -190,7 +190,9 @@ python -m contrib.hyperliquid_perp paper --coin BTC --db paper_trading.db --crea
 python -m contrib.hyperliquid_perp paper --coin BTC --db paper_trading.db
 
 # 手動全量 CSV export（八張 phase2-data §5–§12 CSV；.tmp → atomic replace；
-# 最後寫 manifest.json 標記整組一致——讀取方先驗 manifest 再做跨檔 join）
+# 最後寫 manifest.json 標記整組一致——讀取方先驗 manifest 再做跨檔 join；
+# exit 0 寫完、1 操作錯誤、5 store integrity failure（--db 指到的檔不是 SQLite／內容壞掉），
+# 最後一種與 validate／status 同碼，見 RUNBOOK §6）
 python -m contrib.hyperliquid_perp export --run-id paper-BTC --output-dir exports/
 
 # 驗收器：13 項 summary 指標 + 鏈路完整性 + 可進 Phase 3 判定

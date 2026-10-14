@@ -85,7 +85,8 @@ python -m contrib.hyperliquid_perp paper --coin BTC --db paper_trading.db --crea
 > 就設計成安全冪等，而無監管時半夜 crash 到被發現之間，持倉完全沒有 SL/TP 看管。
 > 監管會拉回來的是 daemon **真的退出**的情況（store 壞掉、lease 被搶、export 的
 > fail-loud 例外等——其中「`--db` 不是 SQLite／內容壞掉」自 #362 起是具名 exit 5
-> `store integrity failure` 而不是 exit 2 的 traceback，重啟一百次也不會好，看到就去查 store）；decision cycle **前半**（讀帳本、抓市場、寫 `ai_inputs`、呼叫
+> `store integrity failure` 而不是 exit 2 的 traceback，重啟一百次也不會好，看到就去查 store；
+> 取到 lease 之後才由 migration 撞到的 corruption 仍是 exit 2，已知缺口）；decision cycle **前半**（讀帳本、抓市場、寫 `ai_inputs`、呼叫
 > AI——即 AI 回答之前）的**程式缺陷**（非 Retryable 例外）不再讓 daemon 退出——該
 > cycle 記成 `api_failed`（`error_type` 空、`error_message` 以 `non-retryable:` 開頭）、
 > log 印 ERROR traceback、倉位與 SL/TP 照舊看管、下個 cycle 照排，與 live 車道對

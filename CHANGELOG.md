@@ -167,9 +167,9 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
-- **`paper`, `live` and a real `live-smoke` run now exit 5 with
-  `store integrity failure` on a `--db` that is not a SQLite database, as
-  every other subcommand does** (`contrib/hyperliquid_perp/cli/_common.py`,
+- **`paper`, `live` and a `live-smoke` run (real or `--dry-run`) now exit 5
+  with `store integrity failure` on a `--db` that is not a SQLite database,
+  as every other subcommand does** (`contrib/hyperliquid_perp/cli/_common.py`,
   `cli/__init__.py`, issue #362). The owning commands opened the store
   through `_open_run_or_exit` / `_open_existing_db` with no handler for the
   plain `sqlite3.DatabaseError` a file that is not a database (or a corrupt

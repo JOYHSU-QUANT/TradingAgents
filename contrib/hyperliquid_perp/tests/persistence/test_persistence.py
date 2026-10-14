@@ -11,6 +11,7 @@ import pytest
 
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database, connect
+from contrib.hyperliquid_perp.persistence.db_types import is_store_integrity_error
 from contrib.hyperliquid_perp.persistence.ids import (
     decision_attempt_id,
     fill_id,
@@ -1982,3 +1983,60 @@ def test_get_position_protection_distinguishes_missing_row_from_cleared(tmp_path
         Decimal("60000"),
     )
     db.close()
+
+
+def test_is_store_integrity_error_reads_the_result_code_of_a_real_failure(tmp_path):
+    # A lock and a failing disk are both OperationalError, so the class cannot
+    # tell them apart; SQLite's primary result code can. The real thing: a
+    # second connection refused by one holding a write transaction carries
+    # BUSY and is not the verdict; a file that is not a database carries
+    # NOTADB and is. (An error built by hand carries no code and takes the
+    # fallback pinned in the next test.)
+    path = tmp_path / "x.db"
+    holder = sqlite3.connect(path)
+    holder.execute("CREATE TABLE t (x)")
+    holder.commit()
+    holder.execute("BEGIN IMMEDIATE")
+    other = sqlite3.connect(path, timeout=0)
+    try:
+        with pytest.raises(sqlite3.OperationalError) as locked:
+            other.execute("BEGIN IMMEDIATE")
+    finally:
+        other.close()
+        holder.rollback()
+        holder.close()
+    assert not is_store_integrity_error(locked.value)
+
+    garbage = tmp_path / "g.db"
+    garbage.write_bytes(b"not a database" * 100)
+    conn = sqlite3.connect(garbage)
+    try:
+        with pytest.raises(sqlite3.DatabaseError) as notadb:
+            conn.execute("SELECT 1 FROM sqlite_master")
+    finally:
+        conn.close()
+    assert is_store_integrity_error(notadb.value)
+
+
+@pytest.mark.parametrize(
+    ("error", "integrity"),
+    [
+        (sqlite3.DatabaseError("database disk image is malformed"), True),
+        (sqlite3.DatabaseError("file is not a database"), True),
+        (sqlite3.OperationalError("disk I/O error"), True),
+        (sqlite3.OperationalError("database is locked"), False),
+        (sqlite3.OperationalError("attempt to write a readonly database"), False),
+        (sqlite3.OperationalError("database or disk is full"), False),
+        (sqlite3.OperationalError("unable to open database file"), False),
+        (sqlite3.IntegrityError("UNIQUE constraint failed: t.x"), False),
+        (sqlite3.ProgrammingError("Cannot operate on a closed database."), False),
+    ],
+    ids=lambda v: v if isinstance(v, bool) else str(v)[:24],
+)
+def test_is_store_integrity_error_is_positive_without_a_result_code(error, integrity):
+    # No code on a hand-built error (every monkeypatched failure in the CLI
+    # tests, and every error before Python 3.11): the bare DatabaseError
+    # class is what CORRUPT and NOTADB arrive as, a failing disk says so in
+    # words, and nothing else — not a lock, a denied write, a full disk, a
+    # constraint, a tool bug — is the verdict.
+    assert is_store_integrity_error(error) is integrity

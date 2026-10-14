@@ -15,6 +15,7 @@ __all__ = [
     "IN_MEMORY",
     "SchemaVersionError",
     "is_store_integrity_error",
+    "is_store_refusal_error",
 ]
 
 
@@ -35,8 +36,10 @@ BOOKKEEPING_TABLE = "schema_migrations"
 # the disk fails under it — the whole family, its shm/lock sub-codes
 # included), CORRUPT (11), NOTADB (26, the file is not a database). The low
 # byte of an error's code is its kind; the rest says which case of it the
-# error is.
+# error is. And for "refused for a reason outside the store": PERM (3),
+# BUSY (5), LOCKED (6), READONLY (8), FULL (13), CANTOPEN (14).
 _INTEGRITY_CODES = frozenset({10, 11, 26})
+_REFUSAL_CODES = frozenset({3, 5, 6, 8, 13, 14})
 
 
 def is_store_integrity_error(error: sqlite3.Error) -> bool:
@@ -59,6 +62,27 @@ def is_store_integrity_error(error: sqlite3.Error) -> bool:
     if code is None:
         return type(error) is sqlite3.DatabaseError or "I/O error" in str(error)
     return code & 0xFF in _INTEGRITY_CODES
+
+
+def is_store_refusal_error(error: sqlite3.Error) -> bool:
+    """Whether SQLite refused for a reason OUTSIDE the store: another
+    connection holds it (BUSY / LOCKED), the file denies the write
+    (READONLY / PERM), the disk is full (FULL), a ``-wal`` / ``-shm`` cannot
+    be created (CANTOPEN).
+
+    The named exit 1 of a command, as opposed to the exit-5 verdict of
+    :func:`is_store_integrity_error` and to everything else — which is a
+    tool bug: ``OperationalError`` is also SQLite's generic SQLITE_ERROR
+    (``no such table``, a bad statement in a migration), and that must keep
+    its traceback rather than read as "locked, retry later". Positive by
+    result code; before Python 3.11 an error carries no code, and the class
+    is all there is to go on, so any ``OperationalError`` that is not the
+    integrity verdict counts.
+    """
+    code = getattr(error, "sqlite_errorcode", None)
+    if code is None:
+        return isinstance(error, sqlite3.OperationalError) and not is_store_integrity_error(error)
+    return code & 0xFF in _REFUSAL_CODES
 
 
 class SchemaVersionError(RuntimeError):

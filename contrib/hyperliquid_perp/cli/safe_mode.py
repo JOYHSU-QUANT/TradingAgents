@@ -16,7 +16,9 @@ def _cmd_safe_mode(argv: list[str]) -> int:
 
     ``--status`` (the default) prints the persisted current state and recent
     history — exit 0 when not in safe mode, 4 while one is latched, so a
-    supervisor probe can branch without parsing stdout; ``--release --reason
+    supervisor probe can branch without parsing stdout (and 5 when the
+    ``--db`` is not a SQLite database or is corrupt: the diagnostic could not
+    read the store, the verdict ``validate`` gives the same file); ``--release --reason
     "<人工確認說明>"`` releases a MANUAL safe mode, writing the
     ``safe_mode_released`` audit event. Releasing does not resume trading:
     the run must still pass its next full reconciliation (§13.6 rule 3) —
@@ -34,7 +36,8 @@ def _cmd_safe_mode(argv: list[str]) -> int:
         action="store_true",
         help="Print the current safe-mode state, recent history and the open "
         "reconciliation cases (the default action). Exit 0 when not in safe "
-        "mode, 4 while one is latched.",
+        "mode, 4 while one is latched, 5 when the --db is not a SQLite "
+        "database or is corrupt.",
     )
     action.add_argument(
         "--release",
@@ -85,7 +88,18 @@ def _cmd_safe_mode(argv: list[str]) -> int:
         # is the named exit 1. This command migrates on open and writes, so
         # the verdict here says the DIAGNOSTIC could not read the store, not
         # that a ledger it checked failed: it checks none.
-        return _sqlite_error_exit(exc, refused="safe-mode failed")
+        rc = _sqlite_error_exit(exc, refused="safe-mode failed")
+        if args.release or args.stamp_case is not None:
+            # The write lanes are one transaction each (BEGIN IMMEDIATE,
+            # rolled back on any failure), so a refusal recorded nothing —
+            # but a disk that failed at COMMIT is not guaranteed a rollback,
+            # so the store, not this line, is the authority on what landed.
+            print(
+                "hint: nothing is recorded unless `safe-mode --status` shows it — "
+                "re-check before retrying.",
+                file=sys.stderr,
+            )
+        return rc
 
 
 def _safe_mode(args: argparse.Namespace) -> int:

@@ -177,11 +177,15 @@ Breaking changes within the 0.x line are called out explicitly.
   code. The three-way rule `export` settled on in #357 now lives in
   `cli/_common._sqlite_error_exit` and all three commands route through it:
   a store that is itself broken (`is_store_integrity_error`) is the exit-5
-  verdict; an `OperationalError` past the guards — realistically a lock held
-  past `busy_timeout`, for `safe-mode` also under a `--release` /
-  `--stamp-case` write — is the named exit 1 (`live-smoke --gate-status
-  failed — …` / `safe-mode failed — …`); anything else is a tool bug and
-  keeps the exit-2 traceback. `_store_integrity_failure` moved from
+  verdict; what SQLite refuses for a reason outside the store — the new
+  `persistence.db_types.is_store_refusal_error`: BUSY, LOCKED, READONLY,
+  PERM, FULL, CANTOPEN by result code (before Python 3.11, any
+  `OperationalError`), for `safe-mode` also under a `--release` /
+  `--stamp-case` write, where a hint says nothing is recorded unless
+  `--status` shows it — is the named exit 1 (`live-smoke --gate-status
+  failed — …` / `safe-mode failed — …`); anything else, `no such table`
+  included (`OperationalError` is also SQLite's generic error class), is a
+  tool bug and keeps the exit-2 traceback. `_store_integrity_failure` moved from
   `cli/offline.py` to `cli/_common.py` with it. `safe-mode` is not
   report-only (it migrates on open and writes), so its exit 5 says the
   diagnostic could not read the store, not that a ledger it checked failed.

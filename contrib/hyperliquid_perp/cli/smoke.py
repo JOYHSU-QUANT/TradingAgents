@@ -113,7 +113,9 @@ def _cmd_live_smoke(argv: list[str]) -> int:
     has passed — EXCEPT ``--dry-run``, which exits 0 once the wiring check
     completes (its gate is never open); 4 = ran (or read) but the gate is not
     satisfied, including a pre-flight recovery failure that aborted the suite
-    before any test; 1 = a named config / env / network / lease error.
+    before any test; 1 = a named config / env / network / lease error; 5
+    (``--gate-status`` only) = the ``--db`` is not a SQLite database or is
+    corrupt — the store verdict ``validate`` gives the same file.
 
     The restart tests (15–17) EACH drive a real §19.1 startup recovery (three
     arms and three reconcile passes over the run, not one);

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -202,7 +203,34 @@ def test_a_lock_under_a_release_is_a_named_exit_1(store, capsys, monkeypatch):
     err = capsys.readouterr().err
     assert rc == 1
     assert "error: safe-mode failed — database is locked" in err
+    assert "hint: nothing is recorded unless `safe-mode --status` shows it" in err
     assert "store integrity failure" not in err
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 11),
+    reason="before 3.11 a sqlite3 error carries no result code; the class is all there is",
+)
+def test_a_missing_table_is_a_tool_bug_not_a_refusal(store, capsys, monkeypatch):
+    # OperationalError is also SQLite's generic SQLITE_ERROR — `no such
+    # table` from a schema a migration did not build is a code defect, told
+    # from a lock by result code, and keeps the exit-2 traceback rather
+    # than reading as "locked, retry later".
+    from contrib.hyperliquid_perp.live import safe_mode as safe_mode_mod
+
+    path, db = store
+    _enter(db, "manual", REASON_NON_BOT_OWNED_ORDER)
+    db.close()
+
+    def missing_table(self, *, released_by, reason):
+        self._db.conn.execute("SELECT 1 FROM no_such_table")
+
+    monkeypatch.setattr(safe_mode_mod.SafeModeManager, "release_manual", missing_table)
+    rc = main(["safe-mode", "--run-id", "r", "--db", str(path), "--release", "--reason", "checked"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "fatal: unexpected error: OperationalError: no such table: no_such_table" in err
+    assert "safe-mode failed" not in err
 
 
 def test_a_tool_bug_keeps_the_exit_2_lane(store, capsys, monkeypatch):

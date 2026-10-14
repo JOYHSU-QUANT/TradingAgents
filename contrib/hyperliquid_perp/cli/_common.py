@@ -2,8 +2,10 @@
 
 The refusal helpers more than one subcommand routes through: open-an-existing
 store (never CREATE one implicitly), the standard missing-run and wrong-run-mode
-messages, the SIGTERM→KeyboardInterrupt mapping every long-running command
-installs, and the OPENROUTER_API_KEY gate.
+messages, the store verdicts on a ``sqlite3.Error`` past that open (the exit-5
+``store integrity failure`` and the named exit 1 beside it), the
+SIGTERM→KeyboardInterrupt mapping every long-running command installs, and the
+OPENROUTER_API_KEY gate.
 """
 
 from __future__ import annotations
@@ -19,7 +21,11 @@ from ..common.decision_source import decision_source
 from ..config import dotenv_diagnosis
 from ..persistence import repository as repo
 from ..persistence.db import Database
-from ..persistence.db_types import SchemaVersionError, is_store_integrity_error
+from ..persistence.db_types import (
+    SchemaVersionError,
+    is_store_integrity_error,
+    is_store_refusal_error,
+)
 from ..runtime.run_identity import OpenedRun, RunIdentityRefusal, RunIdentityStage, open_run
 
 logger = logging.getLogger(__name__)
@@ -41,14 +47,13 @@ def _store_integrity_failure(exc: BaseException) -> int:
     ``safe-mode`` (the latter migrates and writes — not report-only, see
     :func:`_open_existing_db`): a ``--db`` that exists and passes the path
     guards but is not SQLite, a corrupt one, an I/O failure mid-read, a cell
-    or state the reading model refuses. A store that could
-    not be OPENED is the opposite verdict (named exit 1, see
-    :func:`_open_existing_db`) and mostly never reaches here — "mostly",
-    because a file that is not a database raises plain ``DatabaseError``
-    rather than the ``OperationalError`` those guards narrow themselves to,
-    and that IS an integrity verdict: telling an operator whose disk is
-    rotting that they mistyped ``--db`` is the error this split exists to
-    avoid.
+    or state the reading model refuses. A store that could not be OPENED is
+    the opposite verdict (named exit 1, see :func:`_open_existing_db`) and
+    mostly never reaches here — "mostly", because a file that is not a
+    database raises plain ``DatabaseError`` rather than the
+    ``OperationalError`` those guards narrow themselves to, and that IS an
+    integrity verdict: telling an operator whose disk is rotting that they
+    mistyped ``--db`` is the error this split exists to avoid.
     """
     print(f"error: store integrity failure — {exc}", file=sys.stderr)
     return 5
@@ -59,18 +64,19 @@ def _sqlite_error_exit(exc: sqlite3.Error, *, refused: str) -> int:
 
     A store that is itself broken (``is_store_integrity_error``: not a
     database, corrupt, a disk that fails under it) is the exit-5 verdict.
-    What SQLite refuses for a reason outside the store — an
-    ``OperationalError``; past the guards, realistically a lock held past
-    ``busy_timeout`` — is the named exit 1, printed as ``error: <refused> —
-    <what SQLite said>``. What is neither (an API misuse, a closed
-    connection: a tool bug) is re-raised to ``main``'s last resort, traceback
-    and exit 2, rather than borrowing the operator-error code. Issues #357 /
-    #359: before, each of these commands let the first kind crash as the
-    third.
+    What SQLite refuses for a reason outside the store
+    (``is_store_refusal_error``: a lock held past ``busy_timeout``, a file
+    that denies the write, a full disk) is the named exit 1, printed as
+    ``error: <refused> — <what SQLite said>``. Both arms are positive, so
+    what is neither — an API misuse, a closed connection, ``no such table``
+    from a schema a migration did not build: a tool bug — is re-raised to
+    ``main``'s last resort, traceback and exit 2, rather than borrowing an
+    operator's code. Issues #357 / #359: before, each of these commands let
+    the first kind crash as the third.
     """
     if is_store_integrity_error(exc):
         return _store_integrity_failure(exc)
-    if isinstance(exc, sqlite3.OperationalError):
+    if is_store_refusal_error(exc):
         print(f"error: {refused} — {exc}", file=sys.stderr)
         return 1
     raise exc

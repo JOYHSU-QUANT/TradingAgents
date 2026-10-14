@@ -82,12 +82,14 @@ def _cmd_safe_mode(argv: list[str]) -> int:
     try:
         return _safe_mode(args)
     except sqlite3.Error as exc:
-        # A --db that is not SQLite, or corrupt, is the exit-5 "investigate
-        # the store" verdict the report-only commands give it (issue #359);
-        # a lock — on the open, or under a --release / --stamp-case write —
-        # is the named exit 1. This command migrates on open and writes, so
-        # the verdict here says the DIAGNOSTIC could not read the store, not
-        # that a ledger it checked failed: it checks none.
+        # A store that fails under a read or a write is the exit-5
+        # "investigate the store" verdict the report-only commands give it
+        # (issue #359; a --db that is not SQLite is the open's own
+        # ``StoreIntegrityFailure``, printed by ``main``); a lock — on the
+        # open, or under a --release / --stamp-case write — is the named exit
+        # 1. This command migrates on open and writes, so the verdict here
+        # says the DIAGNOSTIC could not read the store, not that a ledger it
+        # checked failed: it checks none.
         rc = _sqlite_error_exit(exc, refused="safe-mode failed")
         if rc == 1 and (args.release or args.stamp_case is not None):
             # A refused write recorded nothing (each lane is one BEGIN

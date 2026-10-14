@@ -167,6 +167,28 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **`paper`, `live` and a `live-smoke` run (real or `--dry-run`) now exit 5
+  with `store integrity failure` on a `--db` that is not a SQLite database,
+  as every other subcommand does** (`contrib/hyperliquid_perp/cli/_common.py`,
+  `cli/__init__.py`, issue #362). The owning commands opened the store
+  through `_open_run_or_exit` / `_open_existing_db` with no handler for the
+  plain `sqlite3.DatabaseError` a file that is not a database (or a corrupt
+  one) raises — the path guards narrow themselves to `OperationalError` —
+  so it reached `main`'s last resort: a traceback, `fatal: unexpected
+  error`, exit 2, which a supervisor restarts on forever. The two shared
+  opens now turn a broken store (`is_store_integrity_error`: not a
+  database, corrupt, or a disk that fails under the open's schema read)
+  into `StoreIntegrityFailure`, which `main` catches once as the exit-5
+  verdict; every other `sqlite3.Error` propagates as before (a command's
+  own rule, or the exit-2 traceback). The report-only and deferred opens
+  write nothing and no lease is taken; `safe-mode`, which migrates on open,
+  reports a corruption its migration meets the same way (a corruption first
+  met by the lease-held migration of `paper` / `live` / a real `live-smoke`
+  run is still the exit-2 traceback — a known gap). The verdict helper is
+  now public (`cli/_common.store_integrity_failure`) so `main` can print the
+  one wording. The CLI docstring, RUNBOOK §3, RUNBOOK-live §3.4 and §4 name
+  the code.
+
 - **`live-smoke --gate-status` and `safe-mode` now exit 5 with
   `store integrity failure` on a `--db` that is not a SQLite database, as
   `export`, `validate` and `status` do** (`contrib/hyperliquid_perp/cli/smoke.py`,

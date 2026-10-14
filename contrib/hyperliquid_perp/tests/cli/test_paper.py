@@ -1465,3 +1465,21 @@ def test_the_paper_daemon_wires_the_books_as_the_provider_position_source(
     # back from (issue #221) — the live and smoke writers have the same pin
     # through assert_payload_dir; the paper writer is this one.
     assert captured["payload_dir"] == store_layout.payload_dir(tmp_path / "new.db", "fresh")
+
+
+def test_paper_exit_5_on_a_file_that_is_not_a_database(tmp_path, capsys, paper_seams):
+    # Issue #362: the owning command gives a --db that exists, passes the
+    # path guards and is not SQLite the same exit-5 "investigate the store"
+    # verdict the report-only commands do — raised by the shared open as
+    # ``StoreIntegrityFailure`` and printed once in ``main`` — not the exit-2
+    # traceback a supervisor would restart on forever. Nothing is created,
+    # no lease is taken.
+    garbage = tmp_path / "garbage.db"
+    garbage.write_bytes(b"not a database" * 100)
+    rc = cli_main(paper_argv(garbage, run_id="r", config=paper_seams))
+    err = capsys.readouterr().err
+    assert rc == 5
+    assert "store integrity failure" in err
+    assert "Traceback" not in err
+    assert "unexpected error" not in err
+    assert garbage.read_bytes() == b"not a database" * 100

@@ -26,7 +26,7 @@ from ._common import (
     _existing_run_row,
     _open_existing_db,
     _sqlite_error_exit,
-    _store_integrity_failure,
+    store_integrity_failure,
 )
 
 
@@ -225,17 +225,19 @@ def _cmd_export(argv: list[str]) -> int:
         cause = exc.__cause__
         if isinstance(cause, sqlite3.Error):
             if is_store_integrity_error(cause):
-                return _store_integrity_failure(exc)
+                return store_integrity_failure(exc)
             if not is_store_refusal_error(cause):
                 raise
         print(f"error: export_failed — {exc}", file=sys.stderr)
         return 1
     except sqlite3.Error as exc:
-        # The open past the path guards of ``_open_existing_db``, or whatever
-        # ``_backfill_fingerprints`` re-raised: the same positive rule as the
-        # backfill pass and the ExportError lane (issues #357 / #359), so a
-        # refusal from outside the store is the named exit 1 wherever in the
-        # command it hits.
+        # Whatever ``_backfill_fingerprints`` re-raised, or a lock / tool bug
+        # from the open's schema read (a broken store AT the open is
+        # ``StoreIntegrityFailure`` from ``_open_existing_db``, printed by
+        # ``main``, and never arrives here): the same positive rule as the
+        # backfill pass and the ExportError lane (issues #357 / #359 / #362),
+        # so a refusal from outside the store is the named exit 1 wherever in
+        # the command it hits.
         return _sqlite_error_exit(exc, refused="export_failed")
     for path in paths:
         print(path)
@@ -288,9 +290,10 @@ def _cmd_validate(argv: list[str]) -> int:
         # log beside it), and ``Database`` names the one it cannot open as a
         # store even though it reads (#235) — all of them
         # ``SchemaVersionError``, which the open above turns into a named exit
-        # 1. For the one open failure that still lands here, and should, see
-        # ``_store_integrity_failure``.
-        return _store_integrity_failure(exc)
+        # 1. A file that is not a database no longer lands here either: the
+        # open raises it as ``StoreIntegrityFailure`` for ``main`` to print in
+        # these same words (issue #362). What lands here failed AFTER the open.
+        return store_integrity_failure(exc)
     for line in report.summary_lines():
         print(line)
     if report.phase3_ready:
@@ -421,11 +424,12 @@ def _cmd_status(argv: list[str], *, now: Callable[[], datetime] = _utc_now) -> i
                 return 1
             status = read_status(conn, run_id, now=now, recent=args.recent)
     except (sqlite3.Error, ArithmeticError, ValueError) as exc:
-        # The store does not hold up — a file that is not a database, a
-        # malformed one, an I/O failure mid-read, a cell no Decimal accepts,
-        # a state the model refuses as impossible: the verdict ``validate``
-        # gives, see ``_store_integrity_failure``.
-        return _store_integrity_failure(exc)
+        # The store does not hold up past the open — a malformed page, an
+        # I/O failure mid-read, a cell no Decimal accepts, a state the model
+        # refuses as impossible: the verdict ``validate`` gives, see
+        # ``store_integrity_failure`` (a file that is not a database is the
+        # open's own ``StoreIntegrityFailure``, printed by ``main``).
+        return store_integrity_failure(exc)
     if args.json:
         print(status_json(status))
     else:

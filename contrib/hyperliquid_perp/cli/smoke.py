@@ -89,8 +89,10 @@ def _gate_status(args: argparse.Namespace) -> int:
                 return 1
             passed, missing, failed, errored = smoke_gate_report(db.conn, args.run_id)
     except sqlite3.Error as exc:
-        # A --db that is not SQLite, or corrupt, is the exit-5 verdict the
-        # other report-only commands give it; a lock is the named exit 1.
+        # A store that fails under the gate read is the exit-5 verdict the
+        # other report-only commands give it; a lock is the named exit 1 (a
+        # --db that is not SQLite is the open's own ``StoreIntegrityFailure``,
+        # printed by ``main``).
         return _sqlite_error_exit(exc, refused="live-smoke --gate-status failed")
     _print_smoke_gate(passed, missing, failed, errored)
     return 0 if passed else 4
@@ -113,9 +115,10 @@ def _cmd_live_smoke(argv: list[str]) -> int:
     has passed — EXCEPT ``--dry-run``, which exits 0 once the wiring check
     completes (its gate is never open); 4 = ran (or read) but the gate is not
     satisfied, including a pre-flight recovery failure that aborted the suite
-    before any test; 1 = a named config / env / network / lease error; 5
-    (``--gate-status`` only) = the ``--db`` is not a SQLite database or is
-    corrupt — the store verdict ``validate`` gives the same file.
+    before any test; 1 = a named config / env / network / lease error; 5 =
+    the ``--db`` is not a SQLite database or is corrupt (every mode, before
+    any lease or order; ``--gate-status`` also on a disk that fails under
+    the gate read) — the store verdict ``validate`` gives the same file.
 
     The restart tests (15–17) EACH drive a real §19.1 startup recovery (three
     arms and three reconcile passes over the run, not one);

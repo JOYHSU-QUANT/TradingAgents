@@ -6,6 +6,8 @@ import sqlite3
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from contrib.hyperliquid_perp.cli import main as cli_main, smoke as cli_smoke_mod
 from contrib.hyperliquid_perp.persistence.db import Database
 
@@ -38,6 +40,25 @@ def test_live_smoke_gate_status_exit_5_on_a_file_that_is_not_a_database(tmp_path
     assert "store integrity failure" in err
     assert "Traceback" not in err
     assert "unexpected error" not in err
+
+
+@pytest.mark.parametrize("extra", [[], ["--dry-run"]], ids=["real", "dry_run"])
+def test_live_smoke_run_exit_5_on_a_file_that_is_not_a_database(tmp_path, capsys, extra):
+    # Issue #362: the owning path — a real run (deferred open) and the dry
+    # run (read-only open) alike — gives a non-SQLite --db the exit-5
+    # verdict from the shared open, before any key is required or a lease
+    # taken, not the exit-2 traceback; the file is left as it was.
+    garbage = tmp_path / "garbage.db"
+    garbage.write_bytes(b"not a database" * 100)
+    cfg = live_yaml(tmp_path)
+    rc = cli_main(
+        ["live-smoke", "--run-id", "live-BTC", "--db", str(garbage), "--config", str(cfg)] + extra
+    )
+    err = capsys.readouterr().err
+    assert rc == 5
+    assert "store integrity failure" in err
+    assert "Traceback" not in err
+    assert garbage.read_bytes() == b"not a database" * 100
 
 
 def test_live_smoke_gate_status_names_a_lock_under_the_read(tmp_path, capsys, monkeypatch):

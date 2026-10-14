@@ -64,9 +64,12 @@ trusting results") — ``export``, ``status``, ``live-smoke --gate-status`` and
 ``safe-mode`` share the code and its wording for a ``--db`` that is not a
 SQLite database, is corrupt, or sits on a disk that fails while it is read,
 and ``status`` also for a state its model refuses; ``export``, ``live-smoke
---gate-status`` and ``safe-mode`` name a lock held past ``busy_timeout``,
+--gate-status`` and ``safe-mode`` name a refusal from outside the store (a
+lock held past ``busy_timeout``, a file that denies the write, a full disk),
 wherever in the command it hits, as exit 1 (``validate`` and ``status`` give
-it 5),
+a lock 5), and leave a sqlite3 error that is neither — a tool bug — to exit 2
+(on Python 3.10 an error carries no result code, and such an
+``OperationalError`` reads as the exit-1 refusal instead),
 ``130`` interrupted before a graceful lane could take over (Ctrl-C in
 ``export``/``validate``/``live``/``live-smoke``
 or during ``paper`` startup/reconciliation — SIGTERM likewise once ``paper``,

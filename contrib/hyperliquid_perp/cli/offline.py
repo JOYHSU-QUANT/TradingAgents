@@ -215,20 +215,27 @@ def _cmd_export(argv: list[str]) -> int:
             paths = export_run(db, run_id=args.run_id, output_dir=args.output_dir)
     except ExportError as exc:
         # ``export_run`` wraps every failure (§1.1) so the daemon can log
-        # ``export_failed`` and keep trading; here the cause decides. A store
-        # that is itself broken under the read-out is the integrity verdict;
-        # anything else — an unknown run, the output directory, a lock — is
-        # the named refusal it always was.
+        # ``export_failed`` and keep trading; here the cause decides, by the
+        # rule the other two lanes follow. A store that is itself broken
+        # under the read-out is the integrity verdict; a refusal from
+        # outside the store (a lock), an unknown run or the output directory
+        # is the named exit 1 it always was; a sqlite3 error that is neither
+        # — ``no such column`` from a drifted schema: a tool bug — keeps
+        # ``main``'s last resort, with the wrapper and its cause chained.
         cause = exc.__cause__
-        if isinstance(cause, sqlite3.Error) and is_store_integrity_error(cause):
-            return _store_integrity_failure(exc)
+        if isinstance(cause, sqlite3.Error):
+            if is_store_integrity_error(cause):
+                return _store_integrity_failure(exc)
+            if not is_store_refusal_error(cause):
+                raise
         print(f"error: export_failed — {exc}", file=sys.stderr)
         return 1
     except sqlite3.Error as exc:
-        # The open past the path guards of ``_open_existing_db``, or a broken
-        # store ``_backfill_fingerprints`` re-raised: the same positive rule
-        # as the ExportError lane and the backfill pass (issue #357), so a
-        # lock is the named exit 1 wherever in the command it hits.
+        # The open past the path guards of ``_open_existing_db``, or whatever
+        # ``_backfill_fingerprints`` re-raised: the same positive rule as the
+        # backfill pass and the ExportError lane (issues #357 / #359), so a
+        # refusal from outside the store is the named exit 1 wherever in the
+        # command it hits.
         return _sqlite_error_exit(exc, refused="export_failed")
     for path in paths:
         print(path)

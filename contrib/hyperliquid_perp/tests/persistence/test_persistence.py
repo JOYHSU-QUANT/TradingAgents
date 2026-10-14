@@ -1988,7 +1988,7 @@ def test_get_position_protection_distinguishes_missing_row_from_cleared(tmp_path
     db.close()
 
 
-def test_is_store_integrity_error_reads_the_result_code_of_a_real_failure(tmp_path):
+def test_the_store_classifiers_read_the_result_code_of_a_real_failure(tmp_path):
     # A lock and a failing disk are both OperationalError, so the class cannot
     # tell them apart; SQLite's primary result code can. The real thing: a
     # second connection refused by one holding a write transaction carries

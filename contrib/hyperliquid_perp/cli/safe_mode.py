@@ -18,8 +18,8 @@ def _cmd_safe_mode(argv: list[str]) -> int:
     history — exit 0 when not in safe mode, 4 while one is latched, so a
     supervisor probe can branch without parsing stdout (and 5 when the
     ``--db`` is not a SQLite database or is corrupt: the diagnostic could not
-    read the store, the verdict ``validate`` gives the same file); ``--release --reason
-    "<人工確認說明>"`` releases a MANUAL safe mode, writing the
+    read the store, the verdict ``validate`` gives the same file);
+    ``--release --reason "<人工確認說明>"`` releases a MANUAL safe mode, writing the
     ``safe_mode_released`` audit event. Releasing does not resume trading:
     the run must still pass its next full reconciliation (§13.6 rule 3) —
     the released state only lifts the manual latch.

@@ -160,6 +160,33 @@ def test_export_backfill_names_a_refused_write_instead_of_the_exit_5_verdict(
     assert not out.exists()
 
 
+def test_export_backfill_leaves_a_tool_bug_to_the_exit_2_lane(tmp_path, capsys, monkeypatch):
+    # The pass names only what SQLite refuses from outside the store; a
+    # failure that is neither that nor a broken store — here a constraint
+    # the pass's own UPDATE tripped — is a code defect and keeps main's
+    # last resort rather than borrowing the operator code (one rule with
+    # the open and the read-out).
+    import contrib.hyperliquid_perp.persistence.backfill as backfill_mod
+
+    path, db = seed_db(tmp_path)
+    db.close()
+
+    def bug(db, *, run_id, payload_root=None):
+        raise sqlite3.IntegrityError("UNIQUE constraint failed: ai_inputs.attempt_id")
+
+    monkeypatch.setattr(backfill_mod, "backfill_format_fingerprints", bug)
+    out = tmp_path / "exp"
+    rc = cli_main(
+        ["export", "--run-id", "r", "--output-dir", str(out), "--db", str(path)]
+        + ["--backfill-format-fingerprint"]
+    )
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "fatal: unexpected error: IntegrityError: UNIQUE constraint failed" in err
+    assert "backfill failed" not in err
+    assert not out.exists()
+
+
 def test_export_names_a_lock_at_the_open_as_export_failed(tmp_path, capsys, monkeypatch):
     # The one lock the path guards do not name: ``Database.__init__`` wraps
     # only ``connect()``, so on a store that fell back from WAL a writer

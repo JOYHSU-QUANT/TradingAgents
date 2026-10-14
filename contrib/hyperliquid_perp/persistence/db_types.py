@@ -1,8 +1,8 @@
 """Names :mod:`.db` and :mod:`.store_identity` share, and what a SQLite error means.
 
 The error every refused open raises, the constants the two modules have to
-agree on, and the one classifier of a ``sqlite3.Error`` the CLI routes an
-exit code on: a store that is itself broken.
+agree on, and the two classifiers of a ``sqlite3.Error`` the CLI routes an
+exit code on: a store that is itself broken, and a refusal from outside it.
 """
 
 from __future__ import annotations
@@ -37,9 +37,10 @@ BOOKKEEPING_TABLE = "schema_migrations"
 # included), CORRUPT (11), NOTADB (26, the file is not a database). The low
 # byte of an error's code is its kind; the rest says which case of it the
 # error is. And for "refused for a reason outside the store": PERM (3),
-# BUSY (5), LOCKED (6), READONLY (8), FULL (13), CANTOPEN (14).
+# BUSY (5), LOCKED (6), READONLY (8), FULL (13), CANTOPEN (14), PROTOCOL
+# (15, a WAL reader that lost the wal-index lock race too many times).
 _INTEGRITY_CODES = frozenset({10, 11, 26})
-_REFUSAL_CODES = frozenset({3, 5, 6, 8, 13, 14})
+_REFUSAL_CODES = frozenset({3, 5, 6, 8, 13, 14, 15})
 
 
 def is_store_integrity_error(error: sqlite3.Error) -> bool:
@@ -66,9 +67,9 @@ def is_store_integrity_error(error: sqlite3.Error) -> bool:
 
 def is_store_refusal_error(error: sqlite3.Error) -> bool:
     """Whether SQLite refused for a reason OUTSIDE the store: another
-    connection holds it (BUSY / LOCKED), the file denies the write
-    (READONLY / PERM), the disk is full (FULL), a ``-wal`` / ``-shm`` cannot
-    be created (CANTOPEN).
+    connection holds it (BUSY / LOCKED / PROTOCOL), the file denies the
+    write (READONLY / PERM), the disk is full (FULL), a ``-wal`` / ``-shm``
+    cannot be created (CANTOPEN).
 
     The named exit 1 of a command, as opposed to the exit-5 verdict of
     :func:`is_store_integrity_error` and to everything else — which is a

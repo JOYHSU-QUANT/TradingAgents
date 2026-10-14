@@ -2051,7 +2051,7 @@ def test_is_store_integrity_error_reads_the_result_code_of_a_real_failure(tmp_pa
     ],
     ids=lambda v: v if isinstance(v, bool) else str(v)[:24],
 )
-def test_is_store_integrity_error_is_positive_without_a_result_code(error, integrity):
+def test_the_store_classifiers_are_positive_without_a_result_code(error, integrity):
     # No code on a hand-built error (every monkeypatched failure in the CLI
     # tests, and every error before Python 3.11): the bare DatabaseError
     # class is what CORRUPT and NOTADB arrive as, a failing disk says so in

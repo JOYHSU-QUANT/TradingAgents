@@ -20,7 +20,7 @@ from pathlib import Path
 
 from ..common import store_layout
 from ..persistence.db import Database
-from ..persistence.db_types import is_store_integrity_error
+from ..persistence.db_types import is_store_integrity_error, is_store_refusal_error
 from ..status import DEFAULT_RECENT, read_status, status_json, status_lines
 from ._common import (
     _existing_run_row,
@@ -59,10 +59,11 @@ def _backfill_fingerprints(
     ``export_failed`` wording this command has always used (a "stamped=0"
     line about a typo would only compete with it). ``payload_root`` is the
     ``--payload-root`` text as typed (``_cmd_export`` checked it is a
-    directory), echoed as typed in the hint. A store that is itself broken
-    (``is_store_integrity_error``) is left to the caller's exit-5 verdict,
-    with or without the flag; every other refusal of the pass — a lock, a
-    file that denies the write, a full disk — is named here.
+    directory), echoed as typed in the hint. Only what SQLite refuses for a
+    reason outside the store (``is_store_refusal_error``: a lock, a file
+    that denies the write, a full disk) is named here; a store that is
+    itself broken is left to the caller's exit-5 verdict, with or without
+    the flag, and a tool bug to its exit-2 traceback.
     """
     from ..persistence import repository as repo
     from ..persistence.backfill import backfill_format_fingerprints
@@ -109,9 +110,10 @@ def _backfill_fingerprints(
         # The pass takes the store's write lock (RUNBOOK §6 says a
         # running daemon is fine): a lock held past busy_timeout is a
         # named refusal here, not a traceback exit 2 — as is a store that
-        # denies the write or a disk that is full. A broken store is not
-        # this pass's to name: re-raised to the caller's exit-5 verdict.
-        if is_store_integrity_error(exc):
+        # denies the write or a disk that is full. Anything else is not
+        # this pass's to name: re-raised to the caller, whose rule gives a
+        # broken store the exit-5 verdict and a tool bug its traceback.
+        if not is_store_refusal_error(exc):
             raise
         print(f"error: format_fingerprint backfill failed — {exc}", file=sys.stderr)
         return True

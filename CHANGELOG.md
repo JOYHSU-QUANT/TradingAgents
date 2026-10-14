@@ -180,13 +180,16 @@ Breaking changes within the 0.x line are called out explicitly.
   verdict; what SQLite refuses for a reason outside the store — the new
   `persistence.db_types.is_store_refusal_error`: BUSY, LOCKED, READONLY,
   PERM, FULL, CANTOPEN by result code (before Python 3.11, any
-  `OperationalError`), for `safe-mode` also under a `--release` /
+  `OperationalError` that is not the integrity verdict), for `safe-mode`
+  also under a `--release` /
   `--stamp-case` write, where a hint says nothing is recorded unless
   `--status` shows it — is the named exit 1 (`live-smoke --gate-status
   failed — …` / `safe-mode failed — …`); anything else, `no such table`
   included (`OperationalError` is also SQLite's generic error class), is a
-  tool bug and keeps the exit-2 traceback. `_store_integrity_failure` moved from
-  `cli/offline.py` to `cli/_common.py` with it. `safe-mode` is not
+  tool bug and keeps the exit-2 traceback — in `export`'s
+  `--backfill-format-fingerprint` pass too, which named every non-broken
+  `sqlite3.Error` as its exit 1 until now. `_store_integrity_failure`
+  moved from `cli/offline.py` to `cli/_common.py` with it. `safe-mode` is not
   report-only (it migrates on open and writes), so its exit 5 says the
   diagnostic could not read the store, not that a ledger it checked failed.
   The CLI docstring and RUNBOOK-live (§3.4 table, §6) name the code.
@@ -213,7 +216,8 @@ Breaking changes within the 0.x line are called out explicitly.
   failing disk is an `OperationalError` like a lock, a read-only file or a
   full disk, and an `OperationalError` the classifier does not know is a
   named exit 1, never the verdict (a `sqlite3` error that is neither — a
-  tool bug — keeps the exit-2 traceback at the open). So under
+  tool bug — keeps the exit-2 traceback at the open; #359 then narrowed
+  the exit-1 arm to the refusal codes). So under
   `--backfill-format-fingerprint` a corrupt store or a failing disk now
   reaches the exit-5 verdict, while a lock, a file that denies the write
   and a full disk keep the pass's named exit 1 (issues #210 / #235: a

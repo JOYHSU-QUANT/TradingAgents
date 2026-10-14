@@ -89,11 +89,13 @@ def _cmd_safe_mode(argv: list[str]) -> int:
         # the verdict here says the DIAGNOSTIC could not read the store, not
         # that a ledger it checked failed: it checks none.
         rc = _sqlite_error_exit(exc, refused="safe-mode failed")
-        if args.release or args.stamp_case is not None:
-            # The write lanes are one transaction each (BEGIN IMMEDIATE,
-            # rolled back on any failure), so a refusal recorded nothing —
-            # but a disk that failed at COMMIT is not guaranteed a rollback,
-            # so the store, not this line, is the authority on what landed.
+        if rc == 1 and (args.release or args.stamp_case is not None):
+            # A refused write recorded nothing (each lane is one BEGIN
+            # IMMEDIATE transaction, rolled back on any failure) — said as
+            # "unless --status shows it" because the store, not this line,
+            # is the authority on what landed. Not on exit 5: --status on a
+            # broken store fails the same way, so the pointer would be
+            # empty there.
             print(
                 "hint: nothing is recorded unless `safe-mode --status` shows it — "
                 "re-check before retrying.",

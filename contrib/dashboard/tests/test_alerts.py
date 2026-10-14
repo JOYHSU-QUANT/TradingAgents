@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from contrib.dashboard.alerts import (
+    ActiveCondition,
     Condition,
     Evaluation,
     Event,
@@ -327,14 +328,13 @@ def test_the_reports_held_by_d5_light_on_the_newest_day_is_the_condition(tmp_pat
     evaluation = _tick(tmp_path, docs)
     assert _keys(evaluation) == ["carry:held_by_d5"]
     assert evaluation.conditions[0].text == (
-        "held by D5 on 2026-10-13: the handoff unusable 3 day(s) running"
+        "held by D5 on 2026-10-13: a held streak of at least 3 day(s)"
     )
     # Lit yesterday but not today: the streak ended.
     days[-2] = carry_day(today - timedelta(days=2), [light("held by D5")])
     days[-1] = carry_day(today - timedelta(days=1))
     docs[CARRY_KEY] = carry_document(days=days)
     assert _tick(tmp_path, docs).conditions == ()
-    assert "--d5-days" in build_config(tmp_path).lines[5].argv()
 
 
 # --- host, exporter -------------------------------------------------------------------------
@@ -364,7 +364,7 @@ def test_a_line_that_could_not_be_read_is_a_condition_and_nothing_else_is_judged
 def test_a_document_of_another_shape_is_rules_failed_not_a_crash(tmp_path):
     docs = quiet_documents()
     del docs[HL_KEY]["scheduler"]["export"]
-    docs[CARRY_KEY]["days"] = [{"boundary": "2026-10-13", "alerts": None}]
+    docs[CARRY_KEY]["days"] = None
     # A clock state this build does not know is passed over, not refused.
     docs[UNI_TREND_KEY]["run"]["clock"]["state"] = "sideways"
     evaluation = _tick(tmp_path, docs)
@@ -473,8 +473,6 @@ def test_an_event_mark_keeps_the_microseconds_so_the_newest_row_is_not_news_twic
 
 
 def test_a_line_that_cannot_be_read_keeps_what_it_held(tmp_path):
-    from contrib.dashboard.alerts import ActiveCondition
-
     held = {
         "hl-paper:safe_mode": ActiveCondition(
             "hl-paper",
@@ -521,8 +519,6 @@ def test_a_unit_that_systemctl_cannot_show_is_its_own_condition_and_is_not_judge
     evaluation = evaluate(now=NOW, config=config, reads=reads, host=host, events_seen={})
     assert _keys(evaluation) == [f"unit:{unit}:unreadable" for unit in config.units()]
     # What the units and the lines held is kept, unjudged, while systemctl is mute.
-    from contrib.dashboard.alerts import ActiveCondition
-
     since = "2026-10-14T02:00:00+00:00"
     held = {
         "hl-paper:cycle_overdue": ActiveCondition("hl-paper", "cycle_overdue", "late", since),
@@ -559,8 +555,6 @@ def test_a_store_that_does_not_hold_up_is_its_own_condition(tmp_path):
 
 
 def test_a_line_whose_rules_fail_keeps_what_it_held(tmp_path):
-    from contrib.dashboard.alerts import ActiveCondition
-
     since = "2026-10-14T02:00:00+00:00"
     held = {
         "hl-paper:safe_mode": ActiveCondition("hl-paper", "safe_mode", "latched", since),

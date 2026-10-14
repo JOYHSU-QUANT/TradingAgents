@@ -140,3 +140,14 @@ def test_host_commands_run_from_a_directory_that_is_always_there_not_a_checkout(
     ]
     assert host_calls and all(cwd == HOST_CWD for _, cwd in host_calls)
     assert HOST_CWD not in config.checkouts()
+
+
+def test_the_journal_hint_beside_no_entries_is_unreadable_not_zero():
+    def outsider(argv, cwd, timeout):
+        return CommandResult(
+            0,
+            "-- No entries --\n",
+            "Hint: You are currently not seeing messages from other users\n",
+        )
+
+    assert read_journal_errors("hl-paper.service", runner=outsider) is None

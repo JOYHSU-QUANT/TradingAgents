@@ -49,7 +49,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
     for name, text in (
-        ("export", "one tick: read every line and the host, write the documents, mail the changes"),
+        ("export", "one tick: read every line and the host, mail the changes, write the documents"),
         ("check", "read and judge as a tick would, print what holds; write and mail nothing"),
         ("test-mail", "send one letter through the configured account"),
     ):
@@ -110,13 +110,16 @@ def main(
                 file=sys.stderr,
             )
             return 1
-        send_mail(
+        refused = send_mail(
             settings.mail,
             subject=f"{config.subject_prefix} test letter",
             body=f"The exporter's mail account works; sent {show_when(moment)}.\n",
             now=moment,
             smtp_factory=smtp_factory,
         )
+        if refused:
+            print(f"dashboard: {refused} recipient(s) refused the test letter", file=sys.stderr)
+            return 1
         print(f"sent a test letter to {', '.join(settings.mail.recipients)}")
         return 0
     except (ConfigError, StateError, MailError) as exc:

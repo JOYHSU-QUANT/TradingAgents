@@ -58,6 +58,16 @@ def smtp_connection(host: str, port: int, timeout: float) -> smtplib.SMTP:
     return smtplib.SMTP(host, port, timeout=timeout)
 
 
+def _letter(settings: MailSettings, subject: str, body: str, now: datetime) -> EmailMessage:
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = settings.sender
+    message["To"] = ", ".join(settings.recipients)
+    message["Date"] = format_datetime(now)
+    message.set_content(body)
+    return message
+
+
 def send_mail(
     settings: MailSettings,
     *,
@@ -70,22 +80,18 @@ def send_mail(
     """Send one plain-text letter through the account, STARTTLS first.
 
     Returns how many recipients the server refused (``0``: every one took
-    it); a send refused whole raises :class:`MailError`.
+    it); a send refused whole raises :class:`MailError`, as does a header or a
+    credential the mail library cannot encode (a ``ValueError`` from it).
     """
-    message = EmailMessage()
-    message["Subject"] = subject
-    message["From"] = settings.sender
-    message["To"] = ", ".join(settings.recipients)
-    message["Date"] = format_datetime(now)
-    message.set_content(body)
     try:
+        message = _letter(settings, subject, body, now)
         with smtp_factory(settings.host, settings.port, timeout) as smtp:
             smtp.ehlo()
             smtp.starttls(context=ssl.create_default_context())
             smtp.ehlo()
             smtp.login(settings.user, settings.password)
             refused = smtp.send_message(message)
-    except (smtplib.SMTPException, OSError) as exc:
+    except (smtplib.SMTPException, OSError, ValueError) as exc:
         text = str(exc).replace(settings.password, "***") if settings.password else str(exc)
         raise MailError(f"{type(exc).__name__}: {text}") from exc
     return len(refused)

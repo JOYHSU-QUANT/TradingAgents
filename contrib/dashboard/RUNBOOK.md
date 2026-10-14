@@ -132,6 +132,7 @@ systemctl list-timers dashboard-exporter.timer --no-pager
 | `<uni>:behind` | 日界線過了 3.5 小時還沒 decide（三個 visit 時段都過了） | visit log；手動 `paper-visit.sh` 一次 |
 | `<uni>:clock_ahead` | store 的 clock 跑在時鐘前面（不可能狀態） | 主機時鐘或 store 有問題，先 `validate` |
 | `<uni>:no_decision` | run 開了 48 小時一根都沒 decide | run 開錯 id 或 visit 根本沒跑 |
+| `<uni>:no_run` | 文件裡沒有 run（run id 不在 store） | 查 `exporter.local.yaml` 的 `run_id` |
 | `carry:handoff_stale` | 00:30Z 過了交接檔還是昨天的 | 協調者沒跑成：`carry-signal.log`；兩腿照舊維持（D5） |
 | `carry:handoff_unreadable` | report 讀不到交接檔 | 路徑／權限；協調者第一次還沒跑完也會 |
 | `carry:held_by_d5` | report 最新一天亮 `held by D5`（held 連續天數到了 carry 線的 `d5_days`，預設 3，exporter 以 `--d5-days` 傳給 report） | carry RUNBOOK §6：協調者連三天沒給可用交接檔 |
@@ -168,7 +169,7 @@ tick 會 exit 1、stderr 說 `is not a state file this build reads ... move it a
 ### 5.5 升級
 
 `deploy/paper` 的 push 會 reset hl checkout、跑 `contrib/dashboard/tests` 等測試，restart daemon 前後會停起這個 timer（有 enable 才停），
-所以部署不會寄 down／cleared；手動 `systemctl stop hl-paper` 做維護則會各寄一行（重啟還會多一行 `kill_switch_armed` 事件），屬預期。timer 是 oneshot，每次用當時的 checkout，
+所以部署不會寄 down／cleared；手動 `systemctl stop hl-paper` 做維護則會各寄一行，屬預期。timer 是 oneshot，每次用當時的 checkout，
 **不用**重啟任何東西。uniswap checkout 另外用 `lightsail-install.sh <commit>` 升級（uniswap RUNBOOK §0）。
 
 ---

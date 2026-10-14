@@ -105,6 +105,7 @@ def test_a_relative_path_is_taken_from_the_yaml_directory_and_a_bare_program_fro
         (lambda t: t + "thresholds:\n  disk_used_pct: 850\n", "percentage, 1 to 100"),
         (lambda t: t.replace("name: hl", "name: hl-paper.service"), "cannot share a name"),
         (lambda t: t + "digest_utc: 25:00\n", "HH:MM"),
+        (lambda t: t + 'subject_prefix: "a\\rb"\n', "one line of text"),
         (lambda t: t + "x: 1\n", "unknown key\\(s\\) x"),
     ],
 )

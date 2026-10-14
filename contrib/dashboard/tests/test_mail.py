@@ -47,6 +47,7 @@ class FakeSMTP:
     """Records the STARTTLS, login and send a letter goes through."""
 
     instances: list[FakeSMTP] = []
+    refused: dict[str, tuple[int, bytes]] = {}
 
     def __init__(self, host: str, port: int, timeout: float) -> None:
         self.host, self.port, self.timeout = host, port, timeout
@@ -72,8 +73,6 @@ class FakeSMTP:
     def login(self, user, password):
         self.login_args = (user, password)
         self.steps.append("login")
-
-    refused: dict[str, tuple[int, bytes]] = {}
 
     def send_message(self, message):
         self.sent.append(message)
@@ -253,3 +252,18 @@ def test_no_amount_position_or_address_of_any_document_reaches_a_letter(tmp_path
             assert value not in letter, (value, letter)
         for word in ("0x", "key", "secret", "password", "mnemonic", "USDC", "WETH"):
             assert word not in letter, (word, letter)
+
+
+def test_a_header_or_credential_the_library_cannot_encode_is_a_mail_error():
+    from dataclasses import replace
+
+    accented = replace(SETTINGS, password="p\u00e4ss")
+
+    class AsciiOnlySMTP(FakeSMTP):
+        def login(self, user, password):
+            password.encode("ascii")
+
+    with pytest.raises(MailError, match="UnicodeEncodeError"):
+        send_mail(accented, subject="s", body="b", now=NOW, smtp_factory=AsciiOnlySMTP)
+    with pytest.raises(MailError, match="ValueError"):
+        send_mail(SETTINGS, subject="bad\rheader", body="b", now=NOW, smtp_factory=FakeSMTP)

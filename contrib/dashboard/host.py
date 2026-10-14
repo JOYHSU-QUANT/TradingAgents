@@ -221,12 +221,15 @@ def read_journal_errors(unit: str, *, runner: Runner) -> int | None:
     result = runner(argv, HOST_CWD, _HOST_COMMAND_TIMEOUT)
     if result.exit_code != 0:
         return None
-    if not result.stdout.strip() and result.stderr.strip():
-        return None
     # journalctl's own lines ("-- No entries --") are not errors.
-    return sum(
+    count = sum(
         1 for line in result.stdout.splitlines() if line.strip() and not line.startswith("-- ")
     )
+    if count == 0 and result.stderr.strip():
+        # A user outside the journal group gets exit 0, "-- No entries --" and
+        # a hint on stderr: that is not a count of zero.
+        return None
+    return count
 
 
 def _load_average() -> tuple[float, float, float] | None:

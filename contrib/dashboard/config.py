@@ -461,7 +461,7 @@ def load_config(path: Path) -> ExporterConfig:
             "cannot share a name"
         )
     prefix = top.get("subject_prefix", ExporterConfig.subject_prefix)
-    if not isinstance(prefix, str) or not prefix.strip() or "\n" in prefix:
+    if not isinstance(prefix, str) or not prefix.strip() or any(c in prefix for c in "\r\n"):
         raise ConfigError(f"{where}.subject_prefix must be one line of text")
     return ExporterConfig(
         status_dir=_path(top, "status_dir", where, base),

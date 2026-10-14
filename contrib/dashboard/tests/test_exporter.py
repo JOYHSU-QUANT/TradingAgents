@@ -199,7 +199,7 @@ def test_a_letter_that_cannot_be_sent_stays_pending_and_the_watchdog_hears_fail(
     assert _json(config.status_dir / STATE_FILE)["pending"][0]["kind"] == "raised"
     assert _json(config.status_dir / "alerts.json")["pending_letters"] == 1
     assert _json(config.status_dir / "exporter.json")["mail"]["pending"] == 1
-    assert "(send failed)" in summary_line(report)
+    assert "(SMTPAuthenticationError" in summary_line(report)
     # The account is back: the same letter goes out, once, and the ping is plain.
     _, report, _ = _run(
         tmp_path, quiet_documents(), ON, now=one.replace(minute=2), units=down, urlopen=pings
@@ -335,3 +335,17 @@ def test_a_naive_clock_is_refused_before_anything_is_read(tmp_path):
             host_reader=host_reader_for(tmp_path),
         )
     assert runner.calls == []
+
+
+def test_a_ping_cut_mid_response_is_reported_not_raised(tmp_path):
+    import http.client
+
+    class CutOff(FakeUrlopen):
+        def __call__(self, url, timeout):
+            self.urls.append(url)
+            raise http.client.IncompleteRead(b"OK")
+
+    pings = CutOff()
+    config, report, _ = _run(tmp_path, quiet_documents(), ON, urlopen=pings)
+    assert report.ping == "ok" and report.ping_error.startswith("IncompleteRead")
+    assert (config.status_dir / "exporter.json").exists()

@@ -350,11 +350,11 @@ def _carry(line: CarryLine, doc: Mapping[str, Any], now: datetime, th: Threshold
                 f"by {th.handoff_due_utc:%H:%M}Z",
             )
     days = doc["days"]
-    if days and any(light["kind"] == HELD_BY_D5 for light in days[-1]["alerts"]):
+    if len(days) > 0 and any(light["kind"] == HELD_BY_D5 for light in days[-1]["alerts"]):
         add(
             "held_by_d5",
-            f"held by D5 on {days[-1]['boundary']}: the handoff unusable {doc['d5_days']} "
-            "day(s) running",
+            f"held by D5 on {days[-1]['boundary']}: a held streak of at least {doc['d5_days']} "
+            "day(s)",
         )
     return _Outcome(found)
 

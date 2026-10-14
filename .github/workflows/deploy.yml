@@ -36,15 +36,13 @@ jobs:
           # restart, so a tick does not mail the daemon down and up again.
           if systemctl is-enabled --quiet dashboard-exporter.timer 2>/dev/null; then
             sudo systemctl stop dashboard-exporter.timer
+            # Back whatever happens below (set -e): a daemon that fails to come
+            # up is news the exporter must send.
+            trap 'sudo systemctl start dashboard-exporter.timer' EXIT
           fi
           sudo systemctl restart hl-paper
           if systemctl is-enabled --quiet hl-paper-carry-eth 2>/dev/null; then
             sudo systemctl restart hl-paper-carry-eth
-          fi
-          # Back before the checks: a daemon that fails to come up is news the
-          # exporter must send.
-          if systemctl is-enabled --quiet dashboard-exporter.timer 2>/dev/null; then
-            sudo systemctl start dashboard-exporter.timer
           fi
           sleep 15
           sudo systemctl is-active hl-paper

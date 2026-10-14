@@ -10,8 +10,8 @@ In this order, so that nothing that can fail later loses what was found:
    day's hour has come and today's is not sent yet; a send that fails is
    logged and the letter stays pending; save the state again (with no mail
    account the letter lines are dropped: nothing will ever send them). The
-   mail goes before the documents are written, so a disk that will not take
-   a file cannot hold back the letter that says so;
+   mail goes before the documents are written: of the files a tick writes,
+   only the state file (step 3) stands between a finding and its letter;
 5. write the documents: each line's as its package printed it
    (``<line>.json``, kept from the last good read when this one failed),
    ``host.json`` and ``alerts.json`` (the conditions holding, the notes,
@@ -308,7 +308,7 @@ def summary_line(report: TickReport) -> str:
     ok = sum(1 for read in report.reads if read.ok)
     mail = "off" if not report.mail_enabled else f"sent {report.mailed}, pending {report.pending}"
     if report.mail_error is not None:
-        mail += " (send failed)"
+        mail += f" ({report.mail_error[:60]})"
     ping = (
         "off" if report.ping is None else report.ping + (" (failed)" if report.ping_error else "")
     )

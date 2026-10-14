@@ -32,7 +32,10 @@ Breaking changes within the 0.x line are called out explicitly.
   5), a kill-switch or safe-mode row first seen (the refresh rows never), and
   one digest a day at 03:30 UTC. Thresholds (decided 2026-10-14) are the YAML's;
   the Hyperliquid progress rules are judged only while the daemon's unit is
-  active and never while the segment-switch marker is present. A letter names
+  known to be active and never while the segment-switch marker is present,
+  and what a tick cannot judge — a line whose document could not be read or
+  whose rules failed, a unit `systemctl` could not show — keeps the
+  conditions it held, so a failed look never mails a false all-clear. A letter names
   only which line, what state and when (`tests/test_mail.py` holds that no
   decimal text or hex of any document reaches one); the account is SMTP 587
   STARTTLS from the repo-root `.env`'s `DASHBOARD_*` names (nothing else in the

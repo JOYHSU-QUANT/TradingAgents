@@ -93,11 +93,12 @@ Thresholds are the YAML's `thresholds:`; the defaults were decided 2026-10-14.
 | `<uni line>:behind` | the clock is `behind` and the latest boundary passed more than `uniswap_behind_hours` (3.5) ago |
 | `<uni line>:clock_ahead` | the clock is `ahead` |
 | `<uni line>:no_decision` | no bar decided `uniswap_no_decision_hours` (48) after the run was created |
+| `<uni line>:no_run` | the document carries no run (the run id is not in the store) |
 | `carry:handoff_stale` | the handoff decides a day before today and the clock is past `handoff_due_utc` (00:30) |
 | `carry:handoff_unreadable` | the report could not read the handoff |
 | `carry:held_by_d5` | the report lights `held by D5` on its newest day (it does once a held streak reaches the carry line's `d5_days`, 3, which the exporter passes as `--d5-days`) |
 | `host:disk` / `host:memory` | disk used above `disk_used_pct` (85) / memory available below `memory_available_mb` (200) |
-| `<line>:store_damaged` | a Hyperliquid line's `status` exited 5: the store does not hold up (`validate`'s verdict) |
+| `<hl line>:store_damaged` | a Hyperliquid line's `status` exited 5: the store does not hold up (`validate`'s verdict) |
 | `<line>:read_failed` | the line's command failed otherwise, timed out, printed no document or one of another schema |
 | `<line>:rules_failed` | the document is not shaped as this build reads it |
 

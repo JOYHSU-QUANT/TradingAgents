@@ -9,7 +9,7 @@ from contrib.dashboard.cli import main
 from contrib.dashboard.readers import CommandResult
 
 from .support import HL_KEY, NOW, UNITS_QUIET, FakeRunner, quiet_documents, unit_text
-from .test_mail import FakeSMTP, RefusingSMTP
+from .test_mail import FakeSMTP, HalfRefusingSMTP, RefusingSMTP
 
 ENVIRON_ON = {
     "DASHBOARD_SMTP_HOST": "smtp.example.com",
@@ -109,4 +109,13 @@ def test_export_exits_3_when_a_letter_could_not_be_sent(tmp_path, capsys):
     out, err = capsys.readouterr()
     assert code == 3
     assert err.startswith("mail: SMTPAuthenticationError")
-    assert "mail sent 0, pending 1 (send failed)" in out
+    assert "mail sent 0, pending 1 (SMTPAuthenticationError" in out
+
+
+def test_test_mail_exits_1_when_a_recipient_is_refused(tmp_path, capsys):
+    FakeSMTP.instances.clear()
+    args = _args("test-mail", tmp_path)
+    environ = dict(ENVIRON_ON, DASHBOARD_MAIL_TO="op@example.com, two@example.com")
+    assert main(args, now=lambda: NOW, smtp_factory=HalfRefusingSMTP, environ=environ) == 1
+    out, err = capsys.readouterr()
+    assert out == "" and err == "dashboard: 1 recipient(s) refused the test letter\n"

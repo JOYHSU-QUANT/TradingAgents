@@ -100,8 +100,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
           grep -v '^\.$' requirements.txt | pip install -r /dev/stdin
-      - name: Run the research radar's, the replay, carry and core packages' suites and the package graph
-        run: pytest -q contrib/autoresearch/tests contrib/replay/tests contrib/carry/tests contrib/core/tests contrib/tests
+      - name: Run the research radar's, the replay, carry, dashboard and core packages' suites and the package graph
+        run: pytest -q contrib/autoresearch/tests contrib/replay/tests contrib/carry/tests contrib/dashboard/tests contrib/core/tests contrib/tests
 
   uniswap-v3:
     name: uniswap_v3 tests (py3.12)

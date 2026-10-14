@@ -1,0 +1,31 @@
+# One tick of the contrib/dashboard exporter on the Lightsail host, as
+# dashboard-exporter.timer beside this file schedules it (every two minutes).
+# The RUNBOOK installs both into /etc/systemd/system; the paths are the
+# host's: the Hyperliquid checkout the package is imported from, the trader
+# user that owns it and the stores, and the exporter's own settings file.
+[Unit]
+Description=contrib/dashboard exporter: one tick
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=trader
+WorkingDirectory=/home/trader/TradingAgents
+ExecStart=/home/trader/TradingAgents/.venv/bin/python -m contrib.dashboard export --config /home/trader/TradingAgents/contrib/dashboard/configs/exporter.local.yaml
+# A tick runs six short commands and reads the host. Above six lines times the
+# YAML's command_timeout_seconds (60) plus the host reads: a tick past this is
+# stuck, not slow. Raise it with the timeout or the number of lines.
+TimeoutStartSec=12min
+# Everything the tick writes is 0640 at most: the dashboard group reads the
+# status directory, nobody else does (plan section 4).
+UMask=0027
+NoNewPrivileges=yes
+PrivateTmp=yes
+# Not ProtectSystem=strict: the tick runs the packages' own commands, which
+# open the daemons' WAL stores (a reader of a WAL store writes its -shm), so
+# the data directories must stay writable to it. The read-only dashboard
+# service (plan PR 4) is the hardened one.
+# Short of memory, the kernel takes this tick (the next one redoes it), not
+# the paper daemons beside it.
+OOMScoreAdjust=500

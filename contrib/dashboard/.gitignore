@@ -1,0 +1,2 @@
+# The host's own exporter settings (paths, run ids) live beside the example and stay out of the repo.
+configs/*.local.yaml

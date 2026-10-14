@@ -27,8 +27,9 @@ Breaking changes within the 0.x line are called out explicitly.
   operator on a change of state only: a condition raised or cleared (unit down
   or failed, decision overdue, lease or export stale, safe mode, Uniswap clock
   behind past the visit window or ahead or never decided, carry handoff stale or
-  unreadable, held by D5 three days, disk or memory, a line that could not be
-  read), a kill-switch or safe-mode row first seen (the refresh rows never), and
+  unreadable, the report's `held by D5` light on its newest day, disk or memory,
+  a line that could not be read — `store_damaged` when the perp `status` exited
+  5), a kill-switch or safe-mode row first seen (the refresh rows never), and
   one digest a day at 03:30 UTC. Thresholds (decided 2026-10-14) are the YAML's;
   the Hyperliquid progress rules are judged only while the daemon's unit is
   active and never while the segment-switch marker is present. A letter names
@@ -48,7 +49,11 @@ Breaking changes within the 0.x line are called out explicitly.
   a condition that flaps across a threshold mails each flip (no hysteresis);
   a digest hour the host sleeps through is skipped for that day; the event
   tails are the `--recent` rows, so more than ten new rows between two ticks
-  lose the oldest.
+  lose the oldest; a daemon crash-looping under `Restart=on-failure` may mail
+  each flip until systemd gives up. A tick that could not send a letter (or
+  whose server refused a recipient) exits 3, so the unit shows as failed;
+  `exporter.json` carries the tick's `duration_ms`; `deploy.yml` holds the
+  exporter's timer across the daemon restart.
 - **`status --json` for `contrib/uniswap_v3` and `report --json` for `contrib/carry`
   (dashboard plan PR 2b).** Each package now has a `status.py` reading model as
   the Hyperliquid package has. Uniswap: `status` reads the store, and the run

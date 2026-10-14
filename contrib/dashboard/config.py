@@ -25,8 +25,9 @@ A *line* is one thing the host runs that has a document: a Hyperliquid run
 checkout to run its command from (the Uniswap checkout is its own), the
 systemd unit that drives it, and the stores and run ids its command takes.
 A line's name is the file its document is written to under the status
-directory, so it is a file name, and not one of the files the exporter
-writes itself (:data:`RESERVED_NAMES`).
+directory, so it is a file name, not one of the files the exporter writes
+itself (:data:`RESERVED_NAMES`), and not the name of a unit (a unit's
+conditions are keyed by its name too).
 """
 
 from __future__ import annotations
@@ -66,13 +67,17 @@ _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 RESERVED_NAMES = frozenset({"host", "alerts", "exporter", "alerts-state"})
 # The environment names this package reads; nothing else in the .env is looked at.
 ENV_PREFIX = "DASHBOARD_"
-_CLOCK = re.compile(r"^\d\d:\d\d$")
+_CLOCK = re.compile(r"^\d\d?:\d\d$")
 _DEFAULT_SMTP_PORT = 587
 
 
 @dataclass(frozen=True)
 class Thresholds:
-    """What the alert rules compare against (:mod:`.alerts`); the defaults are the plan's (2026-10-14)."""
+    """What the alert rules compare against (:mod:`.alerts`); the defaults are the plan's (2026-10-14).
+
+    The carry sleeve's ``held by D5`` streak is the report's own threshold,
+    given per carry line (:attr:`CarryLine.d5_days`), not here.
+    """
 
     cycle_overdue_minutes: int = 30
     lease_stale_minutes: int = 15
@@ -80,7 +85,6 @@ class Thresholds:
     uniswap_behind_hours: float = 3.5
     uniswap_no_decision_hours: float = 48.0
     handoff_due_utc: time = time(0, 30)
-    d5_days: int = 3
     disk_used_pct: int = 85
     memory_available_mb: int = 200
 
@@ -166,6 +170,9 @@ class CarryLine:
 
     The report covers the sleeve's whole history (its own default span): a
     ``--since`` before the runs' first day would read as silent days.
+    ``d5_days`` is passed to the report as its ``--d5-days``: the report
+    lights ``held by D5`` on the day a held streak reaches it and on every
+    day after, and the exporter's rule reads that light off the newest day.
     """
 
     kind: ClassVar[str] = "carry"
@@ -182,6 +189,7 @@ class CarryLine:
     spot_run_id: str
     handoff: Path
     payloads_dir: Path | None = None
+    d5_days: int = 3
 
     def argv(self) -> list[str]:
         argv = [
@@ -199,6 +207,8 @@ class CarryLine:
             str(self.spot_db),
             "--spot-run-id",
             self.spot_run_id,
+            "--d5-days",
+            str(self.d5_days),
             "--json",
             "--handoff",
             str(self.handoff),
@@ -279,11 +289,18 @@ def _program(mapping: Mapping[str, Any], key: str, where: str, base: Path) -> Pa
     return _path(mapping, key, where, base)
 
 
-# The three value parsers share one shape, so a table can name them bare.
+# The value parsers share one shape, so a table can name them bare.
 def _int(mapping: Mapping[str, Any], key: str, where: str, default: int) -> int:
     value = mapping.get(key, default)
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ConfigError(f"{where}.{key} must be an integer of at least 1")
+    return value
+
+
+def _pct(mapping: Mapping[str, Any], key: str, where: str, default: int) -> int:
+    value = _int(mapping, key, where, default)
+    if value > 100:
+        raise ConfigError(f"{where}.{key} must be a percentage, 1 to 100")
     return value
 
 
@@ -299,12 +316,13 @@ def _clock(mapping: Mapping[str, Any], key: str, where: str, default: time) -> t
     if isinstance(value, time):
         return value
     if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 24 * 60:
-        # YAML 1.1 reads an unquoted 03:30 as the sexagesimal integer 210.
+        # YAML 1.1 reads an unquoted 3:30 or 12:00 as the sexagesimal integer
+        # 210 or 720 (a leading zero, as in 03:30, keeps it text).
         return time(value // 60, value % 60)
     if not isinstance(value, str) or not _CLOCK.match(value):
         raise ConfigError(f"{where}.{key} must be a UTC clock time as HH:MM")
     try:
-        return time.fromisoformat(value)
+        return time.fromisoformat(value.zfill(5))
     except ValueError as exc:
         raise ConfigError(f"{where}.{key} must be a UTC clock time as HH:MM") from exc
 
@@ -317,8 +335,7 @@ _THRESHOLD_PARSERS: dict[str, Callable[[Mapping[str, Any], str, str, Any], Any]]
     "uniswap_behind_hours": _hours,
     "uniswap_no_decision_hours": _hours,
     "handoff_due_utc": _clock,
-    "d5_days": _int,
-    "disk_used_pct": _int,
+    "disk_used_pct": _pct,
     "memory_available_mb": _int,
 }
 
@@ -394,7 +411,7 @@ def _line(raw: object, where: str, base: Path) -> Line:
         where,
         required=_COMMON_KEYS
         + ("coin", "perp_db", "perp_run_id", "spot_db", "spot_run_id", "handoff"),
-        optional=("payloads_dir",),
+        optional=("payloads_dir", "d5_days"),
     )
     payloads = _path(mapping, "payloads_dir", where, base) if "payloads_dir" in mapping else None
     return CarryLine(
@@ -406,6 +423,7 @@ def _line(raw: object, where: str, base: Path) -> Line:
         spot_run_id=_text(mapping, "spot_run_id", where),
         handoff=_path(mapping, "handoff", where, base),
         payloads_dir=payloads,
+        d5_days=_int(mapping, "d5_days", where, CarryLine.d5_days),
     )
 
 
@@ -436,6 +454,12 @@ def load_config(path: Path) -> ExporterConfig:
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
         raise ConfigError(f"{where}.lines name {', '.join(duplicates)} more than once")
+    clashes = sorted(set(names) & {line.unit for line in lines})
+    if clashes:
+        raise ConfigError(
+            f"{where}.lines name {', '.join(clashes)} as a unit is named: a line and a unit "
+            "cannot share a name"
+        )
     prefix = top.get("subject_prefix", ExporterConfig.subject_prefix)
     if not isinstance(prefix, str) or not prefix.strip() or "\n" in prefix:
         raise ConfigError(f"{where}.subject_prefix must be one line of text")

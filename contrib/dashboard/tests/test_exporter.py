@@ -26,7 +26,7 @@ from .support import (
     quiet_documents,
     unit_text,
 )
-from .test_mail import SETTINGS, FakeSMTP, RefusingSMTP
+from .test_mail import SETTINGS, FakeSMTP, HalfRefusingSMTP, RefusingSMTP
 
 OFF = Settings(mail=None, healthchecks_url=None)
 ON = Settings(mail=SETTINGS, healthchecks_url="https://hc-ping.com/abc")
@@ -127,6 +127,7 @@ def test_a_quiet_first_tick_writes_every_document_and_mails_only_the_digest(tmp_
         "error": None,
     }
     assert exporter["deadman"] == {"enabled": True, "ping": "ok", "error": None}
+    assert isinstance(exporter["duration_ms"], int) and exporter["duration_ms"] >= 0
     state = _json(status / STATE_FILE)
     assert state["events_seen"] == {
         "hl-paper": "2026-10-14T04:50:00+00:00",
@@ -244,7 +245,7 @@ def test_a_line_that_fails_keeps_its_last_good_document_on_disk(tmp_path):
         "exit 5",
         "error: malformed database",
     )
-    assert report.raised == ("hl-paper:read_failed",)
+    assert report.raised == ("hl-paper:store_damaged",)
 
 
 def test_a_state_file_this_build_cannot_read_refuses_the_tick_before_anything_is_read(tmp_path):
@@ -304,3 +305,33 @@ def test_dump_json_refuses_what_is_not_a_document():
     assert dump_json({"a": 1}) == '{\n  "a": 1\n}\n'
     with pytest.raises(TypeError, match="carries no set"):
         dump_json({"a": {1, 2}})
+
+
+def test_a_recipient_the_server_refused_is_a_mail_error_but_the_letter_is_not_resent(tmp_path):
+    FakeSMTP.instances.clear()
+    down = dict(UNITS_QUIET, **{"hl-paper.service": unit_text(active="inactive", sub="dead")})
+    pings = FakeUrlopen()
+    one = NOW.replace(hour=1)
+    config, report, _ = _run(
+        tmp_path, quiet_documents(), ON, now=one, units=down, smtp=HalfRefusingSMTP, urlopen=pings
+    )
+    assert report.mailed == 1 and report.pending == 0
+    assert report.mail_error == "1 recipient(s) refused"
+    assert report.ping == "fail" and pings.urls == ["https://hc-ping.com/abc/fail"]
+    assert _json(config.status_dir / "exporter.json")["mail"]["error"] == "1 recipient(s) refused"
+    _, report, _ = _run(tmp_path, quiet_documents(), ON, now=one.replace(minute=2), units=down)
+    assert report.mailed == 0 and report.mail_error is None
+
+
+def test_a_naive_clock_is_refused_before_anything_is_read(tmp_path):
+    config = build_config(tmp_path)
+    runner = FakeRunner(quiet_documents())
+    with pytest.raises(ValueError, match="aware"):
+        run_once(
+            config,
+            OFF,
+            now=NOW.replace(tzinfo=None),
+            runner=runner,
+            host_reader=host_reader_for(tmp_path),
+        )
+    assert runner.calls == []

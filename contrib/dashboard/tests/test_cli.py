@@ -9,7 +9,7 @@ from contrib.dashboard.cli import main
 from contrib.dashboard.readers import CommandResult
 
 from .support import HL_KEY, NOW, UNITS_QUIET, FakeRunner, quiet_documents, unit_text
-from .test_mail import FakeSMTP
+from .test_mail import FakeSMTP, RefusingSMTP
 
 ENVIRON_ON = {
     "DASHBOARD_SMTP_HOST": "smtp.example.com",
@@ -94,3 +94,19 @@ def test_a_bad_setting_is_exit_1_with_the_reason(tmp_path, capsys):
     assert "lines must be a non-empty list" in capsys.readouterr().err
     assert main(_args("export", tmp_path), environ={"DASHBOARD_SMTP_HOST": "h"}) == 1
     assert "DASHBOARD_SMTP_USER" in capsys.readouterr().err
+
+
+def test_export_exits_3_when_a_letter_could_not_be_sent(tmp_path, capsys):
+    units = dict(UNITS_QUIET, **{"hl-paper.service": unit_text(active="inactive", sub="dead")})
+    runner = FakeRunner(quiet_documents(), units=units)
+    code = main(
+        _args("export", tmp_path),
+        now=lambda: NOW,
+        runner=runner,
+        smtp_factory=RefusingSMTP,
+        environ=ENVIRON_ON,
+    )
+    out, err = capsys.readouterr()
+    assert code == 3
+    assert err.startswith("mail: SMTPAuthenticationError")
+    assert "mail sent 0, pending 1 (send failed)" in out

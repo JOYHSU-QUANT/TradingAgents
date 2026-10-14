@@ -40,7 +40,9 @@ python -m contrib.dashboard test-mail --config ...   # one letter through the ac
 the repository root's). Exit `0` done (a line that failed to read is still
 "done": it is in `exporter.json` and in the mail); `1` a setting that cannot
 be used, a state file this build cannot read, a `test-mail` with no account
-or whose send failed; `2` usage.
+or whose send failed; `2` usage; `3` an `export` that ran whole but could not
+send a letter (or a recipient was refused), so the unit shows as failed until
+a tick sends again.
 
 ## Settings
 
@@ -64,7 +66,7 @@ Two files, kept apart on purpose:
 | `<line>.json` | the line's own document, as its package printed it (`schema_version` and `source` first); kept from the last good read when a read fails |
 | `host.json` | `units[]` (`type`, `load_state`, `active_state`, `sub_state`, `result`, `n_restarts`, main process start/exit/status), `checkouts[]` (path, commit), `disk`, `memory`, `load_average`, `journal_errors_24h` |
 | `alerts.json` | `active[]` (key, line, rule, text, since), `notes[]`, `recent_events[]`, `pending_letters` |
-| `exporter.json` | per line: `ok`, `exit_code`, `failure`, `stderr_line` (first line, hex masked, cut), `duration_ms`, `document_generated_at`; the `mail` and `deadman` outcome |
+| `exporter.json` | the tick's `duration_ms`; per line: `ok`, `exit_code`, `failure`, `stderr_line` (first line, hex masked, cut), `duration_ms`, `document_generated_at`; the `mail` and `deadman` outcome. Its `lines[].file` is the index of the line documents: a reader goes by it, never by globbing the directory |
 | `alerts-state.json` | the exporter's own: the conditions holding, the newest event instant seen per line, the letters pending, the recent events, the day the digest last went |
 
 Every instant this package writes is ISO-8601 UTC to the second; the
@@ -93,14 +95,18 @@ Thresholds are the YAML's `thresholds:`; the defaults were decided 2026-10-14.
 | `<uni line>:no_decision` | no bar decided `uniswap_no_decision_hours` (48) after the run was created |
 | `carry:handoff_stale` | the handoff decides a day before today and the clock is past `handoff_due_utc` (00:30) |
 | `carry:handoff_unreadable` | the report could not read the handoff |
-| `carry:held_by_d5` | `held by D5` on the last `d5_days` (3) days |
+| `carry:held_by_d5` | the report lights `held by D5` on its newest day (it does once a held streak reaches the carry line's `d5_days`, 3, which the exporter passes as `--d5-days`) |
 | `host:disk` / `host:memory` | disk used above `disk_used_pct` (85) / memory available below `memory_available_mb` (200) |
-| `<line>:read_failed` | the line's command failed, timed out, printed no document or one of another schema |
+| `<line>:store_damaged` | a Hyperliquid line's `status` exited 5: the store does not hold up (`validate`'s verdict) |
+| `<line>:read_failed` | the line's command failed otherwise, timed out, printed no document or one of another schema |
 | `<line>:rules_failed` | the document is not shaped as this build reads it |
 
 The progress rules (`cycle_overdue`, `lease_stale`, `export_*`) are judged
-only while the daemon's unit is active (a daemon that is down is one
-condition, not four) and never while the segment marker is present.
+only while the daemon's unit is known to be active (a daemon that is down is
+one condition, not four) and never while the segment marker is present.
+What a tick cannot judge it carries as it was: a line whose document could
+not be read or whose rules failed keeps the conditions it held, and so does
+a unit `systemctl` could not show — a failed look never clears a condition.
 
 ## The letters
 

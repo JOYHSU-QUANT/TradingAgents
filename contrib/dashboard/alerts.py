@@ -7,8 +7,9 @@ when it goes (cleared), never while it merely holds (plan D2). An *event* is
 a point — a kill-switch or safe-mode row the store wrote — mailed once, when
 first seen; the newest instant seen per line is kept in the state so a
 restart of the exporter does not mail history again (the first tick seeds
-it silently). The pending letters are kept in the state too, so a mail that
-could not be sent is sent on the next tick, not lost.
+it silently, with the tick's own instant when the tail is empty). The
+pending letters are kept in the state too, so a mail that could not be sent
+is sent on the next tick, not lost.
 
 Every sentence a condition or an event carries names states, counts and
 instants only: no amount, no position, no address (plan §4: the mail passes
@@ -28,15 +29,23 @@ The rules, per line kind (the thresholds are :class:`~.config.Thresholds`):
   window, ``ahead``, or no bar decided long after the run was created; the
   visit unit's last run ``failed`` (a oneshot is judged by its last run).
 - **Carry** (``report --json``): the handoff unreadable, or deciding a day
-  before today once the coordinator is due; ``held by D5`` on the last N
-  days; the coordinator's unit ``failed``.
+  before today once the coordinator is due; the report's ``held by D5``
+  light on the newest day (the report lights it once a held streak reaches
+  the carry line's ``d5_days``); the coordinator's unit ``failed``.
 - **Host**: disk used past the threshold, memory available below it.
 - **Exporter**: a line whose document could not be read (the command
-  failed, timed out, printed no document, or one of another schema) — its
-  other conditions are carried as they were, unjudged, until it is read
-  again; a line whose document the rules could not read (a field missing
-  or of the wrong shape: a package changed its document without bumping
-  its version).
+  failed, timed out, printed no document, or one of another schema) —
+  ``store_damaged`` when the perp package's ``status`` exited 5, its verdict
+  that the store does not hold up, ``read_failed`` otherwise; a line whose
+  document the rules could not read (``rules_failed``: a field missing or of
+  the wrong shape, a package that changed its document without bumping its
+  version).
+
+What a tick cannot judge it carries as it was: a line whose document could
+not be read, or whose rules failed, keeps the conditions it held; a daemon
+whose unit ``systemctl`` could not show keeps its progress conditions and
+the unit its own. A failed look must not clear a safe mode that still holds,
+nor raise it again with a new ``since`` when the look recovers.
 """
 
 from __future__ import annotations
@@ -44,14 +53,14 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, fields, replace
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar
 
 from .config import CarryLine, ExporterConfig, HyperliquidLine, Line, Thresholds, UniswapLine
 from .files import dump_json, write_private
 from .host import HostFacts, UnitFacts
-from .readers import LineRead
+from .readers import LineRead, masked_line
 from .times import (
     clock_reached,
     hours_text,
@@ -66,6 +75,7 @@ from .times import (
 __all__ = [
     "HELD_BY_D5",
     "KILL_SWITCH_REFRESH",
+    "STORE_DAMAGED_EXIT",
     "ActiveCondition",
     "Condition",
     "Evaluation",
@@ -84,11 +94,15 @@ __all__ = [
 KILL_SWITCH_REFRESH = "kill_switch_refreshed"
 # The carry report's light for a day both legs held because the handoff was unusable.
 HELD_BY_D5 = "held by D5"
+# The perp package's exit for a store whose content does not hold up (validate's verdict).
+STORE_DAMAGED_EXIT = 5
 STATE_VERSION = 1
 # How many events ``alerts.json`` keeps for the page.
 RECENT_EVENTS = 50
-# The conditions a line does not keep through a failed read: they are about the read.
-_NOT_CARRIED = frozenset({"read_failed", "rules_failed"})
+# The conditions about a look, not about the line: not kept through a failed look.
+_NOT_CARRIED = frozenset({"read_failed", "store_damaged", "rules_failed", "unreadable"})
+# The conditions that presume a daemon that is running.
+_PROGRESS_RULES = frozenset({"cycle_overdue", "lease_stale", "export_failed", "export_stale"})
 
 
 @dataclass(frozen=True)
@@ -204,9 +218,15 @@ def _progress(
 
 
 def _new_events(
-    name: str, doc: Mapping[str, Any], seen: str | None
-) -> tuple[list[Event], str | None]:
-    """The kill-switch and safe-mode rows newer than ``seen``, oldest first, and the newest instant now seen."""
+    name: str, doc: Mapping[str, Any], seen: str | None, now: datetime
+) -> tuple[list[Event], str]:
+    """The kill-switch and safe-mode rows newer than ``seen``, oldest first, and the newest instant now seen.
+
+    The mark keeps the precision of the row it marks (the perp store writes
+    microseconds), so a row is never newer than its own mark. First sight of
+    a line seeds the mark without news: the newest row, or the tick's own
+    instant when the tail is empty (everything after it is news).
+    """
     rows: list[tuple[datetime, str, str, bool, str | None]] = []
     for row in doc["kill_switch_events"]:
         kind = row["event_type"]
@@ -229,14 +249,11 @@ def _new_events(
                 row["safe_mode_type"],
             )
         )
+    if seen is None:
+        newest = max((row[0] for row in rows), default=now)
+        return [], newest.isoformat()
     if not rows:
         return [], seen
-    newest = max(row[0] for row in rows)
-    if seen is None:
-        # First sight of the line: the tail is history, not news. The mark
-        # keeps the precision of the row (the perp store writes microseconds),
-        # so the row is never newer than its own mark.
-        return [], newest.isoformat()
     since = parse_when(seen)
     fresh = sorted((row for row in rows if row[0] > since and row[3]), key=lambda row: row[0])
     events = [
@@ -249,6 +266,7 @@ def _new_events(
         )
         for when, stamp, kind, _, mode in fresh
     ]
+    newest = max(row[0] for row in rows)
     return events, max(newest, since).isoformat()
 
 
@@ -260,6 +278,7 @@ def _hyperliquid(
     th: Thresholds,
     seen: str | None,
     parked: bool,
+    carried: Sequence[Condition],
 ) -> _Outcome:
     conditions: list[Condition] = []
     notes: list[str] = []
@@ -268,15 +287,18 @@ def _hyperliquid(
             f"{line.name}: the segment switch marker is present; the unit and progress rules "
             "are skipped"
         )
-    # The progress rules presume a daemon that is running: only a unit known
-    # to be active is judged by them (an unreadable unit is its own condition).
-    elif unit is not None and unit.running:
+    elif unit is None or unit.error is not None:
+        # The unit could not be read: whether the daemon runs is unknown, so
+        # the progress conditions it held are kept as they were.
+        conditions += [item for item in carried if item.rule in _PROGRESS_RULES]
+    elif unit.running:
+        # The progress rules presume a daemon that is running.
         conditions += _progress(line.name, now, parse_when(doc["created_at"]), doc["scheduler"], th)
     safe = doc["safe_mode"]
     if safe is not None:
         text = f"safe mode {safe['type']} since {show_text(safe['entered_at'])}"
         conditions.append(_condition(line.name, "safe_mode", text))
-    events, newest = _new_events(line.name, doc, seen)
+    events, newest = _new_events(line.name, doc, seen, now)
     return _Outcome(conditions, events, newest, notes)
 
 
@@ -327,14 +349,12 @@ def _carry(line: CarryLine, doc: Mapping[str, Any], now: datetime, th: Threshold
                 f"the handoff decides {as_of}; today is {today} and the coordinator was due "
                 f"by {th.handoff_due_utc:%H:%M}Z",
             )
-    tail = doc["days"][-th.d5_days :]
-    if len(tail) == th.d5_days and all(
-        any(light["kind"] == HELD_BY_D5 for light in day["alerts"]) for day in tail
-    ):
+    days = doc["days"]
+    if days and any(light["kind"] == HELD_BY_D5 for light in days[-1]["alerts"]):
         add(
             "held_by_d5",
-            f"held by D5 on the last {th.d5_days} day(s), {tail[0]['boundary']} to "
-            f"{tail[-1]['boundary']}",
+            f"held by D5 on {days[-1]['boundary']}: the handoff unusable {doc['d5_days']} "
+            "day(s) running",
         )
     return _Outcome(found)
 
@@ -347,20 +367,22 @@ def _guarded(
     th: Thresholds,
     seen: str | None,
     parked: bool,
+    carried: Sequence[Condition],
 ) -> _Outcome:
-    """The line's rules, or ``rules_failed`` when the document is not shaped as this build reads it."""
+    """The line's rules, or ``rules_failed`` (with what it held) when the document is not shaped as this build reads it."""
     try:
         if isinstance(line, HyperliquidLine):
-            return _hyperliquid(line, doc, unit, now, th, seen, parked)
+            return _hyperliquid(line, doc, unit, now, th, seen, parked, carried)
         if isinstance(line, UniswapLine):
             return _uniswap(line, doc, now, th)
         return _carry(line, doc, now, th)
     except (KeyError, TypeError, ValueError, AttributeError, IndexError) as exc:
+        detail = masked_line(str(exc)) or "no detail"
         text = (
-            f"the rules could not read the document ({type(exc).__name__}: a field is missing "
-            "or not shaped as this build reads it)"
+            f"the rules could not read the document ({type(exc).__name__}: {detail}; a field "
+            "is missing or not shaped as this build reads it)"
         )
-        return _Outcome([_condition(line.name, "rules_failed", text)])
+        return _Outcome([_condition(line.name, "rules_failed", text), *carried])
 
 
 def _unit_condition(unit: UnitFacts) -> Condition | None:
@@ -375,12 +397,13 @@ def _unit_condition(unit: UnitFacts) -> Condition | None:
         )
     if unit.type == "oneshot":
         if unit.active_state == "failed":
+            status = "unknown" if unit.exec_main_status is None else str(unit.exec_main_status)
             return Condition(
                 f"{key}:failed",
                 unit.unit,
                 "failed",
-                f"{unit.unit}'s last run failed ({unit.result}, exit status "
-                f"{unit.exec_main_status}) at {unit.exec_main_exit}",
+                f"{unit.unit}'s last run failed ({unit.result or 'unknown'}, exit status "
+                f"{status}) at {unit.exec_main_exit or 'unknown'}",
             )
         return None
     if not unit.running:
@@ -388,8 +411,8 @@ def _unit_condition(unit: UnitFacts) -> Condition | None:
             f"{key}:down",
             unit.unit,
             "down",
-            f"{unit.unit} is {unit.active_state} ({unit.sub_state}; result {unit.result}); "
-            f"last started {unit.exec_main_start or 'never'}",
+            f"{unit.unit} is {unit.active_state or 'unknown'} ({unit.sub_state or 'unknown'}; "
+            f"result {unit.result or 'unknown'}); last started {unit.exec_main_start or 'never'}",
         )
     return None
 
@@ -417,13 +440,23 @@ def _host_conditions(host: HostFacts, th: Thresholds) -> list[Condition]:
     return found
 
 
-def _carried(name: str, held: Mapping[str, ActiveCondition]) -> list[Condition]:
-    """The conditions ``name`` held last tick, carried unjudged while its document cannot be read."""
+def _carried(subject: str, held: Mapping[str, ActiveCondition]) -> list[Condition]:
+    """The conditions ``subject`` (a line or a unit) held last tick, less those about the look itself."""
     return [
         Condition(key, item.line, item.rule, item.text)
         for key, item in held.items()
-        if item.line == name and item.rule not in _NOT_CARRIED
+        if item.line == subject and item.rule not in _NOT_CARRIED
     ]
+
+
+def _read_failure(line: Line, read: LineRead) -> Condition:
+    if isinstance(line, HyperliquidLine) and read.exit_code == STORE_DAMAGED_EXIT:
+        return _condition(
+            line.name,
+            "store_damaged",
+            f"the store does not hold up: status exited {STORE_DAMAGED_EXIT} (investigate the store)",
+        )
+    return _condition(line.name, "read_failed", f"the document could not be read: {read.failure}")
 
 
 def evaluate(
@@ -437,10 +470,8 @@ def evaluate(
 ) -> Evaluation:
     """Every rule over this tick's reads and host facts.
 
-    ``held`` is the conditions the last tick left holding: a line whose
-    document could not be read this tick keeps its own (a read that fails
-    once must not clear a safe mode that still holds, nor raise it again
-    with a new ``since`` when the read recovers); ``read_failed`` is added.
+    ``held`` is the conditions the last tick left holding, carried where
+    this tick cannot judge (the module docstring says where).
     """
     held = held or {}
     # A parked daemon is a fact of the config and the file system, judged
@@ -454,10 +485,10 @@ def evaluate(
     seen = dict(events_seen)
     for read in reads:
         line = read.line
+        carried = _carried(line.name, held)
         if read.document is None:
-            text = f"the document could not be read: {read.failure}"
-            conditions.append(_condition(line.name, "read_failed", text))
-            conditions += _carried(line.name, held)
+            conditions.append(_read_failure(line, read))
+            conditions += carried
             continue
         outcome = _guarded(
             line,
@@ -467,6 +498,7 @@ def evaluate(
             config.thresholds,
             events_seen.get(line.name),
             line.unit in parked,
+            carried,
         )
         conditions += outcome.conditions
         events += outcome.events
@@ -479,6 +511,8 @@ def evaluate(
         found = _unit_condition(unit)
         if found is not None:
             conditions.append(found)
+        if unit.error is not None:
+            conditions += _carried(unit.unit, held)
     conditions += _host_conditions(host, config.thresholds)
     return Evaluation(
         conditions=tuple(sorted(conditions, key=lambda c: c.key)),
@@ -539,6 +573,15 @@ def _str(value: object, what: str) -> str:
     return value
 
 
+def _instant(value: object, what: str) -> str:
+    text = _str(value, what)
+    try:
+        parse_when(text)
+    except ValueError as exc:
+        raise StateError(f"{what} must be an instant") from exc
+    return text
+
+
 def _record(cls: type[_Record], item: Mapping[str, Any], what: str) -> _Record:
     """``cls`` (all of whose fields are text) from its saved form."""
     return cls(*(_str(item[spec.name], f"{what}.{spec.name}") for spec in fields(cls)))
@@ -553,15 +596,15 @@ def load_state(path: Path) -> State:
         if not isinstance(raw, dict) or raw.get("version") != STATE_VERSION:
             raise StateError(f"version is not {STATE_VERSION}")
         day = raw["last_digest_day"]
-        if day is not None and not isinstance(day, str):
-            raise StateError("last_digest_day must be text")
+        if day is not None:
+            date.fromisoformat(_str(day, "last_digest_day"))
         return State(
             {
                 _str(k, "active key"): _record(ActiveCondition, v, "active")
                 for k, v in raw["active"].items()
             },
             {
-                _str(k, "events_seen key"): _str(v, "events_seen value")
+                _str(k, "events_seen key"): _instant(v, "events_seen value")
                 for k, v in raw["events_seen"].items()
             },
             tuple(_record(Pending, p, "pending") for p in raw["pending"]),

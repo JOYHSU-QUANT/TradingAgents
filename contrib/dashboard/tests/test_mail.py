@@ -73,9 +73,16 @@ class FakeSMTP:
         self.login_args = (user, password)
         self.steps.append("login")
 
+    refused: dict[str, tuple[int, bytes]] = {}
+
     def send_message(self, message):
         self.sent.append(message)
         self.steps.append("send")
+        return dict(self.refused)
+
+
+class HalfRefusingSMTP(FakeSMTP):
+    refused = {"two@example.com": (550, b"no such user")}
 
 
 class RefusingSMTP(FakeSMTP):
@@ -99,6 +106,8 @@ def test_send_mail_goes_through_starttls_and_login_with_one_letter_to_every_reci
     assert message["From"] == "bot@example.com"
     assert message["Date"].startswith("Wed, 14 Oct 2026 05:00:00")
     assert message.get_content() == "body\n"
+    assert send_mail(SETTINGS, subject="s", body="b", now=NOW, smtp_factory=FakeSMTP) == 0
+    assert send_mail(SETTINGS, subject="s", body="b", now=NOW, smtp_factory=HalfRefusingSMTP) == 1
 
 
 def test_a_refused_send_is_a_mail_error_without_the_password():
@@ -182,7 +191,7 @@ def test_the_digest_summarises_each_line_the_host_and_the_alerts_holding(tmp_pat
     )
     assert lines[7] == (
         "carry (carry-ETH-1+paper-carry-1, carry): unit inactive; handoff stay_out for "
-        "2026-10-14T00:00:00+00:00; 3 day(s) 2026-10-11 to 2026-10-13, 0 light(s)"
+        "2026-10-14 00:00Z; 3 day(s) 2026-10-11 to 2026-10-13, 0 light(s)"
     )
     assert lines[9].startswith("host tokyo: disk ")
     assert lines[9].endswith("% used; 1269 MB of memory available")

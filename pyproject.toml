@@ -95,11 +95,17 @@ files = [
     "contrib/hyperliquid_perp/ports.py",
     "contrib/hyperliquid_perp/runtime",
     "contrib/carry",
+    "contrib/dashboard",
     "contrib/replay",
     "contrib/uniswap_v3/domain",
     "contrib/uniswap_v3/ports.py",
 ]
-exclude = ["^contrib/carry/tests/", "^contrib/core/tests/", "^contrib/replay/tests/"]
+exclude = [
+    "^contrib/carry/tests/",
+    "^contrib/core/tests/",
+    "^contrib/dashboard/tests/",
+    "^contrib/replay/tests/",
+]
 python_version = "3.10"
 follow_imports = "silent"
 warn_unused_ignores = true

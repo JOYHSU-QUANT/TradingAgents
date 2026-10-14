@@ -79,7 +79,7 @@ jobs:
         run: mypy
 
   autoresearch:
-    name: autoresearch + replay + carry tests (py3.12)
+    name: autoresearch + replay + carry + dashboard tests (py3.12)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

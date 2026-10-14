@@ -10,7 +10,9 @@ Exit codes: ``0`` done (an ``export`` whose lines failed to read is still
 done: the failures are in ``exporter.json`` and, as alerts, in the mail);
 ``1`` a setting that cannot be used — the YAML, the ``.env`` names, a state
 file this build cannot read, a ``test-mail`` without a mail account or whose
-send failed; ``2`` usage.
+send failed; ``2`` usage; ``3`` an ``export`` that ran whole but could not
+send a letter (or a recipient was refused), so the unit shows as failed
+until a tick sends again.
 
 The ``.env`` read for the ``DASHBOARD_*`` names is the repository root's
 unless ``--env-file`` names another; the process environment wins over it.
@@ -87,7 +89,7 @@ def main(
             if report.ping_error is not None:
                 print(f"ping: {report.ping_error}", file=sys.stderr)
             print(summary_line(report))
-            return 0
+            return 3 if report.mail_error is not None else 0
         if args.command == "check":
             reads, host, evaluation = read_and_judge(config, now=moment, runner=runner)
             for line in failure_lines(reads):

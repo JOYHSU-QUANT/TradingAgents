@@ -22,7 +22,7 @@ Python 是該 checkout 的 `.venv/bin/python`；裝 unit 的步驟用 `ubuntu`�
 | 文件 | `hl-paper.json`、`carry-perp.json`、`uniswap-trend.json`、`uniswap-ai.json`、`uniswap-carry.json`、`carry.json`、`host.json`、`alerts.json`、`exporter.json` |
 | exporter 自己的狀態 | `/home/trader/status/alerts-state.json`（§5.3） |
 | units | `/etc/systemd/system/dashboard-exporter.service`、`dashboard-exporter.timer`（§2；來源在 `contrib/dashboard/schedule/`） |
-| log | `journalctl -u dashboard-exporter.service`（每 tick 一行摘要；讀不到的線與寄信失敗在 stderr） |
+| log | `journalctl -u dashboard-exporter.service`（每 tick 一行摘要；讀不到的線與寄信失敗在 stderr；寄不出去時 tick exit 3，`systemctl --failed` 看得到，下次寄成就恢復） |
 
 ---
 
@@ -96,7 +96,7 @@ sudo systemd-analyze verify /etc/systemd/system/dashboard-exporter.service
 sudo systemctl daemon-reload
 sudo systemctl start dashboard-exporter.service            # 先手動跑一個 tick
 sudo journalctl -u dashboard-exporter.service -n 20 --no-pager
-ls -l /home/trader/status/                                 # 九個 json，0640，group dashboard
+ls -l /home/trader/status/                                 # 十個 json（含 alerts-state.json），0640，group dashboard
 sudo systemctl enable --now dashboard-exporter.timer
 systemctl list-timers dashboard-exporter.timer --no-pager
 ```
@@ -128,15 +128,16 @@ systemctl list-timers dashboard-exporter.timer --no-pager
 | `<hl>:lease_stale` | lease 心跳 15 分鐘沒動但 unit 還 active | daemon 吊住：journal；必要時 restart（避開 cycle 中） |
 | `<hl>:export_failed`／`export_stale` | export 失敗或 5 小時沒更新 | hyperliquid RUNBOOK §5（日常監控）；`REPLAY_UNVERIFIED` 看 `/paper-status` |
 | `<hl>:safe_mode` | run 鎖在 safe mode | hyperliquid RUNBOOK §7（`recoverable` 自動解、`manual` 要人） |
-| `<hl>:event:emergency_kill_switch_triggered@...` 等 | kill switch／safe mode 新事件（refresh 不算） | 看 journal 那個時間點 |
+| `<hl>:event:kill_switch_cancel_triggered@...`、`emergency_close_triggered@...`、`safe_mode_entered@...` 等 | kill switch／safe mode 新事件（refresh 不算） | 看 journal 那個時間點 |
 | `<uni>:behind` | 日界線過了 3.5 小時還沒 decide（三個 visit 時段都過了） | visit log；手動 `paper-visit.sh` 一次 |
 | `<uni>:clock_ahead` | store 的 clock 跑在時鐘前面（不可能狀態） | 主機時鐘或 store 有問題，先 `validate` |
 | `<uni>:no_decision` | run 開了 48 小時一根都沒 decide | run 開錯 id 或 visit 根本沒跑 |
 | `carry:handoff_stale` | 00:30Z 過了交接檔還是昨天的 | 協調者沒跑成：`carry-signal.log`；兩腿照舊維持（D5） |
 | `carry:handoff_unreadable` | report 讀不到交接檔 | 路徑／權限；協調者第一次還沒跑完也會 |
-| `carry:held_by_d5` | 連 3 天 held by D5 | carry RUNBOOK §6：協調者連三天沒給可用交接檔 |
+| `carry:held_by_d5` | report 最新一天亮 `held by D5`（held 連續天數到了 carry 線的 `d5_days`，預設 3，exporter 以 `--d5-days` 傳給 report） | carry RUNBOOK §6：協調者連三天沒給可用交接檔 |
 | `host:disk`／`host:memory` | 磁碟 > 85%／可用記憶體 < 200 MB | 清 `/home/trader/data/exports`、journal；兩個 perp daemon 各約 90 MB |
-| `<line>:read_failed` | 那條線的指令跑不起來（exit N／逾時／沒有 JSON／schema 不對） | `exporter.json` 的 `stderr_line`；**exit 5＝store 內容壞了，當紅燈**；uniswap 的 exit 1 不分「找不到 run」與「store 壞」，看 stderr |
+| `<hl>:store_damaged` | perp 的 `status` exit 5＝store 內容壞了（`validate` 的判決） | **紅燈**：hyperliquid RUNBOOK §7，先 `validate` |
+| `<line>:read_failed` | 那條線的指令跑不起來（exit N／逾時／沒有 JSON／schema 不對） | `exporter.json` 的 `stderr_line`；uniswap 的 exit 1 不分「找不到 run」與「store 壞」，看 stderr |
 | `<line>:rules_failed` | 文件形狀跟這版 exporter 讀的不同（套件改了欄位沒 bump 版本） | 升級 exporter（hl checkout）或回報 |
 
 ---
@@ -166,7 +167,8 @@ tick 會 exit 1、stderr 說 `is not a state file this build reads ... move it a
 
 ### 5.5 升級
 
-`deploy/paper` 的 push 會 reset hl checkout、跑 `contrib/dashboard/tests` 等測試；timer 是 oneshot，每次用當時的 checkout，
+`deploy/paper` 的 push 會 reset hl checkout、跑 `contrib/dashboard/tests` 等測試，restart daemon 前後會停起這個 timer（有 enable 才停），
+所以部署不會寄 down／cleared；手動 `systemctl stop hl-paper` 做維護則會各寄一行（重啟還會多一行 `kill_switch_armed` 事件），屬預期。timer 是 oneshot，每次用當時的 checkout，
 **不用**重啟任何東西。uniswap checkout 另外用 `lightsail-install.sh <commit>` 升級（uniswap RUNBOOK §0）。
 
 ---

@@ -12,7 +12,7 @@ status_dir: /home/trader/status
 # When the daily digest goes out, UTC, HH:MM (decided 2026-10-14: 03:30 =
 # 11:30 Taipei, after the carry coordinator, the Hyperliquid 00:00 cycle and
 # the three Uniswap visit slots).
-digest_utc: "03:30"   # quoted; an unquoted 03:30 is read as the number 210, which is accepted too
+digest_utc: "03:30"   # quoted; an unquoted 3:30 or 12:00 reads as the integer 210 / 720, accepted too
 
 # The subject line's prefix.
 subject_prefix: "[trading]"
@@ -31,14 +31,13 @@ thresholds:
   uniswap_behind_hours: 3.5        # uniswap: clock behind, latest boundary this far past (the three visit slots done)
   uniswap_no_decision_hours: 48    # uniswap: no bar decided this long after the run was created
   handoff_due_utc: "00:30"         # carry: a handoff for a day before today is stale from this hour
-  d5_days: 3                       # carry: held by D5 on this many days in a row
   disk_used_pct: 85
   memory_available_mb: 200
 
 # The lines. Each kind's keys:
 #   hyperliquid: python, cwd, unit, db, run_id [, segment_marker, recent]
 #   uniswap:     python, cwd, unit, config, db, run_id [, bars]
-#   carry:       python, cwd, unit, coin, perp_db, perp_run_id, spot_db, spot_run_id, handoff [, payloads_dir]
+#   carry:       python, cwd, unit, coin, perp_db, perp_run_id, spot_db, spot_run_id, handoff [, payloads_dir, d5_days]
 # `name` is the document's file name under status_dir.
 lines:
   - kind: hyperliquid
@@ -100,3 +99,6 @@ lines:
     spot_db: /home/trader/data/uniswap/paper.db
     spot_run_id: paper-carry-1
     handoff: /home/trader/data/carry/handoff-ETH.json
+    # The report's --d5-days: it lights held by D5 once a held streak is this
+    # long, and the exporter mails that light.
+    d5_days: 3

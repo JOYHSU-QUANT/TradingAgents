@@ -214,14 +214,19 @@ def read_journal_errors(unit: str, *, runner: Runner) -> int | None:
     answered nothing but a hint on stderr (the trader user outside the
     journal group).
     """
-    argv = ["journalctl", "-u", unit, "-p", "err", "--since", _JOURNAL_SINCE, "-q"]
+    # Not --quiet: it would also silence the hint that tells a user outside the
+    # journal group from an empty journal.
+    argv = ["journalctl", "-u", unit, "-p", "err", "--since", _JOURNAL_SINCE]
     argv += ["--no-pager", "-o", "cat"]
     result = runner(argv, HOST_CWD, _HOST_COMMAND_TIMEOUT)
     if result.exit_code != 0:
         return None
     if not result.stdout.strip() and result.stderr.strip():
         return None
-    return sum(1 for line in result.stdout.splitlines() if line.strip())
+    # journalctl's own lines ("-- No entries --") are not errors.
+    return sum(
+        1 for line in result.stdout.splitlines() if line.strip() and not line.startswith("-- ")
+    )
 
 
 def _load_average() -> tuple[float, float, float] | None:

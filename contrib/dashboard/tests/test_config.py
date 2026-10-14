@@ -77,6 +77,7 @@ def test_each_kind_builds_its_package_command_line():
     assert carry.argv()[1:4] == ["-m", "contrib.carry", "report"]
     assert carry.argv()[carry.argv().index("--handoff") + 1].endswith("handoff-ETH.json")
     assert "--payloads-dir" not in carry.argv()
+    assert carry.argv()[carry.argv().index("--d5-days") + 1] == "3" and carry.d5_days == 3
     from contrib.dashboard.readers import run_label
 
     assert run_label(carry) == "carry-ETH-1+paper-carry-1" and run_label(hl) == "paper-BTC-8"
@@ -101,6 +102,8 @@ def test_a_relative_path_is_taken_from_the_yaml_directory_and_a_bare_program_fro
         (lambda t: t + "thresholds:\n  export_stale_hours: 0\n", "positive number"),
         (lambda t: t + "thresholds:\n  handoff_due_utc: 7am\n", "HH:MM"),
         (lambda t: t + "thresholds:\n  banana: 1\n", "unknown key\\(s\\) banana"),
+        (lambda t: t + "thresholds:\n  disk_used_pct: 850\n", "percentage, 1 to 100"),
+        (lambda t: t.replace("name: hl", "name: hl-paper.service"), "cannot share a name"),
         (lambda t: t + "digest_utc: 25:00\n", "HH:MM"),
         (lambda t: t + "x: 1\n", "unknown key\\(s\\) x"),
     ],
@@ -230,6 +233,7 @@ def test_an_unquoted_clock_read_as_a_sexagesimal_integer_is_accepted(tmp_path):
     )
     assert config.digest_utc == time(3, 30)
     assert config.thresholds.handoff_due_utc == time(0, 30)
+    assert load_config(_write(tmp_path, MINIMAL + "digest_utc: 3:30\n")).digest_utc == time(3, 30)
     with pytest.raises(ConfigError, match="HH:MM"):
         load_config(_write(tmp_path, MINIMAL + "digest_utc: 1440\n"))
 

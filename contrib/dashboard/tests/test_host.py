@@ -77,6 +77,12 @@ def test_journal_errors_are_counted_or_none_when_refused():
     assert read_journal_errors("other.service", runner=runner) is None
     argv = runner.calls[0][0]
     assert argv[:5] == ["journalctl", "-u", "hl-paper.service", "-p", "err"]
+    assert "-q" not in argv
+
+    def no_entries(argv, cwd, timeout):
+        return CommandResult(0, "-- No entries --\n", "")
+
+    assert read_journal_errors("hl-paper.service", runner=no_entries) == 0
 
 
 def test_read_host_assembles_every_unit_and_checkout_the_config_names(tmp_path):

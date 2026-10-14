@@ -66,8 +66,12 @@ def send_mail(
     now: datetime,
     smtp_factory: SmtpFactory = smtp_connection,
     timeout: float = _SEND_TIMEOUT,
-) -> None:
-    """Send one plain-text letter through the account, STARTTLS first."""
+) -> int:
+    """Send one plain-text letter through the account, STARTTLS first.
+
+    Returns how many recipients the server refused (``0``: every one took
+    it); a send refused whole raises :class:`MailError`.
+    """
     message = EmailMessage()
     message["Subject"] = subject
     message["From"] = settings.sender
@@ -80,10 +84,11 @@ def send_mail(
             smtp.starttls(context=ssl.create_default_context())
             smtp.ehlo()
             smtp.login(settings.user, settings.password)
-            smtp.send_message(message)
+            refused = smtp.send_message(message)
     except (smtplib.SMTPException, OSError) as exc:
         text = str(exc).replace(settings.password, "***") if settings.password else str(exc)
         raise MailError(f"{type(exc).__name__}: {text}") from exc
+    return len(refused)
 
 
 # --- the letters -------------------------------------------------------------------
@@ -142,7 +147,7 @@ def _uniswap_tail(doc: Mapping[str, Any]) -> str:
 def _carry_tail(doc: Mapping[str, Any]) -> str:
     handoff = doc["handoff"]
     if handoff is not None:
-        handoff_text = f"handoff {handoff['action']} for {handoff['as_of']}"
+        handoff_text = f"handoff {handoff['action']} for {_when(handoff['as_of'])}"
     elif doc["handoff_error"] is not None:
         handoff_text = "handoff unreadable"
     else:
@@ -168,8 +173,9 @@ def line_summary(read: LineRead, host: HostFacts) -> str:
     head = f"{read.name} ({read.run_label}, {read.kind}): unit {unit_state}"
     if read.document is None:
         return f"{head}; not read ({read.failure})"
+    tail = _TAILS[read.kind]
     try:
-        return f"{head}; {_TAILS[read.kind](read.document)}"
+        return f"{head}; {tail(read.document)}"
     except (KeyError, TypeError, AttributeError) as exc:
         return f"{head}; not summarised ({type(exc).__name__})"
 

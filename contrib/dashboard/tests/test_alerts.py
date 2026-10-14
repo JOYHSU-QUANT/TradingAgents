@@ -316,21 +316,25 @@ def test_a_handoff_for_a_day_before_today_is_stale_once_the_coordinator_is_due(t
     assert _keys(_tick(tmp_path, docs)) == ["carry:handoff_unreadable"]
 
 
-def test_held_by_d5_three_days_running_is_a_condition_two_are_not(tmp_path):
+def test_the_reports_held_by_d5_light_on_the_newest_day_is_the_condition(tmp_path):
+    # The report lights the day a held streak reaches --d5-days and every day
+    # after; the exporter reads the newest day only, and passes the threshold.
     today = datetime(2026, 10, 14, tzinfo=timezone.utc)
-    held = [carry_day(today - timedelta(days=n), [light("held by D5")]) for n in (4, 3, 2, 1)]
+    days = [carry_day(today - timedelta(days=n)) for n in (4, 3, 2)]
+    days.append(carry_day(today - timedelta(days=1), [light("held by D5")]))
     docs = quiet_documents()
-    docs[CARRY_KEY] = carry_document(days=held)
+    docs[CARRY_KEY] = carry_document(days=days)
     evaluation = _tick(tmp_path, docs)
     assert _keys(evaluation) == ["carry:held_by_d5"]
     assert evaluation.conditions[0].text == (
-        "held by D5 on the last 3 day(s), 2026-10-11 to 2026-10-13"
+        "held by D5 on 2026-10-13: the handoff unusable 3 day(s) running"
     )
-    held[-2] = carry_day(today - timedelta(days=2), [light("delta")])
-    docs[CARRY_KEY] = carry_document(days=held)
+    # Lit yesterday but not today: the streak ended.
+    days[-2] = carry_day(today - timedelta(days=2), [light("held by D5")])
+    days[-1] = carry_day(today - timedelta(days=1))
+    docs[CARRY_KEY] = carry_document(days=days)
     assert _tick(tmp_path, docs).conditions == ()
-    docs[CARRY_KEY] = carry_document(days=held[-2:])
-    assert _tick(tmp_path, docs).conditions == ()
+    assert "--d5-days" in build_config(tmp_path).lines[5].argv()
 
 
 # --- host, exporter -------------------------------------------------------------------------
@@ -350,17 +354,17 @@ def test_disk_and_memory_past_their_thresholds(tmp_path):
 
 def test_a_line_that_could_not_be_read_is_a_condition_and_nothing_else_is_judged_for_it(tmp_path):
     docs = quiet_documents()
-    docs[HL_KEY] = CommandResult(5, "", "error: malformed\n")
+    docs[HL_KEY] = CommandResult(1, "", "error: no such run\n")
     evaluation = _tick(tmp_path, docs)
     assert _keys(evaluation) == ["hl-paper:read_failed"]
-    assert evaluation.conditions[0].text == "the document could not be read: exit 5"
+    assert evaluation.conditions[0].text == "the document could not be read: exit 1"
     assert "hl-paper" not in evaluation.events_seen
 
 
 def test_a_document_of_another_shape_is_rules_failed_not_a_crash(tmp_path):
     docs = quiet_documents()
     del docs[HL_KEY]["scheduler"]["export"]
-    docs[CARRY_KEY]["days"] = None
+    docs[CARRY_KEY]["days"] = [{"boundary": "2026-10-13", "alerts": None}]
     # A clock state this build does not know is passed over, not refused.
     docs[UNI_TREND_KEY]["run"]["clock"]["state"] = "sideways"
     evaluation = _tick(tmp_path, docs)
@@ -516,4 +520,85 @@ def test_a_unit_that_systemctl_cannot_show_is_its_own_condition_and_is_not_judge
     config, reads, host = read_lines_and_host(tmp_path, docs, runner=no_bus)
     evaluation = evaluate(now=NOW, config=config, reads=reads, host=host, events_seen={})
     assert _keys(evaluation) == [f"unit:{unit}:unreadable" for unit in config.units()]
-    assert evaluation.conditions[0].text == "systemctl could not show carry-signal.service"
+    # What the units and the lines held is kept, unjudged, while systemctl is mute.
+    from contrib.dashboard.alerts import ActiveCondition
+
+    since = "2026-10-14T02:00:00+00:00"
+    held = {
+        "hl-paper:cycle_overdue": ActiveCondition("hl-paper", "cycle_overdue", "late", since),
+        "hl-paper:safe_mode": ActiveCondition("hl-paper", "safe_mode", "latched", since),
+        "unit:hl-paper.service:down": ActiveCondition("hl-paper.service", "down", "off", since),
+        "unit:hl-paper.service:unreadable": ActiveCondition(
+            "hl-paper.service", "unreadable", "x", since
+        ),
+    }
+    evaluation = evaluate(now=NOW, config=config, reads=reads, host=host, events_seen={}, held=held)
+    mine = [c.key for c in evaluation.conditions if c.line in ("hl-paper", "hl-paper.service")]
+    assert mine == [
+        "hl-paper:cycle_overdue",
+        "unit:hl-paper.service:down",
+        "unit:hl-paper.service:unreadable",
+    ]
+    unreadable = next(
+        c
+        for c in evaluation.conditions
+        if c.rule == "unreadable" and c.line == "carry-signal.service"
+    )
+    assert unreadable.text == "systemctl could not show carry-signal.service"
+
+
+def test_a_store_that_does_not_hold_up_is_its_own_condition(tmp_path):
+    docs = quiet_documents()
+    docs[HL_KEY] = CommandResult(5, "", "error: store integrity\n")
+    docs[UNI_TREND_KEY] = CommandResult(5, "", "failed: whatever\n")
+    evaluation = _tick(tmp_path, docs)
+    assert _keys(evaluation) == ["hl-paper:store_damaged", "uniswap-trend:read_failed"]
+    assert evaluation.conditions[0].text == (
+        "the store does not hold up: status exited 5 (investigate the store)"
+    )
+
+
+def test_a_line_whose_rules_fail_keeps_what_it_held(tmp_path):
+    from contrib.dashboard.alerts import ActiveCondition
+
+    since = "2026-10-14T02:00:00+00:00"
+    held = {
+        "hl-paper:safe_mode": ActiveCondition("hl-paper", "safe_mode", "latched", since),
+        "hl-paper:rules_failed": ActiveCondition("hl-paper", "rules_failed", "x", since),
+    }
+    docs = quiet_documents()
+    del docs[HL_KEY]["scheduler"]["export"]
+    config, reads, host = read_lines_and_host(tmp_path, docs)
+    evaluation = evaluate(now=NOW, config=config, reads=reads, host=host, events_seen={}, held=held)
+    assert _keys(evaluation) == ["hl-paper:rules_failed", "hl-paper:safe_mode"]
+    assert "KeyError: 'export'" in evaluation.conditions[0].text
+    assert evaluation.conditions[1].text == "latched"
+
+
+def test_an_empty_event_tail_on_first_sight_is_seeded_with_the_tick(tmp_path):
+    docs = quiet_documents()
+    docs[HL_KEY]["kill_switch_events"] = []
+    docs[HL_KEY]["safe_mode_events"] = []
+    first = _tick(tmp_path, docs)
+    assert first.events == () and first.events_seen["hl-paper"] == NOW.isoformat()
+    docs[HL_KEY]["safe_mode_events"] = [
+        safe_mode_event(NOW + timedelta(minutes=1), "safe_mode_entered", "manual")
+    ]
+    later = NOW + timedelta(minutes=2)
+    second = _tick(tmp_path, docs, now=later, events_seen=first.events_seen)
+    assert [e.kind for e in second.events] == ["safe_mode_entered"]
+
+
+def test_a_state_file_whose_marks_are_not_instants_is_refused(tmp_path):
+    path = tmp_path / "alerts-state.json"
+    save_state(path, fresh_state())
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["events_seen"] = {"hl-paper": "yesterday"}
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(StateError, match="must be an instant"):
+        load_state(path)
+    raw["events_seen"] = {}
+    raw["last_digest_day"] = "2026-13-40"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(StateError, match="ValueError"):
+        load_state(path)

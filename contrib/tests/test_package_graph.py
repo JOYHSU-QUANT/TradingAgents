@@ -48,7 +48,8 @@ _CONTRIB = Path(__file__).resolve().parents[1]
 # adopts the floor relaxes both. ``replay`` sits ABOVE ``autoresearch``
 # (it scores with that package's cost model and split); ``carry`` borrows
 # from ``autoresearch`` and the perp package but from neither ``replay`` nor
-# ``uniswap_v3`` — its spot leg is driven through files, not imports.
+# ``uniswap_v3`` — its spot leg is driven through files, not imports;
+# ``dashboard`` runs the other packages' commands and reads what they print.
 ALLOWED: dict[str, frozenset[str]] = {
     "core": frozenset(),
     "hyperliquid_perp": frozenset({"core"}),
@@ -56,6 +57,9 @@ ALLOWED: dict[str, frozenset[str]] = {
     "autoresearch": frozenset({"core", "hyperliquid_perp"}),
     "replay": frozenset({"core", "hyperliquid_perp", "autoresearch"}),
     "carry": frozenset({"core", "hyperliquid_perp", "autoresearch"}),
+    # The exporter reads the three packages' documents through their command
+    # lines, never their modules: the floor is all it imports.
+    "dashboard": frozenset({"core"}),
 }
 
 _PERP = "hyperliquid_perp"

@@ -1,0 +1,16 @@
+# Every two minutes (decided 2026-10-14): the Hyperliquid cycles are four
+# hours apart and the Uniswap visits daily, but a unit that fails or a kill
+# switch that fires should reach the operator within minutes. A tick is six
+# short commands; two minutes keep the journal quiet. Not Persistent: a tick
+# missed while the host was down is not worth running late; the next one
+# reads the same state.
+[Unit]
+Description=contrib/dashboard exporter, every two minutes
+
+[Timer]
+OnCalendar=*:0/2
+AccuracySec=15s
+Unit=dashboard-exporter.service
+
+[Install]
+WantedBy=timers.target

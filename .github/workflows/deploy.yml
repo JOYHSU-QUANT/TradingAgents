@@ -26,12 +26,22 @@ jobs:
             git checkout deploy/paper 2>/dev/null || git checkout -b deploy/paper origin/deploy/paper
             git reset --hard origin/deploy/paper
             .venv/bin/pip install -q -r requirements.txt
-            .venv/bin/python -m pytest contrib/core/tests/ contrib/hyperliquid_perp/tests/ contrib/carry/tests/ contrib/tests/ -q
+            .venv/bin/python -m pytest contrib/core/tests/ contrib/hyperliquid_perp/tests/ contrib/carry/tests/ contrib/dashboard/tests/ contrib/tests/ -q
           '
           # The carry sleeve's perp daemon and coordinator run from this same
           # checkout (contrib/carry/RUNBOOK.md): the daemon is restarted with
           # hl-paper while its unit is enabled (one the operator disabled stays
           # down); the coordinator's timer runs the checkout as it is.
+          # The status exporter (contrib/dashboard/RUNBOOK.md) is held for the
+          # restart, so a tick does not mail the daemon down and up again.
+          if systemctl is-enabled --quiet dashboard-exporter.timer 2>/dev/null; then
+            sudo systemctl stop dashboard-exporter.timer
+            # A tick already running finishes first (a few seconds).
+            while systemctl is-active --quiet dashboard-exporter.service; do sleep 1; done
+            # Back whatever happens below (set -e): a daemon that fails to come
+            # up is news the exporter must send.
+            trap 'sudo systemctl start dashboard-exporter.timer' EXIT
+          fi
           sudo systemctl restart hl-paper
           if systemctl is-enabled --quiet hl-paper-carry-eth 2>/dev/null; then
             sudo systemctl restart hl-paper-carry-eth

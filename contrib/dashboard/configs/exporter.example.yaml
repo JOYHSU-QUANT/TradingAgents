@@ -1,0 +1,104 @@
+# The exporter's settings (contrib/dashboard, dashboard plan PR 3). Copy to
+# exporter.local.yaml beside this file (gitignored) and fill in the host's
+# paths and run ids. Nothing secret goes here: the mail account and the
+# dead-man URL are read from the repo-root .env (README, "The .env names").
+# A relative path is taken from this file's directory; the host's are absolute.
+# A bare program name as `python` (python3) is looked up on PATH.
+
+# Where the documents are written (0640, for the dashboard group). The RUNBOOK
+# creates it: owner trader, group dashboard, mode 2750.
+status_dir: /home/trader/status
+
+# When the daily digest goes out, UTC, HH:MM (decided 2026-10-14: 03:30 =
+# 11:30 Taipei, after the carry coordinator, the Hyperliquid 00:00 cycle and
+# the three Uniswap visit slots).
+digest_utc: "03:30"   # quoted; an unquoted 3:30 or 12:00 reads as the integer 210 / 720, accepted too
+
+# The subject line's prefix.
+subject_prefix: "[trading]"
+
+# How long one line's command may take before the read is given up (a read
+# takes well under a second). The unit's TimeoutStartSec (12 minutes) must stay
+# above lines x this.
+command_timeout_seconds: 60
+
+# The alert rules' thresholds; these are the defaults (decided 2026-10-14),
+# so the block can be left out.
+thresholds:
+  cycle_overdue_minutes: 30        # hyperliquid: next_decision_at this far past
+  lease_stale_minutes: 15          # hyperliquid: lease heartbeat this old
+  export_stale_hours: 5            # hyperliquid: export breadcrumb this old
+  uniswap_behind_hours: 3.5        # uniswap: clock behind, latest boundary this far past (the three visit slots done)
+  uniswap_no_decision_hours: 48    # uniswap: no bar decided this long after the run was created
+  handoff_due_utc: "00:30"         # carry: a handoff for a day before today is stale from this hour
+  disk_used_pct: 85
+  memory_available_mb: 200
+
+# The lines. Each kind's keys:
+#   hyperliquid: python, cwd, unit, db, run_id [, segment_marker, recent]
+#   uniswap:     python, cwd, unit, config, db, run_id [, bars]
+#   carry:       python, cwd, unit, coin, perp_db, perp_run_id, spot_db, spot_run_id, handoff [, payloads_dir, d5_days]
+# `name` is the document's file name under status_dir.
+lines:
+  - kind: hyperliquid
+    name: hl-paper
+    python: /home/trader/TradingAgents/.venv/bin/python
+    cwd: /home/trader/TradingAgents
+    unit: hl-paper.service
+    db: /home/trader/data/paper_trading.db
+    run_id: paper-BTC-8
+    # The flat watcher's marker: while present the daemon is parked between
+    # segments on purpose, and the unit and progress rules are skipped.
+    segment_marker: /home/trader/data/SEGMENT_SWITCH_READY
+    recent: 10
+
+  - kind: hyperliquid
+    name: carry-perp
+    python: /home/trader/TradingAgents/.venv/bin/python
+    cwd: /home/trader/TradingAgents
+    unit: hl-paper-carry-eth.service
+    db: /home/trader/data/carry/paper_trading.db
+    run_id: carry-ETH-1
+
+  - kind: uniswap
+    name: uniswap-trend
+    python: /home/trader/uniswap-paper/.venv/bin/python
+    cwd: /home/trader/uniswap-paper
+    unit: uniswap-v3-paper.service
+    config: /home/trader/uniswap-paper/contrib/uniswap_v3/configs/paper-trend.local.yaml
+    db: /home/trader/data/uniswap/paper.db
+    run_id: paper-trend-1
+    bars: 5
+
+  - kind: uniswap
+    name: uniswap-ai
+    python: /home/trader/uniswap-paper/.venv/bin/python
+    cwd: /home/trader/uniswap-paper
+    unit: uniswap-v3-paper.service
+    config: /home/trader/uniswap-paper/contrib/uniswap_v3/configs/paper-ai.local.yaml
+    db: /home/trader/data/uniswap/paper.db
+    run_id: paper-ai-1
+
+  - kind: uniswap
+    name: uniswap-carry
+    python: /home/trader/uniswap-paper/.venv/bin/python
+    cwd: /home/trader/uniswap-paper
+    unit: uniswap-v3-paper.service
+    config: /home/trader/uniswap-paper/contrib/uniswap_v3/configs/paper-carry.local.yaml
+    db: /home/trader/data/uniswap/paper.db
+    run_id: paper-carry-1
+
+  - kind: carry
+    name: carry
+    python: /home/trader/TradingAgents/.venv/bin/python
+    cwd: /home/trader/TradingAgents
+    unit: carry-signal.service
+    coin: ETH
+    perp_db: /home/trader/data/carry/paper_trading.db
+    perp_run_id: carry-ETH-1
+    spot_db: /home/trader/data/uniswap/paper.db
+    spot_run_id: paper-carry-1
+    handoff: /home/trader/data/carry/handoff-ETH.json
+    # The report's --d5-days: it lights held by D5 once a held streak is this
+    # long, and the exporter mails that light.
+    d5_days: 3

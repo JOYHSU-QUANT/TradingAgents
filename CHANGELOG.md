@@ -10,6 +10,54 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **`contrib/dashboard`: the status exporter and e-mail alerting (dashboard plan PR 3).**
+  A new package, `python -m contrib.dashboard export`, run by a systemd timer every
+  two minutes on the trader account (`contrib/dashboard/schedule/`). One tick reads
+  each configured line's document by running that line's own command from the
+  line's checkout with the line's python (`contrib.hyperliquid_perp status --json`
+  for a perp run, `contrib.uniswap_v3 status --json` for a Uniswap run,
+  `contrib.carry report --json --handoff` for the carry sleeve) — the package
+  imports none of the three, so the Uniswap checkout stays its own at its own
+  commit, the packages' no-neighbour-imports-me tests stand, and the package
+  graph gets a `dashboard: {core}` row — adds the host's facts (`systemctl show`
+  per unit, each checkout's commit, disk, memory, load, the journal's error count
+  per unit when readable), writes it all under one status directory (atomic,
+  mode 0640, for the `dashboard` group: `<line>.json` verbatim, `host.json`,
+  `alerts.json`, `exporter.json`, its own `alerts-state.json`) and mails the
+  operator on a change of state only: a condition raised or cleared (unit down
+  or failed, decision overdue, lease or export stale, safe mode, Uniswap clock
+  behind past the visit window or ahead or never decided, carry handoff stale or
+  unreadable, the report's `held by D5` light on its newest day, disk or memory,
+  a line that could not be read — `store_damaged` when the perp `status` exited
+  5), a kill-switch or safe-mode row first seen (the refresh rows never), and
+  one digest a day at 03:30 UTC. Thresholds (decided 2026-10-14) are the YAML's;
+  the Hyperliquid progress rules are judged only while the daemon's unit is
+  known to be active and never while the segment-switch marker is present,
+  and what a tick cannot judge — a line whose document could not be read or
+  whose rules failed, a unit `systemctl` could not show — keeps the
+  conditions it held, so a failed look never mails a false all-clear. A letter
+  names only which line, what state and when (`tests/test_mail.py` holds that no
+  decimal text or hex of any document reaches one); the account is SMTP 587
+  STARTTLS from the repo-root `.env`'s `DASHBOARD_*` names (nothing else in the
+  file is read; a refusal names the name, never a value); an optional
+  healthchecks.io URL is pinged each tick, `/fail` when a letter could not be
+  sent, and an unsent letter stays pending for the next tick. `check` reads and
+  judges without writing or mailing, `test-mail` proves the account.
+  `tests/test_schema_pin.py` reads the three packages' `status.py` as text and
+  holds the exporter's known schema versions and its test documents' field
+  names to them. README, a RUNBOOK (install, the alert table, segment switches),
+  the example config; CI's autoresearch job and `deploy.yml` run the suite.
+  A tick that could not send a letter (or whose server refused a recipient)
+  exits 3, so the unit shows as failed, and `exporter.json` carries the tick's
+  `duration_ms`; `deploy.yml` holds the exporter's timer across the daemon
+  restart.
+  Known trade-offs: a Uniswap read that fails is `exit 1` whether the run is
+  missing or the store is damaged (the stderr line tells, in `exporter.json`);
+  a condition that flaps across a threshold mails each flip (no hysteresis);
+  a digest hour the host sleeps through is skipped for that day; the event
+  tails are the `--recent` rows, so more than ten new rows between two ticks
+  lose the oldest; a daemon crash-looping under `Restart=on-failure` may mail
+  each flip until systemd gives up.
 - **`status --json` for `contrib/uniswap_v3` and `report --json` for `contrib/carry`
   (dashboard plan PR 2b).** Each package now has a `status.py` reading model as
   the Hyperliquid package has. Uniswap: `status` reads the store, and the run

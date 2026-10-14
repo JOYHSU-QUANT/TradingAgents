@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -23,6 +24,38 @@ def test_live_smoke_gate_status_nonexistent_run_exits_1(tmp_path, capsys):
     dbp = make_live_run(tmp_path)
     rc = cli_main(["live-smoke", "--run-id", "nope", "--db", str(dbp), "--gate-status"])
     assert rc == 1
+
+
+def test_live_smoke_gate_status_exit_5_on_a_file_that_is_not_a_database(tmp_path, capsys):
+    # Issue #359: the same exit-5 "investigate the store" verdict export /
+    # validate / status give a --db that is not SQLite — not the exit-2
+    # traceback lane, which means "tool bug" to whatever reads the code.
+    garbage = tmp_path / "garbage.db"
+    garbage.write_bytes(b"not a database" * 100)
+    rc = cli_main(["live-smoke", "--run-id", "live-BTC", "--db", str(garbage), "--gate-status"])
+    err = capsys.readouterr().err
+    assert rc == 5
+    assert "store integrity failure" in err
+    assert "Traceback" not in err
+    assert "unexpected error" not in err
+
+
+def test_live_smoke_gate_status_names_a_lock_under_the_read(tmp_path, capsys, monkeypatch):
+    # A lock held past busy_timeout under the gate read (the open's own
+    # OperationalError is already a named exit 1 through the path guards) is
+    # a refusal outside the store: the named exit 1, not 5, not a traceback.
+    from contrib.hyperliquid_perp.live import smoke_catalog
+
+    def locked(conn, run_id):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(smoke_catalog, "smoke_gate_report", locked)
+    dbp = make_live_run(tmp_path)
+    rc = cli_main(["live-smoke", "--run-id", "live-BTC", "--db", str(dbp), "--gate-status"])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "error: live-smoke --gate-status failed — database is locked" in err
+    assert "store integrity failure" not in err
 
 
 def test_live_smoke_bad_only_key_exits_1(tmp_path, capsys):

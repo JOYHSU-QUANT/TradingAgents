@@ -167,6 +167,26 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **`live-smoke --gate-status` and `safe-mode` now exit 5 with
+  `store integrity failure` on a `--db` that is not a SQLite database, as
+  `export`, `validate` and `status` do** (`contrib/hyperliquid_perp/cli/smoke.py`,
+  `cli/safe_mode.py`, `cli/_common.py`, issue #359). Both opened the store
+  outside any handler, so a file that passes the path guards but is not
+  SQLite (or is corrupt) raised `sqlite3.DatabaseError` up to `main`'s last
+  resort — a traceback, `fatal: unexpected error`, exit 2, the "tool bug"
+  code. The three-way rule `export` settled on in #357 now lives in
+  `cli/_common._sqlite_error_exit` and all three commands route through it:
+  a store that is itself broken (`is_store_integrity_error`) is the exit-5
+  verdict; an `OperationalError` past the guards — realistically a lock held
+  past `busy_timeout`, for `safe-mode` also under a `--release` /
+  `--stamp-case` write — is the named exit 1 (`live-smoke --gate-status
+  failed — …` / `safe-mode failed — …`); anything else is a tool bug and
+  keeps the exit-2 traceback. `_store_integrity_failure` moved from
+  `cli/offline.py` to `cli/_common.py` with it. `safe-mode` is not
+  report-only (it migrates on open and writes), so its exit 5 says the
+  diagnostic could not read the store, not that a ledger it checked failed.
+  The CLI docstring and RUNBOOK-live (§3.4 table, §6) name the code.
+
 - **`export` now exits 5 with `store integrity failure` on a `--db` that is
   not a SQLite database, as `validate` and `status` do**
   (`contrib/hyperliquid_perp/cli/offline.py`, issue #357). The store open in

@@ -60,11 +60,13 @@ one way; ``safe-mode
 not "human action required"), ``5`` (``validate``) the run has integrity
 failures — orphans, snapshot or replay mismatches, or a store so corrupt the
 checks themselves cannot run ("the store is broken; investigate before
-trusting results") — ``export`` and ``status`` share the code and its wording
-for a ``--db`` that is not a SQLite database, is corrupt, or sits on a disk
-that fails while it is read, and ``status`` also for a state its model
-refuses; ``export`` alone names a lock held past ``busy_timeout``, wherever
-in the command it hits, as exit 1 (``validate`` and ``status`` give it 5),
+trusting results") — ``export``, ``status``, ``live-smoke --gate-status`` and
+``safe-mode`` share the code and its wording for a ``--db`` that is not a
+SQLite database, is corrupt, or sits on a disk that fails while it is read,
+and ``status`` also for a state its model refuses; ``export``, ``live-smoke
+--gate-status`` and ``safe-mode`` name a lock held past ``busy_timeout``,
+wherever in the command it hits, as exit 1 (``validate`` and ``status`` give
+it 5),
 ``130`` interrupted before a graceful lane could take over (Ctrl-C in
 ``export``/``validate``/``live``/``live-smoke``
 or during ``paper`` startup/reconciliation — SIGTERM likewise once ``paper``,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -165,6 +166,58 @@ def test_unknown_run_and_missing_store_are_named_errors(store, capsys, tmp_path)
     assert "does not exist" in capsys.readouterr().err
     assert main(["safe-mode", "--run-id", "r", "--db", str(tmp_path / "absent.db")]) == 1
     assert "does not exist" in capsys.readouterr().err
+
+
+def test_a_file_that_is_not_a_database_is_the_exit_5_verdict(tmp_path, capsys):
+    # Issue #359: a --db that exists, passes the path guards and is not SQLite
+    # takes the exit-5 "investigate the store" verdict the report-only
+    # commands give it — not the exit-2 traceback lane. The verdict says the
+    # diagnostic could not read the store, which is what a supervisor probe
+    # branching on 0 / 4 needs to know first.
+    garbage = tmp_path / "garbage.db"
+    garbage.write_bytes(b"not a database" * 100)
+    rc = main(["safe-mode", "--run-id", "r", "--db", str(garbage)])
+    err = capsys.readouterr().err
+    assert rc == 5
+    assert "store integrity failure" in err
+    assert "Traceback" not in err
+    assert "unexpected error" not in err
+
+
+def test_a_lock_under_a_release_is_a_named_exit_1(store, capsys, monkeypatch):
+    # The write lanes (--release / --stamp-case) hit the store's write lock;
+    # one held past busy_timeout is a refusal outside the store and named,
+    # not a traceback.
+    from contrib.hyperliquid_perp.live import safe_mode as safe_mode_mod
+
+    path, db = store
+    _enter(db, "manual", REASON_NON_BOT_OWNED_ORDER)
+    db.close()
+
+    def locked(self, *, released_by, reason):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(safe_mode_mod.SafeModeManager, "release_manual", locked)
+    rc = main(["safe-mode", "--run-id", "r", "--db", str(path), "--release", "--reason", "checked"])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "error: safe-mode failed — database is locked" in err
+    assert "store integrity failure" not in err
+
+
+def test_a_tool_bug_keeps_the_exit_2_lane(store, capsys, monkeypatch):
+    # Neither the store's fault nor a refusal outside it: an API misuse is a
+    # tool bug and keeps main's last resort rather than borrowing a code.
+    import contrib.hyperliquid_perp.cli.safe_mode as safe_mode_cli
+
+    def misuse(path, **kwargs):
+        raise sqlite3.ProgrammingError("Incorrect number of bindings supplied.")
+
+    monkeypatch.setattr(safe_mode_cli, "_open_existing_db", misuse)
+    rc = main(["safe-mode", "--run-id", "r", "--db", "x.db"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "fatal: unexpected error: ProgrammingError: Incorrect number of bindings" in err
 
 
 def test_status_limit_widens_and_zero_prints_the_full_history(store, capsys):

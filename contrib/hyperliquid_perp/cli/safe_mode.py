@@ -5,9 +5,10 @@ mode, and the §12.3 reconciliation-case stamping lane (§13.6).
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import sys
 
-from ._common import _open_existing_db
+from ._common import _open_existing_db, _sqlite_error_exit
 
 
 def _cmd_safe_mode(argv: list[str]) -> int:
@@ -75,6 +76,20 @@ def _cmd_safe_mode(argv: list[str]) -> int:
     )
     args = parser.parse_args(argv)
 
+    try:
+        return _safe_mode(args)
+    except sqlite3.Error as exc:
+        # A --db that is not SQLite, or corrupt, is the exit-5 "investigate
+        # the store" verdict the report-only commands give it (issue #359);
+        # a lock — on the open, or under a --release / --stamp-case write —
+        # is the named exit 1. This command migrates on open and writes, so
+        # the verdict here says the DIAGNOSTIC could not read the store, not
+        # that a ledger it checked failed: it checks none.
+        return _sqlite_error_exit(exc, refused="safe-mode failed")
+
+
+def _safe_mode(args: argparse.Namespace) -> int:
+    """The command proper; ``_cmd_safe_mode`` wraps it in the store verdicts."""
     import getpass
 
     from ..live.safe_mode import SafeModeManager

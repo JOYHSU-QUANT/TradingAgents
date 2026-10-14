@@ -396,6 +396,7 @@ python -m contrib.hyperliquid_perp live-smoke \
 | `0` | **全 20 項** gate 開（每項最新真跑結果都 passed） | 可進 testnet_live cycles |
 | `4` | 跑了（或讀了）但 gate 未滿足；含 pre-flight recovery 沒過、或跑到一半出 `error` 判定，suite 提前中止 | 看 not_yet_run／failed／errored（或 pre-flight 錯誤訊息），補跑或修 |
 | `1` | config／env／網路／run-lock 具名錯誤 | 依訊息修 |
+| `5` | 只有 `--gate-status`：`--db` 指到的檔在、守衛也放行、卻不是 SQLite 或內容壞掉（`store integrity failure`，與 `validate`／`export`／`status` 同一判決；issue #359 之前是 exit 2 的 traceback） | 先查 store，別相信任何 gate 讀數 |
 
 > `--only` 只跑子集時，即使選到的項全過，其餘未跑的項仍讓 gate 未開——所以 exit 仍是
 > `4`（`not_yet_run` 會列出剩下的項）。真跑的 exit `0` 代表整個 §20.2 gate 開，不是「選到的那幾項過了」。
@@ -736,7 +737,8 @@ reconciliation mismatch、非 bot-owned 單、daily/consecutive loss、
 - **manual**（§13.5）：需人工介入。查狀態與解除：
 
 ```bash
-# 看目前 safe-mode 狀態、歷史、open reconciliation cases（exit 0＝無、4＝latched）
+# 看目前 safe-mode 狀態、歷史、open reconciliation cases（exit 0＝無、4＝latched；
+# 5＝--db 不是 SQLite／內容壞掉，診斷根本讀不到 store——與 validate 同一判決，issue #359）
 python -m contrib.hyperliquid_perp safe-mode --run-id live-BTC --db live_trading.db --status
 
 # 人工核對後解除 manual safe mode（解除不等於恢復交易——還要過下一輪 reconciliation）

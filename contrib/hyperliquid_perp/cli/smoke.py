@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -18,6 +19,7 @@ from ._common import (
     _raise_keyboard_interrupt,
     _require_agent_key,
     _require_live_run_mode,
+    _sqlite_error_exit,
 )
 from ._drift import _HARD_DRIFT_KINDS, _config_drift_report
 from .live_shared import (
@@ -46,6 +48,52 @@ def _gate_refusal_wording(refusal: LiveGateRefusal) -> str:
     }
     mode = "" if refusal.mode is None else refusal.mode.value
     return wording[refusal.stage].format(mode=mode)
+
+
+def _gate_status(args: argparse.Namespace) -> int:
+    """``live-smoke --gate-status``: the stored §20.2 gate, under the
+    report-only commands' store verdicts (issue #359)."""
+    from ..live.smoke_catalog import smoke_gate_report
+
+    try:
+        db = _open_existing_db(args.db)
+        if db is None:
+            return 1
+        with db:
+            run_row = _existing_run_row(db.conn, args.run_id, args.db)
+            if run_row is None:
+                return 1
+            if not _require_live_run_mode(
+                run_row, args.run_id, args.db, extra="smoke results are live-run state"
+            ):
+                return 1
+            # The §20.2 gate is testnet-only state: a mainnet_tiny run's
+            # live_smoke_tests is empty BY DESIGN (§21.3 — smoke is proven on
+            # the separate testnet run), so reporting its raw buckets would
+            # print "not_yet_run: <every test>" + exit 4 and read as "go smoke-test
+            # mainnet" — the exact misreading `validate` renders as "n/a
+            # (§21.3)". Refuse, mirroring the real-run testnet-only guard
+            # (decision 2026-07-28).
+            from ..live.validation import execution_mode
+
+            genesis_mode = execution_mode(run_row["config_json"])
+            if genesis_mode != "testnet_live":
+                print(
+                    f"error: run {args.run_id!r} has genesis live.mode "
+                    f"{genesis_mode!r} — the §20.2 smoke gate applies only to "
+                    "testnet_live runs (a mainnet run relies on the smoke "
+                    "proven on the separate testnet run, §21.3); there is no "
+                    "smoke gate to report here.",
+                    file=sys.stderr,
+                )
+                return 1
+            passed, missing, failed, errored = smoke_gate_report(db.conn, args.run_id)
+    except sqlite3.Error as exc:
+        # A --db that is not SQLite, or corrupt, is the exit-5 verdict the
+        # other report-only commands give it; a lock is the named exit 1.
+        return _sqlite_error_exit(exc, refused="live-smoke --gate-status failed")
+    _print_smoke_gate(passed, missing, failed, errored)
+    return 0 if passed else 4
 
 
 def _cmd_live_smoke(argv: list[str]) -> int:
@@ -137,40 +185,7 @@ def _cmd_live_smoke(argv: list[str]) -> int:
 
     # --gate-status: a pure store read — no config, no network, no orders.
     if args.gate_status:
-        db = _open_existing_db(args.db)
-        if db is None:
-            return 1
-        with db:
-            run_row = _existing_run_row(db.conn, args.run_id, args.db)
-            if run_row is None:
-                return 1
-            if not _require_live_run_mode(
-                run_row, args.run_id, args.db, extra="smoke results are live-run state"
-            ):
-                return 1
-            # The §20.2 gate is testnet-only state: a mainnet_tiny run's
-            # live_smoke_tests is empty BY DESIGN (§21.3 — smoke is proven on
-            # the separate testnet run), so reporting its raw buckets would
-            # print "not_yet_run: <every test>" + exit 4 and read as "go smoke-test
-            # mainnet" — the exact misreading `validate` renders as "n/a
-            # (§21.3)". Refuse, mirroring the real-run testnet-only guard
-            # (decision 2026-07-28).
-            from ..live.validation import execution_mode
-
-            genesis_mode = execution_mode(run_row["config_json"])
-            if genesis_mode != "testnet_live":
-                print(
-                    f"error: run {args.run_id!r} has genesis live.mode "
-                    f"{genesis_mode!r} — the §20.2 smoke gate applies only to "
-                    "testnet_live runs (a mainnet run relies on the smoke "
-                    "proven on the separate testnet run, §21.3); there is no "
-                    "smoke gate to report here.",
-                    file=sys.stderr,
-                )
-                return 1
-            passed, missing, failed, errored = smoke_gate_report(db.conn, args.run_id)
-            _print_smoke_gate(passed, missing, failed, errored)
-            return 0 if passed else 4
+        return _gate_status(args)
 
     # This command OWNS the db handle: opened here, closed in the finally no
     # matter how the build or the run fails (a raise, not just an int return) —

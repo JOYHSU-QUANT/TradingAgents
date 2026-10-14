@@ -22,7 +22,12 @@ from ..common import store_layout
 from ..persistence.db import Database
 from ..persistence.db_types import is_store_integrity_error
 from ..status import DEFAULT_RECENT, read_status, status_json, status_lines
-from ._common import _existing_run_row, _open_existing_db
+from ._common import (
+    _existing_run_row,
+    _open_existing_db,
+    _sqlite_error_exit,
+    _store_integrity_failure,
+)
 
 
 def _every_payload_missing(report) -> bool:
@@ -41,25 +46,6 @@ def _every_payload_missing(report) -> bool:
         and bool(report.missing_payload)
         and not (report.unreadable or report.unverified)
     )
-
-
-def _store_integrity_failure(exc: BaseException) -> int:
-    """The exit-5 verdict of the report-only commands: "the store is broken;
-    investigate before trusting results".
-
-    One wording and one code for ``export`` / ``validate`` / ``status``: a
-    ``--db`` that exists and passes the path guards but is not SQLite, a
-    corrupt one, an I/O failure mid-read, a cell or state the reading model
-    refuses. A store that could not be OPENED is the opposite verdict (named
-    exit 1, see :func:`._common._open_existing_db`) and mostly never reaches
-    here — "mostly", because a file that is not a database raises plain
-    ``DatabaseError`` rather than the ``OperationalError`` those guards narrow
-    themselves to, and that IS an integrity verdict: telling an operator whose
-    disk is rotting that they mistyped ``--db`` is the error this split
-    exists to avoid.
-    """
-    print(f"error: store integrity failure — {exc}", file=sys.stderr)
-    return 5
 
 
 def _backfill_fingerprints(
@@ -239,17 +225,9 @@ def _cmd_export(argv: list[str]) -> int:
     except sqlite3.Error as exc:
         # The open past the path guards of ``_open_existing_db``, or a broken
         # store ``_backfill_fingerprints`` re-raised: the same positive rule
-        # as the ExportError lane and the backfill pass (issue #357). What
-        # SQLite refuses for a reason outside the store — past the guards,
-        # realistically a lock — is the named exit 1 wherever in the command
-        # it hits; what is neither (an API misuse, a closed connection: a
-        # tool bug) keeps ``main``'s last resort, traceback and exit 2.
-        if is_store_integrity_error(exc):
-            return _store_integrity_failure(exc)
-        if isinstance(exc, sqlite3.OperationalError):
-            print(f"error: export_failed — {exc}", file=sys.stderr)
-            return 1
-        raise
+        # as the ExportError lane and the backfill pass (issue #357), so a
+        # lock is the named exit 1 wherever in the command it hits.
+        return _sqlite_error_exit(exc, refused="export_failed")
     for path in paths:
         print(path)
     return 0

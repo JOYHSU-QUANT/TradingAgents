@@ -459,9 +459,10 @@ python -m contrib.hyperliquid_perp live \
 - **長駐建議**同 paper（[RUNBOOK §3](./RUNBOOK.md)）：掛在會自動重啟的監管下，
   working directory 設 repo 根目錄。監管（systemd 等）的重啟策略可依 exit code
   分流：**4**＝smoke gate 未開（重啟不會自己好，先去跑 `live-smoke`）、或被停掉時處在
-  safe mode／protection-only；**5**＝`--db` 不是 SQLite／內容壞掉／開檔時磁碟 I/O 失敗（`store integrity
-  failure`，#362；前兩種重啟不會好，第三種可能會，所以不設 `RestartPreventExitStatus=5`）；**1**＝
-  config／憑證／環境錯誤（含上面 protection-only 倉位了結後的自我結束）——兩者都不該無腦無限重啟。**exit 1 至少有以下四種是暫時性的**：
+  safe mode／protection-only；**5**＝`--db` 不是 SQLite／內容壞掉／`connect` 過了、讀 schema 那一步磁碟 I/O 失敗（`store integrity
+  failure`，#362；前兩種重啟不會好，第三種可能會，所以不設 `RestartPreventExitStatus=5`；`connect` 本身的
+  `disk I/O error` 仍是 §8 那列的 exit 1）；**1**＝
+  config／憑證／環境錯誤（含上面 protection-only 倉位了結後的自我結束）——三者都不該無腦無限重啟。**exit 1 至少有以下四種是暫時性的**：
   (a) 同錢包姊妹 run 還持著新鮮 lease 時的具名拒絕（訊息含 `ACCOUNT-wide`），等對方
   收工或 lease 過期後重跑就會好——但那代表有兩個 run 同時被啟動，該查的是啟動來源；
   (b) store 打不開來讀的具名拒絕（訊息含 `could not be opened for reading`），成因
@@ -482,7 +483,7 @@ python -m contrib.hyperliquid_perp live \
   另有一種同樣**永遠不會自己好**、但走的是 **exit 5** 不是 exit 1 的：`--db` 指到的檔在、守衛也放行、
   卻**不是 SQLite 或內容壞掉**——自 #362 起 `paper`／`live`／`live-smoke` 跟報表指令一樣印
   `error: store integrity failure — …`（以前是 exit 2 的 traceback），監管重啟一百次也不會好，要人去查 store；
-  抓它就 grep `store integrity failure`。同一個碼也涵蓋開檔那一下磁碟 I/O 失敗（IOERR 家族），那種**可能**自己好，
+  抓它就 grep `store integrity failure`。同一個碼也涵蓋 `connect` 過了、讀 schema 那一步磁碟 I/O 失敗（IOERR 家族；`connect` 本身失敗是 §8 的 exit 1），那種**可能**自己好，
   所以不建議 `RestartPreventExitStatus=5`——讓監管照 `StartLimitBurst` 的上限去撞，看 log 分辨。
   另外 `live`／`live-smoke` 收到 SIGTERM 會走與 Ctrl-C 相同的收尾（exit 130）。注意 live 的無人看管空窗風險比
   paper 高——真錢／真倉。

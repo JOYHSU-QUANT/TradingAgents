@@ -89,8 +89,10 @@ def _gate_status(args: argparse.Namespace) -> int:
                 return 1
             passed, missing, failed, errored = smoke_gate_report(db.conn, args.run_id)
     except sqlite3.Error as exc:
-        # A --db that is not SQLite, or corrupt, is the exit-5 verdict the
-        # other report-only commands give it; a lock is the named exit 1.
+        # A store that fails under the gate read is the exit-5 verdict the
+        # other report-only commands give it; a lock is the named exit 1 (a
+        # --db that is not SQLite is the open's own ``StoreIntegrityFailure``,
+        # printed by ``main``).
         return _sqlite_error_exit(exc, refused="live-smoke --gate-status failed")
     _print_smoke_gate(passed, missing, failed, errored)
     return 0 if passed else 4

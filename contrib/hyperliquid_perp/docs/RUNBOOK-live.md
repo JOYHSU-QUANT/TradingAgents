@@ -475,6 +475,9 @@ python -m contrib.hyperliquid_perp live \
   不到、(d) 讀得到但開一個 store 要寫入。反過來，`could not be opened as a store`
   以外還有一種**永遠不會自己好**、重啟只會空轉的：主檔沒有 bytes 而旁邊的 log 有
   （issue #236）——那要人去把 log 移開或修好 `--db`，監管重啟幫不上忙。
+  另有一種同樣**永遠不會自己好**的：`--db` 指到的檔在、守衛也放行、卻**不是 SQLite 或內容壞掉**——
+  自 #362 起 `paper`／`live`／`live-smoke` 跟報表指令一樣印 `error: store integrity failure — …` 並 exit 5
+  （以前是 exit 2 的 traceback），監管重啟一百次也不會好，要人去查 store。
   **要抓這一條就 grep `is zero bytes, but` 與 `is not there, but` 這兩句**，
   不要 grep `holds data`：列到兩個 log 時它是 `hold data`、量不到時是
   `could not be measured and may hold data`，三種都對不上同一個字串。

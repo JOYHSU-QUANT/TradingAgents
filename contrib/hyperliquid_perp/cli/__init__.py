@@ -60,10 +60,14 @@ one way; ``safe-mode
 not "human action required"), ``5`` (``validate``) the run has integrity
 failures — orphans, snapshot or replay mismatches, or a store so corrupt the
 checks themselves cannot run ("the store is broken; investigate before
-trusting results") — ``export``, ``status``, ``live-smoke --gate-status`` and
-``safe-mode`` share the code and its wording for a ``--db`` that is not a
-SQLite database, is corrupt, or sits on a disk that fails while it is read,
-and ``status`` also for a state its model refuses; ``export``, ``live-smoke
+trusting results") — EVERY subcommand shares the code and its wording for a
+``--db`` that is not a SQLite database, is corrupt, or sits on a disk that
+fails under the open's schema read (the shared open raises
+``StoreIntegrityFailure``, caught here once; ``paper``, ``live`` and a real
+``live-smoke`` run then exit before taking any lease or touching the
+exchange), ``export``, ``status``, ``live-smoke --gate-status`` and
+``safe-mode`` also for a disk that fails while the store is read, and
+``status`` also for a state its model refuses; ``export``, ``live-smoke
 --gate-status`` and ``safe-mode`` name a refusal from outside the store (a
 lock held past ``busy_timeout``, a file that denies the write, a full disk),
 wherever in the command it hits, as exit 1 (``validate`` and ``status`` give
@@ -90,6 +94,7 @@ import sys
 
 from ..common.entry_argv import is_legacy_argv
 from ..config import load_dotenv_files
+from ._common import StoreIntegrityFailure
 from .live import _cmd_live
 from .offline import _cmd_export, _cmd_status, _cmd_validate
 from .paper import _cmd_paper
@@ -142,6 +147,16 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("interrupted.", file=sys.stderr)
         return 130
+    except StoreIntegrityFailure as exc:
+        # The shared open found the --db is not a database, corrupt, or on a
+        # disk that failed under its schema read: the exit-5 verdict every
+        # subcommand gives that file (issue #362), printed here once rather
+        # than wrapped around each open. The same line ``_common``'s
+        # ``_store_integrity_failure`` prints for a store that fails later;
+        # spelled out because this package imports no private name but its
+        # dispatch targets (tests/common/test_layering.py).
+        print(f"error: store integrity failure — {exc}", file=sys.stderr)
+        return 5
     except Exception as exc:  # noqa: BLE001 — last-resort handler, mirrors main.main
         logger.exception("unexpected error in %s", command)
         print(f"fatal: unexpected error: {type(exc).__name__}: {exc}", file=sys.stderr)

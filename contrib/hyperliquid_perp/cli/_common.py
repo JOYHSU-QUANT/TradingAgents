@@ -2,8 +2,10 @@
 
 The refusal helpers more than one subcommand routes through: open-an-existing
 store (never CREATE one implicitly), the standard missing-run and wrong-run-mode
-messages, the store verdicts on a ``sqlite3.Error`` past that open (the exit-5
-``store integrity failure`` and the named exit 1 beside it), the
+messages, the store verdicts on a ``sqlite3.Error`` — at that open
+(:class:`StoreIntegrityFailure`, which :func:`.main` prints as the exit-5
+``store integrity failure``) and past it (the same verdict, and the named exit
+1 beside it) — the
 SIGTERM→KeyboardInterrupt mapping every long-running command installs, and the
 OPENROUTER_API_KEY gate.
 """
@@ -38,6 +40,20 @@ def _raise_keyboard_interrupt(signum, frame) -> None:
     raise KeyboardInterrupt
 
 
+class StoreIntegrityFailure(RuntimeError):
+    """The shared open found the ``--db`` is not a SQLite database, or is corrupt.
+
+    Raised by :func:`_open_existing_db` and :func:`_open_run_or_exit` in place
+    of the ``sqlite3.DatabaseError`` the store raised, and caught once, in
+    :func:`.main`, as the exit-5 ``store integrity failure`` verdict — so every
+    subcommand that opens a store through them, the owning ``paper`` / ``live``
+    / real ``live-smoke`` included, gives that file the same answer the
+    report-only commands do, without each wrapping its open (issue #362). Not
+    a ``sqlite3.Error``: a command's own ``except sqlite3.Error`` around the
+    open is for what happens AFTER it, and must not re-classify this.
+    """
+
+
 def _store_integrity_failure(exc: BaseException) -> int:
     """The exit-5 verdict on a store a command cannot read AS a store: "the
     store is broken; investigate before trusting results".
@@ -48,12 +64,12 @@ def _store_integrity_failure(exc: BaseException) -> int:
     :func:`_open_existing_db`): a ``--db`` that exists and passes the path
     guards but is not SQLite, a corrupt one, an I/O failure mid-read, a cell
     or state the reading model refuses. A store that could not be OPENED is
-    the opposite verdict (named exit 1, see :func:`_open_existing_db`) and
-    mostly never reaches here — "mostly", because a file that is not a
-    database raises plain ``DatabaseError`` rather than the
-    ``OperationalError`` those guards narrow themselves to, and that IS an
-    integrity verdict: telling an operator whose disk is rotting that they
-    mistyped ``--db`` is the error this split exists to avoid.
+    the opposite verdict (named exit 1, see :func:`_open_existing_db`) —
+    except the file that is not a database, which IS this verdict and is
+    raised from the open itself as :class:`StoreIntegrityFailure` for
+    :func:`.main` to print in these same words: telling an operator whose
+    disk is rotting that they mistyped ``--db`` is the error this split
+    exists to avoid.
     """
     print(f"error: store integrity failure — {exc}", file=sys.stderr)
     return 5
@@ -120,6 +136,9 @@ def _open_existing_db(
     except SchemaVersionError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return None
+    except sqlite3.Error as exc:
+        _raise_if_broken_store(exc)
+        raise
 
 
 def _open_run_or_exit(db_path: str | Path, run_id: str, *, create: bool) -> OpenedRun | None:
@@ -134,6 +153,9 @@ def _open_run_or_exit(db_path: str | Path, run_id: str, *, create: bool) -> Open
     except SchemaVersionError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return None
+    except sqlite3.Error as exc:
+        _raise_if_broken_store(exc)
+        raise
     except RunIdentityRefusal as refusal:
         wording = {
             RunIdentityStage.MISSING_RUN: (
@@ -147,6 +169,24 @@ def _open_run_or_exit(db_path: str | Path, run_id: str, *, create: bool) -> Open
         }
         print(f"error: {wording[refusal.stage]}", file=sys.stderr)
         return None
+
+
+def _raise_if_broken_store(exc: sqlite3.Error) -> None:
+    """The open failures the path guards let through, named for ``main``.
+
+    ``Database.__init__`` and the ``store_identity`` probe narrow themselves
+    to ``OperationalError`` at ``connect()`` (every refusal outside the store
+    is a named ``SchemaVersionError`` by the time it leaves them), so what
+    still escapes as a raw ``sqlite3.Error`` is a file that is not a
+    database or a corrupt one — plain ``DatabaseError`` — and, from the
+    schema read after the connect (and, for ``migrate=True``, the migration
+    steps), a failing disk, a lock or a tool bug. The store itself broken
+    (``is_store_integrity_error``: not a database, corrupt, the disk failing
+    under it) is the verdict; the rest propagate as they were (the caller's
+    own rule, or ``main``'s last resort).
+    """
+    if is_store_integrity_error(exc):
+        raise StoreIntegrityFailure(str(exc)) from exc
 
 
 def _migrate_owned_store(db: Database, *, run_id: str, now: datetime) -> bool:

@@ -1718,3 +1718,22 @@ def test_live_refuses_a_timeout_that_cannot_fit_the_kill_switch_budget(
     assert "cannot be refreshed in time" in err
     # The message names the knob the operator can actually change.
     assert "network_timeout_s" in err
+
+
+def test_live_exit_5_on_a_file_that_is_not_a_database(tmp_path, capsys, live_seams, monkeypatch):
+    # Issue #362, the live mirror: a --db that is not SQLite is the exit-5
+    # verdict from the shared open, before the kill switch is armed or any
+    # reconciliation write touches it — and the file is left as it was.
+    monkeypatch.setenv(LIVE_ENV, LIVE_KEY)
+    cfg = live_yaml(
+        tmp_path,
+        live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
+    )
+    garbage = tmp_path / "garbage.db"
+    garbage.write_bytes(b"not a database" * 100)
+    rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(garbage)])
+    err = capsys.readouterr().err
+    assert rc == 5
+    assert "store integrity failure" in err
+    assert "Traceback" not in err
+    assert garbage.read_bytes() == b"not a database" * 100

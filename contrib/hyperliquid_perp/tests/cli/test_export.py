@@ -96,7 +96,8 @@ def test_export_backfill_leaves_a_broken_store_to_the_exit_5_verdict(
     tmp_path, capsys, monkeypatch, failure
 ):
     # The pass's own handler names what is refused for a reason OUTSIDE the
-    # store (a lock, pinned below and in the next test as exit 1); a corrupt
+    # store (a denied write or a full disk in the next test, a lock further
+    # down — all exit 1); a corrupt
     # store under the pass, or a disk that fails under it — an
     # OperationalError like the lock, so the class cannot be the test — is
     # the same file the command exits 5 on without the flag, and the flag
@@ -174,6 +175,25 @@ def test_export_names_a_lock_at_the_open_as_export_failed(tmp_path, capsys, monk
     err = capsys.readouterr().err
     assert rc == 1
     assert "error: export_failed — database is locked" in err
+    assert "store integrity failure" not in err
+
+
+def test_export_leaves_a_tool_bug_at_the_open_to_the_exit_2_lane(tmp_path, capsys, monkeypatch):
+    # The positive rule has a third outcome: a sqlite3 error that is neither
+    # the store's fault nor a refusal outside it — an API misuse, a closed
+    # connection — is a tool bug, and keeps main's last resort (traceback,
+    # exit 2) rather than borrowing the operator-error code.
+    import contrib.hyperliquid_perp.cli.offline as offline_mod
+
+    def misuse(path, **kwargs):
+        raise sqlite3.ProgrammingError("Incorrect number of bindings supplied.")
+
+    monkeypatch.setattr(offline_mod, "_open_existing_db", misuse)
+    rc = cli_main(["export", "--run-id", "r", "--output-dir", str(tmp_path / "e"), "--db", "x.db"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "fatal: unexpected error: ProgrammingError: Incorrect number of bindings" in err
+    assert "export_failed" not in err
     assert "store integrity failure" not in err
 
 

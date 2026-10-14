@@ -237,15 +237,19 @@ def _cmd_export(argv: list[str]) -> int:
         print(f"error: export_failed — {exc}", file=sys.stderr)
         return 1
     except sqlite3.Error as exc:
-        # The open itself, past the path guards of ``_open_existing_db``:
-        # not SQLite, or corrupt, is the shared exit-5 verdict (issue #357).
-        # The same positive rule as the two lanes above, so a lock — or any
-        # refusal outside the store — is the named exit 1 wherever in the
-        # command it hits.
+        # The open past the path guards of ``_open_existing_db``, or a broken
+        # store ``_backfill_fingerprints`` re-raised: the same positive rule
+        # as the ExportError lane and the backfill pass (issue #357). What
+        # SQLite refuses for a reason outside the store — past the guards,
+        # realistically a lock — is the named exit 1 wherever in the command
+        # it hits; what is neither (an API misuse, a closed connection: a
+        # tool bug) keeps ``main``'s last resort, traceback and exit 2.
         if is_store_integrity_error(exc):
             return _store_integrity_failure(exc)
-        print(f"error: export_failed — {exc}", file=sys.stderr)
-        return 1
+        if isinstance(exc, sqlite3.OperationalError):
+            print(f"error: export_failed — {exc}", file=sys.stderr)
+            return 1
+        raise
     for path in paths:
         print(path)
     return 0

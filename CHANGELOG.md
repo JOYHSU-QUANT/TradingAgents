@@ -167,6 +167,37 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **`live-smoke --gate-status` and `safe-mode` now exit 5 with
+  `store integrity failure` on a `--db` that is not a SQLite database, as
+  `export`, `validate` and `status` do** (`contrib/hyperliquid_perp/cli/smoke.py`,
+  `cli/safe_mode.py`, `cli/_common.py`, issue #359). Both opened the store
+  outside any handler, so a file that passes the path guards but is not
+  SQLite (or is corrupt) raised `sqlite3.DatabaseError` up to `main`'s last
+  resort — a traceback, `fatal: unexpected error`, exit 2, the "tool bug"
+  code. The three-way rule `export` settled on in #357 now lives in
+  `cli/_common._sqlite_error_exit` and all three commands route through it:
+  a store that is itself broken (`is_store_integrity_error`) is the exit-5
+  verdict; what SQLite refuses for a reason outside the store — the new
+  `persistence.db_types.is_store_refusal_error`: BUSY, LOCKED, PROTOCOL,
+  READONLY, PERM, FULL, CANTOPEN by result code (before Python 3.11 an
+  error carries no code, and any `OperationalError` that is not the
+  integrity verdict counts — so on 3.10 a tool bug such as `no such
+  table` reads as this exit 1, not as exit 2), for `safe-mode`
+  also under a `--release` /
+  `--stamp-case` write, where a hint says nothing is recorded unless
+  `--status` shows it — is the named exit 1 (`live-smoke --gate-status
+  failed — …` / `safe-mode failed — …`); anything else, `no such table`
+  included (`OperationalError` is also SQLite's generic error class), is a
+  tool bug and keeps the exit-2 traceback — in `export`'s
+  `--backfill-format-fingerprint` pass and under its CSV read-out too,
+  which named every non-broken `sqlite3.Error` as their exit 1 until now
+  (the read-out through `ExportError`'s cause; the wrapper is re-raised
+  with the cause chained). `_store_integrity_failure`
+  moved from `cli/offline.py` to `cli/_common.py` with it. `safe-mode` is not
+  report-only (it migrates on open and writes), so its exit 5 says the
+  diagnostic could not read the store, not that a ledger it checked failed.
+  The CLI docstring and RUNBOOK-live (§3.4 table, §6) name the code.
+
 - **`export` now exits 5 with `store integrity failure` on a `--db` that is
   not a SQLite database, as `validate` and `status` do**
   (`contrib/hyperliquid_perp/cli/offline.py`, issue #357). The store open in
@@ -187,9 +218,10 @@ Breaking changes within the 0.x line are called out explicitly.
   family, shm/lock sub-codes included), CORRUPT, NOTADB; before Python
   3.11 the bare `DatabaseError` class or the words `I/O error` — because a
   failing disk is an `OperationalError` like a lock, a read-only file or a
-  full disk, and an `OperationalError` the classifier does not know is a
+  full disk, and an `OperationalError` the classifier does not know was a
   named exit 1, never the verdict (a `sqlite3` error that is neither — a
-  tool bug — keeps the exit-2 traceback at the open). So under
+  tool bug — kept the exit-2 traceback at the open) — #359 then narrowed
+  the exit-1 arm to the refusal codes in every lane, see its entry. So under
   `--backfill-format-fingerprint` a corrupt store or a failing disk now
   reaches the exit-5 verdict, while a lock, a file that denies the write
   and a full disk keep the pass's named exit 1 (issues #210 / #235: a
@@ -197,9 +229,9 @@ Breaking changes within the 0.x line are called out explicitly.
   code live in one helper (`_store_integrity_failure`) that `validate` and
   `status` route through as well, and the backfill branch is its own
   function (`_backfill_fingerprints`). The CLI docstring, RUNBOOK §6 and
-  SETUP name the code. `live-smoke --gate-status` and `safe-mode` open the store
-  outside any such handler and keep the exit-2 lane for a non-SQLite
-  `--db`; that is a separate follow-up.
+  SETUP name the code. `live-smoke --gate-status` and `safe-mode` opened
+  the store outside any such handler and kept the exit-2 lane for a
+  non-SQLite `--db`: fixed in #359, the entry above.
 
 - **A crypto cross such as `ETH-BTC` or `BTC-EUR` now gets a no-signal answer
   instead of its base's USD report** (`tradingagents/dataflows/symbol_utils.py`,

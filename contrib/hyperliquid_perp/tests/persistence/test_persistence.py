@@ -11,7 +11,10 @@ import pytest
 
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database, connect
-from contrib.hyperliquid_perp.persistence.db_types import is_store_integrity_error
+from contrib.hyperliquid_perp.persistence.db_types import (
+    is_store_integrity_error,
+    is_store_refusal_error,
+)
 from contrib.hyperliquid_perp.persistence.ids import (
     decision_attempt_id,
     fill_id,
@@ -1985,7 +1988,7 @@ def test_get_position_protection_distinguishes_missing_row_from_cleared(tmp_path
     db.close()
 
 
-def test_is_store_integrity_error_reads_the_result_code_of_a_real_failure(tmp_path):
+def test_the_store_classifiers_read_the_result_code_of_a_real_failure(tmp_path):
     # A lock and a failing disk are both OperationalError, so the class cannot
     # tell them apart; SQLite's primary result code can. The real thing: a
     # second connection refused by one holding a write transaction carries
@@ -2006,6 +2009,20 @@ def test_is_store_integrity_error_reads_the_result_code_of_a_real_failure(tmp_pa
         holder.rollback()
         holder.close()
     assert not is_store_integrity_error(locked.value)
+    assert is_store_refusal_error(locked.value)
+
+    probe = sqlite3.connect(path)
+    try:
+        with pytest.raises(sqlite3.OperationalError) as missing:
+            probe.execute("SELECT 1 FROM no_such_table")
+    finally:
+        probe.close()
+    # SQLITE_ERROR, the generic code: a bug, neither verdict (on 3.11+ the
+    # code says so; before, the class is all there is and it reads as a
+    # refusal — the fallback pinned in the next test).
+    if hasattr(missing.value, "sqlite_errorcode"):
+        assert not is_store_refusal_error(missing.value)
+    assert not is_store_integrity_error(missing.value)
 
     garbage = tmp_path / "g.db"
     garbage.write_bytes(b"not a database" * 100)
@@ -2016,6 +2033,7 @@ def test_is_store_integrity_error_reads_the_result_code_of_a_real_failure(tmp_pa
     finally:
         conn.close()
     assert is_store_integrity_error(notadb.value)
+    assert not is_store_refusal_error(notadb.value)
 
 
 @pytest.mark.parametrize(
@@ -2033,10 +2051,14 @@ def test_is_store_integrity_error_reads_the_result_code_of_a_real_failure(tmp_pa
     ],
     ids=lambda v: v if isinstance(v, bool) else str(v)[:24],
 )
-def test_is_store_integrity_error_is_positive_without_a_result_code(error, integrity):
+def test_the_store_classifiers_are_positive_without_a_result_code(error, integrity):
     # No code on a hand-built error (every monkeypatched failure in the CLI
     # tests, and every error before Python 3.11): the bare DatabaseError
     # class is what CORRUPT and NOTADB arrive as, a failing disk says so in
     # words, and nothing else — not a lock, a denied write, a full disk, a
-    # constraint, a tool bug — is the verdict.
+    # constraint, a tool bug — is the verdict. Without a code the refusal
+    # classifier has only the class: every OperationalError that is not the
+    # verdict counts, nothing else does.
     assert is_store_integrity_error(error) is integrity
+    expected_refusal = isinstance(error, sqlite3.OperationalError) and not integrity
+    assert is_store_refusal_error(error) is expected_refusal

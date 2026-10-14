@@ -156,7 +156,8 @@ def apply_migrations(conn: sqlite3.Connection) -> int:
     loser's wait is
     bounded by :func:`connect`'s ``busy_timeout``;
     a winner whose single step outlasted it would leave the loser with
-    ``database is locked`` (an ``OperationalError``, so main()'s exit 2) —
+    ``database is locked`` (an ``OperationalError``: main()'s exit 2 for
+    ``paper`` / ``live``, a named exit 1 for ``safe-mode``) —
     every step here is a handful of DDL statements, far inside that bound.
 
     A store NEWER than this build is refused rather than used. Nothing else

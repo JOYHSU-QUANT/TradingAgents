@@ -20,9 +20,14 @@ from pathlib import Path
 
 from ..common import store_layout
 from ..persistence.db import Database
-from ..persistence.db_types import is_store_integrity_error
+from ..persistence.db_types import is_store_integrity_error, is_store_refusal_error
 from ..status import DEFAULT_RECENT, read_status, status_json, status_lines
-from ._common import _existing_run_row, _open_existing_db
+from ._common import (
+    _existing_run_row,
+    _open_existing_db,
+    _sqlite_error_exit,
+    _store_integrity_failure,
+)
 
 
 def _every_payload_missing(report) -> bool:
@@ -43,25 +48,6 @@ def _every_payload_missing(report) -> bool:
     )
 
 
-def _store_integrity_failure(exc: BaseException) -> int:
-    """The exit-5 verdict of the report-only commands: "the store is broken;
-    investigate before trusting results".
-
-    One wording and one code for ``export`` / ``validate`` / ``status``: a
-    ``--db`` that exists and passes the path guards but is not SQLite, a
-    corrupt one, an I/O failure mid-read, a cell or state the reading model
-    refuses. A store that could not be OPENED is the opposite verdict (named
-    exit 1, see :func:`._common._open_existing_db`) and mostly never reaches
-    here — "mostly", because a file that is not a database raises plain
-    ``DatabaseError`` rather than the ``OperationalError`` those guards narrow
-    themselves to, and that IS an integrity verdict: telling an operator whose
-    disk is rotting that they mistyped ``--db`` is the error this split
-    exists to avoid.
-    """
-    print(f"error: store integrity failure — {exc}", file=sys.stderr)
-    return 5
-
-
 def _backfill_fingerprints(
     db: Database, *, db_path: str, run_id: str, payload_root: str | None
 ) -> bool:
@@ -73,10 +59,11 @@ def _backfill_fingerprints(
     ``export_failed`` wording this command has always used (a "stamped=0"
     line about a typo would only compete with it). ``payload_root`` is the
     ``--payload-root`` text as typed (``_cmd_export`` checked it is a
-    directory), echoed as typed in the hint. A store that is itself broken
-    (``is_store_integrity_error``) is left to the caller's exit-5 verdict,
-    with or without the flag; every other refusal of the pass — a lock, a
-    file that denies the write, a full disk — is named here.
+    directory), echoed as typed in the hint. Only what SQLite refuses for a
+    reason outside the store (``is_store_refusal_error``: a lock, a file
+    that denies the write, a full disk) is named here; a store that is
+    itself broken is left to the caller's exit-5 verdict, with or without
+    the flag, and a tool bug to its exit-2 traceback.
     """
     from ..persistence import repository as repo
     from ..persistence.backfill import backfill_format_fingerprints
@@ -123,9 +110,10 @@ def _backfill_fingerprints(
         # The pass takes the store's write lock (RUNBOOK §6 says a
         # running daemon is fine): a lock held past busy_timeout is a
         # named refusal here, not a traceback exit 2 — as is a store that
-        # denies the write or a disk that is full. A broken store is not
-        # this pass's to name: re-raised to the caller's exit-5 verdict.
-        if is_store_integrity_error(exc):
+        # denies the write or a disk that is full. Anything else is not
+        # this pass's to name: re-raised to the caller, whose rule gives a
+        # broken store the exit-5 verdict and a tool bug its traceback.
+        if not is_store_refusal_error(exc):
             raise
         print(f"error: format_fingerprint backfill failed — {exc}", file=sys.stderr)
         return True
@@ -227,29 +215,28 @@ def _cmd_export(argv: list[str]) -> int:
             paths = export_run(db, run_id=args.run_id, output_dir=args.output_dir)
     except ExportError as exc:
         # ``export_run`` wraps every failure (§1.1) so the daemon can log
-        # ``export_failed`` and keep trading; here the cause decides. A store
-        # that is itself broken under the read-out is the integrity verdict;
-        # anything else — an unknown run, the output directory, a lock — is
-        # the named refusal it always was.
+        # ``export_failed`` and keep trading; here the cause decides, by the
+        # rule the other two lanes follow. A store that is itself broken
+        # under the read-out is the integrity verdict; a refusal from
+        # outside the store (a lock), an unknown run or the output directory
+        # is the named exit 1 it always was; a sqlite3 error that is neither
+        # — ``no such column`` from a drifted schema: a tool bug — keeps
+        # ``main``'s last resort, with the wrapper and its cause chained.
         cause = exc.__cause__
-        if isinstance(cause, sqlite3.Error) and is_store_integrity_error(cause):
-            return _store_integrity_failure(exc)
+        if isinstance(cause, sqlite3.Error):
+            if is_store_integrity_error(cause):
+                return _store_integrity_failure(exc)
+            if not is_store_refusal_error(cause):
+                raise
         print(f"error: export_failed — {exc}", file=sys.stderr)
         return 1
     except sqlite3.Error as exc:
-        # The open past the path guards of ``_open_existing_db``, or a broken
-        # store ``_backfill_fingerprints`` re-raised: the same positive rule
-        # as the ExportError lane and the backfill pass (issue #357). What
-        # SQLite refuses for a reason outside the store — past the guards,
-        # realistically a lock — is the named exit 1 wherever in the command
-        # it hits; what is neither (an API misuse, a closed connection: a
-        # tool bug) keeps ``main``'s last resort, traceback and exit 2.
-        if is_store_integrity_error(exc):
-            return _store_integrity_failure(exc)
-        if isinstance(exc, sqlite3.OperationalError):
-            print(f"error: export_failed — {exc}", file=sys.stderr)
-            return 1
-        raise
+        # The open past the path guards of ``_open_existing_db``, or whatever
+        # ``_backfill_fingerprints`` re-raised: the same positive rule as the
+        # backfill pass and the ExportError lane (issues #357 / #359), so a
+        # refusal from outside the store is the named exit 1 wherever in the
+        # command it hits.
+        return _sqlite_error_exit(exc, refused="export_failed")
     for path in paths:
         print(path)
     return 0

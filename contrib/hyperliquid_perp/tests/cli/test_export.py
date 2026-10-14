@@ -160,6 +160,65 @@ def test_export_backfill_names_a_refused_write_instead_of_the_exit_5_verdict(
     assert not out.exists()
 
 
+def test_export_backfill_leaves_a_tool_bug_to_the_exit_2_lane(tmp_path, capsys, monkeypatch):
+    # The pass names only what SQLite refuses from outside the store; a
+    # failure that is neither that nor a broken store — here a constraint
+    # the pass's own UPDATE tripped — is a code defect and keeps main's
+    # last resort rather than borrowing the operator code (one rule with
+    # the open and the read-out).
+    import contrib.hyperliquid_perp.persistence.backfill as backfill_mod
+
+    path, db = seed_db(tmp_path)
+    db.close()
+
+    def bug(db, *, run_id, payload_root=None):
+        raise sqlite3.IntegrityError("UNIQUE constraint failed: ai_inputs.attempt_id")
+
+    monkeypatch.setattr(backfill_mod, "backfill_format_fingerprints", bug)
+    out = tmp_path / "exp"
+    rc = cli_main(
+        ["export", "--run-id", "r", "--output-dir", str(out), "--db", str(path)]
+        + ["--backfill-format-fingerprint"]
+    )
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "fatal: unexpected error: IntegrityError: UNIQUE constraint failed" in err
+    assert "backfill failed" not in err
+    assert not out.exists()
+
+
+def test_export_leaves_a_tool_bug_under_the_read_out_to_the_exit_2_lane(
+    tmp_path, capsys, monkeypatch
+):
+    # ``export_run`` wraps every failure, so the cause decides here too: a
+    # sqlite3 error that is neither the store's fault nor a refusal from
+    # outside it — a drifted schema under the SELECT — is a code defect and
+    # keeps main's last resort, the wrapper and its cause chained, rather
+    # than the operator code ``export_failed`` always carried.
+    import contrib.hyperliquid_perp.persistence.export as export_mod
+
+    path, db = seed_db(tmp_path)
+    db.close()
+
+    def drifted(db, *, run_id, output_dir):
+        try:
+            raise sqlite3.OperationalError("no such column: fills.fee_rate")
+        except sqlite3.OperationalError as exc:
+            # A hand-built error carries no result code and the class alone
+            # reads as a refusal; a real one (3.11+) carries SQLITE_ERROR,
+            # the tool bug this test wants — give it the code a real one has.
+            exc.sqlite_errorcode = 1
+            raise export_mod.ExportError(f"CSV export for run {run_id!r} failed: {exc}") from exc
+
+    monkeypatch.setattr(export_mod, "export_run", drifted)
+    rc = cli_main(["export", "--run-id", "r", "--output-dir", str(tmp_path / "e"), "--db", str(path)])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "fatal: unexpected error: ExportError: CSV export for run 'r' failed: no such column" in err
+    assert "error: export_failed" not in err
+    assert "store integrity failure" not in err
+
+
 def test_export_names_a_lock_at_the_open_as_export_failed(tmp_path, capsys, monkeypatch):
     # The one lock the path guards do not name: ``Database.__init__`` wraps
     # only ``connect()``, so on a store that fell back from WAL a writer
@@ -198,8 +257,8 @@ def test_export_leaves_a_tool_bug_at_the_open_to_the_exit_2_lane(tmp_path, capsy
 
 
 def test_export_names_a_lock_under_the_read_out_as_export_failed(tmp_path, capsys, monkeypatch):
-    # The one sqlite3 cause that is NOT the integrity verdict: a lock held
-    # past busy_timeout while the CSVs are read out (reachable when the store
+    # A refusal from outside the store under the read-out: a lock held past
+    # busy_timeout while the CSVs are read out (reachable when the store
     # fell back from WAL) is the same named exit 1 the backfill pass gives
     # it — one rule for the whole command.
     import contrib.hyperliquid_perp.persistence.export as export_mod

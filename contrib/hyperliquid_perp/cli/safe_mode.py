@@ -5,9 +5,10 @@ mode, and the §12.3 reconciliation-case stamping lane (§13.6).
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import sys
 
-from ._common import _open_existing_db
+from ._common import _open_existing_db, _sqlite_error_exit
 
 
 def _cmd_safe_mode(argv: list[str]) -> int:
@@ -15,8 +16,10 @@ def _cmd_safe_mode(argv: list[str]) -> int:
 
     ``--status`` (the default) prints the persisted current state and recent
     history — exit 0 when not in safe mode, 4 while one is latched, so a
-    supervisor probe can branch without parsing stdout; ``--release --reason
-    "<人工確認說明>"`` releases a MANUAL safe mode, writing the
+    supervisor probe can branch without parsing stdout (and 5 when the
+    ``--db`` is not a SQLite database or is corrupt: the diagnostic could not
+    read the store, the verdict ``validate`` gives the same file);
+    ``--release --reason "<人工確認說明>"`` releases a MANUAL safe mode, writing the
     ``safe_mode_released`` audit event. Releasing does not resume trading:
     the run must still pass its next full reconciliation (§13.6 rule 3) —
     the released state only lifts the manual latch.
@@ -33,7 +36,8 @@ def _cmd_safe_mode(argv: list[str]) -> int:
         action="store_true",
         help="Print the current safe-mode state, recent history and the open "
         "reconciliation cases (the default action). Exit 0 when not in safe "
-        "mode, 4 while one is latched.",
+        "mode, 4 while one is latched, 5 when the --db is not a SQLite "
+        "database or is corrupt.",
     )
     action.add_argument(
         "--release",
@@ -75,6 +79,33 @@ def _cmd_safe_mode(argv: list[str]) -> int:
     )
     args = parser.parse_args(argv)
 
+    try:
+        return _safe_mode(args)
+    except sqlite3.Error as exc:
+        # A --db that is not SQLite, or corrupt, is the exit-5 "investigate
+        # the store" verdict the report-only commands give it (issue #359);
+        # a lock — on the open, or under a --release / --stamp-case write —
+        # is the named exit 1. This command migrates on open and writes, so
+        # the verdict here says the DIAGNOSTIC could not read the store, not
+        # that a ledger it checked failed: it checks none.
+        rc = _sqlite_error_exit(exc, refused="safe-mode failed")
+        if rc == 1 and (args.release or args.stamp_case is not None):
+            # A refused write recorded nothing (each lane is one BEGIN
+            # IMMEDIATE transaction, rolled back on any failure) — said as
+            # "unless --status shows it" because the store, not this line,
+            # is the authority on what landed. Not on exit 5: --status on a
+            # broken store fails the same way, so the pointer would be
+            # empty there.
+            print(
+                "hint: nothing is recorded unless `safe-mode --status` shows it — "
+                "re-check before retrying.",
+                file=sys.stderr,
+            )
+        return rc
+
+
+def _safe_mode(args: argparse.Namespace) -> int:
+    """The command proper; ``_cmd_safe_mode`` wraps it in the store verdicts."""
     import getpass
 
     from ..live.safe_mode import SafeModeManager

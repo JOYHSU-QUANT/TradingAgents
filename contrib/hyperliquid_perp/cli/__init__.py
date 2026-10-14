@@ -60,12 +60,12 @@ one way; ``safe-mode
 not "human action required"), ``5`` (``validate``) the run has integrity
 failures — orphans, snapshot or replay mismatches, or a store so corrupt the
 checks themselves cannot run ("the store is broken; investigate before
-trusting results") — EVERY subcommand shares the code and its wording for a
-``--db`` that is not a SQLite database, is corrupt, or sits on a disk that
-fails under the open's schema read (the shared open raises
+trusting results") — every subcommand that opens a store shares the code and
+its wording for a ``--db`` that is not a SQLite database, is corrupt, or sits
+on a disk that fails under the open's schema read (the shared open raises
 ``StoreIntegrityFailure``, caught here once; ``paper``, ``live`` and a real
-``live-smoke`` run then exit before taking any lease or touching the
-exchange), ``export``, ``status``, ``live-smoke --gate-status`` and
+``live-smoke`` run then exit before taking any lease or placing any order),
+``export``, ``status``, ``live-smoke --gate-status`` and
 ``safe-mode`` also for a disk that fails while the store is read, and
 ``status`` also for a state its model refuses; ``export``, ``live-smoke
 --gate-status`` and ``safe-mode`` name a refusal from outside the store (a
@@ -94,7 +94,7 @@ import sys
 
 from ..common.entry_argv import is_legacy_argv
 from ..config import load_dotenv_files
-from ._common import StoreIntegrityFailure
+from ._common import StoreIntegrityFailure, store_integrity_failure
 from .live import _cmd_live
 from .offline import _cmd_export, _cmd_status, _cmd_validate
 from .paper import _cmd_paper
@@ -150,13 +150,10 @@ def main(argv: list[str] | None = None) -> int:
     except StoreIntegrityFailure as exc:
         # The shared open found the --db is not a database, corrupt, or on a
         # disk that failed under its schema read: the exit-5 verdict every
-        # subcommand gives that file (issue #362), printed here once rather
-        # than wrapped around each open. The same line ``_common``'s
-        # ``_store_integrity_failure`` prints for a store that fails later;
-        # spelled out because this package imports no private name but its
-        # dispatch targets (tests/common/test_layering.py).
-        print(f"error: store integrity failure — {exc}", file=sys.stderr)
-        return 5
+        # subcommand that opens a store gives that file (issue #362), printed
+        # here once rather than wrapped around each open — in the words the
+        # commands print for a store that fails later.
+        return store_integrity_failure(exc)
     except Exception as exc:  # noqa: BLE001 — last-resort handler, mirrors main.main
         logger.exception("unexpected error in %s", command)
         print(f"fatal: unexpected error: {type(exc).__name__}: {exc}", file=sys.stderr)

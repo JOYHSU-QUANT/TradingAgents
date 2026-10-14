@@ -396,7 +396,7 @@ python -m contrib.hyperliquid_perp live-smoke \
 | `0` | **全 20 項** gate 開（每項最新真跑結果都 passed） | 可進 testnet_live cycles |
 | `4` | 跑了（或讀了）但 gate 未滿足；含 pre-flight recovery 沒過、或跑到一半出 `error` 判定，suite 提前中止 | 看 not_yet_run／failed／errored（或 pre-flight 錯誤訊息），補跑或修 |
 | `1` | config／env／網路／run-lock 具名錯誤 | 依訊息修 |
-| `5` | 只有 `--gate-status`：`--db` 指到的檔在、守衛也放行、卻不是 SQLite 或內容壞掉（`store integrity failure`，與 `validate`／`export`／`status` 同一判決；issue #359 之前是 exit 2 的 traceback） | 先查 store，別相信任何 gate 讀數 |
+| `5` | `--db` 指到的檔在、守衛也放行、卻不是 SQLite 或內容壞掉（`store integrity failure`，與 `validate`／`export`／`status` 同一判決）：`--gate-status` 自 #359 起、真跑與 `--dry-run` 自 #362 起都是這個碼（之前是 exit 2 的 traceback）；`--gate-status` 讀到一半磁碟 I/O 失敗也是 | 先查 store，別相信任何 gate 讀數；真跑不會取 lease、不會下單 |
 
 > `--only` 只跑子集時，即使選到的項全過，其餘未跑的項仍讓 gate 未開——所以 exit 仍是
 > `4`（`not_yet_run` 會列出剩下的項）。真跑的 exit `0` 代表整個 §20.2 gate 開，不是「選到的那幾項過了」。
@@ -459,7 +459,8 @@ python -m contrib.hyperliquid_perp live \
 - **長駐建議**同 paper（[RUNBOOK §3](./RUNBOOK.md)）：掛在會自動重啟的監管下，
   working directory 設 repo 根目錄。監管（systemd 等）的重啟策略可依 exit code
   分流：**4**＝smoke gate 未開（重啟不會自己好，先去跑 `live-smoke`）、或被停掉時處在
-  safe mode／protection-only；**1**＝
+  safe mode／protection-only；**5**＝`--db` 不是 SQLite／內容壞掉／開檔時磁碟 I/O 失敗（`store integrity
+  failure`，#362；前兩種重啟不會好，第三種可能會，所以不設 `RestartPreventExitStatus=5`）；**1**＝
   config／憑證／環境錯誤（含上面 protection-only 倉位了結後的自我結束）——兩者都不該無腦無限重啟。**exit 1 至少有以下四種是暫時性的**：
   (a) 同錢包姊妹 run 還持著新鮮 lease 時的具名拒絕（訊息含 `ACCOUNT-wide`），等對方
   收工或 lease 過期後重跑就會好——但那代表有兩個 run 同時被啟動，該查的是啟動來源；
@@ -475,12 +476,14 @@ python -m contrib.hyperliquid_perp live \
   不到、(d) 讀得到但開一個 store 要寫入。反過來，`could not be opened as a store`
   以外還有一種**永遠不會自己好**、重啟只會空轉的：主檔沒有 bytes 而旁邊的 log 有
   （issue #236）——那要人去把 log 移開或修好 `--db`，監管重啟幫不上忙。
-  另有一種同樣**永遠不會自己好**的：`--db` 指到的檔在、守衛也放行、卻**不是 SQLite 或內容壞掉**——
-  自 #362 起 `paper`／`live`／`live-smoke` 跟報表指令一樣印 `error: store integrity failure — …` 並 exit 5
-  （以前是 exit 2 的 traceback），監管重啟一百次也不會好，要人去查 store。
   **要抓這一條就 grep `is zero bytes, but` 與 `is not there, but` 這兩句**，
   不要 grep `holds data`：列到兩個 log 時它是 `hold data`、量不到時是
   `could not be measured and may hold data`，三種都對不上同一個字串。
+  另有一種同樣**永遠不會自己好**、但走的是 **exit 5** 不是 exit 1 的：`--db` 指到的檔在、守衛也放行、
+  卻**不是 SQLite 或內容壞掉**——自 #362 起 `paper`／`live`／`live-smoke` 跟報表指令一樣印
+  `error: store integrity failure — …`（以前是 exit 2 的 traceback），監管重啟一百次也不會好，要人去查 store；
+  抓它就 grep `store integrity failure`。同一個碼也涵蓋開檔那一下磁碟 I/O 失敗（IOERR 家族），那種**可能**自己好，
+  所以不建議 `RestartPreventExitStatus=5`——讓監管照 `StartLimitBurst` 的上限去撞，看 log 分辨。
   另外 `live`／`live-smoke` 收到 SIGTERM 會走與 Ctrl-C 相同的收尾（exit 130）。注意 live 的無人看管空窗風險比
   paper 高——真錢／真倉。
 

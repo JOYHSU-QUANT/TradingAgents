@@ -182,8 +182,12 @@ Breaking changes within the 0.x line are called out explicitly.
   verdict; every other `sqlite3.Error` propagates as before (a command's
   own rule, or the exit-2 traceback). The report-only and deferred opens
   write nothing and no lease is taken; `safe-mode`, which migrates on open,
-  reports a corruption its migration meets the same way. The CLI docstring
-  and RUNBOOK-live §8 name the code.
+  reports a corruption its migration meets the same way (a corruption first
+  met by the lease-held migration of `paper` / `live` / a real `live-smoke`
+  run is still the exit-2 traceback — a known gap). The verdict helper is
+  now public (`cli/_common.store_integrity_failure`) so `main` can print the
+  one wording. The CLI docstring, RUNBOOK §3, RUNBOOK-live §3.4 and §4 name
+  the code.
 
 - **`live-smoke --gate-status` and `safe-mode` now exit 5 with
   `store integrity failure` on a `--db` that is not a SQLite database, as

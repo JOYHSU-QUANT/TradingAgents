@@ -26,7 +26,7 @@ from ._common import (
     _existing_run_row,
     _open_existing_db,
     _sqlite_error_exit,
-    _store_integrity_failure,
+    store_integrity_failure,
 )
 
 
@@ -225,7 +225,7 @@ def _cmd_export(argv: list[str]) -> int:
         cause = exc.__cause__
         if isinstance(cause, sqlite3.Error):
             if is_store_integrity_error(cause):
-                return _store_integrity_failure(exc)
+                return store_integrity_failure(exc)
             if not is_store_refusal_error(cause):
                 raise
         print(f"error: export_failed — {exc}", file=sys.stderr)
@@ -290,10 +290,10 @@ def _cmd_validate(argv: list[str]) -> int:
         # log beside it), and ``Database`` names the one it cannot open as a
         # store even though it reads (#235) — all of them
         # ``SchemaVersionError``, which the open above turns into a named exit
-        # 1 — and a file that is not a database, which the open raises as
-        # ``StoreIntegrityFailure`` for ``main`` to print in these same words
-        # (issue #362). What lands here failed AFTER the open.
-        return _store_integrity_failure(exc)
+        # 1. A file that is not a database no longer lands here either: the
+        # open raises it as ``StoreIntegrityFailure`` for ``main`` to print in
+        # these same words (issue #362). What lands here failed AFTER the open.
+        return store_integrity_failure(exc)
     for line in report.summary_lines():
         print(line)
     if report.phase3_ready:
@@ -427,9 +427,9 @@ def _cmd_status(argv: list[str], *, now: Callable[[], datetime] = _utc_now) -> i
         # The store does not hold up past the open — a malformed page, an
         # I/O failure mid-read, a cell no Decimal accepts, a state the model
         # refuses as impossible: the verdict ``validate`` gives, see
-        # ``_store_integrity_failure`` (a file that is not a database is the
+        # ``store_integrity_failure`` (a file that is not a database is the
         # open's own ``StoreIntegrityFailure``, printed by ``main``).
-        return _store_integrity_failure(exc)
+        return store_integrity_failure(exc)
     if args.json:
         print(status_json(status))
     else:

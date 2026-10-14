@@ -144,6 +144,7 @@ def test_the_env_file_gives_only_the_dashboard_names(tmp_path):
         "DASHBOARD_SMTP_PASSWORD='app pass word' \n"
         "DASHBOARD_MAIL_TO=a@example.com, b@example.com # two of them\n"
         "DASHBOARD_MAIL_FROM = bot@example.com\n"
+        'DASHBOARD_HEALTHCHECKS_URL="https://hc-ping.com/uuid" # quoted, then a comment\n'
         "not an assignment\n"
         "DASHBOARD-BAD=1\n",
         encoding="utf-8",
@@ -154,6 +155,7 @@ def test_the_env_file_gives_only_the_dashboard_names(tmp_path):
         "DASHBOARD_SMTP_PASSWORD": "app pass word",
         "DASHBOARD_MAIL_TO": "a@example.com, b@example.com",
         "DASHBOARD_MAIL_FROM": "bot@example.com",
+        "DASHBOARD_HEALTHCHECKS_URL": "https://hc-ping.com/uuid",
     }
     settings = load_settings(environ={}, env_file=env)
     assert settings.mail == MailSettings(
@@ -164,7 +166,7 @@ def test_the_env_file_gives_only_the_dashboard_names(tmp_path):
         recipients=("a@example.com", "b@example.com"),
         password="app pass word",
     )
-    assert settings.healthchecks_url is None
+    assert settings.healthchecks_url == "https://hc-ping.com/uuid"
     assert "app pass word" not in repr(settings)
 
 
@@ -203,6 +205,7 @@ def test_a_half_account_is_refused_naming_the_missing_names_not_the_values():
         ({"DASHBOARD_SMTP_PORT": "70000"}, "port number"),
         ({"DASHBOARD_MAIL_TO": "nobody"}, "DASHBOARD_MAIL_TO must be"),
         ({"DASHBOARD_HEALTHCHECKS_URL": "http://hc-ping.com/x"}, "https://"),
+        ({"DASHBOARD_MAIL_FROM": "a@example.com, b@example.com"}, "must be one mail address"),
     ],
 )
 def test_a_port_an_address_and_the_url_are_checked(extra, words):
@@ -254,6 +257,20 @@ def test_an_env_file_that_cannot_be_read_is_refused_by_name(tmp_path):
 def test_every_threshold_has_its_parser_and_no_parser_is_without_a_threshold():
     from dataclasses import fields
 
-    from contrib.dashboard.config import _THRESHOLD_PARSERS
+    from contrib.dashboard.config import THRESHOLD_PARSERS
 
-    assert set(_THRESHOLD_PARSERS) == {spec.name for spec in fields(Thresholds)}
+    assert set(THRESHOLD_PARSERS) == {spec.name for spec in fields(Thresholds)}
+
+
+def test_half_an_account_without_the_host_is_refused_not_mail_off():
+    with pytest.raises(ConfigError) as caught:
+        load_settings(
+            environ={"DASHBOARD_SMTP_USER": "u", "DASHBOARD_MAIL_TO": "t@x.io"}, env_file=None
+        )
+    assert "DASHBOARD_SMTP_HOST is not set but DASHBOARD_SMTP_USER, DASHBOARD_MAIL_TO are" in str(
+        caught.value
+    )
+    assert (
+        load_settings(environ={"DASHBOARD_HEALTHCHECKS_URL": "https://h/x"}, env_file=None).mail
+        is None
+    )

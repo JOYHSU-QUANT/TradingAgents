@@ -49,6 +49,7 @@ __all__ = [
     "Line",
     "MailSettings",
     "Settings",
+    "THRESHOLD_PARSERS",
     "Thresholds",
     "UniswapLine",
     "load_config",
@@ -328,7 +329,7 @@ def _clock(mapping: Mapping[str, Any], key: str, where: str, default: time) -> t
 
 
 # One parser per threshold, by name: tests/test_config.py holds the table to the fields.
-_THRESHOLD_PARSERS: dict[str, Callable[[Mapping[str, Any], str, str, Any], Any]] = {
+THRESHOLD_PARSERS: dict[str, Callable[[Mapping[str, Any], str, str, Any], Any]] = {
     "cycle_overdue_minutes": _int,
     "lease_stale_minutes": _int,
     "export_stale_hours": _hours,
@@ -342,11 +343,11 @@ _THRESHOLD_PARSERS: dict[str, Callable[[Mapping[str, Any], str, str, Any], Any]]
 
 def _thresholds(raw: object, where: str) -> Thresholds:
     mapping = _mapping(raw, where)
-    _keys(mapping, where, required=(), optional=tuple(_THRESHOLD_PARSERS))
+    _keys(mapping, where, required=(), optional=tuple(THRESHOLD_PARSERS))
     return Thresholds(
         **{
             name: parse(mapping, name, where, getattr(Thresholds, name))
-            for name, parse in _THRESHOLD_PARSERS.items()
+            for name, parse in THRESHOLD_PARSERS.items()
         }
     )
 
@@ -524,8 +525,9 @@ def read_env_file(path: Path) -> dict[str, str]:
         if not sep or not key.startswith(ENV_PREFIX) or not key.isidentifier():
             continue
         value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
+        if value[:1] in ('"', "'") and (closing := value.find(value[0], 1)) > 0:
+            # A quoted value, whatever follows the closing quote (a comment).
+            value = value[1:closing]
         else:
             value = value.split(" #", 1)[0].rstrip()
         values[key] = value
@@ -541,13 +543,32 @@ def _addresses(text: str, name: str) -> tuple[str, ...]:
     return found
 
 
+def _one_address(text: str, name: str) -> str:
+    found = _addresses(text, name)
+    if len(found) != 1:
+        raise ConfigError(f"{name} must be one mail address")
+    return found[0]
+
+
+# The names an account takes beside the host, and every mail name there is.
+_MAIL_REQUIRED = (
+    "DASHBOARD_SMTP_USER",
+    "DASHBOARD_SMTP_PASSWORD",
+    "DASHBOARD_MAIL_FROM",
+    "DASHBOARD_MAIL_TO",
+)
+_MAIL_NAMES = ("DASHBOARD_SMTP_PORT",) + _MAIL_REQUIRED
+
+
 def load_settings(*, environ: Mapping[str, str], env_file: Path | None) -> Settings:
     """The mail account and dead-man URL from ``env_file`` (when it exists) and ``environ`` (which wins).
 
     Mail is on when ``DASHBOARD_SMTP_HOST`` is set, and then takes
     ``DASHBOARD_SMTP_USER``, ``DASHBOARD_SMTP_PASSWORD``, ``DASHBOARD_MAIL_FROM``
     and ``DASHBOARD_MAIL_TO`` (comma-separated), with ``DASHBOARD_SMTP_PORT``
-    587 unless set. ``DASHBOARD_HEALTHCHECKS_URL`` must be ``https://``.
+    587 unless set; any of those set while the host is not is refused (a
+    half-set account is a mistake, not a way to turn the mail off).
+    ``DASHBOARD_HEALTHCHECKS_URL`` must be ``https://``.
     """
     values: dict[str, str] = {}
     if env_file is not None and env_file.is_file():
@@ -555,17 +576,17 @@ def load_settings(*, environ: Mapping[str, str], env_file: Path | None) -> Setti
     values.update({key: value for key, value in environ.items() if key.startswith(ENV_PREFIX)})
     mail = None
     host = values.get("DASHBOARD_SMTP_HOST", "").strip()
-    if host:
-        missing = [
-            name
-            for name in (
-                "DASHBOARD_SMTP_USER",
-                "DASHBOARD_SMTP_PASSWORD",
-                "DASHBOARD_MAIL_FROM",
-                "DASHBOARD_MAIL_TO",
+    if not host:
+        # Half an account is a mistake, not a choice: the other names set
+        # while the host is not would silently turn the mail off.
+        stray = [name for name in _MAIL_NAMES if values.get(name, "").strip()]
+        if stray:
+            raise ConfigError(
+                f"DASHBOARD_SMTP_HOST is not set but {', '.join(stray)} {'is' if len(stray) == 1 else 'are'}: "
+                "set the host too, or none of them"
             )
-            if not values.get(name, "").strip()
-        ]
+    if host:
+        missing = [name for name in _MAIL_REQUIRED if not values.get(name, "").strip()]
         if missing:
             raise ConfigError(
                 f"DASHBOARD_SMTP_HOST is set but {', '.join(missing)} not: the mail account takes "
@@ -578,7 +599,7 @@ def load_settings(*, environ: Mapping[str, str], env_file: Path | None) -> Setti
             host=host,
             port=int(port_text),
             user=values["DASHBOARD_SMTP_USER"].strip(),
-            sender=_addresses(values["DASHBOARD_MAIL_FROM"], "DASHBOARD_MAIL_FROM")[0],
+            sender=_one_address(values["DASHBOARD_MAIL_FROM"], "DASHBOARD_MAIL_FROM"),
             recipients=_addresses(values["DASHBOARD_MAIL_TO"], "DASHBOARD_MAIL_TO"),
             password=values["DASHBOARD_SMTP_PASSWORD"],
         )

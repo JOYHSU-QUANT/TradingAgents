@@ -109,3 +109,10 @@ def test_the_vocabulary_words_the_rules_match_are_the_packages_words():
     uniswap = _STATUS["uniswap_v3"].read_text(encoding="utf-8")
     for state in ("up_to_date", "behind", "ahead"):
         assert f'"{state}"' in uniswap
+
+
+def test_the_carry_lines_default_d5_days_is_the_carry_packages_own_default():
+    from contrib.dashboard.config import CarryLine
+
+    report = (_CONTRIB / "carry" / "report.py").read_text(encoding="utf-8")
+    assert f"DEFAULT_D5_DAYS: Final = {CarryLine.d5_days}" in report

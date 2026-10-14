@@ -36,6 +36,8 @@ jobs:
           # restart, so a tick does not mail the daemon down and up again.
           if systemctl is-enabled --quiet dashboard-exporter.timer 2>/dev/null; then
             sudo systemctl stop dashboard-exporter.timer
+            # A tick already running finishes first (a few seconds).
+            while systemctl is-active --quiet dashboard-exporter.service; do sleep 1; done
             # Back whatever happens below (set -e): a daemon that fails to come
             # up is news the exporter must send.
             trap 'sudo systemctl start dashboard-exporter.timer' EXIT

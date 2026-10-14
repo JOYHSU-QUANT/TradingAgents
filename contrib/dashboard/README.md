@@ -55,7 +55,8 @@ Two files, kept apart on purpose:
   in, mode 600): `DASHBOARD_SMTP_HOST`, `DASHBOARD_SMTP_PORT` (587),
   `DASHBOARD_SMTP_USER`, `DASHBOARD_SMTP_PASSWORD`, `DASHBOARD_MAIL_FROM`,
   `DASHBOARD_MAIL_TO` (comma-separated), `DASHBOARD_HEALTHCHECKS_URL`. With
-  no `DASHBOARD_SMTP_HOST` there is no mail (JSON only); with no URL there
+  none of the mail names set there is no mail (JSON only; a half-set account
+  is refused by name); with no URL there
   is no dead-man ping. Only the `DASHBOARD_*` lines are read; a refusal
   names the missing name, never a value.
 

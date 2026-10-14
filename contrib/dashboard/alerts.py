@@ -377,7 +377,9 @@ def _guarded(
             return _uniswap(line, doc, now, th)
         return _carry(line, doc, now, th)
     except (KeyError, TypeError, ValueError, AttributeError, IndexError) as exc:
-        detail = masked_line(str(exc)) or "no detail"
+        # A KeyError names the field (a word of this code); another error's
+        # text could quote the document, so only its class goes in the mail.
+        detail = (masked_line(str(exc)) if isinstance(exc, KeyError) else None) or "no detail"
         text = (
             f"the rules could not read the document ({type(exc).__name__}: {detail}; a field "
             "is missing or not shaped as this build reads it)"
@@ -486,6 +488,9 @@ def evaluate(
     for read in reads:
         line = read.line
         carried = _carried(line.name, held)
+        if line.unit in parked:
+            # Parked: the progress rules are not judged, so nothing held by them stays.
+            carried = [item for item in carried if item.rule not in _PROGRESS_RULES]
         if read.document is None:
             conditions.append(_read_failure(line, read))
             conditions += carried

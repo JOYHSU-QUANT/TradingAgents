@@ -347,8 +347,8 @@ def test_disk_and_memory_past_their_thresholds(tmp_path):
     assert evaluation.conditions[0].text == "100 MB of memory available"
     strict = build_config(tmp_path, thresholds=Thresholds(disk_used_pct=1))
     evaluation = _tick(tmp_path, quiet_documents(), config=strict)
-    assert "host:disk" in _keys(evaluation)
-    disk = next(c for c in evaluation.conditions if c.key == "host:disk")
+    assert _keys(evaluation) == ["host:disk"]
+    disk = evaluation.conditions[0]
     assert disk.text.startswith("disk ") and "% used on" in disk.text
 
 
@@ -596,3 +596,20 @@ def test_a_state_file_whose_marks_are_not_instants_is_refused(tmp_path):
     path.write_text(json.dumps(raw), encoding="utf-8")
     with pytest.raises(StateError, match="ValueError"):
         load_state(path)
+
+
+def test_a_parked_line_whose_read_fails_drops_what_the_progress_rules_held(tmp_path):
+    marker = tmp_path / "SEGMENT_SWITCH_READY"
+    marker.write_text("", encoding="ascii")
+    since = "2026-10-14T02:00:00+00:00"
+    held = {
+        "hl-paper:cycle_overdue": ActiveCondition("hl-paper", "cycle_overdue", "late", since),
+        "hl-paper:safe_mode": ActiveCondition("hl-paper", "safe_mode", "latched", since),
+    }
+    docs = quiet_documents()
+    docs[HL_KEY] = CommandResult(1, "", "error: mid-swap\n")
+    config, reads, host = read_lines_and_host(
+        tmp_path, docs, config=build_config(tmp_path, marker=marker)
+    )
+    evaluation = evaluate(now=NOW, config=config, reads=reads, host=host, events_seen={}, held=held)
+    assert _keys(evaluation) == ["hl-paper:read_failed", "hl-paper:safe_mode"]

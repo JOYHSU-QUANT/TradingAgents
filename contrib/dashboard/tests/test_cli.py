@@ -38,6 +38,7 @@ lines:
 
 
 def _args(command: str, tmp_path: Path) -> list[str]:
+    (tmp_path / "none.env").write_text("", encoding="utf-8")
     return [command, "--config", str(_config(tmp_path)), "--env-file", str(tmp_path / "none.env")]
 
 
@@ -119,3 +120,11 @@ def test_test_mail_exits_1_when_a_recipient_is_refused(tmp_path, capsys):
     assert main(args, now=lambda: NOW, smtp_factory=HalfRefusingSMTP, environ=environ) == 1
     out, err = capsys.readouterr()
     assert out == "" and err == "dashboard: 1 recipient(s) refused the test letter\n"
+
+
+def test_an_env_file_named_but_missing_is_exit_1_not_mail_off(tmp_path, capsys):
+    runner = FakeRunner(quiet_documents())
+    args = ["export", "--config", str(_config(tmp_path)), "--env-file", str(tmp_path / "typo.env")]
+    assert main(args, now=lambda: NOW, runner=runner, environ={}) == 1
+    assert "no such .env file" in capsys.readouterr().err
+    assert runner.calls == []

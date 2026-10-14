@@ -15,7 +15,8 @@ send a letter (or a recipient was refused), so the unit shows as failed
 until a tick sends again.
 
 The ``.env`` read for the ``DASHBOARD_*`` names is the repository root's
-unless ``--env-file`` names another; the process environment wins over it.
+unless ``--env-file`` names another (one that must exist: a mistyped path
+must not pass as "no mail"); the process environment wins over it.
 """
 
 from __future__ import annotations
@@ -58,7 +59,7 @@ def _build_parser() -> argparse.ArgumentParser:
         sub.add_argument(
             "--env-file",
             type=Path,
-            default=_DEFAULT_ENV_FILE,
+            default=None,
             help=f"the .env to read the DASHBOARD_* names from (default: {_DEFAULT_ENV_FILE})",
         )
     return parser
@@ -76,7 +77,9 @@ def main(
     args = _build_parser().parse_args(argv)
     try:
         config = load_config(args.config)
-        settings = load_settings(environ=environ, env_file=args.env_file)
+        if args.env_file is not None and not args.env_file.is_file():
+            raise ConfigError(f"{args.env_file}: no such .env file")
+        settings = load_settings(environ=environ, env_file=args.env_file or _DEFAULT_ENV_FILE)
         moment = now()
         if args.command == "export":
             report = run_once(

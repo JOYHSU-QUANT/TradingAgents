@@ -89,9 +89,6 @@ class RefusingSMTP(FakeSMTP):
         raise smtplib.SMTPAuthenticationError(535, f"bad credentials for {password}".encode())
 
 
-_reads_and_host = read_lines_and_host
-
-
 def test_send_mail_goes_through_starttls_and_login_with_one_letter_to_every_recipient():
     FakeSMTP.instances.clear()
     send_mail(SETTINGS, subject="[t] hi", body="body\n", now=NOW, smtp_factory=FakeSMTP)
@@ -164,7 +161,7 @@ def test_the_transitions_letter_lists_each_pending_line_with_its_kind_and_instan
 
 
 def test_the_digest_summarises_each_line_the_host_and_the_alerts_holding(tmp_path):
-    config, reads, host = _reads_and_host(tmp_path, quiet_documents())
+    config, reads, host = read_lines_and_host(tmp_path, quiet_documents())
     active = {
         "hl-paper:safe_mode": ActiveCondition(
             "hl-paper",
@@ -209,7 +206,7 @@ def test_a_line_not_read_or_not_shaped_is_said_so_in_the_digest(tmp_path):
     docs = quiet_documents()
     docs[HL_KEY] = CommandResult(5, "", "boom")
     docs[CARRY_KEY] = carry_document(span={"days": 3})
-    config, reads, host = _reads_and_host(tmp_path, docs)
+    config, reads, host = read_lines_and_host(tmp_path, docs)
     assert line_summary(reads[0], host) == (
         "hl-paper (paper-BTC-8, hyperliquid): unit active; not read (exit 5)"
     )
@@ -236,7 +233,7 @@ def test_no_amount_position_or_address_of_any_document_reaches_a_letter(tmp_path
         "at": hl_instant(NOW - timedelta(hours=1)),
         "error": AGENT_KEY,
     }
-    config, reads, host = _reads_and_host(tmp_path, docs)
+    config, reads, host = read_lines_and_host(tmp_path, docs)
     seen = {"hl-paper": hl_instant(NOW - timedelta(hours=1))}
     evaluation = evaluate(now=NOW, config=config, reads=reads, host=host, events_seen=seen)
     assert len(evaluation.conditions) >= 3 and len(evaluation.events) == 1

@@ -47,16 +47,17 @@ Breaking changes within the 0.x line are called out explicitly.
   holds the exporter's known schema versions and its test documents' field
   names to them. README, a RUNBOOK (install, the alert table, segment switches),
   the example config; CI's autoresearch job and `deploy.yml` run the suite.
+  A tick that could not send a letter (or whose server refused a recipient)
+  exits 3, so the unit shows as failed, and `exporter.json` carries the tick's
+  `duration_ms`; `deploy.yml` holds the exporter's timer across the daemon
+  restart.
   Known trade-offs: a Uniswap read that fails is `exit 1` whether the run is
   missing or the store is damaged (the stderr line tells, in `exporter.json`);
   a condition that flaps across a threshold mails each flip (no hysteresis);
   a digest hour the host sleeps through is skipped for that day; the event
   tails are the `--recent` rows, so more than ten new rows between two ticks
   lose the oldest; a daemon crash-looping under `Restart=on-failure` may mail
-  each flip until systemd gives up. A tick that could not send a letter (or
-  whose server refused a recipient) exits 3, so the unit shows as failed;
-  `exporter.json` carries the tick's `duration_ms`; `deploy.yml` holds the
-  exporter's timer across the daemon restart.
+  each flip until systemd gives up.
 - **`status --json` for `contrib/uniswap_v3` and `report --json` for `contrib/carry`
   (dashboard plan PR 2b).** Each package now has a `status.py` reading model as
   the Hyperliquid package has. Uniswap: `status` reads the store, and the run

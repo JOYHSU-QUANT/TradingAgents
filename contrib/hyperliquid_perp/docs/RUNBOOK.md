@@ -490,10 +490,12 @@ python -m contrib.hyperliquid_perp validate --run-id paper-BTC
 | `1` | 操作錯誤（db／run 不存在，**或 `--db` 指到別的應用程式的資料庫、目錄、不是普通檔案的東西、一個打不開來讀的檔、一個開不起來的檔、或一個內容其實在 `-wal`／`-journal` 裡的檔**） | 檢查 `--db`／`--run-id`；訊息會說是哪一種，各列見 RUNBOOK-live §8。**「打不開來讀」與「開不起來」這兩種以前都印成 exit 5**（`store integrity failure`）——檔案權限問題被當成帳本問題，現在都歸這一列（issue #210／#235；後者是長度 0、讀得到但**寫不進去**的檔，因為開一個 store 本身就是寫入）。**「內容在 log 裡」那種以前更糟**：長度 0（或根本不存在）的主檔旁邊有裝著資料的 `-wal`，會被當成空 store 整套建進去，而且開檔那一下就先把那個 log 刪掉；現在具名拒絕、兩個檔都不碰（issue #236） |
 
 `export` 用同一套碼：`0` 八張 CSV 寫完、`1` 操作錯誤（run 不存在、上一列那些 `--db` 守衛的具名拒絕、
-別的 process 握著 store 超過 busy_timeout——不論是 `--backfill-format-fingerprint` 那一趟還是讀 CSV 那一趟）、
+`--payload-root` 不是目錄、`--output-dir` 寫不進去、別的 process 握著 store 超過 busy_timeout——開檔那一下、
+`--backfill-format-fingerprint` 那一趟、讀 CSV 那一趟都一樣——以及 backfill 那一趟碰到**store 之外**的拒絕：
+檔案拒絕寫入、磁碟滿、`-wal`／`-shm` 建不出來，照 #210／#235 的規則這些永遠不印成帳本問題）、
 `5` `store integrity failure`——`--db` 指到的檔**在、守衛也放行、卻不是 SQLite 或內容壞掉**（截斷、損壞、
-別的格式），或讀到一半磁碟 I/O 失敗（`disk I/O error`；它跟鎖同屬 `OperationalError`，所以是用 SQLite 的
-結果碼分的，不是看例外類別）。跟 `validate`／`status`
+別的格式），或磁碟在讀到一半／backfill 那一趟底下 I/O 失敗（`disk I/O error`；它跟鎖、唯讀、磁碟滿同屬
+`OperationalError`，所以是用 SQLite 的結果碼**正向**認 IOERR／CORRUPT／NOTADB 三種，不認識的一律不算）。跟 `validate`／`status`
 對同一種檔是同一個判決（issue #357 之前 `export` 會落到 `main()` 的最後手段：traceback＋
 `fatal: unexpected error`、exit 2——那個碼的意思是「工具本身有 bug」，照 exit code 分流的健檢會走錯路）。
 

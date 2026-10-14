@@ -1,7 +1,8 @@
-"""Names :mod:`.db` and :mod:`.store_identity` share.
+"""Names :mod:`.db` and :mod:`.store_identity` share, and what a SQLite error means.
 
-The error every refused open raises, and the constants the two modules have to
-agree on.
+The error every refused open raises, the constants the two modules have to
+agree on, and the two classifiers of a ``sqlite3.Error`` the CLI routes exit
+codes on: a lock, and a store that is itself broken.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ __all__ = [
     "IN_MEMORY",
     "SchemaVersionError",
     "is_lock_error",
+    "is_store_integrity_error",
 ]
 
 
@@ -30,10 +32,12 @@ IN_MEMORY = ":memory:"
 # The table ``db.apply_migrations`` records each applied version in.
 BOOKKEEPING_TABLE = "schema_migrations"
 
-# SQLite's primary result codes for "another connection holds it": BUSY (5)
-# and LOCKED (6). The low byte of an error's code is its kind; the rest says
-# which case of it the error is.
+# SQLite's primary result codes. The low byte of an error's code is its kind;
+# the rest says which case of it the error is. "Another connection holds it":
+# BUSY (5) and LOCKED (6). "The store itself is broken": IOERR (10, the disk
+# fails under it), CORRUPT (11), NOTADB (26, the file is not a database).
 _LOCK_CODES = frozenset({5, 6})
+_INTEGRITY_CODES = frozenset({10, 11, 26})
 
 
 def is_lock_error(error: sqlite3.Error) -> bool:
@@ -49,6 +53,26 @@ def is_lock_error(error: sqlite3.Error) -> bool:
     if code is None:
         return "is locked" in str(error)
     return code & 0xFF in _LOCK_CODES
+
+
+def is_store_integrity_error(error: sqlite3.Error) -> bool:
+    """Whether SQLite reported the store itself broken: not a database, corrupt,
+    or a disk that fails under it.
+
+    The verdict the report-only commands exit 5 on ("investigate the store
+    before trusting results"), told apart from everything SQLite refuses for
+    a reason outside the store — a lock, a file that denies writes, a full
+    disk, a ``-wal``/``-shm`` it cannot create — which stay the caller's
+    named refusals (issues #210 / #235: a permission must never read as a
+    broken ledger). Positive, so an error this function does not know is
+    NOT the verdict. Before Python 3.11 an error carries no code: CORRUPT
+    and NOTADB arrive as the bare ``DatabaseError`` class and a failing disk
+    as an ``OperationalError`` whose words say so.
+    """
+    code = getattr(error, "sqlite_errorcode", None)
+    if code is None:
+        return type(error) is sqlite3.DatabaseError or "I/O error" in str(error)
+    return code & 0xFF in _INTEGRITY_CODES
 
 
 class SchemaVersionError(RuntimeError):

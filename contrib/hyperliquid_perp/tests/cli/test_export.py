@@ -95,20 +95,21 @@ def test_export_exit_5_when_the_store_fails_while_the_csvs_are_read(tmp_path, ca
 def test_export_backfill_leaves_a_broken_store_to_the_exit_5_verdict(
     tmp_path, capsys, monkeypatch, failure
 ):
-    # The pass's own handler names a LOCK (pinned below as exit 1) and nothing
-    # else: a corrupt store under the pass, or a disk that fails under it —
-    # an OperationalError like the lock, so the class cannot be the test —
-    # is the same file the command exits 5 on without the flag, and the flag
+    # The pass's own handler names what is refused for a reason OUTSIDE the
+    # store (a lock, pinned below and in the next test as exit 1); a corrupt
+    # store under the pass, or a disk that fails under it — an
+    # OperationalError like the lock, so the class cannot be the test — is
+    # the same file the command exits 5 on without the flag, and the flag
     # must not move it into the operator-error lane.
     import contrib.hyperliquid_perp.persistence.backfill as backfill_mod
 
     path, db = seed_db(tmp_path)
     db.close()
 
-    def malformed(db, *, run_id, payload_root=None):
+    def broken(db, *, run_id, payload_root=None):
         raise failure
 
-    monkeypatch.setattr(backfill_mod, "backfill_format_fingerprints", malformed)
+    monkeypatch.setattr(backfill_mod, "backfill_format_fingerprints", broken)
     out = tmp_path / "exp"
     rc = cli_main(
         ["export", "--run-id", "r", "--output-dir", str(out), "--db", str(path)]
@@ -119,6 +120,61 @@ def test_export_backfill_leaves_a_broken_store_to_the_exit_5_verdict(
     assert f"store integrity failure — {failure}" in err
     assert "format_fingerprint backfill failed" not in err
     assert not out.exists()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        sqlite3.OperationalError("attempt to write a readonly database"),
+        sqlite3.OperationalError("database or disk is full"),
+    ],
+    ids=["readonly", "full"],
+)
+def test_export_backfill_names_a_refused_write_instead_of_the_exit_5_verdict(
+    tmp_path, capsys, monkeypatch, failure
+):
+    # Issues #210 / #235 through this flag: a store copied onto a read-only
+    # file, or a disk with no room, is a refusal OUTSIDE the store and must
+    # not read as a broken ledger. The classification is positive — only
+    # what SQLite reports as the store itself broken is exit 5 — so these
+    # keep the named exit 1 they had before #357.
+    import contrib.hyperliquid_perp.persistence.backfill as backfill_mod
+
+    path, db = seed_db(tmp_path)
+    db.close()
+
+    def refused(db, *, run_id, payload_root=None):
+        raise failure
+
+    monkeypatch.setattr(backfill_mod, "backfill_format_fingerprints", refused)
+    out = tmp_path / "exp"
+    rc = cli_main(
+        ["export", "--run-id", "r", "--output-dir", str(out), "--db", str(path)]
+        + ["--backfill-format-fingerprint"]
+    )
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert f"error: format_fingerprint backfill failed — {failure}" in err
+    assert "store integrity failure" not in err
+    assert not out.exists()
+
+
+def test_export_names_a_lock_at_the_open_as_export_failed(tmp_path, capsys, monkeypatch):
+    # The one lock the path guards do not name: ``Database.__init__`` wraps
+    # only ``connect()``, so on a store that fell back from WAL a writer
+    # holding the exclusive lock past busy_timeout surfaces from the schema
+    # read right after it. Same rule as the two lanes below: exit 1, named.
+    import contrib.hyperliquid_perp.cli.offline as offline_mod
+
+    def locked(path, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(offline_mod, "_open_existing_db", locked)
+    rc = cli_main(["export", "--run-id", "r", "--output-dir", str(tmp_path / "e"), "--db", "x.db"])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "error: export_failed — database is locked" in err
+    assert "store integrity failure" not in err
 
 
 def test_export_names_a_lock_under_the_read_out_as_export_failed(tmp_path, capsys, monkeypatch):

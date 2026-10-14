@@ -180,17 +180,21 @@ Breaking changes within the 0.x line are called out explicitly.
   store failing while the CSVs are read out — `export_run` wraps every
   failure for the daemon's `export_failed` log) takes the same verdict;
   an `ExportError` over an unknown run is still exit 1, and so is a lock
-  held past `busy_timeout` under the read-out. The backfill pass's own
-  handler now names only a lock — told by SQLite's result code
-  (`persistence.db_types.is_lock_error`, BUSY or LOCKED, with the message
-  as the fallback before Python 3.11), not by exception class, since a
-  failing disk (`disk I/O error`) is an `OperationalError` like the lock —
-  so a corrupt store or a failing disk under `--backfill-format-fingerprint`
-  reaches the exit-5 verdict too. The verdict's wording and code live in one
-  helper (`_store_integrity_failure`) that `validate` and `status` route
-  through as well, and the backfill branch is its own function
-  (`_backfill_fingerprints`). The CLI docstring, RUNBOOK §6 and SETUP name
-  the code. `live-smoke --gate-status` and `safe-mode` open the store
+  held past `busy_timeout` wherever in the command it hits (the open, the
+  backfill pass, the read-out). The verdict is told by SQLite's result code,
+  not by exception class — `persistence.db_types.is_store_integrity_error`
+  (IOERR, CORRUPT, NOTADB; before Python 3.11 the bare `DatabaseError`
+  class or the words `I/O error`) beside `is_lock_error` (BUSY, LOCKED;
+  the words `is locked`) — because a failing disk is an `OperationalError`
+  like a lock, a read-only file or a full disk. So under
+  `--backfill-format-fingerprint` a corrupt store or a failing disk now
+  reaches the exit-5 verdict, while a lock, a file that denies the write
+  and a full disk keep the pass's named exit 1 (issues #210 / #235: a
+  permission never reads as a broken ledger). The verdict's wording and
+  code live in one helper (`_store_integrity_failure`) that `validate` and
+  `status` route through as well, and the backfill branch is its own
+  function (`_backfill_fingerprints`). The CLI docstring, RUNBOOK §6 and
+  SETUP name the code. `live-smoke --gate-status` and `safe-mode` open the store
   outside any such handler and keep the exit-2 lane for a non-SQLite
   `--db`; that is a separate follow-up.
 

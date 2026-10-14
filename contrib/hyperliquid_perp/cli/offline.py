@@ -20,7 +20,7 @@ from pathlib import Path
 
 from ..common import store_layout
 from ..persistence.db import Database
-from ..persistence.db_types import is_lock_error
+from ..persistence.db_types import is_lock_error, is_store_integrity_error
 from ..status import DEFAULT_RECENT, read_status, status_json, status_lines
 from ._common import _existing_run_row, _open_existing_db
 
@@ -63,7 +63,7 @@ def _store_integrity_failure(exc: BaseException) -> int:
 
 
 def _backfill_fingerprints(
-    db: Database, *, db_path: str, run_id: str, payload_root: Path | None
+    db: Database, *, db_path: str, run_id: str, payload_root: str | None
 ) -> bool:
     """``export --backfill-format-fingerprint``: the pass, then the hints.
 
@@ -71,9 +71,12 @@ def _backfill_fingerprints(
     export must not run; False when it may go on — the pass ran, or was
     skipped over an unknown run, which ``export_run`` refuses in the one
     ``export_failed`` wording this command has always used (a "stamped=0"
-    line about a typo would only compete with it). Only a lock is this
-    pass's refusal; a corrupt store or a failing disk is left to the caller's
-    exit-5 verdict, with or without the flag.
+    line about a typo would only compete with it). ``payload_root`` is the
+    ``--payload-root`` text as typed (``_cmd_export`` checked it is a
+    directory), echoed as typed in the hint. A store that is itself broken
+    (``is_store_integrity_error``) is left to the caller's exit-5 verdict,
+    with or without the flag; every other refusal of the pass — a lock, a
+    file that denies the write, a full disk — is named here.
     """
     from ..persistence import repository as repo
     from ..persistence.backfill import backfill_format_fingerprints
@@ -86,6 +89,8 @@ def _backfill_fingerprints(
     beside = store_layout.payload_dir(db_path, run_id)
     retried_beside = False
 
+    root_arg = Path(payload_root) if payload_root is not None else None
+
     def _pass(root: Path | None):
         report = backfill_format_fingerprints(db, run_id=run_id, payload_root=root)
         print(report.summary(run_id), file=sys.stderr)
@@ -93,7 +98,7 @@ def _backfill_fingerprints(
 
     try:
         known = repo.get_run(db.conn, run_id) is not None
-        report = _pass(payload_root) if known else None
+        report = _pass(root_arg) if known else None
         if (
             report is not None
             and payload_root is None
@@ -117,8 +122,10 @@ def _backfill_fingerprints(
     except sqlite3.Error as exc:
         # The pass takes the store's write lock (RUNBOOK §6 says a
         # running daemon is fine): a lock held past busy_timeout is a
-        # named refusal here, not a traceback exit 2.
-        if not is_lock_error(exc):
+        # named refusal here, not a traceback exit 2 — as is a store that
+        # denies the write or a disk that is full. A broken store is not
+        # this pass's to name: re-raised to the caller's exit-5 verdict.
+        if is_store_integrity_error(exc):
             raise
         print(f"error: format_fingerprint backfill failed — {exc}", file=sys.stderr)
         return True
@@ -128,7 +135,7 @@ def _backfill_fingerprints(
         layout = f"<db dir>/{store_layout.PAYLOADS_DIRNAME}/"
         if payload_root is not None:
             print(
-                f"hint: no payload under --payload-root {str(payload_root)!r} "
+                f"hint: no payload under --payload-root {payload_root!r} "
                 "matched a recorded file name; the daemon writes them under "
                 f"{layout}{run_id}/ (here: {beside}) — point at that run's "
                 "own directory",
@@ -214,23 +221,29 @@ def _cmd_export(argv: list[str]) -> int:
             return 1
         with db:
             if args.backfill_format_fingerprint and _backfill_fingerprints(
-                db, db_path=args.db, run_id=args.run_id, payload_root=payload_root
+                db, db_path=args.db, run_id=args.run_id, payload_root=args.payload_root
             ):
                 return 1
             paths = export_run(db, run_id=args.run_id, output_dir=args.output_dir)
     except ExportError as exc:
         # ``export_run`` wraps every failure (§1.1) so the daemon can log
         # ``export_failed`` and keep trading; here the cause decides. A store
-        # that fails while the CSVs are read out is the integrity verdict; a
-        # lock is the named refusal the backfill pass gives it; anything else
-        # (an unknown run, the output directory) is the refusal it always was.
+        # that is itself broken under the read-out is the integrity verdict;
+        # anything else — an unknown run, the output directory, a lock — is
+        # the named refusal it always was.
         cause = exc.__cause__
-        if isinstance(cause, sqlite3.Error) and not is_lock_error(cause):
+        if isinstance(cause, sqlite3.Error) and is_store_integrity_error(cause):
             return _store_integrity_failure(exc)
         print(f"error: export_failed — {exc}", file=sys.stderr)
         return 1
     except sqlite3.Error as exc:
-        # Not SQLite, or corrupt: the shared exit-5 verdict (issue #357).
+        # The open itself (the path guards in ``_open_existing_db`` have
+        # already named every refusal outside the store): not SQLite, or
+        # corrupt, is the shared exit-5 verdict (issue #357). One rule for a
+        # lock wherever in the command it hits: the named exit 1.
+        if is_lock_error(exc):
+            print(f"error: export_failed — {exc}", file=sys.stderr)
+            return 1
         return _store_integrity_failure(exc)
     for path in paths:
         print(path)

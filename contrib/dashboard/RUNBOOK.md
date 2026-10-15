@@ -35,9 +35,11 @@ Python 是該 checkout 的 `.venv/bin/python`；裝 unit 的步驟用 `ubuntu`�
 ```bash
 sudo groupadd --system dashboard            # PR 4 的唯讀帳號會進這個 group
 sudo install -d -o trader -g dashboard -m 2750 /home/trader/status
+sudo install -d -o trader -g dashboard -m 2750 /home/trader/status/history   # PR 5 的歷史曲線
 ```
 
-`2750`：trader 可寫、dashboard 群組可讀可進、其他人不可；setgid 讓 exporter 寫出的檔都掛 `dashboard` 群組。
+`2750`：trader 可寫、dashboard 群組可讀可進、其他人不可；setgid 讓 exporter 寫出的檔都掛 `dashboard` 群組
+（`history/` exporter 自己也會建並從上層繼承 setgid，但 trader 不在 `dashboard` 群組、不能自己設這個位元，由 root 先建最穩）。
 
 ### 1.2 設定檔
 
@@ -288,7 +290,7 @@ hash 不能手改：`tests/test_requirements_hashes.py` 會比對檔案就是腳
 | pip 說 `Hashes are required in --require-hashes mode` | 有 pin 沒帶 hash 進了 committed tree（`tests/test_requirements_hashes.py` 本應擋下）：跑 §7.5 的腳本重產、commit；這種失敗只是 warning、不會紅 |
 | 第一次安裝就失敗（例如 curl 探不到） | 沒有舊頁面可回：unit 會被 disable 並移除、樹留在原地；看 stderr 的 `systemctl status`／`journalctl` 輸出，修了再重跑 |
 | 卡片 `document not shaped ...` | 頁面版本落後套件：§7.5 |
-| 明細頁每條線都 `history: history/<line>.json not readable by this build (not readable (PermissionError))` | `history/` 的檔案 group 不是 `dashboard`（第一版 exporter 用 trader 對目錄 chmod 2750、setgid 被核心剝掉）：`sudo chmod g+s /home/trader/status/history && sudo sh -c 'chgrp dashboard /home/trader/status/history/*.json'` 一次即可，之後寫出的檔跟著目錄的 group |
+| 明細頁每條線都 `history: history/<line>.json not readable by this build (not readable (PermissionError))` | `history/` 的檔案 group 不是 `dashboard`（2026-10-15 之前的 exporter 用 trader 對目錄 chmod 2750、setgid 被核心剝掉；現在的 exporter 不 chmod 已正確的目錄）：先升級 exporter，再 `sudo chmod g+s /home/trader/status/history && sudo sh -c 'chgrp dashboard /home/trader/status/history/*.json'` 一次即可，之後寫出的檔跟著目錄的 group |
 | 明細頁 `history: not written yet` | exporter 還沒升到會寫 `history/` 的版本，或第一個 tick 還沒跑；exporter 卡 `history: not kept for ...`＝§5.6 |
 
 ### 7.7 資安對照（計畫 §4，接 §6）

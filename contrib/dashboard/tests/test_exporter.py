@@ -296,8 +296,16 @@ def _keys_of(value) -> list[str]:
 
 
 @pytest.mark.skipif(os.name != "posix", reason="file modes are POSIX")
-def test_every_file_written_is_mode_0640_and_the_history_directory_keeps_the_setgid(tmp_path):
-    """The RUNBOOK makes the status directory 2750 as root; ``history/`` inherits the bit and keeps it."""
+def test_every_file_written_is_mode_0640_and_the_history_directory_keeps_the_setgid(
+    tmp_path, monkeypatch
+):
+    """The RUNBOOK makes the status directory 2750 as root; ``history/`` inherits the bit and keeps it.
+
+    The exporter's user is not in the directory's group, and the kernel
+    clears the setgid bit on any chmod such a user makes, whatever mode it
+    names: ``os.chmod`` is replaced by that rule here, so the test fails
+    whenever the directory is chmod'ed at all once its bits are right.
+    """
     import stat
 
     config = build_config(tmp_path)
@@ -306,6 +314,12 @@ def test_every_file_written_is_mode_0640_and_the_history_directory_keeps_the_set
     assert config.status_dir.stat().st_mode & stat.S_ISGID, (
         "the test's own group lets it set the bit"
     )
+    real_chmod = os.chmod
+
+    def chmod_by_a_non_member(path, mode, *args, **kwargs):
+        real_chmod(path, mode & ~stat.S_ISGID, *args, **kwargs)
+
+    monkeypatch.setattr(os, "chmod", chmod_by_a_non_member)
     _run(tmp_path, quiet_documents(), config=config)
     for path in config.status_dir.rglob("*"):
         if path.is_dir():
@@ -318,9 +332,13 @@ def test_every_file_written_is_mode_0640_and_the_history_directory_keeps_the_set
 
 
 @pytest.mark.skipif(os.name != "posix", reason="file modes are POSIX")
-def test_a_history_directory_without_a_setgid_parent_is_0750(tmp_path):
+def test_a_history_directory_without_a_setgid_parent_is_0750_and_wrong_bits_are_set(tmp_path):
     config, _, _ = _run(tmp_path, quiet_documents())
-    assert (config.status_dir / "history").stat().st_mode & 0o7777 == 0o750
+    history = config.status_dir / "history"
+    assert history.stat().st_mode & 0o7777 == 0o750
+    history.chmod(0o700)
+    _run(tmp_path, quiet_documents(), config=config)
+    assert history.stat().st_mode & 0o7777 == 0o750
 
 
 def test_dump_json_refuses_what_is_not_a_document():

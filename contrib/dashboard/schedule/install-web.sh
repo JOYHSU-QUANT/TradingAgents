@@ -7,10 +7,12 @@
 #   sudo /home/trader/TradingAgents/contrib/dashboard/schedule/install-web.sh
 #
 # What it does, and only this:
-#   1. the dashboard system account (primary group dashboard, no shell), if missing;
-#   2. a copy of the package for that account under /home/dashboard/app, taken
-#      with `git archive` from the trader's checkout — the paths the page
-#      imports and nothing else (no .env, no local.yaml, no stores);
+#   1. the dashboard system account (primary group dashboard, no shell), if
+#      missing; its home is root's, readable by the account;
+#   2. a root-owned copy of the package under /home/dashboard/app, taken with
+#      `git archive` from the trader's checkout — the paths the page imports
+#      and nothing else (no .env, no local.yaml, no stores) — and the unit
+#      file from the same committed tree into /var/lib/dashboard-web;
 #   3. that account's own venv under /home/dashboard/venv, installed from the
 #      package's requirements.txt (pinned);
 #   4. the unit verified where it is staged, the swap, the unit file into
@@ -27,6 +29,9 @@ HOME_DIR=/home/$ACCOUNT
 APP_DIR=$HOME_DIR/app
 VENV_DIR=$HOME_DIR/venv
 UNIT=dashboard-web.service
+# Root's own: the unit file staged for verification, and the previous one
+# for a rollback. Never under the account's home, which pip writes into.
+STATE_DIR=/var/lib/dashboard-web
 PYTHON="${PYTHON:-python3}"
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -48,14 +53,20 @@ if ! id -u $ACCOUNT >/dev/null 2>&1; then
     useradd --system --gid $ACCOUNT --home-dir "$HOME_DIR" --create-home \
         --shell /usr/sbin/nologin --comment "read-only status page" $ACCOUNT
 fi
+# The home is root's, readable by the account: the tree under it is bound
+# read-only into the unit anyway, and nothing the account runs (pip, the
+# page) may replace what root installs from it. The venv alone is the
+# account's, because pip writes there.
+chown root:$ACCOUNT "$HOME_DIR"
 chmod 750 "$HOME_DIR"
+install -d -o root -g root -m 700 "$STATE_DIR"
 
 # 2. the code: an archive of the committed tree, not a clone (the account
 #    needs no deploy key and gets no history). The trader's checkout is read
 #    as the trader, so root never opens its files by hand.
 COMMIT=$(sudo -u trader git -C "$CHECKOUT" rev-parse --short HEAD)
 rm -rf "$APP_DIR.new"
-install -d -o $ACCOUNT -g $ACCOUNT -m 750 "$APP_DIR.new"
+install -d -o root -g $ACCOUNT -m 750 "$APP_DIR.new"
 sudo -u trader git -C "$CHECKOUT" archive HEAD \
     contrib/__init__.py contrib/core contrib/dashboard \
     | tar -x -C "$APP_DIR.new"
@@ -63,12 +74,16 @@ sudo -u trader git -C "$CHECKOUT" archive HEAD \
 rm -rf "$APP_DIR.new/contrib/core/tests" "$APP_DIR.new/contrib/dashboard/tests" \
     "$APP_DIR.new/contrib/dashboard/configs"
 echo "$COMMIT" > "$APP_DIR.new/COMMIT"
-chown -R $ACCOUNT:$ACCOUNT "$APP_DIR.new"
-chmod -R u=rX,g=rX,o= "$APP_DIR.new"
+chown -R root:$ACCOUNT "$APP_DIR.new"
+chmod -R u=rwX,g=rX,o= "$APP_DIR.new"
+# The unit file, from the committed tree straight into root's state
+# directory: the copy root verifies and installs is never one the account
+# could have written.
+sudo -u trader git -C "$CHECKOUT" show "HEAD:contrib/dashboard/schedule/$UNIT" > "$STATE_DIR/$UNIT.new"
 
 # 3. the venv, the account's own, from the pinned requirements. The page is
-#    stopped first (unconditionally: a unit waiting in auto-restart is not
-#    "active" yet would come back mid-swap): pip writes into the venv the
+#    stopped first when it is installed, active or not (a unit waiting in
+#    auto-restart would come back mid-swap): pip writes into the venv the
 #    running page imports from (a no-op while the pins hold, a few seconds
 #    when they moved), and the tree is swapped next. From the stop on, a
 #    failure restores the previous tree and unit file and starts the page
@@ -78,15 +93,22 @@ command -v curl >/dev/null || { echo "install-web.sh: curl is needed for the pro
 # A .old left by a run killed mid-way (an ssh session dropping) must not be
 # what a rollback restores: only this run's .old counts.
 rm -rf "$APP_DIR.old"
-UNIT_PREV="$HOME_DIR/$UNIT.prev"
+UNIT_PREV="$STATE_DIR/$UNIT.prev"
 rm -f "$UNIT_PREV"
 if [ -f /etc/systemd/system/$UNIT ]; then
     cp /etc/systemd/system/$UNIT "$UNIT_PREV"
 fi
-systemctl stop $UNIT 2>/dev/null || true
-systemctl reset-failed $UNIT 2>/dev/null || true
+# A unit not yet installed (the first run) has nothing to stop; one that is
+# installed must stop, and loudly if it cannot.
+if systemctl cat $UNIT >/dev/null 2>&1; then
+    systemctl stop $UNIT
+    systemctl reset-failed $UNIT 2>/dev/null || true
+fi
 rollback() {
     echo "install-web.sh: failed at line $1; restoring the previous page" >&2
+    # A page started on the new tree (a probe that failed) must not keep
+    # running while its tree is taken away under it.
+    systemctl stop $UNIT 2>/dev/null || true
     if [ -d "$APP_DIR.old" ]; then
         rm -rf "$APP_DIR" || true
         mv "$APP_DIR.old" "$APP_DIR" || true
@@ -96,14 +118,13 @@ rollback() {
         systemctl daemon-reload || true
     fi
     systemctl start $UNIT || true
-    systemctl is-active $UNIT >&2 || true
+    echo "dashboard-web: $(systemctl is-active $UNIT || true) on $(cat "$APP_DIR/COMMIT" 2>/dev/null || echo '?')" >&2
 }
 trap 'rollback $LINENO' ERR
 if [ ! -x "$VENV_DIR/bin/python" ]; then
+    # The venv's bundled pip is enough for exact pins; an unpinned
+    # `--upgrade pip` from PyPI is one moving part this host does not need.
     sudo -u $ACCOUNT -H "$PYTHON" -m venv "$VENV_DIR"
-    # pip is brought up to date once, with the venv; a deploy that re-runs
-    # this script must not take a new pip from PyPI every time.
-    sudo -u $ACCOUNT -H "$VENV_DIR/bin/python" -m pip install --quiet --upgrade pip
 fi
 # Pinned exactly, so this is a no-op (no index contact) when nothing moved.
 sudo -u $ACCOUNT -H "$VENV_DIR/bin/python" -m pip install --quiet -r "$APP_DIR.new/contrib/dashboard/requirements.txt"
@@ -112,7 +133,7 @@ sudo -u $ACCOUNT -H "$VENV_DIR/bin/python" -m pip install --quiet -r "$APP_DIR.n
 #    that fails, or that only warns "Unknown key name" (a hardening line this
 #    systemd would drop), is a failure here; edit the committed unit instead
 #    (RUNBOOK section 7.2).
-STAGED="$APP_DIR.new/contrib/dashboard/schedule/$UNIT"
+STAGED="$STATE_DIR/$UNIT.new"
 VERIFY_STATUS=0
 VERIFY=$(systemd-analyze verify "$STAGED" 2>&1) || VERIFY_STATUS=$?
 if [ -n "$VERIFY" ]; then
@@ -124,7 +145,7 @@ fi
 # the swap, then the unit
 if [ -d "$APP_DIR" ]; then mv "$APP_DIR" "$APP_DIR.old"; fi
 mv "$APP_DIR.new" "$APP_DIR"
-install -m 644 "$APP_DIR/contrib/dashboard/schedule/$UNIT" /etc/systemd/system/$UNIT
+install -m 644 "$STAGED" /etc/systemd/system/$UNIT
 systemctl daemon-reload
 systemctl enable $UNIT
 systemctl start $UNIT
@@ -144,5 +165,5 @@ curl -sf -o /dev/null http://127.0.0.1:8787/ || {
 }
 trap - ERR
 rm -rf "$APP_DIR.old"
-rm -f "$UNIT_PREV"
+rm -f "$UNIT_PREV" "$STAGED"
 echo "dashboard-web: $COMMIT installed, $(systemctl is-active $UNIT); try: curl -s http://127.0.0.1:8787/ | head -5"

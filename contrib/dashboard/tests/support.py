@@ -278,6 +278,33 @@ def uniswap_run(**overrides: Any) -> dict[str, Any]:
     return run
 
 
+def pool_extent(pool: str = "WETH/USDC 0.05%") -> dict[str, Any]:
+    return {
+        "pool": pool,
+        "readings": 120,
+        "first": uni_instant(datetime(2026, 6, 1, tzinfo=timezone.utc)),
+        "last": uni_instant(NOW),
+    }
+
+
+def bar_status(**overrides: Any) -> dict[str, Any]:
+    document = {
+        "time": uni_instant(datetime(2026, 10, 14, tzinfo=timezone.utc)),
+        "complete": True,
+        "close_block": 23456789,
+        "prices": {"WETH": "2567.89"},
+        "finality": "final",
+        "suspect": False,
+        "flags": [],
+    }
+    document.update(overrides)
+    return document
+
+
+def coverage() -> dict[str, Any]:
+    return {"what": "bars", "source": "chain", "complete": 120, "of": 120, "per_token": {"WETH": 120}}
+
+
 def uniswap_document(run: Mapping[str, Any] | None = None, **overrides: Any) -> dict[str, Any]:
     """A ``uniswap_v3`` ``status --json`` document with one run (the default one unless given)."""
     document = {
@@ -288,9 +315,9 @@ def uniswap_document(run: Mapping[str, Any] | None = None, **overrides: Any) -> 
             "chain_id": 1,
             "interval_seconds": 86400,
             "quote": "USDC",
-            "pools": [],
-            "latest_bars": [],
-            "coverage": None,
+            "pools": [pool_extent()],
+            "latest_bars": [bar_status()],
+            "coverage": [coverage()],
         },
         "run": uniswap_run() if run is None else run,
     }

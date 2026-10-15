@@ -153,6 +153,12 @@ def test_the_overview_has_no_tables_and_the_line_page_has_them(tmp_path):
         "reason codes",
         "store",
     ]
+    store = dict(uni.tables[2].rows)
+    assert store["pools"] == (
+        "WETH/USDC 0.05%: 120 reading(s), 2026-06-01T00:00:00Z to 2026-10-14T05:00:00Z"
+    )
+    assert store["latest bars"] == "2026-10-14T00:00:00Z complete WETH 2567.89"
+    assert store["coverage"] == "bars from chain: 120 of 120"
 
 
 def test_a_line_the_index_does_not_know_has_no_page(tmp_path):
@@ -661,3 +667,35 @@ def test_a_generated_at_that_is_not_an_instant_is_bad_not_merely_stale(tmp_path)
     hl = _line(page_at(tmp_path, documents), "hl-paper")
     assert hl.tone == BAD and hl.stale
     assert hl.status == "the document's generated_at is not an instant"
+
+
+def test_an_exporter_generated_at_that_is_not_an_instant_says_so(tmp_path):
+    directory = status_dir(tmp_path)
+    exporter = json.loads((directory / "exporter.json").read_text(encoding="utf-8"))
+    exporter["generated_at"] = "yesterday-ish"
+    (directory / "exporter.json").write_text(json.dumps(exporter), encoding="utf-8")
+    page = load_page(directory, now=NOW, stale=STALE)
+    assert page.exporter.status == "exporter.json's generated_at is not an instant"
+    assert page.banner == (
+        "exporter.json's generated_at is not an instant: every card may be out of date."
+    )
+
+
+def test_a_replay_mismatch_reddens_the_card_and_a_config_drift_warns(tmp_path):
+    documents = quiet_documents()
+    document = hyperliquid_document()
+    document["scheduler"]["replay"] = {
+        "status": "mismatch",
+        "at": "2026-10-14T04:00:00+00:00",
+        "error": "materialised state contradicted",
+    }
+    document["scheduler"]["config_drift"] = {
+        "status": "drift",
+        "at": "2026-10-14T04:00:00+00:00",
+        "error": "risk block differs from genesis",
+    }
+    documents[HL_KEY] = document
+    hl = _line(page_at(tmp_path, documents), "hl-paper")
+    rows = {row.label: row for row in hl.rows}
+    assert rows["replay"].tone == BAD and rows["config drift"].tone == "warn"
+    assert hl.tone == BAD and hl.status == "quiet by the rules, but 1 row(s) red: replay"

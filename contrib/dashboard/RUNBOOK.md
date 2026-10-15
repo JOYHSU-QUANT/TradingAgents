@@ -203,9 +203,10 @@ tick 會 exit 1、stderr 說 `is not a state file this build reads ... move it a
 sudo /home/trader/TradingAgents/contrib/dashboard/schedule/install-web.sh
 ```
 
-它只做四件事：建 `dashboard` 系統帳號（primary group `dashboard`、無 shell、home 750）；用 `git archive` 把 `contrib/__init__.py`、
-`contrib/core`、`contrib/dashboard` 抄到 `/home/dashboard/app`（沒有 `.env`、沒有 local.yaml、沒有 tests）並寫 `COMMIT`；
-先停頁面、建 `/home/dashboard/venv` 並照 `contrib/dashboard/requirements.txt`（整組釘死）裝；換樹、裝 `dashboard-web.service`、`systemd-analyze verify`、enable、start，
+它只做四件事：建 `dashboard` 系統帳號（primary group `dashboard`、無 shell；home 是 root 的、帳號只能讀）；用 `git archive` 把 `contrib/__init__.py`、
+`contrib/core`、`contrib/dashboard` 抄到 `/home/dashboard/app`（root 擁有、帳號只讀；沒有 `.env`、沒有 local.yaml、沒有 tests）並寫 `COMMIT`，
+unit 檔則從同一個 committed tree 直接取到 root 的 `/var/lib/dashboard-web/`（root 驗證與安裝的檔案永遠不是帳號寫得到的）；
+先停頁面、建 `/home/dashboard/venv` 並照 `contrib/dashboard/requirements.txt`（整組釘死）裝；`systemd-analyze verify` 暫存的 unit、換樹、裝 `dashboard-web.service`、enable、start，
 再用 curl 探到頁面真的回應才算裝好（`Type=simple` 一 fork 就算 active，不能信）。停頁面之後任何一步失敗都會把舊樹與舊 unit 檔換回去、把頁面重新啟動
 （venv 不會還原：pin 換版到一半 pip 失敗時頁面可能還是起不來，但 stderr 會說）。
 不碰 trader 的任何檔案、不碰 exporter、不碰 daemon。
@@ -241,7 +242,8 @@ unit 的硬化（計畫 §4）：`ProtectHome=tmpfs`＋`BindReadOnlyPaths=` 只�
 ### 7.4 看什麼
 
 - 卡片左邊顏色：綠＝quiet；紅＝有 condition、那條線讀不到、文件形狀不是這版讀的、**或卡上有紅色的列**（例如最後一個 cycle failed、carry 當天亮了 exporter 沒規則的燈）——
-  紅列的理由會寫在卡片的狀態句；灰虛線＋灰標題＋`STALE`＝文件超過 6 分鐘（3 個 tick）沒更新（stale 時不再掛 `OK` 標籤）。
+  紅列的理由會寫在卡片的狀態句；琥珀色的列＝資訊（歷史上的燈、mail 關著、clock 沒跟上），不影響卡片顏色；
+  灰虛線＋灰標題＋`STALE`＝文件超過 6 分鐘（3 個 tick）沒更新（stale 的綠卡不再掛 `OK` 標籤；紅卡仍紅邊、`BAD` 標籤照掛）。
 - 頁首紅色橫幅＝exporter 自己停了（`exporter.json` 太舊或沒有）：先看 §3、`systemctl list-timers dashboard-exporter.timer`。
 - 每張卡都有 `generated ...` 一行（文件的 `generated_at`＋多久以前）；點線名進明細（cycles／fills／events；decisions／reason codes／store；days／weeks）。
 - 頁面每 60 秒自己重載；數字是各套件文件的原文（Decimal 字串），地址與 key 一律折成 `0x1234...abcd`。
@@ -261,12 +263,13 @@ exporter 文件形狀變了（套件 bump `schema_version`）而頁面沒跟上�
 | 每張卡都 stale＋橫幅 | exporter 停了：§3、§5 |
 | 卡片 `not written yet` | exporter 沒跑過，或 unit 的 `--status-dir` 不是 exporter 的 `status_dir` |
 | 卡片 `not readable (PermissionError)` | 檔不是 0640／group `dashboard`：§1.1 的目錄要 2750（setgid），exporter unit 的 `UMask=0027` |
-| `install-web.sh` 在 pip 那步失敗 | 主機沒網路或 PyPI 不通；重跑即可（idempotent） |
+| `install-web.sh` 在 pip 那步失敗 | 主機沒網路或 PyPI 不通；會自動換回舊頁面（venv 不還原）；重跑即可（idempotent） |
 | 卡片 `document not shaped ...` | 頁面版本落後套件：§7.5 |
 
 ### 7.7 資安對照（計畫 §4，接 §6）
 
 - `dashboard` 帳號只讀得到 `/home/trader/status`（經 group `dashboard`、檔 0640）；unit 的 mount namespace 裡 `/home` 是空的 tmpfs，只掛三個唯讀目錄，看不到 `.env`、`*.local.yaml`、`~/.ssh`、SQLite、payloads。
+- 帳號寫得到的只有自己的 venv（pip 裝進去）；程式碼樹、home、unit 檔與回滾用的備份都是 root 的，root 不會安裝任何帳號寫得到的檔案（已知缺口：wheel 只釘版本、沒釘 hash，另開 issue）。
 - 只綁 loopback（非 loopback 的 `--host` 直接拒絕、沒有放寬旗標）；對外只有 `tailscale serve`，Funnel 不開，Lightsail 防火牆不動。
 - 無寫入端點：非 `GET`／`HEAD` 一律 405（在 routing 之前）；FastAPI 的 `/docs`、`/redoc`、`/openapi.json` 關閉（它們會從 CDN 載 script）。
 - 回應帶 CSP（`default-src 'none'; style-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`）、`nosniff`、`DENY`、`no-referrer`、`no-store`（樣式檔 `no-cache`）；頁面沒有任何 script，樣式檔在 repo。

@@ -18,10 +18,12 @@ condition's ``line`` after the unit).
 Every card carries the instant its document was generated and is marked
 **stale** when that is older than the threshold the page was started with;
 a card is **bad** when a condition holds about it, when its line could not
-be read, or when its document is not shaped as this build reads it — a
+be read, when its document is not shaped as this build reads it — a
 document of another shape never takes the page down, it takes its card to
 a sentence naming the exception's class (never its text, which could quote
-the document); :func:`_safe` holds that for every card alike. Every string
+the document); :func:`_safe` holds that for every card alike — when it
+carries no instant, or when one of its rows is red without a rule behind
+it (the colour never says less than the rows do). Every string
 shown passes :func:`contrib.dashboard.text.mask_hex` and is cut: the
 packages mask their own free text, and the page masks it again.
 """
@@ -587,6 +589,8 @@ def _exporter_card(loaded: Loaded, now: datetime, stale: timedelta) -> Card:
     red = [row.label for row in rows if row.tone == BAD]
     if shown is None:
         status = f"{EXPORTER_FILE} carries no generated_at this build reads"
+    elif _instant(doc.get("generated_at")) is None:
+        status = f"{EXPORTER_FILE}'s generated_at is not an instant"
     elif is_stale:
         status = "the last tick is older than the page's threshold"
     elif red:
@@ -611,6 +615,12 @@ _Built = tuple[list[Row], Sparkline | None, list[Table]]
 _Builder = Callable[[Mapping[str, Any], datetime, bool], _Built]
 
 
+# The perp store's breadcrumb words that are not ``ok`` (its ``_vocab``): a
+# replay that contradicted the state halts trading, so it is red like a failed
+# export; a config drift on resume is a warning (``validate`` says as much).
+_BREADCRUMB_TONES: Mapping[str, RowTone] = {"failed": BAD, "mismatch": BAD, "drift": WARN}
+
+
 def _breadcrumb(value: object, now: datetime) -> tuple[str, RowTone]:
     crumb = _mapping(value)
     status = crumb.get("status")
@@ -619,7 +629,7 @@ def _breadcrumb(value: object, now: datetime) -> tuple[str, RowTone]:
     text = f"{_s(status)} {_when(crumb.get('at'), now)}"
     if crumb.get("error"):
         text += f": {_s(crumb.get('error'))}"
-    return text, BAD if status == "failed" else ""
+    return text, _BREADCRUMB_TONES.get(_s(status), "")
 
 
 def _verdict_text(verdict: Mapping[str, Any]) -> str:
@@ -1330,7 +1340,10 @@ def load_page(status_dir: Path, *, now: datetime, stale: timedelta) -> Page:
     banner: str | None = None
     if context.exporter.document is None:
         banner = f"No exporter tick to show: exporter.json {context.exporter.error}."
-    elif exporter_card.generated_at is None:
+    elif (
+        exporter_card.generated_at is None
+        or _instant(context.exporter.document.get("generated_at")) is None
+    ):
         banner = f"{exporter_card.status}: every card may be out of date."
     elif exporter_card.stale:
         banner = (

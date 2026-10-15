@@ -32,9 +32,11 @@ Breaking changes within the 0.x line are called out explicitly.
   `no-store` (the stylesheet `no-cache`); FastAPI's interactive docs are off. On the host it runs as the `dashboard` account from its own
   archive copy and venv (`schedule/install-web.sh`; `schedule/dashboard-web.service`
   hardened: `ProtectHome=tmpfs` with only the status directory, its code and
-  its venv bound read-only, no capabilities, loopback only); the installer
-  probes the page with curl and restores the previous tree if the new one does
-  not answer, and `deploy.yml` re-runs it when the unit is enabled (after
+  its venv bound read-only, no capabilities, loopback only). The installer
+  keeps the tree and the unit file root-owned (the account reads them, pip
+  writes only its venv), verifies the unit where it is staged, probes the page
+  with curl, and restores the previous tree and unit file if any step after
+  the stop fails; `deploy.yml` re-runs it when the unit is enabled (after
   starting the exporter's timer again). Dependencies are pinned in
   `contrib/dashboard/requirements.txt`; `tests/test_web.py` skips without them
   and is required in CI (`DASHBOARD_WEB_TESTS=required`). The hex mask the

@@ -89,6 +89,9 @@ def test_the_uniswap_document_carries_the_fields_of_the_uniswap_status_model():
     assert sorted(doc["run"]) == sorted(_fields(module, "RunStatus"))
     assert sorted(doc["run"]["clock"]) == sorted(_fields(module, "Clock"))
     assert sorted(doc["store"]) == sorted(_fields(module, "StoreStatus"))
+    assert sorted(doc["store"]["pools"][0]) == sorted(_fields(module, "PoolExtent"))
+    assert sorted(doc["store"]["latest_bars"][0]) == sorted(_fields(module, "BarStatus"))
+    assert sorted(doc["store"]["coverage"][0]) == sorted(_fields(module, "Coverage"))
     assert sorted(doc["run"]["holdings"]) == sorted(_fields(module, "Holdings"))
     assert sorted(doc["run"]["metrics"]) == sorted(_fields(module, "Metrics"))
     assert sorted(doc["run"]["metrics"]["strategy"]) == sorted(_fields(module, "CurveStatus"))
@@ -114,6 +117,10 @@ def test_the_carry_document_carries_the_fields_of_the_carry_report_model():
 def test_the_vocabulary_words_the_rules_match_are_the_packages_words():
     vocab = _CONTRIB / "hyperliquid_perp" / "persistence" / "repository" / "_vocab.py"
     assert f'"{KILL_SWITCH_REFRESH}"' in vocab.read_text(encoding="utf-8")
+    from contrib.dashboard.app.documents import _BREADCRUMB_TONES
+
+    for word in _BREADCRUMB_TONES:
+        assert f'"{word}"' in vocab.read_text(encoding="utf-8")
     carry_report = (_CONTRIB / "carry" / "report.py").read_text(encoding="utf-8")
     assert f'"{HELD_BY_D5}"' in carry_report
     uniswap = _STATUS["uniswap_v3"].read_text(encoding="utf-8")
@@ -126,3 +133,25 @@ def test_the_carry_lines_default_d5_days_is_the_carry_packages_own_default():
 
     report = (_CONTRIB / "carry" / "report.py").read_text(encoding="utf-8")
     assert f"DEFAULT_D5_DAYS: Final = {CarryLine.d5_days}" in report
+
+
+def test_the_page_imports_its_web_library_only_once_the_settings_hold():
+    """``cli.py`` imports FastAPI, uvicorn and its own ``web`` inside ``main``/``_serve`` only.
+
+    A refusal (a non-loopback host, a missing directory) must need none of the
+    page's requirements, which the trader's venv does not have; the test for
+    it cannot see a hoisted import (the module is already imported), so the
+    source is read instead.
+    """
+    cli = _module(_CONTRIB / "dashboard" / "app" / "cli.py")
+    hoisted = [
+        node
+        for node in cli.body
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        and any(
+            (alias.name or "").split(".")[0] in ("fastapi", "starlette", "uvicorn", "jinja2")
+            or (isinstance(node, ast.ImportFrom) and node.module == "web")
+            for alias in node.names
+        )
+    ]
+    assert hoisted == []

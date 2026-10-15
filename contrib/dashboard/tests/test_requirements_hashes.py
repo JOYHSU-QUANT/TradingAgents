@@ -54,6 +54,8 @@ def test_every_pin_has_wheel_hashes_and_the_file_is_what_pin_hashes_writes_for_t
     """The file's shape is the script's (continuations, indentation), not a hand edit's."""
     text = REQUIREMENTS.read_text(encoding="utf-8")
     pins = _pins(text)
+    bare = [pin for pin, hashes in pins.items() if not hashes]
+    assert not bare, f"pins without a hash (pip refuses the file): {bare}"
     # the three the page imports, and their resolved set, are all here
     names = {pin.split("==")[0].lower().replace("_", "-") for pin in pins}
     assert {
@@ -71,8 +73,14 @@ def test_every_pin_has_wheel_hashes_and_the_file_is_what_pin_hashes_writes_for_t
 def test_the_installer_and_the_ci_job_install_with_require_hashes():
     installer = INSTALLER.read_text(encoding="utf-8")
     assert installer.count("-m pip install") == 1
-    assert (
-        '--require-hashes \\\n    -r "$APP_DIR.new/contrib/dashboard/requirements.txt"' in installer
+    assert '--require-hashes \\\n    -r "$REQUIREMENTS"' in installer
+
+    # the same already-installed gap on the host: the venv is remade when the
+    # file differs from root's record of the last successful install
+    assert 'REQUIREMENTS_RECORD="$STATE_DIR/requirements.sha256"' in installer
+    assert installer.index('rm -rf "$VENV_DIR"') < installer.index("-m pip install")
+    assert installer.index("-m pip install") < installer.index(
+        'echo "$REQUIREMENTS_SUM" > "$REQUIREMENTS_RECORD"'
     )
 
     ci = CI.read_text(encoding="utf-8")
@@ -81,7 +89,11 @@ def test_the_installer_and_the_ci_job_install_with_require_hashes():
         line.strip() for line in step.splitlines() if line.strip().startswith("pip install")
     ]
     pinned = [line for line in installs if "contrib/dashboard/requirements.txt" in line]
-    assert pinned == ["pip install --require-hashes -r contrib/dashboard/requirements.txt"]
+    # --ignore-installed: a pin the job's venv already holds at that version
+    # would otherwise be skipped unverified (pip hashes what it downloads)
+    assert pinned == [
+        "pip install --require-hashes --ignore-installed -r contrib/dashboard/requirements.txt"
+    ]
     # the pinned install is the last one: whatever the test client's httpx
     # moved is put back, and pip check then reports the conflict
     assert installs[-1] == pinned[0]
@@ -96,12 +108,12 @@ def test_pin_hashes_rewrite_keeps_comments_replaces_hashes_and_is_idempotent():
         asked.append((name, version))
         return fake[(name, version)]
 
-    before = "# header\nfastapi==0.1\n# h11's\nh11==0.2\n"
+    before = "# header\nfastapi==0.1\n\n# h11's\nh11==0.2\n"
     once = pin_hashes.rewrite(before, hashes_for)
     assert asked == [("fastapi", "0.1"), ("h11", "0.2")]
     assert _pins(once) == {"fastapi==0.1": ["a" * 64, "b" * 64], "h11==0.2": ["c" * 64]}
     assert once.splitlines()[0] == "# header"
-    assert "# h11's" in once
+    assert "\n\n# h11's\n" in once
     # a second run reads its own output: old hash lines are dropped, not
     # doubled, an unindented one (pip accepts it) included
     fake[("fastapi", "0.1")] = ["d" * 64]
@@ -119,11 +131,28 @@ def test_pin_hashes_rewrite_keeps_comments_replaces_hashes_and_is_idempotent():
         "uvicorn==0.34.2 --hash=sha256:" + "e" * 64,
         "uvicorn>=0.34,==0.34.*",
         "-r other.txt",
+        "    --hash=sha256:" + "a" * 63,
+        "    --hash=sha256:" + "A" * 64,
     ],
 )
 def test_a_line_the_script_would_not_have_written_is_a_refusal_not_a_pass_through(line):
     with pytest.raises(SystemExit, match="line 2 is not a bare name==version pin"):
         pin_hashes.rewrite("# header\n" + line + "\n", lambda name, version: ["a" * 64])
+
+
+def test_main_writes_the_file_with_lf_and_leaves_it_alone_on_a_refusal(tmp_path):
+    path = tmp_path / "requirements.txt"
+    path.write_bytes(b"# c\nh11==0.2\n")
+    assert pin_hashes.main(["pin-hashes.py", str(path)], lambda name, version: ["c" * 64]) == 0
+    assert path.read_bytes() == b"# c\nh11==0.2 \\\n    --hash=sha256:" + b"c" * 64 + b"\n"
+    written = path.read_bytes()
+
+    def refusing(name, version):
+        raise SystemExit(f"pin-hashes: {name}=={version}: HTTP Error 404: Not Found")
+
+    with pytest.raises(SystemExit, match="h11==0.2: HTTP Error 404"):
+        pin_hashes.main(["pin-hashes.py", str(path)], refusing)
+    assert path.read_bytes() == written
 
 
 def _serving(payload: dict | Exception):
@@ -159,12 +188,13 @@ def test_wheel_hashes_takes_every_wheel_sorted_by_filename_and_no_sdist_or_yanke
                 "filename": "fastapi-0.1-cp312-cp312-manylinux_2_17_x86_64.whl",
                 "packagetype": "bdist_wheel",
                 "yanked": False,
-                "digests": {"sha256": "a" * 64},
+                "digests": {"sha256": "z" * 64},
             },
         ]
     }
+    # filename order (cp312 before py3), not digest order
     assert pin_hashes.wheel_hashes("fastapi", "0.1", urlopen=_serving(release)) == [
-        "a" * 64,
+        "z" * 64,
         "b" * 64,
     ]
 

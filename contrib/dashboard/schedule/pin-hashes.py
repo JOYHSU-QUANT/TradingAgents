@@ -74,11 +74,14 @@ def rewrite(text: str, hashes_for=wheel_hashes) -> str:
     return "\n".join(out) + "\n"
 
 
-def main(argv: list[str]) -> int:
+def main(argv: list[str], hashes_for=wheel_hashes) -> int:
     path = (
         Path(argv[1]) if len(argv) > 1 else Path(__file__).resolve().parents[1] / "requirements.txt"
     )
-    path.write_text(rewrite(path.read_text(encoding="utf-8")), encoding="utf-8", newline="\n")
+    # rewritten in full before the file is opened for writing: a refusal
+    # halfway (a 404, a line the grammar rejects) leaves the file as it was
+    text = rewrite(path.read_text(encoding="utf-8"), hashes_for)
+    path.write_text(text, encoding="utf-8", newline="\n")  # LF on Windows too
     return 0
 
 

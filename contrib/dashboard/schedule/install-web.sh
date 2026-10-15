@@ -15,7 +15,8 @@
 #      file from the same committed tree into /var/lib/dashboard-web/new;
 #   3. that account's own venv under /home/dashboard/venv, installed from the
 #      package's requirements.txt (pinned, and every wheel listed by sha256:
-#      pip installs nothing whose hash is not in the file);
+#      pip installs nothing whose hash is not in the file; the venv is made
+#      afresh whenever that file changed since the last install);
 #   4. the unit verified where it is staged, the swap, the unit file into
 #      /etc/systemd/system, enabled, started and probed with curl; a failure
 #      after the page was stopped restores the previous tree and unit file and
@@ -98,7 +99,8 @@ command -v curl >/dev/null || { echo "install-web.sh: curl is needed for the pro
 # Below 3.11 the pinned set wants a package it does not pin (exceptiongroup;
 # see the header of requirements.txt), which pip would report as a pinning
 # error: the floor is said here instead.
-"$PYTHON" -c 'import sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null || {
+command -v "$PYTHON" >/dev/null || { echo "install-web.sh: $PYTHON not found (PYTHON=... to point at one)" >&2; exit 1; }
+"$PYTHON" -c 'import sys; sys.exit(sys.version_info < (3, 11))' || {
     echo "install-web.sh: $PYTHON is older than 3.11; the page's pins need 3.11+ (PYTHON=... to point at one)" >&2
     exit 1
 }
@@ -139,25 +141,38 @@ rollback() {
     echo "dashboard-web: $(systemctl is-active $UNIT 2>/dev/null || true) on $(cat "$APP_DIR/COMMIT" 2>/dev/null || echo '?')" >&2
 }
 trap 'rollback $LINENO' ERR
-if ! sudo -u $ACCOUNT -H "$VENV_DIR/bin/python" -m pip --version >/dev/null 2>&1; then
-    # No venv, or a half-made one (python3-venv missing leaves a python
-    # without pip): made afresh. The home is root's, so root makes the
-    # venv's directory for the account (venv fills an empty one). The venv's
-    # bundled pip is enough for exact pins; an unpinned `--upgrade pip` from
-    # PyPI is one moving part this host does not need.
+# --require-hashes checks a file pip downloads, not one already installed at
+# the pinned version: a venv made before the hashes were listed, or one
+# whose requirements moved under it, would keep what it has unverified. So
+# the venv is made afresh whenever the requirements file differs from the
+# one the last successful install recorded (root's record, in STATE_DIR,
+# which the account cannot write), and is reused, with pip a no-op (no
+# index contact), while the file is the same.
+REQUIREMENTS="$APP_DIR.new/contrib/dashboard/requirements.txt"
+REQUIREMENTS_SUM=$(sha256sum "$REQUIREMENTS" | cut -d' ' -f1)
+REQUIREMENTS_RECORD="$STATE_DIR/requirements.sha256"
+if [ "$(cat "$REQUIREMENTS_RECORD" 2>/dev/null)" != "$REQUIREMENTS_SUM" ] ||
+    ! sudo -u $ACCOUNT -H "$VENV_DIR/bin/python" -m pip --version >/dev/null 2>&1; then
+    # No venv, a half-made one (python3-venv missing leaves a python without
+    # pip), or one installed from another requirements file: made afresh.
+    # The home is root's, so root makes the venv's directory for the account
+    # (venv fills an empty one). The venv's bundled pip is enough for exact
+    # pins; an unpinned `--upgrade pip` from PyPI is one moving part this
+    # host does not need.
+    rm -f "$REQUIREMENTS_RECORD"
     rm -rf "$VENV_DIR"
     install -d -o $ACCOUNT -g $ACCOUNT -m 750 "$VENV_DIR"
     sudo -u $ACCOUNT -H "$PYTHON" -m venv "$VENV_DIR"
 fi
-# Pinned exactly, so this is a no-op (no index contact) when nothing moved;
-# no cache under the root-owned home, and no "is pip newer" query either.
+# No cache under the root-owned home, and no "is pip newer" query either.
 # --require-hashes: a file pip downloads is installed only when its sha256
 # is one the requirements list next to the pin (schedule/pin-hashes.py
 # writes them); a wheel replaced on the index under the same version, or a
 # pin without hashes, fails here and the trap restores the previous page.
 sudo -u $ACCOUNT -H "$VENV_DIR/bin/python" -m pip install --quiet --no-cache-dir \
     --disable-pip-version-check --require-hashes \
-    -r "$APP_DIR.new/contrib/dashboard/requirements.txt"
+    -r "$REQUIREMENTS"
+echo "$REQUIREMENTS_SUM" > "$REQUIREMENTS_RECORD"
 
 # 4. the unit, verified where it is staged before it is installed: a verify
 #    that fails, or that only warns "Unknown key name" (a hardening line this

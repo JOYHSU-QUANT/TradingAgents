@@ -22,7 +22,10 @@ Every two minutes (`schedule/dashboard-exporter.timer`) one tick of
    plus one digest a day;
 4. writes everything under the status directory, atomically, mode 0640:
    `<line>.json` (the package's document, verbatim), `host.json`,
-   `alerts.json`, `exporter.json`, and its own `alerts-state.json`.
+   `alerts.json`, `exporter.json`, and its own `alerts-state.json`;
+5. carries the **histories** on (dashboard plan PR 5, below): a few series
+   per line and for the host under `history/`, harvested from the tails the
+   documents carry, so the page can chart more than one document shows.
 
 The package imports nothing from the other `contrib` packages but
 `contrib.core` (the package graph in `contrib/tests/test_package_graph.py`
@@ -57,7 +60,8 @@ Two files, kept apart on purpose:
 
 - **`configs/exporter.local.yaml`** (copy `exporter.example.yaml`; gitignored):
   nothing secret — the status directory, the digest hour, the thresholds,
-  and the lines with their python, checkout, unit, stores and run ids.
+  the history's bounds (`history:` — `max_points` 4000, `host_sample_minutes`
+  30), and the lines with their python, checkout, unit, stores and run ids.
 - **The `.env` names** (repository root, the file the daemons keep their keys
   in, mode 600): `DASHBOARD_SMTP_HOST`, `DASHBOARD_SMTP_PORT` (587),
   `DASHBOARD_SMTP_USER`, `DASHBOARD_SMTP_PASSWORD`, `DASHBOARD_MAIL_FROM`,
@@ -74,7 +78,8 @@ Two files, kept apart on purpose:
 | `<line>.json` | the line's own document, as its package printed it (`schema_version` and `source` first); kept from the last good read when a read fails |
 | `host.json` | `units[]` (`type`, `load_state`, `active_state`, `sub_state`, `result`, `n_restarts`, main process start/exit/status), `checkouts[]` (path, commit), `disk`, `memory`, `load_average`, `journal_errors_24h` |
 | `alerts.json` | `active[]` (key, line, rule, text, since), `notes[]`, `recent_events[]`, `pending_letters` |
-| `exporter.json` | the tick's `duration_ms`; per line: `ok`, `exit_code`, `failure`, `stderr_line` (first line, hex masked, cut), `duration_ms`, `document_generated_at`; the `mail` and `deadman` outcome. Its `lines[].file` is the index of the line documents: a reader goes by it, never by globbing the directory |
+| `exporter.json` | the tick's `duration_ms`; per line: `ok`, `exit_code`, `failure`, `stderr_line` (first line, hex masked, cut), `duration_ms`, `document_generated_at`, `history_error` (why the line's history was not kept, else null); `host_history_error`; the `mail` and `deadman` outcome. Its `lines[].file` is the index of the line documents: a reader goes by it, never by globbing the directory, and derives a line's history file from its `name` |
+| `history/<line>.json`, `history/host.json` | the line's (the host's) history, compact JSON: `line`, `kind`, `run`, `max_points`, `generated_at` (when a series last changed), and `series{name: {label, points: [[instant, value], ...]}}` — instants UTC to the second, values plain decimal digits, nothing else (below) |
 | `alerts-state.json` | the exporter's own: the conditions holding, the newest event instant seen per line, the letters pending, the recent events, the day the digest last went |
 
 Every instant this package writes is ISO-8601 UTC to the second; the
@@ -117,6 +122,46 @@ What a tick cannot judge it carries as it was: a line whose document could
 not be read or whose rules failed keeps the conditions it held, and so does
 a unit `systemctl` could not show — a failed look never clears a condition.
 
+## The history
+
+A line's document carries a tail — the perp run's last `--recent` account
+snapshots, a Uniswap run's last `--bars` valuations — and no more, and the
+carry report its whole span. Each tick the exporter **harvests** the numbers
+of that (`history.py`, one whitelist per kind: the perp run's
+`account_equity` and `total_position_notional` by snapshot — its total pnl
+is the equity less the opening balance, so the one curve says it; the
+Uniswap run's `total_value` by bar; the carry sleeve's `net`, `perp_equity`
+and `spot_equity` by day, plus the running total `net_cumulative`; the
+host's disk used, memory available and load, one sample per tick) and
+carries the line's history on: a point is appended when its instant is later than the
+series' last, so a tail seen twice adds nothing and one that overlaps the
+last tick's fills the gap, and the oldest points fall off past
+`max_points`; within one second the reading stored first stands (a perp
+fill and the cycle's end can share a second: in one tail the later row is
+taken, across ticks the stored one). A day of the carry report is revised after the fact (a
+settlement priced later), so its series are replaced by the document's
+each tick. The host is thinned to one sample per `host_sample_minutes`
+(at the defaults the host keeps about 83 days, a perp run a year or more,
+a Uniswap run or the carry sleeve ten years). A tick that adds no point
+rewrites nothing: the file's `generated_at` is when a series last changed.
+
+A history belongs to a run: when the line's run changes (a segment switch,
+a new run id in the YAML) the history starts afresh — a curve across two
+segments would join two opening balances. A history file this build
+cannot read is left as it is and named in `exporter.json`
+(`history_error`; the page reddens the exporter's card); a document the
+harvest cannot read leaves the history as it was; a line that was not read
+leaves it untouched too.
+
+A history's points hold instants and plain decimal digits and nothing
+else, and the types hold that: a `Series` refuses a point not spelled as
+the exporter writes one, not parsable as a date, past float's range (the
+charts plot in it) or out of order, so what `advance` builds is what the
+reader accepts and the page parses. The rest of the file is the line's
+name, kind, run and this package's own labels — no free text from a
+document, so no address or key (`tests/test_history.py` holds that, and
+the documents' secret-field test covers the history files).
+
 ## The letters
 
 Only which line, what state and when: states, counts and instants. No
@@ -153,7 +198,17 @@ downloads) — the trader's venv runs the exporter and needs none of it.
   day) and a sparkline of the document's tail.
 - `/line/<name>` — one line with its tables: cycles, fills, snapshots and
   events (perp); decisions, reason codes, the store (Uniswap); days, weeks,
-  sidecar problems (carry).
+  sidecar problems (carry) — and its **history charts**: one inline SVG per
+  series of `history/<name>.json` (`charts.py`: the instants on the x axis,
+  so a gap in the series is spaced as time on the page; the series' highest
+  and lowest values on the left, to two decimals, the first and last instants
+  below; a long series is thinned to a point per pixel before it is drawn). The `history` row names the run,
+  the depth and when a series last changed. A history that is not there yet,
+  or not one this build reads, is a warning row, never a red card: the
+  history is the exporter's extra, appended after the card is built, so it
+  shows whether or not the line's own document could be read.
+- `/host` — the host with its tables and the host's history charts (disk,
+  memory, load).
 - `/static/style.css` — the one stylesheet, from the repo (no CDN, no script).
 
 Every card shows its document's `generated_at`. A card is **stale** when
@@ -187,7 +242,9 @@ pytest -q contrib/dashboard/tests
 `tests/test_web.py` needs the page's requirements and `httpx`; without them
 it is skipped (the trader's venv), and with `DASHBOARD_WEB_TESTS=required`
 in the environment a missing install fails instead (the CI job sets it).
-`tests/test_app_documents.py` covers the view models without any of them.
+`tests/test_app_documents.py` covers the view models without any of them,
+the history charts included; `tests/test_history.py` the harvest, the
+carrying on, the file and what never enters it.
 
 `tests/test_schema_pin.py` reads the three packages' `status.py` as text
 (no import) and holds this package's `KNOWN_SCHEMA_VERSIONS` and the test

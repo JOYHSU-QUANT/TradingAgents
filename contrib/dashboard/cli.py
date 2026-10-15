@@ -30,7 +30,7 @@ from pathlib import Path
 
 from .alerts import StateError
 from .config import ConfigError, load_config, load_settings
-from .exporter import failure_lines, read_and_judge, run_once, summary_line
+from .exporter import failure_lines, history_lines, read_and_judge, run_once, summary_line
 from .mail import MailError, SmtpFactory, send_mail, smtp_connection
 from .readers import Runner, run_command
 from .times import show_when, utc_now
@@ -87,6 +87,8 @@ def main(
             )
             for line in failure_lines(report.reads):
                 print(f"not read: {line}", file=sys.stderr)
+            for line in history_lines(report):
+                print(f"history not kept: {line}", file=sys.stderr)
             if report.mail_error is not None:
                 print(f"mail: {report.mail_error}", file=sys.stderr)
             if report.ping_error is not None:

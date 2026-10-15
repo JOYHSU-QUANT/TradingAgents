@@ -30,10 +30,9 @@ packages mask their own free text, and the page masks it again.
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from functools import partial
@@ -41,8 +40,11 @@ from pathlib import Path
 from typing import Any, Final, Literal
 from urllib.parse import quote
 
+from ..files import read_json_object
+from ..history import HOST_KIND, HistoryError, history_file, load_history, parse_point
 from ..text import cut, mask_hex
-from ..times import minutes, parse_when, show_when
+from ..times import minutes, parse_when, show_when, span_text
+from .charts import Chart, chart
 
 __all__ = [
     "ALERTS_FILE",
@@ -59,6 +61,7 @@ __all__ = [
     "Sparkline",
     "Table",
     "ago",
+    "load_host",
     "load_line",
     "load_page",
     "read_document",
@@ -137,6 +140,7 @@ class Card:
     generated_at: str | None
     rows: tuple[Row, ...] = ()
     sparkline: Sparkline | None = None
+    charts: tuple[Chart, ...] = ()
     tables: tuple[Table, ...] = ()
     link: str | None = None
 
@@ -172,19 +176,11 @@ class Loaded:
 def read_document(path: Path) -> Loaded:
     """The JSON object at ``path``; ``error`` says why there is none (never the path)."""
     try:
-        text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
+        document = read_json_object(path)
+    except ValueError as exc:
+        return Loaded(path.name, None, str(exc))
+    if document is None:
         return Loaded(path.name, None, "not written yet")
-    except OSError as exc:
-        return Loaded(path.name, None, f"not readable ({type(exc).__name__})")
-    except ValueError:  # UnicodeDecodeError is one; so is a null byte in the name
-        return Loaded(path.name, None, "not UTF-8")
-    try:
-        document = json.loads(text)
-    except ValueError:
-        return Loaded(path.name, None, "not JSON")
-    if not isinstance(document, Mapping):
-        return Loaded(path.name, None, "not a JSON object")
     return Loaded(path.name, document, None)
 
 
@@ -254,24 +250,11 @@ def _decimal(value: object) -> Decimal | None:
     return number if number.is_finite() else None
 
 
-def _span_text(seconds: float) -> str:
-    if seconds < 60:
-        return "under a minute"
-    whole_minutes = int(seconds // 60)
-    if whole_minutes < 60:
-        return f"{whole_minutes} min"
-    hours = whole_minutes // 60
-    if hours < 48:
-        return f"{hours} h {whole_minutes % 60} min"
-    return f"{hours // 24} d"
-
-
 def ago(span: timedelta) -> str:
     """``3 min ago``, ``in 2 h 10 min``, ``under a minute ago``."""
-    seconds = span.total_seconds()
-    if seconds < 0:
-        return f"in {_span_text(-seconds)}"
-    return f"{_span_text(seconds)} ago"
+    if span < timedelta(0):
+        return f"in {span_text(-span)}"
+    return f"{span_text(span)} ago"
 
 
 def _instant(value: object) -> datetime | None:
@@ -314,6 +297,54 @@ def sparkline(amounts: Sequence[object], label: str) -> Sparkline | None:
         for i, n in enumerate(numbers)
     )
     return Sparkline(points, label, _s(shown[0]), _s(shown[-1]), len(numbers))
+
+
+# --- the history, from history/<name>.json --------------------------------------------
+
+
+def _history(status_dir: Path, name: str, now: datetime) -> tuple[Row, tuple[Chart, ...]]:
+    """The ``history`` row and the charts of ``history/<name>.json``, for a detail page.
+
+    A history that is not there, or not one this build reads, is a warning
+    row and no chart: the history is the exporter's extra, never a reason
+    to redden the card.
+    """
+    file = history_file(name)
+    if not _is_bare_json_name(f"{name}.json"):
+        return Row("history", "the line's name is not a file name", WARN), ()
+    try:
+        history = load_history(status_dir / file)
+    except HistoryError as exc:
+        return Row("history", f"{_s(file)} not readable by this build ({_s(str(exc))})", WARN), ()
+    if history is None:
+        return Row("history", "not written yet", WARN), ()
+    charts = []
+    try:
+        for series in history.series.values():
+            drawn = chart([parse_point(point) for point in series.points], _s(series.label))
+            if drawn is not None:
+                charts.append(drawn)
+    except (ValueError, ArithmeticError) as exc:
+        # A stored series parses and rises (the model holds it); this is the
+        # guard for a page that outlives the model, and it is a row.
+        return Row("history", f"{_s(file)} cannot be charted ({type(exc).__name__})", WARN), ()
+    longest = max((len(series.points) for series in history.series.values()), default=0)
+    text = (
+        f"{_s(history.run)}: {len(history.series)} series, up to {longest} point(s) "
+        f"(max {history.max_points}), last changed {_when(history.generated_at, now)}"
+    )
+    return Row("history", text), tuple(charts)
+
+
+def _with_history(card: Card, status_dir: Path, name: str, now: datetime) -> Card:
+    """``card`` with its history row and charts appended (a detail page).
+
+    Appended after the card is built: the row is plain or a warning, so the
+    card's tone and status stand, and the history shows whether or not the
+    document it goes with could be read.
+    """
+    row, charts = _history(status_dir, name, now)
+    return replace(card, rows=card.rows + (row,), charts=charts)
 
 
 # --- the conditions, from alerts.json -----------------------------------------------
@@ -586,6 +617,11 @@ def _exporter_card(loaded: Loaded, now: datetime, stale: timedelta) -> Card:
         rows.append(Row("dead-man ping", ping + (f"; {_s(error)}" if error else ""), tone))
     else:
         rows.append(Row("dead-man ping", "off", WARN))
+    not_kept = [_s(line.get("name")) for line in lines if line.get("history_error")]
+    if doc.get("host_history_error"):
+        not_kept.append(HOST_KIND)
+    if not_kept:
+        rows.append(Row("history", f"not kept for {', '.join(not_kept)}", BAD))
     red = [row.label for row in rows if row.tone == BAD]
     if shown is None:
         status = f"{EXPORTER_FILE} carries no generated_at this build reads"
@@ -1358,11 +1394,21 @@ def load_page(status_dir: Path, *, now: datetime, stale: timedelta) -> Page:
             "alerts", ALERTS_FILE, lambda: _alerts_card(context.alerts, context.active, now, stale)
         ),
         lines=_line_cards(context, status_dir, now, stale, detail=False),
-        host=_safe("host", HOST_FILE, lambda: _host_card(context.host, context.active, now, stale)),
+        host=replace(_host_card_of(context, now, stale), link="/host"),
     )
 
 
+def _host_card_of(context: _Context, now: datetime, stale: timedelta) -> Card:
+    return _safe("host", HOST_FILE, lambda: _host_card(context.host, context.active, now, stale))
+
+
 def load_line(status_dir: Path, name: str, *, now: datetime, stale: timedelta) -> Card | None:
-    """One line's card with its tables; ``None`` when the index knows no line ``name``."""
+    """One line's card with its tables and history charts; ``None`` when the index knows no line ``name``."""
     cards = _line_cards(_context(status_dir), status_dir, now, stale, detail=True, only=name)
-    return cards[0] if cards else None
+    return _with_history(cards[0], status_dir, name, now) if cards else None
+
+
+def load_host(status_dir: Path, *, now: datetime, stale: timedelta) -> Card:
+    """The host's card with its tables and history charts."""
+    card = _host_card_of(_context(status_dir), now, stale)
+    return _with_history(card, status_dir, HOST_KIND, now)

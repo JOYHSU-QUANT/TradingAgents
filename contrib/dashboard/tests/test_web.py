@@ -177,3 +177,20 @@ def test_the_settings_refuse_a_reload_loop_and_a_zero_threshold(tmp_path):
         PageSettings(tmp_path, STALE, 0)
     with pytest.raises(ValueError):
         PageSettings(tmp_path, timedelta(0), 60)
+
+
+def test_the_host_page_renders_and_the_line_page_carries_its_charts_without_script(tmp_path):
+    client = client_over(tmp_path)
+    host = client.get("/host")
+    assert host.status_code == 200
+    assert "<title>host · paper traders</title>" in host.text
+    assert ">units<" in host.text and 'href="/"' in host.text
+    assert client.head("/host").status_code == 200 and client.head("/host").content == b""
+    assert 'href="/host"' in client.get("/").text
+    # The quiet tick's carry history has three days: a chart with axes and labels, no script.
+    carry = client.get("/line/carry").text
+    assert '<figure class="chart">' in carry and "<script" not in carry
+    assert 'aria-label="net, cumulative (USDC)"' in carry
+    assert '<polyline class="axes" points="76,16 76,170 632,170" />' in carry
+    assert 'text-anchor="end">2026-10-13 00:00Z</text>' in carry
+    assert '<figure class="chart">' not in client.get("/").text

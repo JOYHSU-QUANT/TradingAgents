@@ -65,6 +65,12 @@ def _texts(card: Card) -> Iterator[str]:
         yield card.sparkline.label
         yield card.sparkline.first
         yield card.sparkline.last
+    for chart in card.charts:
+        yield chart.title
+        yield chart.first
+        yield chart.last
+        for label in chart.labels:
+            yield label.text
 
 
 def _page_texts(page: Page) -> Iterator[str]:
@@ -699,3 +705,263 @@ def test_a_replay_mismatch_reddens_the_card_and_a_config_drift_warns(tmp_path):
     rows = {row.label: row for row in hl.rows}
     assert rows["replay"].tone == BAD and rows["config drift"].tone == "warn"
     assert hl.tone == BAD and hl.status == "quiet by the rules, but 1 row(s) red: replay"
+
+
+# --- the history charts (dashboard plan PR 5) -----------------------------------------
+
+
+def _second_tick(tmp_path: Path) -> Path:
+    """Two ticks: the perp line's tail grows by one snapshot, three hours on."""
+    from contrib.dashboard.config import Settings
+    from contrib.dashboard.exporter import run_once
+
+    from .support import FakeRunner, build_config, host_reader_for
+
+    documents = quiet_documents()
+    directory = status_dir(tmp_path, documents)
+    document = hyperliquid_document()
+    older = document["account"]["recent_snapshots"][0]
+    newer = dict(older, account_equity="10300.00", timestamp="2026-10-14T08:00:00+00:00")
+    document["account"]["snapshot"] = newer
+    document["account"]["recent_snapshots"] = [newer, older]
+    documents[HL_KEY] = document
+    run_once(
+        build_config(tmp_path),
+        Settings(mail=None, healthchecks_url=None),
+        now=NOW + timedelta(minutes=2),
+        runner=FakeRunner(documents),
+        host_reader=host_reader_for(tmp_path),
+    )
+    return directory
+
+
+def test_the_line_page_charts_the_history_and_the_overview_does_not(tmp_path):
+    directory = _second_tick(tmp_path)
+    page = load_page(directory, now=NOW + timedelta(minutes=3), stale=STALE)
+    assert all(card.charts == () for card in page.lines) and page.host.charts == ()
+    assert all("history" not in _rows(card) for card in page.lines)
+    hl = load_line(directory, "hl-paper", now=NOW + timedelta(minutes=3), stale=STALE)
+    assert hl is not None and hl.tone == OK
+    assert _rows(hl)["history"] == (
+        "paper-BTC-8: 2 series, up to 2 point(s) (max 4000), last changed 2026-10-14 05:02Z (1 min ago)"
+    )
+    titles = [chart.title for chart in hl.charts]
+    assert titles == ["account equity (USDC)", "position notional (USDC)"]
+    equity = hl.charts[0]
+    assert equity.first == "10234.56" and equity.last == "10300.00" and equity.count == 2
+    assert equity.span == "4 h 0 min" and equity.viewbox == "0 0 640 200"
+    assert [label.text for label in equity.labels] == [
+        "10300.00",
+        "10234.56",
+        "2026-10-14 04:00Z",
+        "2026-10-14 08:00Z",
+    ]
+    # Two points, four hours apart: the first at the left edge, the last at the right.
+    assert equity.points.startswith("76.0,170.0 632.0,16.0")
+
+
+def test_a_series_with_one_point_has_no_chart_but_the_row_says_so(tmp_path):
+    hl = load_line(status_dir(tmp_path), "hl-paper", now=NOW, stale=STALE)
+    assert hl is not None and hl.charts == ()
+    assert _rows(hl)["history"].startswith("paper-BTC-8: 2 series, up to 1 point(s)")
+
+
+def test_the_carry_page_adds_the_cumulative_net(tmp_path):
+    carry = load_line(status_dir(tmp_path), "carry", now=NOW, stale=STALE)
+    assert carry is not None
+    assert [chart.title for chart in carry.charts] == [
+        "net per day (USDC)",
+        "perp leg equity (USDC)",
+        "spot leg equity (USDC)",
+        "net, cumulative (USDC)",
+    ]
+    assert carry.charts[3].last == "0.00" and carry.charts[3].count == 3
+
+
+def test_the_host_page_charts_the_host_and_the_overview_links_to_it(tmp_path):
+    from contrib.dashboard.app.documents import load_host
+
+    directory = _second_tick(tmp_path)
+    page = load_page(directory, now=NOW + timedelta(minutes=3), stale=STALE)
+    assert page.host.link == "/host"
+    host = load_host(directory, now=NOW + timedelta(minutes=3), stale=STALE)
+    assert host.link is None and host.tone == OK and host.name == "host"
+    # The second tick is two minutes on: thinned to the ten-minute sample, one point, no chart yet.
+    assert _rows(host)["history"].startswith("tokyo: 3 series, up to 1 point(s)")
+    assert [table.title for table in host.tables][0] == "units"
+
+
+def test_a_history_missing_or_unreadable_is_a_warning_row_not_a_red_card(tmp_path):
+    from contrib.dashboard.history import history_file
+
+    directory = status_dir(tmp_path)
+    (directory / history_file("hl-paper")).unlink()
+    hl = load_line(directory, "hl-paper", now=NOW, stale=STALE)
+    assert hl is not None and hl.tone == OK
+    row = next(row for row in hl.rows if row.label == "history")
+    assert row.value == "not written yet" and row.tone == "warn"
+    (directory / history_file("uniswap-ai")).write_text("{", encoding="utf-8")
+    uni = load_line(directory, "uniswap-ai", now=NOW, stale=STALE)
+    assert uni is not None and uni.tone == OK
+    row = next(row for row in uni.rows if row.label == "history")
+    assert row.value == "history/uniswap-ai.json not readable by this build (not JSON)"
+    assert row.tone == "warn"
+
+
+def test_a_line_whose_name_is_not_a_file_name_has_no_history(tmp_path):
+    directory = status_dir(tmp_path)
+    exporter = json.loads((directory / "exporter.json").read_text(encoding="utf-8"))
+    exporter["lines"][0]["name"] = "../etc"
+    (directory / "exporter.json").write_text(json.dumps(exporter), encoding="utf-8")
+    card = load_line(directory, "../etc", now=NOW, stale=STALE)
+    assert card is not None and card.charts == ()
+    assert _rows(card)["history"] == "the line's name is not a file name"
+
+
+def test_the_host_page_keeps_its_history_when_host_json_cannot_be_read(tmp_path):
+    from contrib.dashboard.app.documents import load_host
+
+    directory = status_dir(tmp_path)
+    (directory / "host.json").write_text("{", encoding="utf-8")
+    host = load_host(directory, now=NOW, stale=STALE)
+    assert host.tone == BAD and host.status == "host.json not JSON"
+    assert _rows(host)["history"].startswith("tokyo: 3 series, up to 1 point(s)")
+
+
+def test_a_history_not_kept_reddens_the_exporter_card(tmp_path):
+    directory = status_dir(tmp_path)
+    exporter = json.loads((directory / "exporter.json").read_text(encoding="utf-8"))
+    exporter["lines"][2]["history_error"] = "uniswap-trend.json is not a history this build reads"
+    exporter["host_history_error"] = "the document is not shaped as this build harvests it"
+    (directory / "exporter.json").write_text(json.dumps(exporter), encoding="utf-8")
+    page = load_page(directory, now=NOW, stale=STALE)
+    assert page.exporter.tone == BAD
+    assert _rows(page.exporter)["history"] == "not kept for uniswap-trend, host"
+    assert page.exporter.status == "ticking, with a failure: history"
+
+
+def test_a_value_past_floats_range_is_a_warning_row_not_a_red_card(tmp_path):
+    from contrib.dashboard.history import history_file
+
+    directory = status_dir(tmp_path)
+    path = directory / history_file("carry")
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["series"]["net"]["points"][0][1] = "1" + "0" * 400
+    path.write_text(json.dumps(document), encoding="utf-8")
+    carry = load_line(directory, "carry", now=NOW, stale=STALE)
+    assert carry is not None and carry.tone == OK and carry.charts == ()
+    row = next(row for row in carry.rows if row.label == "history")
+    assert (
+        row.value
+        == "history/carry.json not readable by this build (a point's value is past float's range)"
+    )
+    assert row.tone == "warn"
+
+
+def test_a_chart_thins_a_long_series_and_keeps_the_last_point():
+    from datetime import datetime, timezone
+    from decimal import Decimal
+
+    from contrib.dashboard.app.charts import MAX_DRAWN, chart
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    points = [(start + timedelta(minutes=i), Decimal(i)) for i in range(3 * MAX_DRAWN + 1)]
+    drawn = chart(points, "x")
+    assert drawn is not None and drawn.count == len(points)
+    assert drawn.points.count(" ") + 1 <= MAX_DRAWN + 1
+    assert drawn.points.endswith("632.0,16.0") and drawn.last == str(3 * MAX_DRAWN)
+    assert drawn.span == "2 d"
+    assert chart(points[:1], "x") is None
+    flat = chart([(start, Decimal(5)), (start + timedelta(hours=1), Decimal(5))], "flat")
+    assert flat is not None and flat.points == "76.0,93.0 632.0,93.0"
+    assert [label.text for label in flat.labels][:2] == ["5", "5"]
+    import pytest
+
+    with pytest.raises(ValueError, match="instants rise"):
+        chart([(start, Decimal(1)), (start, Decimal(2))], "x")
+
+
+# --- the first review-loop round ------------------------------------------------------
+
+
+def test_a_chart_is_drawn_against_time_and_keeps_the_last_of_a_thinned_series():
+    from datetime import datetime, timezone
+    from decimal import Decimal
+
+    from contrib.dashboard.app.charts import MAX_DRAWN, chart
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    uneven = chart(
+        [
+            (start, Decimal(0)),
+            (start + timedelta(hours=1), Decimal(5)),
+            (start + timedelta(hours=10), Decimal(10)),
+        ],
+        "x",
+    )
+    assert uneven is not None
+    # An hour of ten is a tenth of the width; five of ten is the middle height.
+    assert uneven.points == "76.0,170.0 131.6,93.0 632.0,16.0"
+    n = 3 * MAX_DRAWN + 2
+    points = [(start + timedelta(minutes=i), Decimal(i)) for i in range(n)]
+    points[7] = (points[7][0], Decimal(99999))  # a spike the thinning drops
+    long = chart(points, "x")
+    assert long is not None and long.count == n
+    drawn = long.points.split(" ")
+    assert len(drawn) == -(-n // 4) + 1 and drawn[-1].startswith("632.0,")
+    assert long.last == str(n - 1)
+    # The extremes are the whole series', thinned or not.
+    assert [label.text for label in long.labels][:2] == ["99999", "0"]
+
+
+def test_chart_labels_are_plain_digits_to_two_decimals():
+    from datetime import datetime, timezone
+    from decimal import Decimal
+
+    from contrib.dashboard.app.charts import chart
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    drawn = chart(
+        [
+            (start, Decimal("10012.345678901234567890123456")),
+            (start + timedelta(hours=1), Decimal("0.0000001")),
+            (start + timedelta(hours=2), Decimal("10000")),
+        ],
+        "x",
+    )
+    assert drawn is not None
+    assert [label.text for label in drawn.labels][:2] == ["10012.35", "0.00"]
+    assert drawn.first == "10012.35" and drawn.last == "10000"
+
+
+def test_a_long_history_reaches_the_page_thinned(tmp_path):
+    from datetime import datetime, timezone
+
+    from contrib.dashboard.history import history_file
+
+    directory = status_dir(tmp_path)
+    path = directory / history_file("hl-paper")
+    document = json.loads(path.read_text(encoding="utf-8"))
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    document["series"]["equity"]["points"] = [
+        [(base + timedelta(hours=i)).isoformat(), str(10000 + i)] for i in range(3000)
+    ]
+    path.write_text(json.dumps(document), encoding="utf-8")
+    hl = load_line(directory, "hl-paper", now=NOW, stale=STALE)
+    assert hl is not None
+    equity = next(chart for chart in hl.charts if chart.title == "account equity (USDC)")
+    assert equity.count == 3000 and equity.points.count(" ") + 1 <= 1281
+
+
+def test_a_value_of_thirty_digits_labels_without_a_context_error(tmp_path):
+    from contrib.dashboard.history import history_file
+
+    directory = status_dir(tmp_path)
+    path = directory / history_file("carry")
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["series"]["net"]["points"][0][1] = "123456789012345678901234567.891"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    carry = load_line(directory, "carry", now=NOW, stale=STALE)
+    assert carry is not None and carry.charts
+    net = next(chart for chart in carry.charts if chart.title == "net per day (USDC)")
+    assert net.labels[0].text == "123456789012345678901234567.89"

@@ -24,6 +24,7 @@ __all__ = [
     "parse_when",
     "show_text",
     "show_when",
+    "span_text",
     "utc_day",
     "utc_now",
 ]
@@ -76,3 +77,17 @@ def minutes(span: timedelta) -> int:
 def hours_text(span: timedelta) -> str:
     """A span in hours with one decimal, for a sentence (``5.3``)."""
     return f"{span.total_seconds() / 3600:.1f}"
+
+
+def span_text(span: timedelta) -> str:
+    """A span as the page reads it: ``under a minute``, ``3 min``, ``5 h 10 min``, ``3 d``."""
+    seconds = abs(span.total_seconds())
+    if seconds < 60:
+        return "under a minute"
+    whole_minutes = int(seconds // 60)
+    if whole_minutes < 60:
+        return f"{whole_minutes} min"
+    hours = whole_minutes // 60
+    if hours < 48:
+        return f"{hours} h {whole_minutes % 60} min"
+    return f"{hours // 24} d"

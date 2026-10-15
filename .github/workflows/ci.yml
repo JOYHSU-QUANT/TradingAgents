@@ -104,7 +104,11 @@ jobs:
         # contrib/dashboard/app (the read-only page, dashboard plan PR 4) pins
         # FastAPI, uvicorn and Jinja in its own file; the trader's venv never
         # installs them, this job does, and the test step below says so.
-        run: pip install -r contrib/dashboard/requirements.txt "httpx>=0.27"
+        # pip check: the page's pins land in the job's shared venv; a pin that
+        # a floor elsewhere forbids must fail here, not as a later test failure.
+        run: |
+          pip install -r contrib/dashboard/requirements.txt "httpx>=0.27"
+          pip check
       - name: Run the research radar's, the replay, carry, dashboard and core packages' suites and the package graph
         # DASHBOARD_WEB_TESTS=required: contrib/dashboard/tests/test_web.py
         # skips where the page's requirements are not installed (the trader's

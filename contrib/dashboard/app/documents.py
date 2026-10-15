@@ -29,13 +29,14 @@ packages mask their own free text, and the page masks it again.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, Final, Literal
 from urllib.parse import quote
 
 from ..text import cut, mask_hex
@@ -70,16 +71,19 @@ TEXT_LIMIT = 300
 # How many recent events the overview lists.
 RECENT_EVENTS_SHOWN = 10
 # The tones a card or a row takes; the stylesheet colours them. A card is
-# OK or BAD; WARN is a row's.
-OK = "ok"
-WARN = "warn"
-BAD = "bad"
+# OK or BAD; a row may be WARN too, or plain.
+OK: Final = "ok"
+WARN: Final = "warn"
+BAD: Final = "bad"
+CardTone = Literal["ok", "bad"]
+RowTone = Literal["", "warn", "bad"]
 # The sparkline's box, in the SVG's own units (the stylesheet scales it);
 # the template prints the model's ``viewbox`` so the two cannot disagree.
 _SPARK_WIDTH = 240
 _SPARK_HEIGHT = 48
 _SPARK_PAD = 2.0
 _NONE = "—"
+_log = logging.getLogger(__name__)
 
 # --- the view models ---------------------------------------------------------------
 
@@ -90,7 +94,7 @@ class Row:
 
     label: str
     value: str
-    tone: str = ""
+    tone: RowTone = ""
 
 
 @dataclass(frozen=True)
@@ -100,6 +104,10 @@ class Table:
     title: str
     headers: tuple[str, ...]
     rows: tuple[tuple[str, ...], ...]
+
+    def __post_init__(self) -> None:
+        if any(len(row) != len(self.headers) for row in self.rows):
+            raise ValueError(f"every row of {self.title!r} has one cell per header")
 
 
 @dataclass(frozen=True)
@@ -111,7 +119,7 @@ class Sparkline:
     first: str
     last: str
     count: int
-    viewbox: str = f"0 0 {_SPARK_WIDTH} {_SPARK_HEIGHT}"
+    viewbox: str = field(init=False, default=f"0 0 {_SPARK_WIDTH} {_SPARK_HEIGHT}")
 
 
 @dataclass(frozen=True)
@@ -121,7 +129,7 @@ class Card:
     name: str
     title: str
     kind: str
-    tone: str
+    tone: CardTone
     stale: bool
     status: str
     generated_at: str | None
@@ -150,6 +158,10 @@ class Loaded:
     file: str
     document: Mapping[str, Any] | None
     error: str | None
+
+    def __post_init__(self) -> None:
+        if (self.document is None) != (self.error is not None):
+            raise ValueError("a loaded file has its document, or the reason it has none")
 
 
 # --- reading -----------------------------------------------------------------------
@@ -222,6 +234,15 @@ def _items(value: object) -> list[Mapping[str, Any]]:
     return [_mapping(item) for item in value]
 
 
+def _texts(value: object) -> list[str]:
+    """``value`` as a list of texts (a document's notes); empty for ``None``."""
+    if value is None:
+        return []
+    if isinstance(value, str) or not isinstance(value, Sequence):
+        raise TypeError(f"a list of the document is a {type(value).__name__}")
+    return [_s(item) for item in value]
+
+
 def _decimal(value: object) -> Decimal | None:
     """The finite amount a document value spells, or ``None``."""
     try:
@@ -257,7 +278,7 @@ def _instant(value: object) -> datetime | None:
         return None
     try:
         return parse_when(value)
-    except ValueError:
+    except (ValueError, OverflowError):
         return None
 
 
@@ -365,7 +386,15 @@ def _unread_card(name: str, status: str, rows: Sequence[Row] = ()) -> Card:
 
 
 # What a document of another shape raises while a card is built.
-_SHAPE_ERRORS = (KeyError, TypeError, ValueError, AttributeError, IndexError, InvalidOperation)
+_SHAPE_ERRORS = (
+    KeyError,
+    TypeError,
+    ValueError,
+    AttributeError,
+    IndexError,
+    OverflowError,
+    InvalidOperation,
+)
 
 
 def _safe(name: str, file: str, build: Callable[[], Card]) -> Card:
@@ -381,7 +410,7 @@ def _safe(name: str, file: str, build: Callable[[], Card]) -> Card:
 # --- the host ----------------------------------------------------------------------
 
 
-def _unit_text(unit: Mapping[str, Any] | None) -> tuple[str, str]:
+def _unit_text(unit: Mapping[str, Any] | None, now: datetime) -> tuple[str, RowTone]:
     """``(text, tone)`` of a unit as ``host.json`` shows it; ``None`` when the host did not list it.
 
     ``failed`` is systemd's ``ActiveState`` (the alert rule keys on it too);
@@ -396,6 +425,7 @@ def _unit_text(unit: Mapping[str, Any] | None) -> tuple[str, str]:
     active = _s(unit.get("active_state"))
     sub = _s(unit.get("sub_state"))
     text = f"{active} ({sub})"
+    tone: RowTone
     if unit.get("type") == "oneshot":
         text += f", last run {_s(unit.get('result'))}"
         tone = BAD if active == "failed" else ""
@@ -404,7 +434,7 @@ def _unit_text(unit: Mapping[str, Any] | None) -> tuple[str, str]:
         tone = "" if active == "active" else BAD
         since = unit.get("exec_main_start")
     if since:
-        text += f", since {_s(since)}"
+        text += f", since {_when(since, now)}"
     restarts = unit.get("n_restarts")
     if isinstance(restarts, int) and restarts:
         text += f", {restarts} restart(s)"
@@ -444,12 +474,12 @@ def _host_card(loaded: Loaded, active: Sequence[_Active], now: datetime, stale: 
     else:
         rows.append(Row("memory", "not read", WARN))
     load = doc.get("load_average")
-    rows.append(Row("load", _s(load) if load else "not read"))
+    rows.append(Row("load", _s(load)) if load else Row("load", "not read", WARN))
     units = _items(doc.get("units"))
     unit_rows = tuple(
         (
             _s(unit.get("unit")),
-            _unit_text(unit)[0],
+            _unit_text(unit, now)[0],
             _s(unit.get("type")),
             _s(unit.get("load_state")),
         )
@@ -490,10 +520,11 @@ def _alerts_card(
         return _unread_card("alerts", f"{loaded.file} {loaded.error}")
     doc = loaded.document
     is_stale, shown = _freshness(doc.get("generated_at"), now, stale)
-    rows = [Row("note", _s(note), WARN) for note in doc.get("notes") or ()]
+    rows = [Row("note", note, WARN) for note in _texts(doc.get("notes"))]
     pending = doc.get("pending_letters")
     if isinstance(pending, int) and pending:
-        rows.append(Row("letters pending", str(pending), WARN))
+        # The exporter pings /fail while a letter is pending: the mail path is down.
+        rows.append(Row("letters pending", str(pending), BAD))
     holding = tuple((item.key, _when(item.since, now), item.text) for item in active)
     # alerts.json keeps its tail oldest first; the page shows the newest, newest first.
     events = _items(doc.get("recent_events"))[-RECENT_EVENTS_SHOWN:][::-1]
@@ -545,18 +576,24 @@ def _exporter_card(loaded: Loaded, now: datetime, stale: timedelta) -> Card:
     if deadman.get("enabled") is True:
         ping = _s(deadman.get("ping"))
         error = deadman.get("error")
-        tone = BAD if error or ping != "ok" else ""
+        tone: RowTone = BAD if error or ping != "ok" else ""
         rows.append(Row("dead-man ping", ping + (f"; {_s(error)}" if error else ""), tone))
     else:
         rows.append(Row("dead-man ping", "off", WARN))
-    bad = is_stale or any(row.tone == BAD for row in rows)
+    red = [row.label for row in rows if row.tone == BAD]
+    if is_stale:
+        status = "the last tick is older than the page's threshold"
+    elif red:
+        status = f"ticking, with a failure: {', '.join(red)}"
+    else:
+        status = "ticking"
     return Card(
         name="exporter",
         title="exporter",
         kind="exporter",
-        tone=BAD if bad else OK,
+        tone=BAD if is_stale or red else OK,
         stale=is_stale,
-        status="the last tick is older than the page's threshold" if is_stale else "ticking",
+        status=status,
         generated_at=shown,
         rows=tuple(rows),
     )
@@ -568,7 +605,7 @@ _Built = tuple[list[Row], Sparkline | None, list[Table]]
 _Builder = Callable[[Mapping[str, Any], datetime, bool], _Built]
 
 
-def _breadcrumb(value: object, now: datetime) -> tuple[str, str]:
+def _breadcrumb(value: object, now: datetime) -> tuple[str, RowTone]:
     crumb = _mapping(value)
     status = crumb.get("status")
     if status is None:
@@ -699,7 +736,8 @@ def _hyperliquid(doc: Mapping[str, Any], now: datetime, detail: bool) -> _Built:
                 f"funding {_s(ledger.get('net_funding_pnl'))}",
             )
         )
-    positions = _items(doc.get("positions"))
+    # The store keeps a closed position's row at size 0: that is flat too.
+    positions = [p for p in _items(doc.get("positions")) if _decimal(p.get("size")) != 0]
     for position in positions:
         rows.append(
             Row(
@@ -979,7 +1017,8 @@ def _carry(doc: Mapping[str, Any], now: datetime, detail: bool) -> _Built:
     rows.append(
         Row(
             "span",
-            f"{_s(doc.get('since'))} to {_s(doc.get('until'))}: {_s(span.get('days'))} day(s), "
+            f"{_when(doc.get('since'), now)} to {_when(doc.get('until'), now)}: "
+            f"{_s(span.get('days'))} day(s), "
             f"{_s(span.get('days_in'))} in; net {_s(span.get('net'))} "
             f"(funding {_s(span.get('funding'))}, costs {_s(span.get('costs'))}, "
             f"{_s(span.get('unpriced'))} unpriced); {_s(span.get('alerts'))} light(s), "
@@ -993,7 +1032,7 @@ def _carry(doc: Mapping[str, Any], now: datetime, detail: bool) -> _Built:
         rows.append(
             Row(
                 "newest day",
-                f"{_s(last.get('boundary'))}: {'in' if last.get('intent_in') else 'out'}, "
+                f"{_s(last.get('boundary'))}: in {_s(last.get('intent_in'))}, "
                 f"net {_s(last.get('net'))}, spot {_s(last.get('spot_outcome'))} "
                 f"(target {_s(last.get('spot_target'))})",
             )
@@ -1120,7 +1159,7 @@ def _line_card(
     if unit is None:
         rows = [Row("unit", "no unit")]
     else:
-        unit_text, unit_tone = _unit_text(_unit_of(units, unit))
+        unit_text, unit_tone = _unit_text(_unit_of(units, unit), now)
         rows = [Row("unit", f"{_s(unit)}: {unit_text}", unit_tone)]
     rows.extend(_condition_rows(found, now))
     # Why the card is bad, beyond the conditions: each sentence is one reason.
@@ -1139,6 +1178,8 @@ def _line_card(
     is_stale, shown = True, None
     if loaded is not None and loaded.document is not None:
         is_stale, shown = _freshness(loaded.document.get("generated_at"), now, stale)
+        if shown is None:
+            sentences.append("the document carries no generated_at")
         builder = _BUILDERS.get(kind)
         if builder is None:
             sentences.append(f"a line of kind {kind} is not one this build shows")
@@ -1152,6 +1193,12 @@ def _line_card(
             else:
                 rows.extend(built_rows)
                 tables = tuple(built_tables)
+    # A red row without a condition behind it (a failed cycle, a carry light the
+    # exporter has no rule for, a unit down while alerts.json is unreadable) still
+    # reddens the card: the colour never says less than the rows do.
+    red = [row.label for row in rows if row.tone == BAD and row.label != "alert"]
+    if red and not found and not sentences:
+        sentences.append(f"quiet by the rules, but {len(red)} row(s) red: {', '.join(red)}")
     if sentences and found:
         sentences.insert(0, _status_sentence(found, ""))
     return Card(
@@ -1192,13 +1239,27 @@ class _Context:
     exporter: Loaded
     host: Loaded
     alerts: Loaded
-    entries: list[Mapping[str, Any]]
-    units: list[Mapping[str, Any]]
-    active: list[_Active]
+    entries: tuple[Mapping[str, Any], ...]
+    units: tuple[Mapping[str, Any], ...]
+    active: tuple[_Active, ...]
 
 
 def _not_shaped(loaded: Loaded, exc: BaseException) -> Loaded:
     return Loaded(loaded.file, None, f"not shaped as this build reads it ({type(exc).__name__})")
+
+
+# The last complaint logged per shared file, so a file that stays broken is
+# one journal line, not one per reload.
+_complained: dict[str, str] = {}
+
+
+def _complain(loaded: Loaded) -> None:
+    """One warning in the journal when a shared document cannot be shown (deduplicated)."""
+    if loaded.error is None:
+        _complained.pop(loaded.file, None)
+    elif _complained.get(loaded.file) != loaded.error:
+        _complained[loaded.file] = loaded.error
+        _log.warning("%s %s", loaded.file, loaded.error)
 
 
 def _context(status_dir: Path) -> _Context:
@@ -1207,17 +1268,19 @@ def _context(status_dir: Path) -> _Context:
     host = read_document(status_dir / HOST_FILE)
     alerts = read_document(status_dir / ALERTS_FILE)
     try:
-        entries = _index(exporter.document)
+        entries = tuple(_index(exporter.document))
     except _SHAPE_ERRORS as exc:
-        exporter, entries = _not_shaped(exporter, exc), []
+        exporter, entries = _not_shaped(exporter, exc), ()
     try:
-        units = _items(_mapping(host.document).get("units")) if host.document else []
+        units = tuple(_items(_mapping(host.document).get("units"))) if host.document else ()
     except _SHAPE_ERRORS as exc:
-        host, units = _not_shaped(host, exc), []
+        host, units = _not_shaped(host, exc), ()
     try:
-        active = _active(alerts.document)
+        active = tuple(_active(alerts.document))
     except _SHAPE_ERRORS as exc:
-        alerts, active = _not_shaped(alerts, exc), []
+        alerts, active = _not_shaped(alerts, exc), ()
+    for loaded in (exporter, host, alerts):
+        _complain(loaded)
     return _Context(exporter, host, alerts, entries, units, active)
 
 
@@ -1259,9 +1322,11 @@ def load_page(status_dir: Path, *, now: datetime, stale: timedelta) -> Page:
     banner: str | None = None
     if context.exporter.document is None:
         banner = f"No exporter tick to show: exporter.json {context.exporter.error}."
+    elif exporter_card.generated_at is None:
+        banner = f"The exporter's document is {exporter_card.status}."
     elif exporter_card.stale:
         banner = (
-            f"The exporter's last tick was {exporter_card.generated_at or 'at an unknown time'}, "
+            f"The exporter's last tick was {exporter_card.generated_at}, "
             f"older than {minutes(stale)} min: every card may be out of date."
         )
     return Page(

@@ -151,3 +151,29 @@ def test_a_page_that_cannot_be_rendered_is_a_plain_500_with_the_headers(tmp_path
     assert "went missing" not in response.text
     for name, value in SECURITY_HEADERS.items():
         assert response.headers[name] == value
+
+
+def test_head_carries_the_headers_and_type_of_the_get(tmp_path):
+    client = client_over(tmp_path)
+    for path in ("/", "/line/hl-paper"):
+        got, head = client.get(path), client.head(path)
+        assert head.headers["content-type"] == got.headers["content-type"]
+        for name in SECURITY_HEADERS:
+            assert head.headers[name] == got.headers[name]
+
+
+def test_a_stale_quiet_card_wears_no_ok_badge(tmp_path):
+    body = client_over(tmp_path, later=timedelta(minutes=9)).get("/").text
+    assert 'class="badge badge-stale"' in body
+    assert 'class="badge badge-ok"' not in body
+    fresh = client_over(tmp_path).get("/").text
+    assert 'class="badge badge-ok"' in fresh
+
+
+def test_the_settings_refuse_a_reload_loop_and_a_zero_threshold(tmp_path):
+    import pytest
+
+    with pytest.raises(ValueError):
+        PageSettings(tmp_path, STALE, 0)
+    with pytest.raises(ValueError):
+        PageSettings(tmp_path, timedelta(0), 60)

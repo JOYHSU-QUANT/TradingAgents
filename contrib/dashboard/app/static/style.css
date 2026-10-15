@@ -12,7 +12,6 @@
   --warn: #b7791f;
   --bad: #c0392b;
   --bad-bg: #fdecea;
-  --warn-bg: #fff6e5;
   --stale: #8a929b;
   --spark: #2f6fdb;
 }
@@ -28,7 +27,6 @@
     --warn: #e0a83c;
     --bad: #ef6e60;
     --bad-bg: #3a1f1c;
-    --warn-bg: #3a2e14;
     --stale: #6c757e;
     --spark: #6aa0ff;
   }
@@ -91,7 +89,7 @@ header a:hover, h2 a:hover { text-decoration: underline; }
 
 .card.tone-ok { border-left-color: var(--ok); }
 .card.tone-bad { border-left-color: var(--bad); background: var(--bad-bg); }
-.card.stale { border-style: dashed; color: var(--muted); }
+.card.stale { border-style: dashed; border-left-color: var(--stale); color: var(--muted); }
 .card.stale h2 { color: var(--stale); }
 
 .card h2 {

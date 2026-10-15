@@ -181,7 +181,7 @@ tick 會 exit 1、stderr 說 `is not a state file this build reads ... move it a
 - 寫出的 JSON＝各套件自己的白名單文件（`dataclasses.asdict`），exporter 不加任何 config 內容；`stderr_line` 有 0x＋40／64 hex 就遮罩。
 - 信只有「哪條線、什麼狀態、幾點」（`tests/test_mail.py` 證明文件裡的任何小數字串與 hex 都不會進信）。
 - 目錄 `2750`、檔 `0640`、unit `UMask=0027`：只有 trader 與 `dashboard` 群組讀得到。
-- exporter unit 不加 `ProtectSystem=strict`：它跑的是各套件的指令，要讀 WAL store（讀者也要寫 `-shm`）；硬化留給 PR 4 的唯讀服務。
+- exporter unit 不加 `ProtectSystem=strict`：它跑的是各套件的指令，要讀 WAL store（讀者也要寫 `-shm`）；硬化在唯讀網頁的 unit（§7.2、§7.7）。
 - 不開任何 port、不碰防火牆；dead-man 是**出去**的 HTTPS GET。
 
 ---
@@ -205,7 +205,8 @@ sudo /home/trader/TradingAgents/contrib/dashboard/schedule/install-web.sh
 
 它只做四件事：建 `dashboard` 系統帳號（primary group `dashboard`、無 shell、home 750）；用 `git archive` 把 `contrib/__init__.py`、
 `contrib/core`、`contrib/dashboard` 抄到 `/home/dashboard/app`（沒有 `.env`、沒有 local.yaml、沒有 tests）並寫 `COMMIT`；
-建 `/home/dashboard/venv` 並照 `contrib/dashboard/requirements.txt`（釘死版本）裝；裝 `dashboard-web.service`、`systemd-analyze verify`、enable、restart。
+先停頁面、建 `/home/dashboard/venv` 並照 `contrib/dashboard/requirements.txt`（整組釘死）裝；換樹、裝 `dashboard-web.service`、`systemd-analyze verify`、enable、start，
+再用 curl 探到頁面真的回應才算裝好（`Type=simple` 一 fork 就算 active，不能信）。停頁面之後任何一步失敗都會把舊樹換回去、把頁面重新啟動。
 不碰 trader 的任何檔案、不碰 exporter、不碰 daemon。
 
 ```bash
@@ -217,7 +218,8 @@ sudo journalctl -u dashboard-web -n 20 --no-pager
 
 unit 的硬化（計畫 §4）：`ProtectHome=tmpfs`＋`BindReadOnlyPaths=` 只掛自己的 app／venv 與 `/home/trader/status`，
 `ProtectSystem=strict`、`CapabilityBoundingSet=`（空）、`IPAddressAllow=localhost`、`SystemCallFilter=@system-service`。
-`systemd-analyze verify` 若對 `ProtectProc`／`ProcSubset` 報 unknown（systemd < 247），把那兩行刪掉再裝；其餘不要放寬。
+`systemd-analyze verify` 若報 `Unknown key name`（例如 systemd < 247 不認 `ProtectProc`／`ProcSubset`），installer 會當失敗並回滾：
+要刪那兩行得改 **repo 裡的 unit 檔**再部署（installer 每次都從 archive 的樹重抄 unit，直接改 `/etc/systemd/system` 下次就被蓋掉）；其餘不要放寬。
 
 ### 7.3 Tailscale（只做一次）
 
@@ -237,7 +239,8 @@ unit 的硬化（計畫 §4）：`ProtectHome=tmpfs`＋`BindReadOnlyPaths=` 只�
 
 ### 7.4 看什麼
 
-- 卡片左邊顏色：綠＝quiet；紅＝有 condition、那條線讀不到、或文件形狀不是這版讀的；灰虛線＋`STALE`＝文件超過 6 分鐘（3 個 tick）沒更新。
+- 卡片左邊顏色：綠＝quiet；紅＝有 condition、那條線讀不到、文件形狀不是這版讀的、**或卡上有紅色的列**（例如最後一個 cycle failed、carry 當天亮了 exporter 沒規則的燈）——
+  紅列的理由會寫在卡片的狀態句；灰虛線＋灰標題＋`STALE`＝文件超過 6 分鐘（3 個 tick）沒更新（stale 時不再掛 `OK` 標籤）。
 - 頁首紅色橫幅＝exporter 自己停了（`exporter.json` 太舊或沒有）：先看 §3、`systemctl list-timers dashboard-exporter.timer`。
 - 每張卡都有 `generated ...` 一行（文件的 `generated_at`＋多久以前）；點線名進明細（cycles／fills／events；decisions／reason codes／store；days／weeks）。
 - 頁面每 60 秒自己重載；數字是各套件文件的原文（Decimal 字串），地址與 key 一律折成 `0x1234...abcd`。
@@ -245,7 +248,8 @@ unit 的硬化（計畫 §4）：`ProtectHome=tmpfs`＋`BindReadOnlyPaths=` 只�
 ### 7.5 升級
 
 `deploy/paper` 的 push 在 daemon 重啟並確認 active 後，**若 `dashboard-web.service` 已 enable**，會自動再跑一次 `install-web.sh`
-（失敗只在 Actions 上標 warning，不會讓部署失敗）；手動升級＝再跑 §7.2 的那一行。`cat /home/dashboard/app/COMMIT` 看現在是哪個 commit。
+（失敗只在 Actions 上標 warning 並印出 unit 現在的狀態，不會讓部署失敗；installer 失敗會換回舊樹，頁面留在前一個 commit）。
+daemon 的 active 檢查沒過時部署在那裡就停了、不會走到頁面這步，頁面留在舊 commit；手動升級＝再跑 §7.2 的那一行。`cat /home/dashboard/app/COMMIT` 看現在是哪個 commit。
 exporter 文件形狀變了（套件 bump `schema_version`）而頁面沒跟上時，卡片會紅並寫 `document not shaped as this build reads it`——升級頁面即可。
 
 ### 7.6 故障
@@ -264,6 +268,6 @@ exporter 文件形狀變了（套件 bump `schema_version`）而頁面沒跟上�
 - `dashboard` 帳號只讀得到 `/home/trader/status`（經 group `dashboard`、檔 0640）；unit 的 mount namespace 裡 `/home` 是空的 tmpfs，只掛三個唯讀目錄，看不到 `.env`、`*.local.yaml`、`~/.ssh`、SQLite、payloads。
 - 只綁 loopback（非 loopback 的 `--host` 直接拒絕、沒有放寬旗標）；對外只有 `tailscale serve`，Funnel 不開，Lightsail 防火牆不動。
 - 無寫入端點：非 `GET`／`HEAD` 一律 405（在 routing 之前）；FastAPI 的 `/docs`、`/redoc`、`/openapi.json` 關閉（它們會從 CDN 載 script）。
-- 回應帶 CSP（`default-src 'none'; style-src 'self'`）、`nosniff`、`DENY`、`no-referrer`、`no-store`；頁面沒有任何 script，樣式檔在 repo。
+- 回應帶 CSP（`default-src 'none'; style-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`）、`nosniff`、`DENY`、`no-referrer`、`no-store`（樣式檔 `no-cache`）；頁面沒有任何 script，樣式檔在 repo。
 - 文件裡的自由文字（AI 的 decision reason、錯誤訊息）autoescape 顯示為純文字，且再遮罩一次 `0x` hex、截 300 字；測試證明整個 wallet／agent key 不會進頁面。
 - 依賴釘死在 `contrib/dashboard/requirements.txt`，只裝進 `dashboard` 帳號自己的 venv；不進根目錄 `requirements.txt`、不進 trader 的 venv。

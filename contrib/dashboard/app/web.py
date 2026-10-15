@@ -8,7 +8,8 @@ from a CDN; plan §4 keeps every asset in the repo).
 
 Every response carries the headers plan §4 asks for: a Content Security
 Policy that allows the page's own stylesheet and nothing else (no script
-from anywhere, no frame, no form), ``nosniff``, no referrer, no caching.
+from anywhere, no image, no frame, no form), ``nosniff``, no referrer, and
+no stored page (the stylesheet alone may be kept and revalidated).
 The templates render with autoescape on: a decision's reason is a model's
 text and is shown as text.
 
@@ -18,7 +19,7 @@ test can bind both.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -40,9 +41,9 @@ _TEMPLATES = _HERE / "templates"
 _STATIC = _HERE / "static"
 _READ_METHODS = frozenset({"GET", "HEAD"})
 
-SECURITY_HEADERS: dict[str, str] = {
+SECURITY_HEADERS: Mapping[str, str] = {
     "Content-Security-Policy": (
-        "default-src 'none'; style-src 'self'; img-src 'self'; "
+        "default-src 'none'; style-src 'self'; "
         "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     ),
     "X-Content-Type-Options": "nosniff",
@@ -60,6 +61,12 @@ class PageSettings:
     stale: timedelta
     refresh_seconds: int
     title: str = DEFAULT_TITLE
+
+    def __post_init__(self) -> None:
+        if self.refresh_seconds <= 0:
+            raise ValueError("the page reloads every so many seconds, more than zero")
+        if self.stale <= timedelta(0):
+            raise ValueError("a document is stale after a positive span")
 
 
 def build_app(settings: PageSettings, *, now: Callable[[], datetime] = utc_now) -> FastAPI:

@@ -16,13 +16,17 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
+import logging
 import sys
 from collections.abc import Callable, Sequence
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 
 from . import DEFAULT_TITLE
+
+if TYPE_CHECKING:
+    from fastapi import FastAPI
 
 __all__ = ["DEFAULT_PORT", "main"]
 
@@ -30,7 +34,7 @@ DEFAULT_PORT = 8787
 DEFAULT_STALE_MINUTES = 6
 DEFAULT_REFRESH_SECONDS = 60
 # What runs the application: ``(app, host, port)``; a test binds its own.
-Server = Callable[[Any, str, int], None]
+Server = Callable[["FastAPI", str, int], None]
 
 
 def _positive(text: str) -> int:
@@ -77,9 +81,12 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _serve(app: Any, host: str, port: int) -> None:
+def _serve(app: FastAPI, host: str, port: int) -> None:
     import uvicorn
 
+    # uvicorn configures its own loggers only; the page's warnings (a status
+    # file that cannot be shown) reach stderr, and so the journal, through this.
+    logging.basicConfig(level=logging.WARNING, format="%(name)s: %(message)s")
     uvicorn.run(
         app,
         host=host,

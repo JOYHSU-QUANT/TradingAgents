@@ -13,8 +13,9 @@
 #      imports and nothing else (no .env, no local.yaml, no stores);
 #   3. that account's own venv under /home/dashboard/venv, installed from the
 #      package's requirements.txt (pinned);
-#   4. the swap (page stopped first) and the unit file into /etc/systemd/system,
-#      verified, enabled and started.
+#   4. the swap and the unit file into /etc/systemd/system, verified, enabled,
+#      started and probed with curl; a failure after the page was stopped
+#      restores the previous tree and starts the page on it again.
 # It never touches the trader's files, the exporter or the daemons.
 
 set -euo pipefail
@@ -64,8 +65,25 @@ echo "$COMMIT" > "$APP_DIR.new/COMMIT"
 chown -R $ACCOUNT:$ACCOUNT "$APP_DIR.new"
 chmod -R u=rX,g=rX,o= "$APP_DIR.new"
 
-# 3. the venv, the account's own, from the pinned requirements (the new
-#    tree's; the page keeps serving the old tree meanwhile).
+# 3. the venv, the account's own, from the pinned requirements. The page is
+#    stopped first: pip writes into the venv the running page imports from
+#    (a no-op while the pins hold, a few seconds when they moved), and the
+#    tree is swapped next. From here a failure restores the old tree and
+#    starts the page on it again (the trap), so the page is never left down
+#    with its tree gone.
+if systemctl is-active --quiet $UNIT; then
+    systemctl stop $UNIT
+fi
+rollback() {
+    echo "install-web.sh: failed at line $1; restoring the previous tree" >&2
+    if [ -d "$APP_DIR.old" ]; then
+        rm -rf "$APP_DIR"
+        mv "$APP_DIR.old" "$APP_DIR"
+    fi
+    systemctl start $UNIT || true
+    systemctl is-active $UNIT >&2 || true
+}
+trap 'rollback $LINENO' ERR
 if [ ! -x "$VENV_DIR/bin/python" ]; then
     sudo -u $ACCOUNT -H "$PYTHON" -m venv "$VENV_DIR"
     # pip is brought up to date once, with the venv; a deploy that re-runs
@@ -75,21 +93,37 @@ fi
 # Pinned exactly, so this is a no-op (no index contact) when nothing moved.
 sudo -u $ACCOUNT -H "$VENV_DIR/bin/python" -m pip install --quiet -r "$APP_DIR.new/contrib/dashboard/requirements.txt"
 
-# 4. the swap and the unit. The page is stopped first: it loads its
-#    templates lazily from the tree the unit was started on, so the tree
-#    is never pulled from under a running page.
-if systemctl is-active --quiet $UNIT; then
-    systemctl stop $UNIT
-fi
+# 4. the swap and the unit.
 rm -rf "$APP_DIR.old"
 if [ -d "$APP_DIR" ]; then mv "$APP_DIR" "$APP_DIR.old"; fi
 mv "$APP_DIR.new" "$APP_DIR"
-rm -rf "$APP_DIR.old"
 install -m 644 "$APP_DIR/contrib/dashboard/schedule/$UNIT" /etc/systemd/system/$UNIT
-systemd-analyze verify /etc/systemd/system/$UNIT
+# verify exits 0 on a directive this systemd does not know and only prints
+# "Unknown key name": that is a unit installed with a hardening line dropped,
+# which is a failure here (edit the committed unit, RUNBOOK section 7.2).
+VERIFY=$(systemd-analyze verify /etc/systemd/system/$UNIT 2>&1 || true)
+if [ -n "$VERIFY" ]; then
+    echo "$VERIFY" >&2
+    if echo "$VERIFY" | grep -qi "unknown key"; then
+        false
+    fi
+fi
 systemctl daemon-reload
 systemctl enable $UNIT
 systemctl start $UNIT
-sleep 2
-systemctl is-active --quiet $UNIT || { systemctl status $UNIT --no-pager; exit 1; }
+# Type=simple is "active" the moment the process forks: the page is up only
+# when it answers. Fifteen seconds covers the imports on the small host.
+for _ in $(seq 1 15); do
+    if curl -sf -o /dev/null http://127.0.0.1:8787/; then
+        break
+    fi
+    sleep 1
+done
+curl -sf -o /dev/null http://127.0.0.1:8787/ || {
+    systemctl status $UNIT --no-pager >&2 || true
+    journalctl -u $UNIT -n 20 --no-pager >&2 || true
+    false
+}
+trap - ERR
+rm -rf "$APP_DIR.old"
 echo "dashboard-web: $COMMIT installed, $(systemctl is-active $UNIT); try: curl -s http://127.0.0.1:8787/ | head -5"

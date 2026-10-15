@@ -51,12 +51,18 @@ jobs:
           if systemctl is-enabled --quiet hl-paper-carry-eth 2>/dev/null; then
             sudo systemctl is-active hl-paper-carry-eth
           fi
+          # The daemons are back: the exporter's timer watches them again now,
+          # not only when this script exits (the trap stays as the failure path).
+          if systemctl is-enabled --quiet dashboard-exporter.timer 2>/dev/null; then
+            sudo systemctl start dashboard-exporter.timer
+          fi
           # The read-only page (contrib/dashboard/RUNBOOK.md section 7) runs
           # from its own copy of the package; when it is installed, the
-          # installer takes the new commit. A page that fails to come up is
-          # a warning on the run, not a failed deploy of the daemons.
+          # installer takes the new commit (and restores the previous tree if
+          # the new one does not come up). A page that fails to upgrade is a
+          # warning on the run, not a failed deploy of the daemons.
           if systemctl is-enabled --quiet dashboard-web.service 2>/dev/null; then
-            sudo /home/trader/TradingAgents/contrib/dashboard/schedule/install-web.sh ||
-              echo "::warning::dashboard-web: install-web.sh failed; the page is on the previous commit"
+            sudo bash /home/trader/TradingAgents/contrib/dashboard/schedule/install-web.sh ||
+              echo "::warning::dashboard-web: install-web.sh failed ($(systemctl is-active dashboard-web.service)); check systemctl status dashboard-web on the host"
           fi
           EOF

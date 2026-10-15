@@ -24,14 +24,18 @@ Breaking changes within the 0.x line are called out explicitly.
   adds the tables: cycles, fills, snapshots and events for a perp run;
   decisions, reason codes and the store for a Uniswap run; days, weeks and
   sidecar problems for the carry sleeve. Every text shown is masked again for a
-  `0x` hex and cut at 300 characters, and a model's text is escaped. `GET` and
-  `HEAD` only, anything else `405` before routing; CSP `default-src 'none';
-  style-src 'self'`, `nosniff`, no referrer, `no-store`; FastAPI's interactive
-  docs are off. On the host it runs as the `dashboard` account from its own
+  `0x` hex and cut at 300 characters, and a model's text is escaped. A red row
+  without a rule behind it (a failed last cycle, a carry light the exporter has
+  no rule for) reddens its card too. `GET` and `HEAD` only, anything else `405`
+  before routing; CSP `default-src 'none'; style-src 'self'; base-uri 'none';
+  form-action 'none'; frame-ancestors 'none'`, `nosniff`, no referrer,
+  `no-store` (the stylesheet `no-cache`); FastAPI's interactive docs are off. On the host it runs as the `dashboard` account from its own
   archive copy and venv (`schedule/install-web.sh`; `schedule/dashboard-web.service`
   hardened: `ProtectHome=tmpfs` with only the status directory, its code and
-  its venv bound read-only, no capabilities, loopback only), and `deploy.yml`
-  re-runs the installer when the unit is enabled. Dependencies are pinned in
+  its venv bound read-only, no capabilities, loopback only); the installer
+  probes the page with curl and restores the previous tree if the new one does
+  not answer, and `deploy.yml` re-runs it when the unit is enabled (after
+  starting the exporter's timer again). Dependencies are pinned in
   `contrib/dashboard/requirements.txt`; `tests/test_web.py` skips without them
   and is required in CI (`DASHBOARD_WEB_TESTS=required`). The hex mask the
   exporter's readers used is now `contrib/dashboard/text.py`, shared with the

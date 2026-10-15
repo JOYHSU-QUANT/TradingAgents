@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from contrib.dashboard.app.cli import DEFAULT_PORT, main
@@ -9,10 +11,14 @@ from contrib.dashboard.app.cli import DEFAULT_PORT, main
 from .support import need_web
 
 
-def test_a_host_that_is_not_loopback_is_refused_before_anything_is_imported(tmp_path, capsys):
+def test_a_host_that_is_not_loopback_is_refused_before_anything_is_imported(
+    tmp_path, capsys, monkeypatch
+):
+    monkeypatch.delitem(sys.modules, "contrib.dashboard.app.web", raising=False)
     for host in ("0.0.0.0", "10.0.0.5", "::", "100.64.0.1"):
         assert main(["--status-dir", str(tmp_path), "--host", host]) == 1
         assert "not a loopback address" in capsys.readouterr().err
+    assert "contrib.dashboard.app.web" not in sys.modules
     assert main(["--status-dir", str(tmp_path), "--host", "tokyo"]) == 1
     assert "not an IP address" in capsys.readouterr().err
 

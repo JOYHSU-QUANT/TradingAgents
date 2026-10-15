@@ -154,16 +154,19 @@ Every card shows its document's `generated_at`. A card is **stale** when
 that is older than `--stale-minutes` (default 6: three ticks of the timer),
 and the page carries a banner when the exporter's own document is. A card
 is **bad** when a condition holds about it, when its line was not read
-(the exporter's `failure` and `stderr_line` are shown), or when its document
+(the exporter's `failure` and `stderr_line` are shown), when its document
 is not shaped as this build reads it — the card then names the exception's
-class, never its text, and the page stays up. `exporter.json` missing gives
+class, never its text, and the page stays up — or when one of its rows is
+red without a rule behind it (a failed last cycle, a carry light the exporter
+has no rule for): the colour never says less than the rows do, and the
+status sentence names the rows. `exporter.json` missing gives
 a page with a banner and no lines; a corrupt file names itself.
 
 Nothing reaches the page unmasked: every string shown passes `text.mask_hex`
 (a `0x` 20- or 32-byte hex folded to `0x1234...abcd`, over the packages' own
 masking) and is cut at 300 characters; the templates render with autoescape
 on, so a model's decision text is text. Every response carries
-`Content-Security-Policy: default-src 'none'; style-src 'self'; img-src 'self'; ...`,
+`Content-Security-Policy: default-src 'none'; style-src 'self'; ...`,
 `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
 `Referrer-Policy: no-referrer`, `Cache-Control: no-store` (the stylesheet
 alone is `no-cache`: kept, revalidated); FastAPI's interactive docs are off.

@@ -504,3 +504,114 @@ def test_the_page_shows_every_kind_of_line_the_exporter_config_knows():
     from contrib.dashboard.config import _KINDS
 
     assert set(_BUILDERS) == set(_KINDS)
+
+
+# --- the first review round -------------------------------------------------------
+
+
+def test_a_red_row_without_a_rule_behind_it_reddens_the_card(tmp_path):
+    documents = quiet_documents()
+    document = hyperliquid_document()
+    document["cycles"]["recent"][0].update(
+        status="api_failed", error_type="RateLimit", error_message="429", verdict=None
+    )
+    documents[HL_KEY] = document
+    today = NOW.replace(hour=0, minute=0)
+    light = [{"kind": "one-legged", "text": "perp in, spot out"}]
+    days = [carry_day(today - timedelta(days=n), light if n == 1 else ()) for n in (3, 2, 1)]
+    documents[CARRY_KEY] = carry_document(days)
+    page = page_at(tmp_path, documents)
+    hl = _line(page, "hl-paper")
+    assert hl.tone == BAD
+    assert hl.status == "quiet by the rules, but 1 row(s) red: last cycle"
+    carry = _line(page, "carry")
+    assert carry.tone == BAD and carry.status.endswith("row(s) red: lights")
+    assert _line(page, "carry-perp").tone == OK
+
+
+def test_a_down_unit_reddens_its_line_even_when_alerts_json_is_unreadable(tmp_path):
+    down = unit_text(active="failed", sub="failed", result="exit-code")
+    directory = status_dir(tmp_path, units=dict(UNITS_QUIET, **{"hl-paper.service": down}))
+    (directory / "alerts.json").write_text("{broken", encoding="utf-8")
+    page = load_page(directory, now=NOW, stale=STALE)
+    hl = _line(page, "hl-paper")
+    assert hl.tone == BAD and hl.status == "quiet by the rules, but 1 row(s) red: unit"
+    assert page.alerts.status == "alerts.json not JSON"
+
+
+def test_a_closed_position_at_size_zero_reads_flat(tmp_path):
+    documents = quiet_documents()
+    document = hyperliquid_document()
+    document["positions"][0].update(size="0", entry_price=None, stop_loss_price=None)
+    documents[HL_KEY] = document
+    rows = _rows(_line(page_at(tmp_path, documents), "hl-paper"))
+    assert rows["position"] == "flat" and "position BTC" not in rows
+
+
+def test_an_instant_out_of_range_is_shown_as_text_not_a_500(tmp_path):
+    documents = quiet_documents()
+    documents[HL_KEY] = hyperliquid_document(generated_at="0001-01-01T00:00:00+14:00")
+    hl = _line(page_at(tmp_path, documents), "hl-paper")
+    assert hl.stale and hl.generated_at == "0001-01-01T00:00:00+14:00"
+
+
+def test_a_line_document_without_generated_at_is_bad_not_merely_stale(tmp_path):
+    documents = quiet_documents()
+    document = hyperliquid_document()
+    del document["generated_at"]
+    documents[HL_KEY] = document
+    hl = _line(page_at(tmp_path, documents), "hl-paper")
+    assert hl.tone == BAD and hl.stale
+    assert hl.status == "the document carries no generated_at"
+
+
+def test_notes_that_are_not_a_list_make_the_alerts_card_not_shaped(tmp_path):
+    directory = status_dir(tmp_path)
+    alerts = json.loads((directory / "alerts.json").read_text(encoding="utf-8"))
+    alerts["notes"] = "abc"
+    (directory / "alerts.json").write_text(json.dumps(alerts), encoding="utf-8")
+    page = load_page(directory, now=NOW, stale=STALE)
+    assert page.alerts.status == "alerts.json not shaped as this build reads it (TypeError)"
+    assert not any(row.label == "note" for row in page.alerts.rows)
+
+
+def test_a_readable_exporter_document_of_another_shape_is_not_called_a_stale_tick(tmp_path):
+    directory = status_dir(tmp_path)
+    exporter = json.loads((directory / "exporter.json").read_text(encoding="utf-8"))
+    exporter["mail"] = "x"
+    (directory / "exporter.json").write_text(json.dumps(exporter), encoding="utf-8")
+    page = load_page(directory, now=NOW, stale=STALE)
+    assert page.banner == (
+        "The exporter's document is exporter.json not shaped as this build reads it (TypeError)."
+    )
+    assert tuple(card.name for card in page.lines) == LINE_NAMES
+
+
+def test_an_inactive_oneshot_whose_result_is_exit_code_is_not_red(tmp_path):
+    odd = unit_text(type_="oneshot", active="inactive", sub="dead", result="exit-code", status=1)
+    page = page_at(tmp_path, units=dict(UNITS_QUIET, **{"carry-signal.service": odd}))
+    unit = next(row for row in _line(page, "carry").rows if row.label == "unit")
+    assert unit.tone == "" and "last run exit-code" in unit.value
+
+
+def test_the_exporter_card_says_what_failed_while_it_ticks(tmp_path):
+    directory = status_dir(tmp_path)
+    exporter = json.loads((directory / "exporter.json").read_text(encoding="utf-8"))
+    exporter["deadman"] = {"enabled": True, "ping": "fail", "error": "timed out"}
+    (directory / "exporter.json").write_text(json.dumps(exporter), encoding="utf-8")
+    page = load_page(directory, now=NOW, stale=STALE)
+    assert page.exporter.status == "ticking, with a failure: dead-man ping"
+
+
+def test_the_view_models_hold_their_invariants():
+    import pytest
+
+    from contrib.dashboard.app.documents import Loaded, Sparkline, Table
+
+    with pytest.raises(ValueError):
+        Loaded("x.json", None, None)
+    with pytest.raises(ValueError):
+        Loaded("x.json", {}, "an error too")
+    with pytest.raises(ValueError):
+        Table("t", ("a", "b"), (("only one",),))
+    assert Sparkline("0,0 1,1", "x", "1", "2", 2).viewbox == "0 0 240 48"

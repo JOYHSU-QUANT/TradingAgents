@@ -3,8 +3,8 @@
 <section class="card tone-{{ c.tone }}{% if c.stale %} stale{% endif %}" id="card-{{ c.name }}">
   <h2>
     {% if c.link %}<a href="{{ c.link }}">{{ c.title }}</a>{% else %}{{ c.title }}{% endif %}
-    <span class="badge badge-{{ c.tone }}">{{ c.tone }}</span>
     {% if c.stale %}<span class="badge badge-stale">stale</span>{% endif %}
+    {% if c.tone != "ok" or not c.stale %}<span class="badge badge-{{ c.tone }}">{{ c.tone }}</span>{% endif %}
   </h2>
   <p class="status">{{ c.status }}</p>
   <p class="generated">{% if c.generated_at %}generated {{ c.generated_at }}{% else %}no generated_at{% endif %}</p>

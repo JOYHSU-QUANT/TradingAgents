@@ -24,8 +24,8 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 # Not ProtectSystem=strict: the tick runs the packages' own commands, which
 # open the daemons' WAL stores (a reader of a WAL store writes its -shm), so
-# the data directories must stay writable to it. The read-only dashboard
-# service (plan PR 4) is the hardened one.
+# the data directories must stay writable to it. The read-only page's unit
+# (dashboard-web.service beside this file) is the hardened one.
 # Short of memory, the kernel takes this tick (the next one redoes it), not
 # the paper daemons beside it.
 OOMScoreAdjust=500

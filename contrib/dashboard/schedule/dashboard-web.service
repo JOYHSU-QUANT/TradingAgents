@@ -7,8 +7,8 @@
 # section 7); no public port is opened.
 [Unit]
 Description=contrib/dashboard read-only status page
-After=network-online.target
-Wants=network-online.target
+# The loopback only: nothing to wait for beyond the local network stack.
+After=network.target
 
 [Service]
 Type=simple

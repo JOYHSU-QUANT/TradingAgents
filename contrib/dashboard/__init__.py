@@ -1,4 +1,4 @@
-"""``contrib.dashboard`` — the status exporter and alerting for the paper traders (dashboard plan PR 3).
+"""``contrib.dashboard`` — the status exporter, alerting and read-only page for the paper traders.
 
 The host runs several lines: the Hyperliquid paper daemons (``paper-BTC-*``
 and the carry sleeve's perp leg), the Uniswap paper visits (three runs in one
@@ -8,7 +8,7 @@ Uniswap packages, ``report --json`` for carry). This package's exporter, a
 systemd timer on the trader account, asks each line for that document by
 running its command line, adds what only the host knows (the units' states,
 the deployed commits, disk and memory), writes it all under one directory as
-JSON for the read-only dashboard (plan PR 4) to serve, and mails the
+JSON for the read-only page (:mod:`contrib.dashboard.app`) to serve, and mails the
 operator when a line's state changes — never a balance, a position or an
 address, only which line, what state, since when.
 

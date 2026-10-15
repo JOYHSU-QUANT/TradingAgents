@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% from "_card.html" import card %}
+{% block title %}{{ line.name }} · {{ site }}{% endblock %}
+{% block meta %}{{ now }} · <a href="/">overview</a>{% endblock %}
+{% block body %}
+  <div class="single">
+    {{ card(line) }}
+  </div>
+{% endblock %}

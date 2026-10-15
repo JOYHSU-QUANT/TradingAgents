@@ -10,6 +10,39 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **`contrib/dashboard/app`: the read-only status page (dashboard plan PR 4).**
+  `python -m contrib.dashboard.app --status-dir <dir>` serves the exporter's
+  documents as one web page — FastAPI and Jinja, no script anywhere, the one
+  stylesheet from the repo — on a loopback port for `tailscale serve` to front
+  (plan D1; any other `--host` is refused). The overview is one card per line
+  of `exporter.json`'s index (never a glob of the directory), the alerts
+  holding, the host and the exporter's own tick; every card shows its document's
+  `generated_at`, is marked stale past `--stale-minutes` (6, three ticks) with
+  a banner when the exporter itself is, and is bad when a condition holds about
+  it, its line was not read, or its document is not shaped as this build reads
+  it (the card names the exception's class; the page stays up). `/line/<name>`
+  adds the tables: cycles, fills, snapshots and events for a perp run;
+  decisions, reason codes and the store for a Uniswap run; days, weeks and
+  sidecar problems for the carry sleeve. Every text shown is masked again for a
+  `0x` hex and cut at 300 characters, and a model's text is escaped. A red row
+  without a rule behind it (a failed last cycle, a carry light the exporter has
+  no rule for) reddens its card too. `GET` and `HEAD` only, anything else `405`
+  before routing; CSP `default-src 'none'; style-src 'self'; base-uri 'none';
+  form-action 'none'; frame-ancestors 'none'`, `nosniff`, no referrer,
+  `no-store` (the stylesheet `no-cache`); FastAPI's interactive docs are off. On the host it runs as the `dashboard` account from its own
+  archive copy and venv (`schedule/install-web.sh`; `schedule/dashboard-web.service`
+  hardened: `ProtectHome=tmpfs` with only the status directory, its code and
+  its venv bound read-only, no capabilities, loopback only). The installer
+  keeps the tree and the unit file root-owned (the account reads them, pip
+  writes only its venv), verifies the unit where it is staged, probes the page
+  with curl, and restores the previous tree and unit file if any step after
+  the stop fails; `deploy.yml` re-runs it when the unit is enabled (after
+  starting the exporter's timer again). Dependencies are pinned in
+  `contrib/dashboard/requirements.txt`; `tests/test_web.py` skips without them
+  and is required in CI (`DASHBOARD_WEB_TESTS=required`). The hex mask the
+  exporter's readers used is now `contrib/dashboard/text.py`, shared with the
+  page; the test fixtures carry the packages' nested shapes (Uniswap metrics,
+  decisions and valuations; carry span and weeks) and the schema pin holds them.
 - **`contrib/dashboard`: the status exporter and e-mail alerting (dashboard plan PR 3).**
   A new package, `python -m contrib.dashboard export`, run by a systemd timer every
   two minutes on the trader account (`contrib/dashboard/schedule/`). One tick reads

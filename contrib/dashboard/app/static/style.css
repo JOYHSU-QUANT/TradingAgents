@@ -1,0 +1,167 @@
+/* The read-only status page. One file, from this origin (the CSP allows no
+   other); no inline style anywhere. A card is ok or bad, a row may be warn
+   too; stale greys a card whose document is older than the page's threshold. */
+
+:root {
+  --bg: #f6f7f9;
+  --card: #ffffff;
+  --ink: #1b1f24;
+  --muted: #5c6670;
+  --line: #d9dee5;
+  --ok: #2a8a4a;
+  --warn: #b7791f;
+  --bad: #c0392b;
+  --bad-bg: #fdecea;
+  --stale: #8a929b;
+  --spark: #2f6fdb;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171b;
+    --card: #1e2227;
+    --ink: #e6e9ed;
+    --muted: #9aa4ae;
+    --line: #333a42;
+    --ok: #4cc472;
+    --warn: #e0a83c;
+    --bad: #ef6e60;
+    --bad-bg: #3a1f1c;
+    --stale: #6c757e;
+    --spark: #6aa0ff;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 0 16px 32px;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 16px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+header h1 { font-size: 18px; margin: 0; }
+header a, h2 a { color: inherit; text-decoration: none; }
+header a:hover, h2 a:hover { text-decoration: underline; }
+.meta { margin: 0; color: var(--muted); }
+
+.banner {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--bad);
+  border-radius: 6px;
+  background: var(--bad-bg);
+  font-weight: 600;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+@media (max-width: 420px) {
+  .grid { grid-template-columns: 1fr; }
+}
+
+.single { margin-top: 12px; }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-left: 5px solid var(--line);
+  border-radius: 6px;
+  padding: 10px 12px 12px;
+  min-width: 0;
+}
+
+.card.tone-ok { border-left-color: var(--ok); }
+.card.tone-bad { border-left-color: var(--bad); background: var(--bad-bg); }
+.card.stale { border-style: dashed; border-left-color: var(--stale); color: var(--muted); }
+.card.tone-bad.stale { border-left-color: var(--bad); }
+.card.stale h2 { color: var(--stale); }
+
+.card h2 {
+  font-size: 15px;
+  margin: 0 0 4px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.card h3 {
+  font-size: 13px;
+  margin: 12px 0 4px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 10px;
+  color: #fff;
+  text-transform: uppercase;
+}
+
+.badge-ok { background: var(--ok); }
+.badge-bad { background: var(--bad); }
+.badge-stale { background: var(--stale); }
+
+.status { margin: 0 0 2px; font-weight: 600; }
+.generated { margin: 0 0 8px; color: var(--muted); font-size: 12px; }
+
+dl { margin: 0; }
+
+.row {
+  display: grid;
+  grid-template-columns: 9em 1fr;
+  gap: 8px;
+  padding: 2px 0;
+  border-top: 1px solid var(--line);
+}
+
+.row dt { margin: 0; color: var(--muted); }
+.row dd { margin: 0; overflow-wrap: anywhere; }
+.row.tone-bad dd { color: var(--bad); font-weight: 600; }
+.row.tone-warn dd { color: var(--warn); }
+
+.spark { margin: 10px 0 0; }
+.spark svg { width: 100%; height: 48px; display: block; }
+.spark polyline { fill: none; stroke: var(--spark); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.spark figcaption { font-size: 12px; color: var(--muted); }
+
+.scroll { overflow-x: auto; }
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+}
+
+th, td {
+  text-align: left;
+  vertical-align: top;
+  padding: 3px 8px 3px 0;
+  border-top: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+
+th { color: var(--muted); font-weight: 600; border-top: none; }
+
+.empty { color: var(--muted); margin: 4px 0; }

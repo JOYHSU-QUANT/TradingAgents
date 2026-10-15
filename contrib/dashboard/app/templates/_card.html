@@ -1,0 +1,44 @@
+{# One card: a line, the host, the alerts or the exporter (documents.Card). #}
+{% macro card(c) %}
+<section class="card tone-{{ c.tone }}{% if c.stale %} stale{% endif %}" id="card-{{ c.name }}">
+  <h2>
+    {% if c.link %}<a href="{{ c.link }}">{{ c.title }}</a>{% else %}{{ c.title }}{% endif %}
+    {% if c.stale %}<span class="badge badge-stale">stale</span>{% endif %}
+    {% if c.tone != "ok" or not c.stale %}<span class="badge badge-{{ c.tone }}">{{ c.tone }}</span>{% endif %}
+  </h2>
+  <p class="status">{{ c.status }}</p>
+  <p class="generated">{% if c.generated_at %}generated {{ c.generated_at }}{% else %}no generated_at{% endif %}</p>
+  {% if c.rows %}
+  <dl>
+    {% for r in c.rows %}
+    <div class="row{% if r.tone %} tone-{{ r.tone }}{% endif %}"><dt>{{ r.label }}</dt><dd>{{ r.value }}</dd></div>
+    {% endfor %}
+  </dl>
+  {% endif %}
+  {% if c.sparkline %}
+  <figure class="spark">
+    <svg viewBox="{{ c.sparkline.viewbox }}" preserveAspectRatio="none" role="img" aria-label="{{ c.sparkline.label }}">
+      <polyline points="{{ c.sparkline.points }}" />
+    </svg>
+    <figcaption>{{ c.sparkline.label }}: {{ c.sparkline.first }} → {{ c.sparkline.last }} ({{ c.sparkline.count }} points)</figcaption>
+  </figure>
+  {% endif %}
+  {% for t in c.tables %}
+  <h3>{{ t.title }}</h3>
+  {% if t.rows %}
+  <div class="scroll">
+  <table>
+    <thead><tr>{% for h in t.headers %}<th>{{ h }}</th>{% endfor %}</tr></thead>
+    <tbody>
+      {% for row in t.rows %}
+      <tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="empty">none</p>
+  {% endif %}
+  {% endfor %}
+</section>
+{% endmacro %}

@@ -1,0 +1,28 @@
+# What contrib/dashboard/app (the read-only page, dashboard plan PR 4) needs
+# beyond the standard library. Kept out of the repo-root requirements.txt,
+# which the Hyperliquid paper deployment installs on its server: the trader's
+# venv runs the exporter, which needs none of this; the page runs on the
+# dashboard account's own venv (RUNBOOK section 7) and is installed from here.
+#
+# The whole resolved set is pinned, not only the three the page imports
+# (plan section 4: the page is exposed on the tailnet, and two installs must
+# give the same venv). Resolved 2026-10-15 for fastapi 0.115.12, uvicorn
+# 0.34.2, jinja2 3.1.6; to move, resolve again in a fresh venv and replace
+# the whole list.
+fastapi==0.115.12
+uvicorn==0.34.2
+jinja2==3.1.6
+# fastapi's
+starlette==0.46.2
+pydantic==2.14.1
+pydantic_core==2.50.1
+annotated-types==0.8.0
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+anyio==4.15.1
+idna==3.20
+# uvicorn's
+click==8.5.0
+h11==0.16.0
+# jinja2's
+MarkupSafe==3.0.4

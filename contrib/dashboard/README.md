@@ -1,8 +1,8 @@
 # contrib/dashboard
 
 The status exporter and alerting for the paper traders on the Lightsail host
-(dashboard plan `.claude/dashboard-plan-2026-10-12.md`, PR 3). The read-only
-web page that serves what it writes is PR 4.
+(dashboard plan `.claude/dashboard-plan-2026-10-12.md`, PR 3), and the
+read-only web page that serves what it writes (`app/`, PR 4).
 
 ## What it does
 
@@ -35,6 +35,13 @@ python -m contrib.dashboard export    --config contrib/dashboard/configs/exporte
 python -m contrib.dashboard check     --config ...   # read and judge, print what holds, write and mail nothing
 python -m contrib.dashboard test-mail --config ...   # one letter through the account
 ```
+
+```
+python -m contrib.dashboard.app --status-dir /home/trader/status [--port 8787] [--stale-minutes 6] [--refresh-seconds 60]
+```
+
+serves the page (below); it binds `127.0.0.1` and refuses any other
+`--host`.
 
 `--env-file` names the `.env` to read the `DASHBOARD_*` names from (default:
 the repository root's). Exit `0` done (a line that failed to read is still
@@ -122,11 +129,59 @@ A letter that cannot be sent stays pending and goes out on the next tick
 that can send; the dead-man ping is then `/fail` so the watchdog knows the
 mail path is down.
 
+## The page
+
+`contrib/dashboard/app` serves the status directory as one web page and
+nothing more: it reads the JSON files above, never a store, a config or a
+`.env`; it binds the loopback for `tailscale serve` to front inside the
+tailnet (plan D1); it answers `GET` and `HEAD` and nothing else (plan D5:
+anything else is `405` before routing). FastAPI and Jinja, pinned in
+`requirements.txt`, installed on the `dashboard` account's own venv
+(RUNBOOK section 7) — the trader's venv runs the exporter and needs none of it.
+
+- `/` — the overview: the exporter's tick, the alerts holding, one card per
+  line of `exporter.json`'s `lines[]` (the index; the directory is never
+  globbed), the host. Each line's card: its unit's state, the conditions
+  about it (its own and its unit's), the numbers an operator reads (equity,
+  position, next decision; clock, value, metrics; handoff, span, newest
+  day) and a sparkline of the document's tail.
+- `/line/<name>` — one line with its tables: cycles, fills, snapshots and
+  events (perp); decisions, reason codes, the store (Uniswap); days, weeks,
+  sidecar problems (carry).
+- `/static/style.css` — the one stylesheet, from the repo (no CDN, no script).
+
+Every card shows its document's `generated_at`. A card is **stale** when
+that is older than `--stale-minutes` (default 6: three ticks of the timer),
+and the page carries a banner when the exporter's own document is. A card
+is **bad** when a condition holds about it, when its line was not read
+(the exporter's `failure` and `stderr_line` are shown), when its document
+is not shaped as this build reads it — the card then names the exception's
+class, never its text, and the page stays up — or when one of its rows is
+red without a rule behind it (a failed last cycle, a carry light the exporter
+has no rule for): the colour never says less than the rows do, and the
+status sentence names the rows. `exporter.json` missing gives
+a page with a banner and no lines; a corrupt file names itself.
+
+Nothing reaches the page unmasked: every string shown passes `text.mask_hex`
+(a `0x` 20- or 32-byte hex folded to `0x1234...abcd`, over the packages' own
+masking) and is cut at 300 characters; the templates render with autoescape
+on, so a model's decision text is text. Every response carries
+`Content-Security-Policy: default-src 'none'; style-src 'self'; ...`,
+`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
+`Referrer-Policy: no-referrer`, `Cache-Control: no-store` (the stylesheet
+alone is `no-cache`: kept, revalidated); FastAPI's interactive docs are off.
+The page reloads itself every `--refresh-seconds`.
+
 ## Tests
 
 ```
 pytest -q contrib/dashboard/tests
 ```
+
+`tests/test_web.py` needs the page's requirements and `httpx`; without them
+it is skipped (the trader's venv), and with `DASHBOARD_WEB_TESTS=required`
+in the environment a missing install fails instead (the CI job sets it).
+`tests/test_app_documents.py` covers the view models without any of them.
 
 `tests/test_schema_pin.py` reads the three packages' `status.py` as text
 (no import) and holds this package's `KNOWN_SCHEMA_VERSIONS` and the test

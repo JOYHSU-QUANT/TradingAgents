@@ -11,15 +11,19 @@ reaches a letter.
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Mapping, Sequence
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from contrib.dashboard.config import (
     CarryLine,
     ExporterConfig,
     HyperliquidLine,
+    Settings,
     Thresholds,
     UniswapLine,
 )
@@ -200,6 +204,30 @@ def clock(state: str, latest_boundary: datetime, undecided: int = 0) -> dict[str
     }
 
 
+def curve(start: str, end: str, total_return: str, max_drawdown: str) -> dict[str, Any]:
+    return {
+        "start": start,
+        "end": end,
+        "total_return": total_return,
+        "max_drawdown": max_drawdown,
+    }
+
+
+def decision(bar: datetime, outcome: str = "held", **overrides: Any) -> dict[str, Any]:
+    document = {
+        "time": uni_instant(bar),
+        "outcome": outcome,
+        "decided_at": uni_instant(bar + timedelta(hours=1)),
+        "delay_seconds": 3600,
+        "reason_code": None,
+        "reason": f"engine held; wallet {WALLET} unchanged",
+        "verdicts": None,
+        "targets_now": {"WETH": "0.5", "USDC": "0.5"},
+    }
+    document.update(overrides)
+    return document
+
+
 def uniswap_run(**overrides: Any) -> dict[str, Any]:
     latest = datetime(2026, 10, 14, tzinfo=timezone.utc)
     run = {
@@ -221,14 +249,60 @@ def uniswap_run(**overrides: Any) -> dict[str, Any]:
         "holdings": {"balances": {"USDC": "9876.54", "WETH": "0.0512"}, "gas_eth": "0.998"},
         "holdings_at": uni_instant(latest),
         "value": "10012.34",
-        "metrics": {"return_pct": "0.12", "max_drawdown_pct": "0.40", "turnover": "0.3"},
+        "metrics": {
+            "bars": 6,
+            "measured_from": uni_instant(datetime(2026, 10, 9, tzinfo=timezone.utc)),
+            "measured_to": uni_instant(latest),
+            "suspect_left_out": 0,
+            "strategy": curve("10000", "10012.34", "0.0012", "0.0040"),
+            "opening_held": curve("10000", "10000", "0", "0"),
+            "all_quote": curve("10000", "10000", "0", "0"),
+            "rebalances": 2,
+            "swaps": 2,
+            "traded_value": "3012.34",
+            "turnover": "0.3",
+            "costs": {
+                "pool_fees": "1.50",
+                "slippage": "0.25",
+                "gas": "0.80",
+                "gas_eth": "0.0002",
+                "total": "2.55",
+            },
+        },
         "metrics_error": None,
         "verdicts_seen": None,
-        "recent_decisions": [{"time": uni_instant(latest), "outcome": "held"}],
-        "recent_valuations": [{"time": uni_instant(latest), "value": "10012.34"}],
+        "recent_decisions": [decision(latest)],
+        "recent_valuations": [{"time": uni_instant(latest), "total_value": "10012.34"}],
     }
     run.update(overrides)
     return run
+
+
+def pool_extent(pool: str = "WETH/USDC 0.05%") -> dict[str, Any]:
+    return {
+        "pool": pool,
+        "readings": 120,
+        "first": uni_instant(datetime(2026, 6, 1, tzinfo=timezone.utc)),
+        "last": uni_instant(NOW),
+    }
+
+
+def bar_status(**overrides: Any) -> dict[str, Any]:
+    document = {
+        "time": uni_instant(datetime(2026, 10, 14, tzinfo=timezone.utc)),
+        "complete": True,
+        "close_block": 23456789,
+        "prices": {"WETH": "2567.89"},
+        "finality": "final",
+        "suspect": False,
+        "flags": [],
+    }
+    document.update(overrides)
+    return document
+
+
+def coverage() -> dict[str, Any]:
+    return {"what": "bars", "source": "chain", "complete": 120, "of": 120, "per_token": {"WETH": 120}}
 
 
 def uniswap_document(run: Mapping[str, Any] | None = None, **overrides: Any) -> dict[str, Any]:
@@ -241,9 +315,9 @@ def uniswap_document(run: Mapping[str, Any] | None = None, **overrides: Any) -> 
             "chain_id": 1,
             "interval_seconds": 86400,
             "quote": "USDC",
-            "pools": [],
-            "latest_bars": [],
-            "coverage": None,
+            "pools": [pool_extent()],
+            "latest_bars": [bar_status()],
+            "coverage": [coverage()],
         },
         "run": uniswap_run() if run is None else run,
     }
@@ -306,6 +380,29 @@ def handoff(as_of: datetime, **overrides: Any) -> dict[str, Any]:
     return document
 
 
+def week_row(days: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    year, week, _ = datetime.fromisoformat(days[0]["boundary"]).isocalendar()
+    return {
+        "year": year,
+        "week": week,
+        "days": len(days),
+        "days_in": sum(1 for day in days if day["intent_in"]),
+        "funding": "0.00",
+        "perp_fees": "0.00",
+        "spot_swap_cost": "0.00",
+        "spot_gas_cost": "0.00",
+        "costs": "0.00",
+        "net": "0.00",
+        "unpriced": 0,
+        "funding_pending": 0,
+        "alerts": sum(len(day["alerts"]) for day in days),
+    }
+
+
+def problem(path: str = "payloads/2026-10-13.json", reason: str = "not JSON") -> dict[str, Any]:
+    return {"path": path, "reason": reason}
+
+
 def carry_document(
     days: Sequence[Mapping[str, Any]] | None = None, **overrides: Any
 ) -> dict[str, Any]:
@@ -329,8 +426,18 @@ def carry_document(
         "handoff_error": None,
         "days": list(days),
         "problems": [],
-        "weeks": [],
-        "span": {"days": len(days), "alerts": 0, "net": "0.00"},
+        "weeks": [week_row(days)],
+        "span": {
+            "days": len(days),
+            "days_in": sum(1 for day in days if day["intent_in"]),
+            "funding": "0.00",
+            "funding_pending": 0,
+            "costs": "0.00",
+            "unpriced": 0,
+            "net": "0.00",
+            "alerts": 0,
+            "held_by_d5": 0,
+        },
     }
     document.update(overrides)
     return document
@@ -585,3 +692,48 @@ def read_lines_and_host(
         config, now=now, runner=runner
     )
     return config, reads, host
+
+
+# --- the status directory as the page reads it ---------------------------------------
+
+# The page's default: a document older than three ticks is stale.
+STALE = timedelta(minutes=6)
+# The six lines of build_config, in the exporter's order.
+LINE_NAMES = ("hl-paper", "carry-perp", "uniswap-trend", "uniswap-ai", "uniswap-carry", "carry")
+
+
+def status_dir(
+    tmp_path: Path,
+    documents: Mapping[str, Any] | None = None,
+    *,
+    units: Mapping[str, str] = UNITS_QUIET,
+    now: datetime = NOW,
+) -> Path:
+    """One exporter tick (no mail, no ping) over ``documents`` (the quiet host's unless given)."""
+    from contrib.dashboard.exporter import run_once
+
+    config = build_config(tmp_path)
+    runner = FakeRunner(quiet_documents() if documents is None else documents, units=units)
+    run_once(
+        config,
+        Settings(mail=None, healthchecks_url=None),
+        now=now,
+        runner=runner,
+        host_reader=host_reader_for(tmp_path),
+    )
+    return config.status_dir
+
+
+def need_web() -> None:
+    """Skip without the page's requirements (the trader's venv has none); fail where CI requires them.
+
+    ``DASHBOARD_WEB_TESTS=required`` in the environment turns the skip into
+    an import error, so a dropped install step fails the job.
+    """
+    if os.environ.get("DASHBOARD_WEB_TESTS") == "required":
+        import fastapi  # noqa: F401
+        import httpx  # noqa: F401
+
+        return
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")

@@ -1,7 +1,7 @@
 # contrib/dashboard RUNBOOK
 
 把狀態 exporter（dashboard 計畫 `.claude/dashboard-plan-2026-10-12.md` PR 3）掛到 Lightsail 上、第一次怎麼開、每天看什麼、
-告警信來了怎麼辦的**操作手冊**。套件本身、設定與規則表見 [README.md](./README.md)。唯讀網頁是 PR 4，這張不裝。
+告警信來了怎麼辦的**操作手冊**。套件本身、設定與規則表見 [README.md](./README.md)。唯讀網頁（PR 4）的安裝在 §7。
 
 exporter 是 `trader` 身分的 systemd timer，每 2 分鐘跑一次 `python -m contrib.dashboard export`：讀六條線各自的
 `status --json`／`report --json`，加上主機狀態，寫到 `/home/trader/status/`，狀態轉換時寄 email，每天一封摘要。
@@ -22,6 +22,7 @@ Python 是該 checkout 的 `.venv/bin/python`；裝 unit 的步驟用 `ubuntu`�
 | 文件 | `hl-paper.json`、`carry-perp.json`、`uniswap-trend.json`、`uniswap-ai.json`、`uniswap-carry.json`、`carry.json`、`host.json`、`alerts.json`、`exporter.json` |
 | exporter 自己的狀態 | `/home/trader/status/alerts-state.json`（§5.3） |
 | units | `/etc/systemd/system/dashboard-exporter.service`、`dashboard-exporter.timer`（§2；來源在 `contrib/dashboard/schedule/`） |
+| 唯讀網頁 | `dashboard` 帳號；程式碼 `/home/dashboard/app`（`COMMIT` 檔寫著哪個 commit）、venv `/home/dashboard/venv`、unit `dashboard-web.service`、`http://127.0.0.1:8787/`，tailnet 內 `https://<機器名>.<tailnet>.ts.net/`（§7） |
 | log | `journalctl -u dashboard-exporter.service`（每 tick 一行摘要；讀不到的線與寄信失敗在 stderr；寄不出去時 tick exit 3，`systemctl --failed` 看得到，下次寄成就恢復） |
 
 ---
@@ -180,5 +181,98 @@ tick 會 exit 1、stderr 說 `is not a state file this build reads ... move it a
 - 寫出的 JSON＝各套件自己的白名單文件（`dataclasses.asdict`），exporter 不加任何 config 內容；`stderr_line` 有 0x＋40／64 hex 就遮罩。
 - 信只有「哪條線、什麼狀態、幾點」（`tests/test_mail.py` 證明文件裡的任何小數字串與 hex 都不會進信）。
 - 目錄 `2750`、檔 `0640`、unit `UMask=0027`：只有 trader 與 `dashboard` 群組讀得到。
-- exporter unit 不加 `ProtectSystem=strict`：它跑的是各套件的指令，要讀 WAL store（讀者也要寫 `-shm`）；硬化留給 PR 4 的唯讀服務。
+- exporter unit 不加 `ProtectSystem=strict`：它跑的是各套件的指令，要讀 WAL store（讀者也要寫 `-shm`）；硬化在唯讀網頁的 unit（§7.2、§7.7）。
 - 不開任何 port、不碰防火牆；dead-man 是**出去**的 HTTPS GET。
+
+---
+
+## 7. 唯讀網頁（PR 4）
+
+頁面只讀 §0 的 json、不開 store、不碰 `.env`；跑在獨立的 `dashboard` 帳號、綁 `127.0.0.1:8787`，
+由 `tailscale serve` 在 tailnet 內轉出去（計畫 D1）；沒有任何寫入端點（D5）。套件說明見 README「The page」。
+
+### 7.1 前提
+
+- §1.1 的 `dashboard` 群組與 `/home/trader/status`（2750）已建好，exporter 至少跑過一個 tick（頁面會把沒寫過的檔標成 `not written yet`，不會壞，但沒東西看）；
+- hl checkout（`/home/trader/TradingAgents`）已升到含 `contrib/dashboard/app` 的 commit（頁面的程式碼從這個 checkout 的 **committed tree** 抄出去）；
+- 主機有 `python3 -m venv`（Ubuntu：`sudo apt install python3-venv`）。
+
+### 7.2 裝（一支腳本，可重跑）
+
+```bash
+sudo /home/trader/TradingAgents/contrib/dashboard/schedule/install-web.sh
+```
+
+它只做四件事：建 `dashboard` 系統帳號（primary group `dashboard`、無 shell；home 是 root 的、帳號只能讀）；用 `git archive` 把 `contrib/__init__.py`、
+`contrib/core`、`contrib/dashboard` 抄到 `/home/dashboard/app`（root 擁有、帳號只讀；沒有 `.env`、沒有 local.yaml、沒有 tests）並寫 `COMMIT`，
+unit 檔則從同一個 committed tree 直接取到 root 的 `/var/lib/dashboard-web/new/`（保留原檔名，`systemd-analyze verify` 只認合法的 unit 名；root 驗證與安裝的檔案永遠不是帳號寫得到的）；
+先停頁面、建 `/home/dashboard/venv` 並照 `contrib/dashboard/requirements.txt`（整組釘死）裝；`systemd-analyze verify` 暫存的 unit、換樹、裝 `dashboard-web.service`、enable、start，
+再用 curl 探到頁面真的回應才算裝好（`Type=simple` 一 fork 就算 active，不能信）。停頁面之後任何一步失敗都會把舊樹與舊 unit 檔換回去、把頁面重新啟動
+（venv 不會還原：pin 換版到一半 pip 失敗時頁面可能還是起不來，但 stderr 會說）。
+不碰 trader 的任何檔案、不碰 exporter、不碰 daemon。
+
+```bash
+systemctl status dashboard-web --no-pager
+curl -s http://127.0.0.1:8787/ | head -5          # 要看到 <!doctype html>
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8787/   # 405
+sudo journalctl -u dashboard-web -n 20 --no-pager
+```
+
+unit 的硬化（計畫 §4）：`ProtectHome=tmpfs`＋`BindReadOnlyPaths=` 只掛自己的 app／venv 與 `/home/trader/status`，
+`ProtectSystem=strict`、`CapabilityBoundingSet=`（空）、`IPAddressAllow=localhost`、`SystemCallFilter=@system-service`。
+`systemd-analyze verify` 若報 `Unknown key name`（例如 systemd < 247 不認 `ProtectProc`／`ProcSubset`），installer 會當失敗並回滾：
+要刪那兩行得改 **repo 裡的 unit 檔**再部署（installer 每次都從 archive 的樹重抄 unit，直接改 `/etc/systemd/system` 下次就被蓋掉）；其餘不要放寬。
+
+### 7.3 Tailscale（只做一次）
+
+1. 裝：照官方 Linux 步驟（<https://tailscale.com/kb/1031/install-linux>，apt repo），然後 `sudo tailscale up`，用瀏覽器登入自己的 tailnet。
+2. 轉出頁面（HTTPS、tailnet 內）：
+
+   ```bash
+   sudo tailscale serve --bg 8787
+   tailscale serve status            # https://<機器名>.<tailnet>.ts.net/ -> http://127.0.0.1:8787
+   ```
+
+3. **禁用 Funnel**：永遠不要跑 `tailscale funnel`；`tailscale funnel status` 要是空的（Funnel 會開到公網）。
+4. admin console：ACL 只允許自己的裝置連這台；device key expiry 保持開啟；**不開** Tailscale SSH（維持現有 ssh key）。
+5. Lightsail 防火牆**不加任何 port**：Tailscale 是出去的連線（直連不成會走 DERP 中繼，仍可用）。
+
+手機／電腦裝 Tailscale 登入同一個 tailnet，開 `https://<機器名>.<tailnet>.ts.net/`。
+
+### 7.4 看什麼
+
+- 卡片左邊顏色：綠＝quiet；紅＝有 condition、那條線讀不到、文件形狀不是這版讀的、**或卡上有紅色的列**（例如最後一個 cycle failed、carry 當天亮了 exporter 沒規則的燈）——
+  紅列的理由會寫在卡片的狀態句；琥珀色的列＝資訊（歷史上的燈、mail 關著、clock 沒跟上），不影響卡片顏色；
+  灰虛線＋灰標題＋`STALE`＝文件超過 6 分鐘（3 個 tick）沒更新（stale 的綠卡不再掛 `OK` 標籤；紅卡仍紅邊、`BAD` 標籤照掛）。
+- 頁首紅色橫幅＝exporter 自己停了（`exporter.json` 太舊或沒有）：先看 §3、`systemctl list-timers dashboard-exporter.timer`。
+- 每張卡都有 `generated ...` 一行（文件的 `generated_at`＋多久以前）；點線名進明細（cycles／fills／events；decisions／reason codes／store；days／weeks）。
+- 頁面每 60 秒自己重載；數字是各套件文件的原文（Decimal 字串），地址與 key 一律折成 `0x1234...abcd`。
+
+### 7.5 升級
+
+`deploy/paper` 的 push 在 daemon 重啟並確認 active 後，**若 `dashboard-web.service` 已 enable**，會自動再跑一次 `install-web.sh`
+（失敗只在 Actions 上標 warning 並印出 unit 現在的狀態，不會讓部署失敗；installer 失敗會換回舊樹，頁面留在前一個 commit）。
+daemon 的 active 檢查沒過時部署在那裡就停了、不會走到頁面這步，頁面留在舊 commit；手動升級＝再跑 §7.2 的那一行。`cat /home/dashboard/app/COMMIT` 看現在是哪個 commit。
+exporter 文件形狀變了（套件 bump `schema_version`）而頁面沒跟上時，卡片會紅並寫 `document not shaped as this build reads it`——升級頁面即可。
+
+### 7.6 故障
+
+| 症狀 | 看哪裡 |
+|---|---|
+| 瀏覽器連不上／502 | `systemctl status dashboard-web`；`tailscale serve status`；`curl http://127.0.0.1:8787/` 在主機上通不通 |
+| 每張卡都 stale＋橫幅 | exporter 停了：§3、§5 |
+| 卡片 `not written yet` | exporter 沒跑過，或 unit 的 `--status-dir` 不是 exporter 的 `status_dir` |
+| 卡片 `not readable (PermissionError)` | 檔不是 0640／group `dashboard`：§1.1 的目錄要 2750（setgid），exporter unit 的 `UMask=0027` |
+| `install-web.sh` 在 pip 那步失敗 | 主機沒網路或 PyPI 不通；會自動換回舊頁面（venv 不還原）；重跑即可（idempotent；半成品的 venv 會被重建） |
+| 第一次安裝就失敗（例如 curl 探不到） | 沒有舊頁面可回：unit 會被 disable 並移除、樹留在原地；看 stderr 的 `systemctl status`／`journalctl` 輸出，修了再重跑 |
+| 卡片 `document not shaped ...` | 頁面版本落後套件：§7.5 |
+
+### 7.7 資安對照（計畫 §4，接 §6）
+
+- `dashboard` 帳號只讀得到 `/home/trader/status`（經 group `dashboard`、檔 0640）；unit 的 mount namespace 裡 `/home` 是空的 tmpfs，只掛三個唯讀目錄，看不到 `.env`、`*.local.yaml`、`~/.ssh`、SQLite、payloads。
+- 帳號寫得到的只有自己的 venv（pip 裝進去）；程式碼樹、home、unit 檔與回滾用的備份都是 root 的，root 不會安裝任何帳號寫得到的檔案（已知缺口：wheel 只釘版本、沒釘 hash，另開 issue）。
+- 只綁 loopback（非 loopback 的 `--host` 直接拒絕、沒有放寬旗標）；對外只有 `tailscale serve`，Funnel 不開，Lightsail 防火牆不動。
+- 無寫入端點：非 `GET`／`HEAD` 一律 405（在 routing 之前）；FastAPI 的 `/docs`、`/redoc`、`/openapi.json` 關閉（它們會從 CDN 載 script）。
+- 回應帶 CSP（`default-src 'none'; style-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`）、`nosniff`、`DENY`、`no-referrer`、`no-store`（樣式檔 `no-cache`）；頁面沒有任何 script，樣式檔在 repo。
+- 文件裡的自由文字（AI 的 decision reason、錯誤訊息）autoescape 顯示為純文字，且再遮罩一次 `0x` hex、截 300 字；測試證明整個 wallet／agent key 不會進頁面。
+- 依賴釘死在 `contrib/dashboard/requirements.txt`，只裝進 `dashboard` 帳號自己的 venv；不進根目錄 `requirements.txt`、不進 trader 的 venv。

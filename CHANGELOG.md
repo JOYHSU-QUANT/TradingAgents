@@ -38,7 +38,11 @@ Breaking changes within the 0.x line are called out explicitly.
   with curl, and restores the previous tree and unit file if any step after
   the stop fails; `deploy.yml` re-runs it when the unit is enabled (after
   starting the exporter's timer again). Dependencies are pinned in
-  `contrib/dashboard/requirements.txt`; `tests/test_web.py` skips without them
+  `contrib/dashboard/requirements.txt`, every wheel of each release by sha256
+  (`schedule/pin-hashes.py` writes them from PyPI), and the installer and the
+  CI job install with `--require-hashes`, so a wheel the index replaced under
+  a pinned version is refused and the installer restores the previous page
+  (#366); `tests/test_web.py` skips without them
   and is required in CI (`DASHBOARD_WEB_TESTS=required`). The hex mask the
   exporter's readers used is now `contrib/dashboard/text.py`, shared with the
   page; the test fixtures carry the packages' nested shapes (Uniswap metrics,

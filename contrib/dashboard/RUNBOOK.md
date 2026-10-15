@@ -195,7 +195,7 @@ tick 會 exit 1、stderr 說 `is not a state file this build reads ... move it a
 
 - §1.1 的 `dashboard` 群組與 `/home/trader/status`（2750）已建好，exporter 至少跑過一個 tick（頁面會把沒寫過的檔標成 `not written yet`，不會壞，但沒東西看）；
 - hl checkout（`/home/trader/TradingAgents`）已升到含 `contrib/dashboard/app` 的 commit（頁面的程式碼從這個 checkout 的 **committed tree** 抄出去）；
-- 主機有 `python3 -m venv`（Ubuntu：`sudo apt install python3-venv`）。
+- 主機有 `python3 -m venv`（Ubuntu：`sudo apt install python3-venv`），且 `python3` 是 3.11 以上（24.04 是 3.12；pin 組是在 3.12 解析的，installer 對更舊的 python 直接拒絕，`PYTHON=` 可指到別的直譯器）。
 
 ### 7.2 裝（一支腳本，可重跑）
 
@@ -206,7 +206,7 @@ sudo /home/trader/TradingAgents/contrib/dashboard/schedule/install-web.sh
 它只做四件事：建 `dashboard` 系統帳號（primary group `dashboard`、無 shell；home 是 root 的、帳號只能讀）；用 `git archive` 把 `contrib/__init__.py`、
 `contrib/core`、`contrib/dashboard` 抄到 `/home/dashboard/app`（root 擁有、帳號只讀；沒有 `.env`、沒有 local.yaml、沒有 tests）並寫 `COMMIT`，
 unit 檔則從同一個 committed tree 直接取到 root 的 `/var/lib/dashboard-web/new/`（保留原檔名，`systemd-analyze verify` 只認合法的 unit 名；root 驗證與安裝的檔案永遠不是帳號寫得到的）；
-先停頁面、建 `/home/dashboard/venv` 並照 `contrib/dashboard/requirements.txt`（整組釘死）裝；`systemd-analyze verify` 暫存的 unit、換樹、裝 `dashboard-web.service`、enable、start，
+先停頁面、建 `/home/dashboard/venv` 並照 `contrib/dashboard/requirements.txt`（整組釘死，每個 wheel 的 sha256 都列在 pin 下；`pip install --require-hashes`：下載到的檔案 hash 不在清單裡就拒裝）裝；`systemd-analyze verify` 暫存的 unit、換樹、裝 `dashboard-web.service`、enable、start，
 再用 curl 探到頁面真的回應才算裝好（`Type=simple` 一 fork 就算 active，不能信）。停頁面之後任何一步失敗都會把舊樹與舊 unit 檔換回去、把頁面重新啟動
 （venv 不會還原：pin 換版到一半 pip 失敗時頁面可能還是起不來，但 stderr 會說）。
 不碰 trader 的任何檔案、不碰 exporter、不碰 daemon。
@@ -255,6 +255,10 @@ unit 的硬化（計畫 §4）：`ProtectHome=tmpfs`＋`BindReadOnlyPaths=` 只�
 daemon 的 active 檢查沒過時部署在那裡就停了、不會走到頁面這步，頁面留在舊 commit；手動升級＝再跑 §7.2 的那一行。`cat /home/dashboard/app/COMMIT` 看現在是哪個 commit。
 exporter 文件形狀變了（套件 bump `schema_version`）而頁面沒跟上時，卡片會紅並寫 `document not shaped as this build reads it`——升級頁面即可。
 
+**換依賴版本**：改 `requirements.txt` 裡的版本、在乾淨 venv 重新解析整組，再跑 `python contrib/dashboard/schedule/pin-hashes.py`
+（stdlib，查 PyPI 的 JSON API，把該 release 每個 wheel 的 sha256 重寫到 pin 下；不收 sdist、不收 yanked）、兩者一起 commit。
+hash 不能手改：`tests/test_requirements_hashes.py` 會比對檔案就是腳本寫出來的樣子，而 pip 在主機上會直接拒裝。
+
 ### 7.6 故障
 
 | 症狀 | 看哪裡 |
@@ -264,15 +268,16 @@ exporter 文件形狀變了（套件 bump `schema_version`）而頁面沒跟上�
 | 卡片 `not written yet` | exporter 沒跑過，或 unit 的 `--status-dir` 不是 exporter 的 `status_dir` |
 | 卡片 `not readable (PermissionError)` | 檔不是 0640／group `dashboard`：§1.1 的目錄要 2750（setgid），exporter unit 的 `UMask=0027` |
 | `install-web.sh` 在 pip 那步失敗 | 主機沒網路或 PyPI 不通；會自動換回舊頁面（venv 不還原）；重跑即可（idempotent；半成品的 venv 會被重建） |
+| pip 說 `THESE PACKAGES DO NOT MATCH THE HASHES` | 下載到的 wheel 不在 `requirements.txt` 的 hash 清單裡：pin 換了版沒重產 hash（§7.5），或 index 上同版的檔案被換了——後者不要重產、先查 PyPI 的 release 頁 |
 | 第一次安裝就失敗（例如 curl 探不到） | 沒有舊頁面可回：unit 會被 disable 並移除、樹留在原地；看 stderr 的 `systemctl status`／`journalctl` 輸出，修了再重跑 |
 | 卡片 `document not shaped ...` | 頁面版本落後套件：§7.5 |
 
 ### 7.7 資安對照（計畫 §4，接 §6）
 
 - `dashboard` 帳號只讀得到 `/home/trader/status`（經 group `dashboard`、檔 0640）；unit 的 mount namespace 裡 `/home` 是空的 tmpfs，只掛三個唯讀目錄，看不到 `.env`、`*.local.yaml`、`~/.ssh`、SQLite、payloads。
-- 帳號寫得到的只有自己的 venv（pip 裝進去）；程式碼樹、home、unit 檔與回滾用的備份都是 root 的，root 不會安裝任何帳號寫得到的檔案（已知缺口：wheel 只釘版本、沒釘 hash，另開 issue）。
+- 帳號寫得到的只有自己的 venv（pip 裝進去）；程式碼樹、home、unit 檔與回滾用的備份都是 root 的，root 不會安裝任何帳號寫得到的檔案；pip 裝進 venv 的每個 wheel 都要對上 `requirements.txt` 裡的 sha256（`--require-hashes`）。
 - 只綁 loopback（非 loopback 的 `--host` 直接拒絕、沒有放寬旗標）；對外只有 `tailscale serve`，Funnel 不開，Lightsail 防火牆不動。
 - 無寫入端點：非 `GET`／`HEAD` 一律 405（在 routing 之前）；FastAPI 的 `/docs`、`/redoc`、`/openapi.json` 關閉（它們會從 CDN 載 script）。
 - 回應帶 CSP（`default-src 'none'; style-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`）、`nosniff`、`DENY`、`no-referrer`、`no-store`（樣式檔 `no-cache`）；頁面沒有任何 script，樣式檔在 repo。
 - 文件裡的自由文字（AI 的 decision reason、錯誤訊息）autoescape 顯示為純文字，且再遮罩一次 `0x` hex、截 300 字；測試證明整個 wallet／agent key 不會進頁面。
-- 依賴釘死在 `contrib/dashboard/requirements.txt`，只裝進 `dashboard` 帳號自己的 venv；不進根目錄 `requirements.txt`、不進 trader 的 venv。
+- 依賴釘死在 `contrib/dashboard/requirements.txt`（版本＋每個 wheel 的 sha256，`schedule/pin-hashes.py` 產），只裝進 `dashboard` 帳號自己的 venv；不進根目錄 `requirements.txt`、不進 trader 的 venv。

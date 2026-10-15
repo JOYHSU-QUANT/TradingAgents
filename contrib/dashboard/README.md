@@ -136,8 +136,12 @@ nothing more: it reads the JSON files above, never a store, a config or a
 `.env`; it binds the loopback for `tailscale serve` to front inside the
 tailnet (plan D1); it answers `GET` and `HEAD` and nothing else (plan D5:
 anything else is `405` before routing). FastAPI and Jinja, pinned in
-`requirements.txt`, installed on the `dashboard` account's own venv
-(RUNBOOK section 7) — the trader's venv runs the exporter and needs none of it.
+`requirements.txt` with every wheel's sha256 (`schedule/pin-hashes.py`
+writes them from PyPI; the installer and the CI job install with
+`--require-hashes`, so a wheel the index replaced under a pinned version is
+refused; the set was resolved on Python 3.12 and holds for 3.11 and up),
+installed on the `dashboard` account's own venv (RUNBOOK section 7) — the
+trader's venv runs the exporter and needs none of it.
 
 - `/` — the overview: the exporter's tick, the alerts holding, one card per
   line of `exporter.json`'s `lines[]` (the index; the directory is never
@@ -187,3 +191,9 @@ in the environment a missing install fails instead (the CI job sets it).
 (no import) and holds this package's `KNOWN_SCHEMA_VERSIONS` and the test
 documents' field names to them: a package that bumps its schema or renames
 a field fails here, in its own PR.
+
+`tests/test_requirements_hashes.py` reads `requirements.txt` as text: every
+pin carries at least one `--hash=sha256:` line, nothing else is in the file,
+the file is what `schedule/pin-hashes.py` writes (so a hand edit fails here,
+not as a pip refusal on the host), and the installer and the CI job pass
+`--require-hashes`.

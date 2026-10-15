@@ -14,7 +14,8 @@
 #      and nothing else (no .env, no local.yaml, no stores) — and the unit
 #      file from the same committed tree into /var/lib/dashboard-web/new;
 #   3. that account's own venv under /home/dashboard/venv, installed from the
-#      package's requirements.txt (pinned);
+#      package's requirements.txt (pinned, and every wheel listed by sha256:
+#      pip installs nothing whose hash is not in the file);
 #   4. the unit verified where it is staged, the swap, the unit file into
 #      /etc/systemd/system, enabled, started and probed with curl; a failure
 #      after the page was stopped restores the previous tree and unit file and
@@ -94,6 +95,13 @@ sudo -u trader git -C "$CHECKOUT" show "HEAD:contrib/dashboard/schedule/$UNIT" >
 #    on them again (the trap); the venv is not restored, so a pip failure
 #    halfway through a pin change can still leave the page down, loudly.
 command -v curl >/dev/null || { echo "install-web.sh: curl is needed for the probe" >&2; exit 1; }
+# Below 3.11 the pinned set wants a package it does not pin (exceptiongroup;
+# see the header of requirements.txt), which pip would report as a pinning
+# error: the floor is said here instead.
+"$PYTHON" -c 'import sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null || {
+    echo "install-web.sh: $PYTHON is older than 3.11; the page's pins need 3.11+ (PYTHON=... to point at one)" >&2
+    exit 1
+}
 # A .old left by a run killed mid-way (an ssh session dropping) must not be
 # what a rollback restores: only this run's .old counts.
 rm -rf "$APP_DIR.old"
@@ -143,8 +151,13 @@ if ! sudo -u $ACCOUNT -H "$VENV_DIR/bin/python" -m pip --version >/dev/null 2>&1
 fi
 # Pinned exactly, so this is a no-op (no index contact) when nothing moved;
 # no cache under the root-owned home, and no "is pip newer" query either.
+# --require-hashes: a file pip downloads is installed only when its sha256
+# is one the requirements list next to the pin (schedule/pin-hashes.py
+# writes them); a wheel replaced on the index under the same version, or a
+# pin without hashes, fails here and the trap restores the previous page.
 sudo -u $ACCOUNT -H "$VENV_DIR/bin/python" -m pip install --quiet --no-cache-dir \
-    --disable-pip-version-check -r "$APP_DIR.new/contrib/dashboard/requirements.txt"
+    --disable-pip-version-check --require-hashes \
+    -r "$APP_DIR.new/contrib/dashboard/requirements.txt"
 
 # 4. the unit, verified where it is staged before it is installed: a verify
 #    that fails, or that only warns "Unknown key name" (a hardening line this

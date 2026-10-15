@@ -32,6 +32,9 @@ UNIT=dashboard-web.service
 # Root's own: the unit file staged for verification, and the previous one
 # for a rollback. Never under the account's home, which pip writes into.
 STATE_DIR=/var/lib/dashboard-web
+# The staged unit keeps its real name (systemd-analyze verify refuses any
+# other suffix), so it is staged in a directory of its own.
+STAGE_DIR=$STATE_DIR/new
 PYTHON="${PYTHON:-python3}"
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -50,16 +53,17 @@ if ! getent group $ACCOUNT >/dev/null; then
     groupadd --system $ACCOUNT
 fi
 if ! id -u $ACCOUNT >/dev/null 2>&1; then
-    useradd --system --gid $ACCOUNT --home-dir "$HOME_DIR" --create-home \
+    useradd --system --gid $ACCOUNT --home-dir "$HOME_DIR" --no-create-home \
         --shell /usr/sbin/nologin --comment "read-only status page" $ACCOUNT
 fi
-# The home is root's, readable by the account: the tree under it is bound
-# read-only into the unit anyway, and nothing the account runs (pip, the
-# page) may replace what root installs from it. The venv alone is the
-# account's, because pip writes there.
-chown root:$ACCOUNT "$HOME_DIR"
-chmod 750 "$HOME_DIR"
+# The home is root's, readable by the account (no skeleton files either):
+# the tree under it is bound read-only into the unit anyway, and nothing
+# the account runs (pip, the page) may replace what root installs from it.
+# The venv alone is the account's, because pip writes there.
+install -d -o root -g $ACCOUNT -m 750 "$HOME_DIR"
 install -d -o root -g root -m 700 "$STATE_DIR"
+rm -rf "$STAGE_DIR"
+install -d -o root -g root -m 700 "$STAGE_DIR"
 
 # 2. the code: an archive of the committed tree, not a clone (the account
 #    needs no deploy key and gets no history). The trader's checkout is read
@@ -79,7 +83,7 @@ chmod -R u=rwX,g=rX,o= "$APP_DIR.new"
 # The unit file, from the committed tree straight into root's state
 # directory: the copy root verifies and installs is never one the account
 # could have written.
-sudo -u trader git -C "$CHECKOUT" show "HEAD:contrib/dashboard/schedule/$UNIT" > "$STATE_DIR/$UNIT.new"
+sudo -u trader git -C "$CHECKOUT" show "HEAD:contrib/dashboard/schedule/$UNIT" > "$STAGE_DIR/$UNIT"
 
 # 3. the venv, the account's own, from the pinned requirements. The page is
 #    stopped first when it is installed, active or not (a unit waiting in
@@ -122,18 +126,21 @@ rollback() {
 }
 trap 'rollback $LINENO' ERR
 if [ ! -x "$VENV_DIR/bin/python" ]; then
-    # The venv's bundled pip is enough for exact pins; an unpinned
-    # `--upgrade pip` from PyPI is one moving part this host does not need.
+    # The home is root's, so root makes the venv's directory for the account
+    # (venv fills an empty one). The venv's bundled pip is enough for exact
+    # pins; an unpinned `--upgrade pip` from PyPI is one moving part this
+    # host does not need.
+    install -d -o $ACCOUNT -g $ACCOUNT -m 750 "$VENV_DIR"
     sudo -u $ACCOUNT -H "$PYTHON" -m venv "$VENV_DIR"
 fi
 # Pinned exactly, so this is a no-op (no index contact) when nothing moved.
-sudo -u $ACCOUNT -H "$VENV_DIR/bin/python" -m pip install --quiet -r "$APP_DIR.new/contrib/dashboard/requirements.txt"
+sudo -u $ACCOUNT -H "$VENV_DIR/bin/python" -m pip install --quiet --no-cache-dir -r "$APP_DIR.new/contrib/dashboard/requirements.txt"
 
 # 4. the unit, verified where it is staged before it is installed: a verify
 #    that fails, or that only warns "Unknown key name" (a hardening line this
 #    systemd would drop), is a failure here; edit the committed unit instead
 #    (RUNBOOK section 7.2).
-STAGED="$STATE_DIR/$UNIT.new"
+STAGED="$STAGE_DIR/$UNIT"
 VERIFY_STATUS=0
 VERIFY=$(systemd-analyze verify "$STAGED" 2>&1) || VERIFY_STATUS=$?
 if [ -n "$VERIFY" ]; then
@@ -165,5 +172,6 @@ curl -sf -o /dev/null http://127.0.0.1:8787/ || {
 }
 trap - ERR
 rm -rf "$APP_DIR.old"
-rm -f "$UNIT_PREV" "$STAGED"
+rm -f "$UNIT_PREV"
+rm -rf "$STAGE_DIR"
 echo "dashboard-web: $COMMIT installed, $(systemctl is-active $UNIT); try: curl -s http://127.0.0.1:8787/ | head -5"

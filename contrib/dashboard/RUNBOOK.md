@@ -205,7 +205,7 @@ sudo /home/trader/TradingAgents/contrib/dashboard/schedule/install-web.sh
 
 它只做四件事：建 `dashboard` 系統帳號（primary group `dashboard`、無 shell；home 是 root 的、帳號只能讀）；用 `git archive` 把 `contrib/__init__.py`、
 `contrib/core`、`contrib/dashboard` 抄到 `/home/dashboard/app`（root 擁有、帳號只讀；沒有 `.env`、沒有 local.yaml、沒有 tests）並寫 `COMMIT`，
-unit 檔則從同一個 committed tree 直接取到 root 的 `/var/lib/dashboard-web/`（root 驗證與安裝的檔案永遠不是帳號寫得到的）；
+unit 檔則從同一個 committed tree 直接取到 root 的 `/var/lib/dashboard-web/new/`（保留原檔名，`systemd-analyze verify` 只認合法的 unit 名；root 驗證與安裝的檔案永遠不是帳號寫得到的）；
 先停頁面、建 `/home/dashboard/venv` 並照 `contrib/dashboard/requirements.txt`（整組釘死）裝；`systemd-analyze verify` 暫存的 unit、換樹、裝 `dashboard-web.service`、enable、start，
 再用 curl 探到頁面真的回應才算裝好（`Type=simple` 一 fork 就算 active，不能信）。停頁面之後任何一步失敗都會把舊樹與舊 unit 檔換回去、把頁面重新啟動
 （venv 不會還原：pin 換版到一半 pip 失敗時頁面可能還是起不來，但 stderr 會說）。

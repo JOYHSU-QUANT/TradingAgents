@@ -136,8 +136,14 @@ nothing more: it reads the JSON files above, never a store, a config or a
 `.env`; it binds the loopback for `tailscale serve` to front inside the
 tailnet (plan D1); it answers `GET` and `HEAD` and nothing else (plan D5:
 anything else is `405` before routing). FastAPI and Jinja, pinned in
-`requirements.txt`, installed on the `dashboard` account's own venv
-(RUNBOOK section 7) — the trader's venv runs the exporter and needs none of it.
+`requirements.txt` with every wheel's sha256 (`schedule/pin-hashes.py`
+writes them from PyPI; the installer and the CI job install with
+`--require-hashes`, so a wheel the index replaced under a pinned version is
+refused; the set was resolved on Python 3.12 and holds for 3.11 and up),
+installed on the `dashboard` account's own venv (RUNBOOK section 7), which
+the installer remakes whenever `requirements.txt` differs from the one it
+recorded at the last install that went live (pip hashes only what it
+downloads) — the trader's venv runs the exporter and needs none of it.
 
 - `/` — the overview: the exporter's tick, the alerts holding, one card per
   line of `exporter.json`'s `lines[]` (the index; the directory is never
@@ -187,3 +193,13 @@ in the environment a missing install fails instead (the CI job sets it).
 (no import) and holds this package's `KNOWN_SCHEMA_VERSIONS` and the test
 documents' field names to them: a package that bumps its schema or renames
 a field fails here, in its own PR.
+
+`tests/test_requirements_hashes.py` reads `requirements.txt` as text: every
+pin carries at least one `--hash=sha256:` line, nothing else is in the file,
+and the file is shaped as `schedule/pin-hashes.py` writes it (a bare pin or
+a stray line fails here; a hand-edited digest is well-formed and is pip's to
+refuse on the host). The same file holds the installer's order (the record
+removed and the venv set aside before pip, restored in the rollback, the
+record written only after the probe), the CI step's exact command line and
+order, `deploy.yml`'s red run on a hash refusal, and the script's own
+behaviour (grammar refusals, idempotent rewrite, wheel selection, LF).

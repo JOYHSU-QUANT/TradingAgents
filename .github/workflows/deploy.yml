@@ -58,11 +58,24 @@ jobs:
           fi
           # The read-only page (contrib/dashboard/RUNBOOK.md section 7) runs
           # from its own copy of the package; when it is installed, the
-          # installer takes the new commit (and restores the previous tree and
-          # unit file if any step after the stop fails). A page that fails to upgrade is a
-          # warning on the run, not a failed deploy of the daemons.
+          # installer takes the new commit (and restores the previous tree, unit
+          # file and venv if any step after the stop fails). A page that fails to upgrade is a
+          # warning on the run, not a failed deploy of the daemons — except a
+          # wheel pip refused because its hash is not in requirements.txt
+          # (--require-hashes): the daemons are deployed by now, so the run
+          # goes red for that one, and RUNBOOK section 7.6 says what to check.
           if systemctl is-enabled --quiet dashboard-web.service 2>/dev/null; then
-            sudo bash /home/trader/TradingAgents/contrib/dashboard/schedule/install-web.sh ||
+            # Captured, not piped: this shell has no pipefail, and a pipe
+            # would report tee's status, not the installer's.
+            if out=$(sudo bash /home/trader/TradingAgents/contrib/dashboard/schedule/install-web.sh 2>&1); then
+              printf '%s\n' "$out"
+            else
+              printf '%s\n' "$out"
+              if grep -q "DO NOT MATCH THE HASHES" <<<"$out"; then
+                echo "::error::dashboard-web: pip refused a wheel whose hash is not in requirements.txt ($(systemctl is-active dashboard-web.service)); do not regenerate the hashes before reading RUNBOOK section 7.6"
+                exit 1
+              fi
               echo "::warning::dashboard-web: install-web.sh failed ($(systemctl is-active dashboard-web.service)); check systemctl status dashboard-web on the host"
+            fi
           fi
           EOF

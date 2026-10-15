@@ -14,11 +14,14 @@
 #      and nothing else (no .env, no local.yaml, no stores) — and the unit
 #      file from the same committed tree into /var/lib/dashboard-web/new;
 #   3. that account's own venv under /home/dashboard/venv, installed from the
-#      package's requirements.txt (pinned);
+#      package's requirements.txt (pinned, and every wheel listed by sha256:
+#      pip installs nothing whose hash is not in the file; the venv is made
+#      afresh whenever that file differs from the one root recorded at the
+#      last install that went live);
 #   4. the unit verified where it is staged, the swap, the unit file into
 #      /etc/systemd/system, enabled, started and probed with curl; a failure
-#      after the page was stopped restores the previous tree and unit file and
-#      starts the page on them again.
+#      after the page was stopped restores the previous tree, unit file and,
+#      when this run set one aside, venv, and starts the page on them again.
 # It never touches the trader's files, the exporter or the daemons.
 
 set -euo pipefail
@@ -87,16 +90,27 @@ sudo -u trader git -C "$CHECKOUT" show "HEAD:contrib/dashboard/schedule/$UNIT" >
 
 # 3. the venv, the account's own, from the pinned requirements. The page is
 #    stopped first when it is installed, active or not (a unit waiting in
-#    auto-restart would come back mid-swap): pip writes into the venv the
-#    running page imports from (a no-op while the pins hold, a few seconds
-#    when they moved), and the tree is swapped next. From the stop on, a
+#    auto-restart would come back mid-swap): while requirements.txt matches
+#    root's record pip is a no-op on the venv the page imports from; when it
+#    differs (or there is no record: the first run of this version) that
+#    venv is set aside and a new one is built, every wheel downloaded and
+#    verified, taking a minute on the small host; the tree is swapped next.
+#    From the stop on, a
 #    failure restores the previous tree and unit file and starts the page
-#    on them again (the trap); the venv is not restored, so a pip failure
-#    halfway through a pin change can still leave the page down, loudly.
+#    on them again (the trap), the venv included when this run set one
+#    aside to make a new one.
 command -v curl >/dev/null || { echo "install-web.sh: curl is needed for the probe" >&2; exit 1; }
+# Below 3.11 the pinned set wants a package it does not pin (exceptiongroup;
+# see the header of requirements.txt), which pip would report as a pinning
+# error: the floor is said here instead.
+command -v "$PYTHON" >/dev/null || { echo "install-web.sh: $PYTHON not found (PYTHON=... to point at one)" >&2; exit 1; }
+"$PYTHON" -c 'import sys; sys.exit(sys.version_info < (3, 11))' || {
+    echo "install-web.sh: $PYTHON is older than 3.11; the page's pins need 3.11+ (PYTHON=... to point at one)" >&2
+    exit 1
+}
 # A .old left by a run killed mid-way (an ssh session dropping) must not be
 # what a rollback restores: only this run's .old counts.
-rm -rf "$APP_DIR.old"
+rm -rf "$APP_DIR.old" "$VENV_DIR.old"
 UNIT_PREV="$STATE_DIR/$UNIT.prev"
 rm -f "$UNIT_PREV"
 if [ -f /etc/systemd/system/$UNIT ]; then
@@ -117,6 +131,10 @@ rollback() {
         rm -rf "$APP_DIR" || true
         mv "$APP_DIR.old" "$APP_DIR" || true
     fi
+    if [ -d "$VENV_DIR.old" ]; then
+        rm -rf "$VENV_DIR" || true
+        mv "$VENV_DIR.old" "$VENV_DIR" || true
+    fi
     if [ -f "$UNIT_PREV" ]; then
         install -m 644 "$UNIT_PREV" /etc/systemd/system/$UNIT || true
         systemctl daemon-reload || true
@@ -131,20 +149,41 @@ rollback() {
     echo "dashboard-web: $(systemctl is-active $UNIT 2>/dev/null || true) on $(cat "$APP_DIR/COMMIT" 2>/dev/null || echo '?')" >&2
 }
 trap 'rollback $LINENO' ERR
-if ! sudo -u $ACCOUNT -H "$VENV_DIR/bin/python" -m pip --version >/dev/null 2>&1; then
-    # No venv, or a half-made one (python3-venv missing leaves a python
-    # without pip): made afresh. The home is root's, so root makes the
-    # venv's directory for the account (venv fills an empty one). The venv's
-    # bundled pip is enough for exact pins; an unpinned `--upgrade pip` from
-    # PyPI is one moving part this host does not need.
-    rm -rf "$VENV_DIR"
+# --require-hashes checks a file pip downloads, not one already installed at
+# the pinned version: a venv made before the hashes were listed, or one
+# whose requirements moved under it, would keep what it has unverified. So
+# the venv is made afresh whenever the requirements file differs from the
+# one the last install that went live recorded (root's record, in
+# STATE_DIR, which the account cannot write; written at the very end), and
+# is reused, with pip a no-op (no index contact), while the file is the same.
+REQUIREMENTS="$APP_DIR.new/contrib/dashboard/requirements.txt"
+REQUIREMENTS_SUM=$(sha256sum "$REQUIREMENTS" | cut -d' ' -f1)
+REQUIREMENTS_RECORD="$STATE_DIR/requirements.sha256"
+if [ "$(cat "$REQUIREMENTS_RECORD" 2>/dev/null)" != "$REQUIREMENTS_SUM" ] ||
+    ! sudo -u $ACCOUNT -H "$VENV_DIR/bin/python" -m pip --version >/dev/null 2>&1; then
+    # No venv, a half-made one (python3-venv missing leaves a python without
+    # pip), or one installed from another requirements file: made afresh.
+    # The home is root's, so root makes the venv's directory for the account
+    # (venv fills an empty one). The venv's bundled pip is enough for exact
+    # pins; an unpinned `--upgrade pip` from PyPI is one moving part this
+    # host does not need.
+    rm -f "$REQUIREMENTS_RECORD"
+    # The venv in use is set aside, not removed: a pip failure (PyPI down, a
+    # hash refused) must leave the previous page something to run on, and
+    # the trap moves it back. A venv holds absolute paths, so the new one is
+    # built where it will live.
+    if [ -d "$VENV_DIR" ]; then mv "$VENV_DIR" "$VENV_DIR.old"; fi
     install -d -o $ACCOUNT -g $ACCOUNT -m 750 "$VENV_DIR"
     sudo -u $ACCOUNT -H "$PYTHON" -m venv "$VENV_DIR"
 fi
-# Pinned exactly, so this is a no-op (no index contact) when nothing moved;
-# no cache under the root-owned home, and no "is pip newer" query either.
+# No cache under the root-owned home, and no "is pip newer" query either.
+# --require-hashes: a file pip downloads is installed only when its sha256
+# is one the requirements list next to the pin (schedule/pin-hashes.py
+# writes them); a wheel replaced on the index under the same version, or a
+# pin without hashes, fails here and the trap restores the previous page.
 sudo -u $ACCOUNT -H "$VENV_DIR/bin/python" -m pip install --quiet --no-cache-dir \
-    --disable-pip-version-check -r "$APP_DIR.new/contrib/dashboard/requirements.txt"
+    --disable-pip-version-check --require-hashes \
+    -r "$REQUIREMENTS"
 
 # 4. the unit, verified where it is staged before it is installed: a verify
 #    that fails, or that only warns "Unknown key name" (a hardening line this
@@ -181,7 +220,11 @@ curl -sf -o /dev/null http://127.0.0.1:8787/ || {
     false
 }
 trap - ERR
-rm -rf "$APP_DIR.old"
+# The record is written only for a venv that went live: a failure between
+# pip and here puts the previous venv back, and a record of the new one
+# would let the next run reuse that old venv unverified.
+echo "$REQUIREMENTS_SUM" > "$REQUIREMENTS_RECORD"
+rm -rf "$APP_DIR.old" "$VENV_DIR.old"
 rm -f "$UNIT_PREV"
 rm -rf "$STAGE_DIR"
 echo "dashboard-web: $COMMIT installed, $(systemctl is-active $UNIT); try: curl -s http://127.0.0.1:8787/ | head -5"

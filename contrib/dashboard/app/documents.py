@@ -324,7 +324,7 @@ def _history(status_dir: Path, name: str, now: datetime) -> tuple[Row, tuple[Cha
             drawn = chart([parse_point(point) for point in series.points], _s(series.label))
             if drawn is not None:
                 charts.append(drawn)
-    except (ValueError, OverflowError) as exc:
+    except (ValueError, ArithmeticError) as exc:
         # A stored series parses and rises (the model holds it); this is the
         # guard for a page that outlives the model, and it is a row.
         return Row("history", f"{_s(file)} cannot be charted ({type(exc).__name__})", WARN), ()

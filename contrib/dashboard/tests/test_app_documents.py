@@ -951,3 +951,17 @@ def test_a_long_history_reaches_the_page_thinned(tmp_path):
     assert hl is not None
     equity = next(chart for chart in hl.charts if chart.title == "account equity (USDC)")
     assert equity.count == 3000 and equity.points.count(" ") + 1 <= 1281
+
+
+def test_a_value_of_thirty_digits_labels_without_a_context_error(tmp_path):
+    from contrib.dashboard.history import history_file
+
+    directory = status_dir(tmp_path)
+    path = directory / history_file("carry")
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["series"]["net"]["points"][0][1] = "123456789012345678901234567.891"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    carry = load_line(directory, "carry", now=NOW, stale=STALE)
+    assert carry is not None and carry.charts
+    net = next(chart for chart in carry.charts if chart.title == "net per day (USDC)")
+    assert net.labels[0].text == "123456789012345678901234567.89"

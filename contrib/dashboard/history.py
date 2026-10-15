@@ -218,13 +218,24 @@ def _points(
     value_key: str,
     instant: Callable[[object], str] = _instant_text,
 ) -> tuple[Point, ...]:
-    """One point per row that carries a value under ``value_key``; a row with none is skipped."""
+    """One point per row that carries a value under ``value_key``, oldest first, one per second.
+
+    A row with no value is skipped. Two rows in one second (the perp store
+    stamps microseconds; a fill and the cycle's end can share a second) are
+    the later one; a row earlier than the one before it (a clock step) is
+    skipped — a :class:`Series` holds rising instants.
+    """
     points: list[Point] = []
     for row in rows:
         value = row.get(value_key)
         if value is None:
             continue
-        points.append((instant(row.get(instant_key)), _decimal_text(value)))
+        point = (instant(row.get(instant_key)), _decimal_text(value))
+        if points and point[0] <= points[-1][0]:
+            if point[0] == points[-1][0]:
+                points[-1] = point
+            continue
+        points.append(point)
     return tuple(points)
 
 

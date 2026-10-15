@@ -678,3 +678,36 @@ def test_the_kinds_harvested_are_the_configs_kinds_and_the_host():
     from contrib.dashboard.history import HARVESTED_KINDS
 
     assert set(_KINDS) | {HOST_KIND} == HARVESTED_KINDS
+
+
+# --- the second review-loop round -----------------------------------------------------
+
+
+def test_two_perp_snapshots_in_one_second_are_the_later_one_and_a_clock_step_is_skipped():
+    same_second = _with_snapshots(
+        _snapshot(NOW - timedelta(hours=1, microseconds=900000), "10000"),
+        _snapshot(NOW - timedelta(hours=1, microseconds=300000), "10001"),
+        _snapshot(NOW - timedelta(hours=1, microseconds=100000), "10002"),
+        _snapshot(NOW, "10003"),
+    )
+    series = harvest("hyperliquid", same_second)
+    assert [value for _, value in series["equity"].points] == ["10002", "10003"]
+    stepped = _with_snapshots(
+        _snapshot(NOW - timedelta(hours=2), "1"),
+        _snapshot(NOW, "3"),
+        _snapshot(NOW - timedelta(hours=1), "2"),
+    )
+    assert [value for _, value in harvest("hyperliquid", stepped)["equity"].points] == ["1", "3"]
+
+
+def test_a_history_the_model_refuses_is_reported_with_its_reason(tmp_path, monkeypatch):
+    from contrib.dashboard import exporter as module
+
+    def refuse(*args, **kwargs):
+        raise ValueError("points do not rise")
+
+    monkeypatch.setattr(module, "advance_history", refuse)
+    _, report = _tick(tmp_path, quiet_documents())
+    assert (
+        report.history_errors[0].why == "the history could not be carried on (points do not rise)"
+    )

@@ -208,7 +208,7 @@ def _keep_history(
             min_interval=min_interval,
         )
     except ValueError as exc:  # the model refused what was built (a reader would too)
-        return False, f"the history could not be carried on ({type(exc).__name__})"
+        return False, f"the history could not be carried on ({exc})"
     if history is not None and replace(advanced, generated_at=history.generated_at) == history:
         return False, None
     try:

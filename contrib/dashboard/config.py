@@ -75,6 +75,8 @@ RESERVED_NAMES = frozenset({"host", "alerts", "exporter", "alerts-state", "histo
 ENV_PREFIX = "DASHBOARD_"
 _CLOCK = re.compile(r"^\d\d?:\d\d$")
 _DEFAULT_SMTP_PORT = 587
+# The host is sampled at most this far apart: a day (a wider gap is a typo).
+MAX_HOST_SAMPLE_MINUTES = 24 * 60
 
 
 @dataclass(frozen=True)
@@ -113,8 +115,8 @@ class HistorySettings:
     def __post_init__(self) -> None:
         if self.max_points < MIN_POINTS:
             raise ValueError(f"max_points is at least {MIN_POINTS}")
-        if self.host_sample_minutes < 1:
-            raise ValueError("host_sample_minutes is at least 1")
+        if not 1 <= self.host_sample_minutes <= MAX_HOST_SAMPLE_MINUTES:
+            raise ValueError(f"host_sample_minutes is 1 to {MAX_HOST_SAMPLE_MINUTES}")
 
 
 @dataclass(frozen=True)
@@ -386,12 +388,10 @@ def _history(raw: object, where: str) -> HistorySettings:
     max_points = _int(mapping, "max_points", where, HistorySettings.max_points)
     if max_points < MIN_POINTS:
         raise ConfigError(f"{where}.max_points must be at least {MIN_POINTS}")
-    return HistorySettings(
-        max_points=max_points,
-        host_sample_minutes=_int(
-            mapping, "host_sample_minutes", where, HistorySettings.host_sample_minutes
-        ),
-    )
+    minutes = _int(mapping, "host_sample_minutes", where, HistorySettings.host_sample_minutes)
+    if minutes > MAX_HOST_SAMPLE_MINUTES:
+        raise ConfigError(f"{where}.host_sample_minutes must be at most {MAX_HOST_SAMPLE_MINUTES}")
+    return HistorySettings(max_points=max_points, host_sample_minutes=minutes)
 
 
 def _common(mapping: Mapping[str, Any], where: str, base: Path) -> dict[str, Any]:

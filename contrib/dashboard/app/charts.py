@@ -15,7 +15,7 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from decimal import ROUND_HALF_EVEN, Decimal
+from decimal import Decimal
 from typing import Literal
 
 from ..times import show_when, span_text
@@ -65,15 +65,17 @@ class Chart:
     viewbox: str = field(init=False, default=f"0 0 {_WIDTH} {_HEIGHT}")
 
 
-# A label never shows more than this many decimals (the file keeps them all).
-_LABEL_DECIMALS = Decimal("0.01")
+# A label never shows more than two decimals (the file keeps them all).
+_LABEL_FORMAT = ".2f"
 
 
 def _label(value: Decimal) -> str:
     """``value`` as a label: plain digits, at most two decimals (``10234.56``, never ``1E+4``)."""
     if value == value.to_integral_value():
         return format(value, "f")
-    return format(value.quantize(_LABEL_DECIMALS, rounding=ROUND_HALF_EVEN), "f")
+    # ``format`` rounds without the context's precision: a 30-digit value
+    # labels as well as a 5-digit one (``quantize`` would refuse it).
+    return format(value, _LABEL_FORMAT)
 
 
 def _thinned(points: Sequence[_Point]) -> list[_Point]:

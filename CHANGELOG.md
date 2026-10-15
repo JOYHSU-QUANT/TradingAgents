@@ -8,6 +8,19 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`contrib/dashboard`: the `history/` directory keeps its setgid bit.** The
+  exporter made it `2750` by name, and a chmod that names the bit has the
+  kernel drop it for a user outside the directory's group (trader is not in
+  `dashboard`), so the files written there took the trader group and the
+  page's account could not read them (`not readable (PermissionError)` on
+  every history row). The directory is now made `750` with whatever setgid
+  it inherited from the status directory kept, and the test holds the bit
+  across two ticks under a setgid parent. A host that already has the
+  directory: `chmod g+s /home/trader/status/history` and `chgrp dashboard`
+  its files once (RUNBOOK section 7.6).
+
 ### Added
 
 - **`contrib/dashboard`: history curves (dashboard plan PR 5).** Each tick the

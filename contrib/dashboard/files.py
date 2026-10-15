@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from collections.abc import Mapping
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
@@ -23,10 +24,12 @@ from contrib.core.atomic_io import atomic_write_text
 __all__ = ["dump_json", "ensure_private_dir", "read_json_object", "write_private"]
 
 _FILE_MODE = 0o640
-# A directory under the status directory: group can enter and read, setgid
-# so what is written there keeps the dashboard group (as the RUNBOOK makes
-# the status directory itself, 2750).
-_DIR_MODE = 0o2750
+# A directory under the status directory: group can enter and read. The
+# setgid bit, which keeps what is written there in the dashboard group, is
+# inherited from the status directory (the RUNBOOK makes it 2750, as root)
+# and never set here: the exporter runs as trader, who is not in the
+# dashboard group, and chmod by such a user clears the bit instead.
+_DIR_MODE = 0o750
 
 
 def write_private(path: Path, text: str) -> None:
@@ -36,9 +39,14 @@ def write_private(path: Path, text: str) -> None:
 
 
 def ensure_private_dir(path: Path) -> None:
-    """Make ``path`` (one directory under the status directory) if it is not there, mode 2750."""
+    """Make ``path`` (one directory under the status directory) if it is not there, mode 750.
+
+    The setgid bit the directory inherited from its parent is kept: a chmod
+    that named it would have the kernel drop it (the owner is not in the
+    directory's group), and with it the group of every file written later.
+    """
     path.mkdir(exist_ok=True)
-    os.chmod(path, _DIR_MODE)
+    os.chmod(path, _DIR_MODE | (path.stat().st_mode & stat.S_ISGID))
 
 
 def _default(value: object) -> Any:

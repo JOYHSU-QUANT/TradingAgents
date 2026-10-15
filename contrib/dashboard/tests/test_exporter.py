@@ -296,13 +296,31 @@ def _keys_of(value) -> list[str]:
 
 
 @pytest.mark.skipif(os.name != "posix", reason="file modes are POSIX")
-def test_every_file_written_is_mode_0640_and_the_history_directory_2750(tmp_path):
-    config, _, _ = _run(tmp_path, quiet_documents())
+def test_every_file_written_is_mode_0640_and_the_history_directory_keeps_the_setgid(tmp_path):
+    """The RUNBOOK makes the status directory 2750 as root; ``history/`` inherits the bit and keeps it."""
+    import stat
+
+    config = build_config(tmp_path)
+    config.status_dir.mkdir(parents=True)
+    config.status_dir.chmod(0o2750)
+    assert config.status_dir.stat().st_mode & stat.S_ISGID, (
+        "the test's own group lets it set the bit"
+    )
+    _run(tmp_path, quiet_documents(), config=config)
     for path in config.status_dir.rglob("*"):
         if path.is_dir():
             assert (path.stat().st_mode & 0o7777) == 0o2750, path
         else:
             assert (path.stat().st_mode & 0o777) == 0o640, path
+    # Twice: the bit survives the second tick's chmod as well.
+    _run(tmp_path, quiet_documents(), config=config)
+    assert (config.status_dir / "history").stat().st_mode & 0o7777 == 0o2750
+
+
+@pytest.mark.skipif(os.name != "posix", reason="file modes are POSIX")
+def test_a_history_directory_without_a_setgid_parent_is_0750(tmp_path):
+    config, _, _ = _run(tmp_path, quiet_documents())
+    assert (config.status_dir / "history").stat().st_mode & 0o7777 == 0o750
 
 
 def test_dump_json_refuses_what_is_not_a_document():

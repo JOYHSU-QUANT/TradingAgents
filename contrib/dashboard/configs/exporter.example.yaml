@@ -34,6 +34,14 @@ thresholds:
   disk_used_pct: 85
   memory_available_mb: 200
 
+# The history the exporter keeps under <status_dir>/history/ for the page's
+# charts (dashboard plan PR 5); these are the defaults, so the block can be
+# left out. max_points bounds every series (the oldest points fall off); the
+# host is sampled every tick and thinned to one point per host_sample_minutes.
+history:
+  max_points: 4000
+  host_sample_minutes: 10
+
 # The lines. Each kind's keys:
 #   hyperliquid: python, cwd, unit, db, run_id [, segment_marker, recent]
 #   uniswap:     python, cwd, unit, config, db, run_id [, bars]

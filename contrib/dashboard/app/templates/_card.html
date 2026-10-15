@@ -23,6 +23,18 @@
     <figcaption>{{ c.sparkline.label }}: {{ c.sparkline.first }} → {{ c.sparkline.last }} ({{ c.sparkline.count }} points)</figcaption>
   </figure>
   {% endif %}
+  {% for ch in c.charts %}
+  <figure class="chart">
+    <figcaption>{{ ch.title }}: {{ ch.first }} → {{ ch.last }} ({{ ch.count }} points over {{ ch.span }})</figcaption>
+    <svg viewBox="{{ ch.viewbox }}" role="img" aria-label="{{ ch.title }}">
+      <polyline class="axes" points="{{ ch.axes }}" />
+      <polyline points="{{ ch.points }}" />
+      {% for l in ch.labels %}
+      <text class="{{ l.cls }}" x="{{ l.x }}" y="{{ l.y }}" text-anchor="{{ l.anchor }}">{{ l.text }}</text>
+      {% endfor %}
+    </svg>
+  </figure>
+  {% endfor %}
   {% for t in c.tables %}
   <h3>{{ t.title }}</h3>
   {% if t.rows %}

@@ -1,7 +1,8 @@
 """The web layer: a FastAPI application that renders :mod:`.documents` with Jinja.
 
-Three routes, all ``GET`` and ``HEAD``: ``/`` the overview, ``/line/<name>``
-one line with its tables, ``/static/style.css`` the stylesheet. Any other
+Four routes, all ``GET`` and ``HEAD``: ``/`` the overview, ``/line/<name>``
+one line with its tables and history charts, ``/host`` the host with its,
+``/static/style.css`` the stylesheet. Any other
 method is answered ``405`` before routing — the page writes nothing (plan
 D5) — and the interactive docs FastAPI would add are off (they load scripts
 from a CDN; plan §4 keeps every asset in the repo).
@@ -32,7 +33,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ..times import show_when, utc_now
 from . import DEFAULT_TITLE
-from .documents import load_line, load_page
+from .documents import load_host, load_line, load_page
 
 __all__ = ["SECURITY_HEADERS", "PageSettings", "build_app"]
 
@@ -135,6 +136,12 @@ def build_app(settings: PageSettings, *, now: Callable[[], datetime] = utc_now) 
         card = load_line(settings.status_dir, name, now=moment, stale=settings.stale)
         if card is None:
             raise HTTPException(status_code=404, detail="no such line")
+        return render("line.html", line=card, now=show_when(moment))
+
+    @app.api_route("/host", methods=["GET", "HEAD"])
+    def host() -> HTMLResponse:
+        moment = now()
+        card = load_host(settings.status_dir, now=moment, stale=settings.stale)
         return render("line.html", line=card, now=show_when(moment))
 
     app.mount("/static", StaticFiles(directory=str(_STATIC)))

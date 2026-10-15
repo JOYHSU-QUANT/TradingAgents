@@ -102,12 +102,14 @@ def test_a_quiet_first_tick_writes_every_document_and_mails_only_the_digest(tmp_
         "carry-perp.json",
         "carry.json",
         "exporter.json",
+        "history",
         "hl-paper.json",
         "host.json",
         "uniswap-ai.json",
         "uniswap-carry.json",
         "uniswap-trend.json",
     ]
+    assert (status / "history").is_dir() and len(list((status / "history").iterdir())) == 7
     assert _json(status / "hl-paper.json") == quiet_documents()[HL_KEY]
     assert (status / "hl-paper.json").read_text(encoding="utf-8").endswith("}\n")
     host = _json(status / "host.json")
@@ -271,7 +273,8 @@ def test_read_and_judge_writes_nothing(tmp_path):
 def test_the_documents_name_no_secret_field_and_carry_no_hex_key(tmp_path):
     config, _, _ = _run(tmp_path, quiet_documents(), ON)
     forbidden = re.compile(r"key|secret|password|mnemonic", re.IGNORECASE)
-    for name in ("host.json", "alerts.json", "exporter.json", STATE_FILE):
+    histories = [f"history/{p.name}" for p in (config.status_dir / "history").iterdir()]
+    for name in ("host.json", "alerts.json", "exporter.json", STATE_FILE, *histories):
         document = _json(config.status_dir / name)
         keys = _keys_of(document)
         assert not [k for k in keys if forbidden.search(k)], (name, keys)
@@ -293,10 +296,13 @@ def _keys_of(value) -> list[str]:
 
 
 @pytest.mark.skipif(os.name != "posix", reason="file modes are POSIX")
-def test_every_file_written_is_mode_0640(tmp_path):
+def test_every_file_written_is_mode_0640_and_the_history_directory_2750(tmp_path):
     config, _, _ = _run(tmp_path, quiet_documents())
-    for path in config.status_dir.iterdir():
-        assert (path.stat().st_mode & 0o777) == 0o640, path
+    for path in config.status_dir.rglob("*"):
+        if path.is_dir():
+            assert (path.stat().st_mode & 0o7777) == 0o2750, path
+        else:
+            assert (path.stat().st_mode & 0o777) == 0o640, path
 
 
 def test_dump_json_refuses_what_is_not_a_document():

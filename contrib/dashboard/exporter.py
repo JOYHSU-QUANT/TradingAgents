@@ -16,10 +16,14 @@ In this order, so that nothing that can fail later loses what was found:
    (``<line>.json``, kept from the last good read when this one failed),
    ``host.json`` and ``alerts.json`` (the conditions holding, the notes,
    the recent events, the letters still pending);
-6. ping the dead-man URL — plain when the tick is whole, ``/fail`` when a
+6. carry the histories on (:mod:`.history`): each line's and the host's
+   series under ``history/``, harvested from the documents just read; a
+   history file this build cannot read is left as it is and named in
+   ``exporter.json``;
+7. ping the dead-man URL — plain when the tick is whole, ``/fail`` when a
    letter could not be sent (so the watchdog knows the mail path is down);
-7. write ``exporter.json``: how each read went, how the mail and the ping
-   went, how long the tick took.
+8. write ``exporter.json``: how each read went, how the mail and the ping
+   went, which histories were not kept, how long the tick took.
 
 Everything under the status directory is written by :mod:`.files` — atomic,
 mode 0640 — for the dashboard account to read and nothing else. ``check``
@@ -31,14 +35,26 @@ from __future__ import annotations
 import http.client
 import time
 import urllib.request
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from .alerts import Evaluation, State, advance, evaluate, load_state, save_state
-from .config import ExporterConfig, MailSettings, Settings
-from .files import dump_json, write_private
+from .config import ExporterConfig, HistorySettings, MailSettings, Settings
+from .files import dump_json, ensure_private_dir, write_private
+from .history import (
+    HISTORY_DIR,
+    HOST_KIND,
+    HarvestError,
+    HistoryError,
+    advance as advance_history,
+    dump as dump_history,
+    harvest,
+    history_file,
+    load_history,
+)
 from .host import HostFacts, read_host
 from .mail import (
     MailError,
@@ -56,6 +72,7 @@ __all__ = [
     "HostReader",
     "TickReport",
     "failure_lines",
+    "history_lines",
     "read_and_judge",
     "run_once",
     "summary_line",
@@ -85,6 +102,8 @@ class TickReport:
     ping: str | None
     ping_error: str | None
     written: tuple[str, ...]
+    # The histories not kept this tick: ``(name, why)``; the host's under ``host``.
+    history_errors: tuple[tuple[str, str], ...]
     duration_ms: int
 
 
@@ -101,6 +120,7 @@ def _alerts_document(now: datetime, state: State, evaluation: Evaluation) -> dic
 
 
 def _exporter_document(now: datetime, report: TickReport) -> dict[str, Any]:
+    history_errors = dict(report.history_errors)
     return {
         "schema_version": 1,
         "source": "dashboard",
@@ -121,9 +141,11 @@ def _exporter_document(now: datetime, report: TickReport) -> dict[str, Any]:
                 "document_generated_at": (
                     read.document.get("generated_at") if read.document is not None else None
                 ),
+                "history_error": history_errors.get(read.name),
             }
             for read in report.reads
         ],
+        "host_history_error": history_errors.get(HOST_KIND),
         "mail": {
             "enabled": report.mail_enabled,
             "sent": report.mailed,
@@ -137,6 +159,99 @@ def _exporter_document(now: datetime, report: TickReport) -> dict[str, Any]:
             "error": report.ping_error,
         },
     }
+
+
+def _keep_history(
+    status_dir: Path,
+    name: str,
+    *,
+    kind: str,
+    run: str,
+    document: Mapping[str, Any],
+    now: datetime,
+    max_points: int,
+    min_interval: timedelta,
+) -> tuple[bool, str | None]:
+    """Carry ``history/<name>.json`` on by ``document``: ``(written, why not kept)``.
+
+    Not written when nothing changed (most ticks add no point): the file
+    then still says when its series last changed. A file this build cannot
+    read is left untouched (an operator moves it aside, as with the state
+    file); a document the harvest cannot read leaves the history as it was;
+    a file that cannot be written is reported.
+    """
+    path = status_dir / history_file(name)
+    try:
+        history = load_history(path)
+    except HistoryError as exc:
+        return False, f"{path.name} is not a history this build reads ({exc}); move it aside"
+    try:
+        harvested = harvest(kind, document)
+    except HarvestError as exc:
+        return False, f"the document is not shaped as this build harvests it ({exc})"
+    advanced = advance_history(
+        history,
+        line=name,
+        kind=kind,
+        run=run,
+        harvested=harvested,
+        now=now,
+        max_points=max_points,
+        min_interval=min_interval,
+    )
+    if history is not None and replace(advanced, generated_at=history.generated_at) == history:
+        return False, None
+    try:
+        write_private(path, dump_json(dump_history(advanced), compact=True))
+    except OSError as exc:
+        return False, f"{path.name} could not be written ({type(exc).__name__})"
+    return True, None
+
+
+def _keep_histories(
+    status_dir: Path,
+    reads: Sequence[LineRead],
+    host: HostFacts,
+    now: datetime,
+    settings: HistorySettings,
+) -> tuple[list[str], list[tuple[str, str]]]:
+    """Step 6: every readable line's history and the host's; ``(files written, (name, why) not kept)``.
+
+    A history that cannot be kept — the directory cannot be made, a file
+    cannot be read or written — is reported, never raised: the tick's ping
+    and ``exporter.json`` still follow.
+    """
+    written: list[str] = []
+    errors: list[tuple[str, str]] = []
+    try:
+        ensure_private_dir(status_dir / HISTORY_DIR)
+    except OSError as exc:
+        why = f"{HISTORY_DIR}/ could not be made ({type(exc).__name__})"
+        return [], [(read.name, why) for read in reads if read.ok] + [(HOST_KIND, why)]
+
+    def keep(name: str, kind: str, run: str, document: Mapping[str, Any], gap: timedelta) -> None:
+        was_written, error = _keep_history(
+            status_dir,
+            name,
+            kind=kind,
+            run=run,
+            document=document,
+            now=now,
+            max_points=settings.max_points,
+            min_interval=gap,
+        )
+        if was_written:
+            written.append(history_file(name))
+        if error is not None:
+            errors.append((name, error))
+
+    for read in reads:
+        if read.document is not None:
+            keep(read.name, read.kind, read.run_label, read.document, timedelta(0))
+    # The host's document is host.json's shape: the harvest reads the same keys.
+    host_gap = timedelta(minutes=settings.host_sample_minutes)
+    keep(HOST_KIND, HOST_KIND, host.hostname, asdict(host), host_gap)
+    return written, errors
 
 
 def _ping(url: str, *, urlopen: _Urlopen) -> str | None:
@@ -259,6 +374,8 @@ def run_once(
     written.append("host.json")
     write_private(status_dir / "alerts.json", dump_json(_alerts_document(now, state, evaluation)))
     written.append("alerts.json")
+    kept, history_errors = _keep_histories(status_dir, reads, host, now, config.history)
+    written.extend(kept)
 
     ping: str | None = None
     ping_error: str | None = None
@@ -281,6 +398,7 @@ def run_once(
         ping=ping,
         ping_error=ping_error,
         written=tuple(written) + ("exporter.json",),
+        history_errors=tuple(history_errors),
         duration_ms=int((time.monotonic() - started) * 1000),
     )
     write_private(status_dir / "exporter.json", dump_json(_exporter_document(now, report)))
@@ -312,11 +430,14 @@ def summary_line(report: TickReport) -> str:
     ping = (
         "off" if report.ping is None else report.ping + (" (failed)" if report.ping_error else "")
     )
+    history = (
+        f"; {len(report.history_errors)} history file(s) not kept" if report.history_errors else ""
+    )
     return (
         f"{report.generated_at}: read {ok}/{len(report.reads)} line(s); "
         f"{len(report.evaluation.conditions)} condition(s) hold, {len(report.raised)} raised, "
         f"{len(report.cleared)} cleared, {len(report.evaluation.events)} event(s); mail {mail}; "
-        f"digest {'sent' if report.digest_sent else 'no'}; ping {ping}"
+        f"digest {'sent' if report.digest_sent else 'no'}; ping {ping}{history}"
     )
 
 
@@ -327,3 +448,8 @@ def failure_lines(reads: Sequence[LineRead]) -> list[str]:
         for read in reads
         if not read.ok
     ]
+
+
+def history_lines(report: TickReport) -> list[str]:
+    """One line per history not kept this tick, for stderr."""
+    return [f"{name}: {why}" for name, why in report.history_errors]

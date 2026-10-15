@@ -45,6 +45,7 @@ __all__ = [
     "CarryLine",
     "ConfigError",
     "ExporterConfig",
+    "HistorySettings",
     "HyperliquidLine",
     "Line",
     "MailSettings",
@@ -64,8 +65,10 @@ class ConfigError(ValueError):
 
 # A line's name is also its file name under the status directory.
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-# The files the exporter writes beside the lines' documents.
-RESERVED_NAMES = frozenset({"host", "alerts", "exporter", "alerts-state"})
+# The files the exporter writes beside the lines' documents, and the
+# ``history/`` directory it keeps them in (a line named so would write
+# ``history.json`` beside it, and its history where the host's goes).
+RESERVED_NAMES = frozenset({"host", "alerts", "exporter", "alerts-state", "history"})
 # The environment names this package reads; nothing else in the .env is looked at.
 ENV_PREFIX = "DASHBOARD_"
 _CLOCK = re.compile(r"^\d\d?:\d\d$")
@@ -88,6 +91,19 @@ class Thresholds:
     handoff_due_utc: time = time(0, 30)
     disk_used_pct: int = 85
     memory_available_mb: int = 200
+
+
+@dataclass(frozen=True)
+class HistorySettings:
+    """How much history the exporter keeps per series (:mod:`.history`).
+
+    ``max_points`` bounds every series of every line and of the host (the
+    oldest fall off); the host is sampled every tick and thinned to one
+    point per ``host_sample_minutes``, the lines' tails are kept whole.
+    """
+
+    max_points: int = 4000
+    host_sample_minutes: int = 10
 
 
 @dataclass(frozen=True)
@@ -234,6 +250,7 @@ class ExporterConfig:
     status_dir: Path
     lines: tuple[Line, ...]
     thresholds: Thresholds = Thresholds()
+    history: HistorySettings = HistorySettings()
     digest_utc: time = time(3, 30)
     command_timeout_seconds: int = 60
     subject_prefix: str = "[trading]"
@@ -352,6 +369,20 @@ def _thresholds(raw: object, where: str) -> Thresholds:
     )
 
 
+def _history(raw: object, where: str) -> HistorySettings:
+    mapping = _mapping(raw, where)
+    _keys(mapping, where, required=(), optional=("max_points", "host_sample_minutes"))
+    max_points = _int(mapping, "max_points", where, HistorySettings.max_points)
+    if max_points < 2:
+        raise ConfigError(f"{where}.max_points must be at least 2")
+    return HistorySettings(
+        max_points=max_points,
+        host_sample_minutes=_int(
+            mapping, "host_sample_minutes", where, HistorySettings.host_sample_minutes
+        ),
+    )
+
+
 def _common(mapping: Mapping[str, Any], where: str, base: Path) -> dict[str, Any]:
     name = _text(mapping, "name", where)
     if not _NAME.match(name):
@@ -444,7 +475,13 @@ def load_config(path: Path) -> ExporterConfig:
         top,
         where,
         required=("status_dir", "lines"),
-        optional=("thresholds", "digest_utc", "command_timeout_seconds", "subject_prefix"),
+        optional=(
+            "thresholds",
+            "history",
+            "digest_utc",
+            "command_timeout_seconds",
+            "subject_prefix",
+        ),
     )
     base = path.resolve().parent
     items = top["lines"]
@@ -468,6 +505,7 @@ def load_config(path: Path) -> ExporterConfig:
         status_dir=_path(top, "status_dir", where, base),
         lines=lines,
         thresholds=_thresholds(top.get("thresholds", {}), f"{where}.thresholds"),
+        history=_history(top.get("history", {}), f"{where}.history"),
         digest_utc=_clock(top, "digest_utc", where, ExporterConfig.digest_utc),
         command_timeout_seconds=_int(
             top, "command_timeout_seconds", where, ExporterConfig.command_timeout_seconds

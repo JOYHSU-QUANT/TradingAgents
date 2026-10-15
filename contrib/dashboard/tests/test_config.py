@@ -274,3 +274,37 @@ def test_half_an_account_without_the_host_is_refused_not_mail_off():
         load_settings(environ={"DASHBOARD_HEALTHCHECKS_URL": "https://h/x"}, env_file=None).mail
         is None
     )
+
+
+# --- the history block (dashboard plan PR 5) ----------------------------------------------
+
+
+def test_the_history_block_is_optional_and_bounded(tmp_path):
+    from contrib.dashboard.config import HistorySettings
+
+    assert load_config(_write(tmp_path, MINIMAL)).history == HistorySettings(4000, 10)
+    assert load_config(EXAMPLE).history == HistorySettings()
+    config = load_config(
+        _write(tmp_path, MINIMAL + "history:\n  max_points: 500\n  host_sample_minutes: 5\n")
+    )
+    assert config.history == HistorySettings(max_points=500, host_sample_minutes=5)
+
+
+@pytest.mark.parametrize(
+    "extra, words",
+    [
+        ("history:\n  max_points: 1\n", "max_points must be at least 2"),
+        ("history:\n  max_points: 1.5\n", "integer of at least 1"),
+        ("history:\n  host_sample_minutes: 0\n", "integer of at least 1"),
+        ("history:\n  banana: 1\n", "unknown key\\(s\\) banana"),
+        ("history: 3\n", "mapping with string keys"),
+    ],
+)
+def test_a_history_setting_that_cannot_be_used_is_refused_by_name(tmp_path, extra, words):
+    with pytest.raises(ConfigError, match=words):
+        load_config(_write(tmp_path, MINIMAL + extra))
+
+
+def test_a_line_named_history_is_refused_as_the_directory_the_exporter_writes(tmp_path):
+    with pytest.raises(ConfigError, match="file the exporter writes itself"):
+        load_config(_write(tmp_path, MINIMAL.replace("name: hl\n", "name: history\n")))

@@ -12,7 +12,7 @@
 #   2. a root-owned copy of the package under /home/dashboard/app, taken with
 #      `git archive` from the trader's checkout — the paths the page imports
 #      and nothing else (no .env, no local.yaml, no stores) — and the unit
-#      file from the same committed tree into /var/lib/dashboard-web;
+#      file from the same committed tree into /var/lib/dashboard-web/new;
 #   3. that account's own venv under /home/dashboard/venv, installed from the
 #      package's requirements.txt (pinned);
 #   4. the unit verified where it is staged, the swap, the unit file into
@@ -120,21 +120,31 @@ rollback() {
     if [ -f "$UNIT_PREV" ]; then
         install -m 644 "$UNIT_PREV" /etc/systemd/system/$UNIT || true
         systemctl daemon-reload || true
+        systemctl start $UNIT || true
+    else
+        # A first install that failed: there is no previous page to go back
+        # to, so the unit is taken out rather than left flapping on restart.
+        systemctl disable $UNIT 2>/dev/null || true
+        rm -f /etc/systemd/system/$UNIT
+        systemctl daemon-reload || true
     fi
-    systemctl start $UNIT || true
-    echo "dashboard-web: $(systemctl is-active $UNIT || true) on $(cat "$APP_DIR/COMMIT" 2>/dev/null || echo '?')" >&2
+    echo "dashboard-web: $(systemctl is-active $UNIT 2>/dev/null || true) on $(cat "$APP_DIR/COMMIT" 2>/dev/null || echo '?')" >&2
 }
 trap 'rollback $LINENO' ERR
-if [ ! -x "$VENV_DIR/bin/python" ]; then
-    # The home is root's, so root makes the venv's directory for the account
-    # (venv fills an empty one). The venv's bundled pip is enough for exact
-    # pins; an unpinned `--upgrade pip` from PyPI is one moving part this
-    # host does not need.
+if ! sudo -u $ACCOUNT -H "$VENV_DIR/bin/python" -m pip --version >/dev/null 2>&1; then
+    # No venv, or a half-made one (python3-venv missing leaves a python
+    # without pip): made afresh. The home is root's, so root makes the
+    # venv's directory for the account (venv fills an empty one). The venv's
+    # bundled pip is enough for exact pins; an unpinned `--upgrade pip` from
+    # PyPI is one moving part this host does not need.
+    rm -rf "$VENV_DIR"
     install -d -o $ACCOUNT -g $ACCOUNT -m 750 "$VENV_DIR"
     sudo -u $ACCOUNT -H "$PYTHON" -m venv "$VENV_DIR"
 fi
-# Pinned exactly, so this is a no-op (no index contact) when nothing moved.
-sudo -u $ACCOUNT -H "$VENV_DIR/bin/python" -m pip install --quiet --no-cache-dir -r "$APP_DIR.new/contrib/dashboard/requirements.txt"
+# Pinned exactly, so this is a no-op (no index contact) when nothing moved;
+# no cache under the root-owned home, and no "is pip newer" query either.
+sudo -u $ACCOUNT -H "$VENV_DIR/bin/python" -m pip install --quiet --no-cache-dir \
+    --disable-pip-version-check -r "$APP_DIR.new/contrib/dashboard/requirements.txt"
 
 # 4. the unit, verified where it is staged before it is installed: a verify
 #    that fails, or that only warns "Unknown key name" (a hardening line this

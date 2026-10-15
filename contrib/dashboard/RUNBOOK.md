@@ -263,7 +263,8 @@ exporter 文件形狀變了（套件 bump `schema_version`）而頁面沒跟上�
 | 每張卡都 stale＋橫幅 | exporter 停了：§3、§5 |
 | 卡片 `not written yet` | exporter 沒跑過，或 unit 的 `--status-dir` 不是 exporter 的 `status_dir` |
 | 卡片 `not readable (PermissionError)` | 檔不是 0640／group `dashboard`：§1.1 的目錄要 2750（setgid），exporter unit 的 `UMask=0027` |
-| `install-web.sh` 在 pip 那步失敗 | 主機沒網路或 PyPI 不通；會自動換回舊頁面（venv 不還原）；重跑即可（idempotent） |
+| `install-web.sh` 在 pip 那步失敗 | 主機沒網路或 PyPI 不通；會自動換回舊頁面（venv 不還原）；重跑即可（idempotent；半成品的 venv 會被重建） |
+| 第一次安裝就失敗（例如 curl 探不到） | 沒有舊頁面可回：unit 會被 disable 並移除、樹留在原地；看 stderr 的 `systemctl status`／`journalctl` 輸出，修了再重跑 |
 | 卡片 `document not shaped ...` | 頁面版本落後套件：§7.5 |
 
 ### 7.7 資安對照（計畫 §4，接 §6）

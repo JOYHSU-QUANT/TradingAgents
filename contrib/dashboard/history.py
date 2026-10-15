@@ -350,7 +350,12 @@ def harvest(kind: str, document: Mapping[str, Any]) -> dict[str, Series]:
 def _append(
     kept: Sequence[Point], new: Sequence[Point], *, min_interval: timedelta, max_points: int
 ) -> tuple[Point, ...]:
-    """``kept`` plus those of ``new`` later than its last by ``min_interval``, the oldest cut past ``max_points``."""
+    """``kept`` plus those of ``new`` later than its last by ``min_interval``, the oldest cut past ``max_points``.
+
+    Within a second the reading stored first stands: a row in the same
+    second as the kept last point is skipped (the harvest took the later
+    row of a tail; across ticks the stored one holds).
+    """
     points = list(kept)
     last = parse_when(points[-1][0]) if points else None
     # Never two points at one instant: the floor is one second.

@@ -61,7 +61,7 @@ Two files, kept apart on purpose:
 - **`configs/exporter.local.yaml`** (copy `exporter.example.yaml`; gitignored):
   nothing secret — the status directory, the digest hour, the thresholds,
   the history's bounds (`history:` — `max_points` 4000, `host_sample_minutes`
-  10), and the lines with their python, checkout, unit, stores and run ids.
+  30), and the lines with their python, checkout, unit, stores and run ids.
 - **The `.env` names** (repository root, the file the daemons keep their keys
   in, mode 600): `DASHBOARD_SMTP_HOST`, `DASHBOARD_SMTP_PORT` (587),
   `DASHBOARD_SMTP_USER`, `DASHBOARD_SMTP_PASSWORD`, `DASHBOARD_MAIL_FROM`,
@@ -136,7 +136,9 @@ host's disk used, memory available and load, one sample per tick) and
 carries the line's history on: a point is appended when its instant is later than the
 series' last, so a tail seen twice adds nothing and one that overlaps the
 last tick's fills the gap, and the oldest points fall off past
-`max_points`. A day of the carry report is revised after the fact (a
+`max_points`; within one second the reading stored first stands (a perp
+fill and the cycle's end can share a second: in one tail the later row is
+taken, across ticks the stored one). A day of the carry report is revised after the fact (a
 settlement priced later), so its series are replaced by the document's
 each tick. The host is thinned to one sample per `host_sample_minutes`
 (at the defaults the host keeps about 83 days, a perp run a year or more,

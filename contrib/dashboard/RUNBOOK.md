@@ -175,7 +175,8 @@ tick 照常跑（文件、信、ping 都不受影響），只是那條線的歷�
 `exporter.json` 該線的 `history_error` 有字、頁面的 exporter 卡轉紅寫 `history: not kept for <line>`。
 把它搬走（`mv history/<line>.json history/<line>.bad`），下一個 tick 從文件的尾巴重新開始累積（之前累積的點就沒了）。
 `history_error` 若寫 `the document is not shaped as this build harvests it (...)`＝套件文件的形狀變了（升級 exporter 或回報）；
-寫 `the history could not be carried on (...)`＝這版 exporter 自己組出了讀不回來的歷史（括號裡是原因），屬 bug、回報。
+寫 `the history could not be carried on (...)`＝這版 exporter 自己組出了讀不回來的歷史（括號裡是原因），屬 bug、回報；
+寫 `history/ could not be made (...)` 或 `<line>.json could not be written (...)`＝目錄或檔案的權限、磁碟滿（括號裡是例外類別），不用搬任何檔，修權限或清磁碟（§1.1 的目錄要 trader 可寫）。
 
 ### 5.5 升級
 

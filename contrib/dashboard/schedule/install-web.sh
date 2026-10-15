@@ -149,9 +149,9 @@ trap 'rollback $LINENO' ERR
 # the pinned version: a venv made before the hashes were listed, or one
 # whose requirements moved under it, would keep what it has unverified. So
 # the venv is made afresh whenever the requirements file differs from the
-# one the last successful install recorded (root's record, in STATE_DIR,
-# which the account cannot write), and is reused, with pip a no-op (no
-# index contact), while the file is the same.
+# one the last install that went live recorded (root's record, in
+# STATE_DIR, which the account cannot write; written at the very end), and
+# is reused, with pip a no-op (no index contact), while the file is the same.
 REQUIREMENTS="$APP_DIR.new/contrib/dashboard/requirements.txt"
 REQUIREMENTS_SUM=$(sha256sum "$REQUIREMENTS" | cut -d' ' -f1)
 REQUIREMENTS_RECORD="$STATE_DIR/requirements.sha256"
@@ -180,7 +180,6 @@ fi
 sudo -u $ACCOUNT -H "$VENV_DIR/bin/python" -m pip install --quiet --no-cache-dir \
     --disable-pip-version-check --require-hashes \
     -r "$REQUIREMENTS"
-echo "$REQUIREMENTS_SUM" > "$REQUIREMENTS_RECORD"
 
 # 4. the unit, verified where it is staged before it is installed: a verify
 #    that fails, or that only warns "Unknown key name" (a hardening line this
@@ -217,6 +216,10 @@ curl -sf -o /dev/null http://127.0.0.1:8787/ || {
     false
 }
 trap - ERR
+# The record is written only for a venv that went live: a failure between
+# pip and here puts the previous venv back, and a record of the new one
+# would let the next run reuse that old venv unverified.
+echo "$REQUIREMENTS_SUM" > "$REQUIREMENTS_RECORD"
 rm -rf "$APP_DIR.old" "$VENV_DIR.old"
 rm -f "$UNIT_PREV"
 rm -rf "$STAGE_DIR"

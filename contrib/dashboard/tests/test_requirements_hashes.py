@@ -84,8 +84,14 @@ def test_the_installer_and_the_ci_job_install_with_require_hashes():
     assert 'mv "$VENV_DIR" "$VENV_DIR.old"' in installer
     assert 'mv "$VENV_DIR.old" "$VENV_DIR" || true' in installer
     assert installer.index('mv "$VENV_DIR" "$VENV_DIR.old"') < installer.index("-m pip install")
-    assert installer.index("-m pip install") < installer.index(
-        'echo "$REQUIREMENTS_SUM" > "$REQUIREMENTS_RECORD"'
+    # ... and recorded only once the page is up on it: a rollback after pip
+    # restores the old venv, which a record of the new one would misdescribe
+    record = installer.index('echo "$REQUIREMENTS_SUM" > "$REQUIREMENTS_RECORD"')
+    assert installer.rindex("curl -sf -o /dev/null http://127.0.0.1:8787/") < record
+    assert (
+        installer.index("trap - ERR")
+        < record
+        < installer.index('rm -rf "$APP_DIR.old" "$VENV_DIR.old"', record)
     )
 
     ci = CI.read_text(encoding="utf-8")

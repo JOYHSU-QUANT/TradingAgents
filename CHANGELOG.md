@@ -12,8 +12,8 @@ Breaking changes within the 0.x line are called out explicitly.
 
 - **`contrib/dashboard`: history curves (dashboard plan PR 5).** Each tick the
   exporter now harvests the numbers a line's document carries in its tail
-  (`history.py`: the perp run's account equity, total pnl and position
-  notional by snapshot; a Uniswap run's value by bar; the carry sleeve's net,
+  (`history.py`: the perp run's account equity and position notional by
+  snapshot; a Uniswap run's value by bar; the carry sleeve's net,
   its running total, perp and spot equity by day; the host's disk, memory and
   load, one sample per tick) and carries one history per line and one for the
   host on under `history/` (`history/<line>.json`, `history/host.json`;
@@ -21,7 +21,7 @@ Breaking changes within the 0.x line are called out explicitly.
   instant is later than the series' last (a tail seen twice adds nothing, an
   overlapping one fills the gap), the oldest fall off past
   `history.max_points` (4000), the host is thinned to one sample per
-  `history.host_sample_minutes` (10), the carry series are replaced by the
+  `history.host_sample_minutes` (30; about 83 days), the carry series are replaced by the
   report's whole span each tick (a day is revised after the fact), and a
   tick that adds no point rewrites nothing. A history belongs to a run and
   starts afresh on a segment switch. A history file this build cannot read
@@ -29,12 +29,14 @@ Breaking changes within the 0.x line are called out explicitly.
   `host_history_error`; the page reddens the exporter's card; `export` prints
   `history not kept:` to stderr), and so is one that cannot be written or a
   directory that cannot be made — the tick's ping and `exporter.json` still
-  follow. Only instants and plain decimal digits enter a history, and the
-  reader holds every stored point to those spellings and to float's range
+  follow. A history's points are instants and plain decimal digits and
+  nothing else, and the `Series` type refuses anything not spelled so, not a
+  calendar instant, past float's range or out of order, so what the exporter
+  builds is what the reader accepts and the page parses
   (`tests/test_history.py`). The page's `/line/<name>` now ends in one inline
-  SVG chart per series (`app/charts.py`: time on the x axis, the extreme
-  values and the first and last instants labelled, a long series thinned to
-  a point per pixel), with a `history` row naming the run, the depth and when
+  SVG chart per series (`app/charts.py`: time on the x axis, the series'
+  extremes to two decimals and the first and last instants labelled, a long
+  series thinned to a point per pixel), with a `history` row naming the run, the depth and when
   a series last changed, appended after the card is built so it shows even
   when the line's document could not be read; a new `/host` page does the
   same for the host (the overview's host card links to it). A missing or

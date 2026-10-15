@@ -41,6 +41,8 @@ from typing import Any, ClassVar
 
 import yaml
 
+from .history import MIN_POINTS
+
 __all__ = [
     "CarryLine",
     "ConfigError",
@@ -66,8 +68,8 @@ class ConfigError(ValueError):
 # A line's name is also its file name under the status directory.
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 # The files the exporter writes beside the lines' documents, and the
-# ``history/`` directory it keeps them in (a line named so would write
-# ``history.json`` beside it, and its history where the host's goes).
+# ``history/`` directory it keeps the histories in (``host`` is also the
+# name the host's history goes under).
 RESERVED_NAMES = frozenset({"host", "alerts", "exporter", "alerts-state", "history"})
 # The environment names this package reads; nothing else in the .env is looked at.
 ENV_PREFIX = "DASHBOARD_"
@@ -99,11 +101,20 @@ class HistorySettings:
 
     ``max_points`` bounds every series of every line and of the host (the
     oldest fall off); the host is sampled every tick and thinned to one
-    point per ``host_sample_minutes``, the lines' tails are kept whole.
+    point per ``host_sample_minutes``, the lines' tails are kept whole. At
+    the defaults the host keeps about 83 days, a perp run a year or more
+    (a snapshot per cycle, plus fills), a Uniswap run or the carry sleeve
+    (one point a day) ten years.
     """
 
     max_points: int = 4000
-    host_sample_minutes: int = 10
+    host_sample_minutes: int = 30
+
+    def __post_init__(self) -> None:
+        if self.max_points < MIN_POINTS:
+            raise ValueError(f"max_points is at least {MIN_POINTS}")
+        if self.host_sample_minutes < 1:
+            raise ValueError("host_sample_minutes is at least 1")
 
 
 @dataclass(frozen=True)
@@ -373,8 +384,8 @@ def _history(raw: object, where: str) -> HistorySettings:
     mapping = _mapping(raw, where)
     _keys(mapping, where, required=(), optional=("max_points", "host_sample_minutes"))
     max_points = _int(mapping, "max_points", where, HistorySettings.max_points)
-    if max_points < 2:
-        raise ConfigError(f"{where}.max_points must be at least 2")
+    if max_points < MIN_POINTS:
+        raise ConfigError(f"{where}.max_points must be at least {MIN_POINTS}")
     return HistorySettings(
         max_points=max_points,
         host_sample_minutes=_int(

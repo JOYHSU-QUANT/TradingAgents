@@ -302,7 +302,13 @@ def bar_status(**overrides: Any) -> dict[str, Any]:
 
 
 def coverage() -> dict[str, Any]:
-    return {"what": "bars", "source": "chain", "complete": 120, "of": 120, "per_token": {"WETH": 120}}
+    return {
+        "what": "bars",
+        "source": "chain",
+        "complete": 120,
+        "of": 120,
+        "per_token": {"WETH": 120},
+    }
 
 
 def uniswap_document(run: Mapping[str, Any] | None = None, **overrides: Any) -> dict[str, Any]:

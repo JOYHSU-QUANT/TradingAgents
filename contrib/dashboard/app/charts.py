@@ -15,7 +15,8 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Decimal
+from typing import Literal
 
 from ..times import show_when, span_text
 
@@ -45,8 +46,8 @@ class Label:
     text: str
     x: int
     y: int
-    anchor: str
-    cls: str
+    anchor: Literal["start", "end"]
+    cls: Literal["x", "y"]
 
 
 @dataclass(frozen=True)
@@ -64,8 +65,19 @@ class Chart:
     viewbox: str = field(init=False, default=f"0 0 {_WIDTH} {_HEIGHT}")
 
 
+# A label never shows more than this many decimals (the file keeps them all).
+_LABEL_DECIMALS = Decimal("0.01")
+
+
+def _label(value: Decimal) -> str:
+    """``value`` as a label: plain digits, at most two decimals (``10234.56``, never ``1E+4``)."""
+    if value == value.to_integral_value():
+        return format(value, "f")
+    return format(value.quantize(_LABEL_DECIMALS, rounding=ROUND_HALF_EVEN), "f")
+
+
 def _thinned(points: Sequence[_Point]) -> list[_Point]:
-    """At most :data:`MAX_DRAWN` of ``points``: every k-th, the first and the last always kept."""
+    """Every k-th of ``points`` so that at most :data:`MAX_DRAWN` (plus the last, always kept) are drawn."""
     if len(points) <= MAX_DRAWN:
         return list(points)
     step = math.ceil(len(points) / MAX_DRAWN)
@@ -78,10 +90,11 @@ def _thinned(points: Sequence[_Point]) -> list[_Point]:
 def chart(points: Sequence[_Point], title: str) -> Chart | None:
     """The chart of ``points`` (oldest first, instants strictly rising); ``None`` with fewer than two.
 
-    The values are plotted as floats (the labels keep the decimal text; a
-    stored value is within float's range, the history's reader holds it);
-    a flat series runs through the middle of the box. ``ValueError`` for
-    instants that do not rise, which a stored series never has.
+    The values are plotted as floats (a stored value is within float's
+    range, the history's reader holds it) and labelled to two decimals; the
+    extremes are the whole series', thinned or not; a flat series runs
+    through the middle of the box. The instants are taken as rising (a
+    stored series' are); ``ValueError`` when the first and the last are not.
     """
     if len(points) < 2:
         return None
@@ -90,7 +103,7 @@ def chart(points: Sequence[_Point], title: str) -> Chart | None:
     span = last_at - first_at
     if span <= timedelta(0):
         raise ValueError("a chart's instants rise")
-    amounts = [value for _, value in drawn]
+    amounts = [value for _, value in points]
     lowest, highest = min(amounts), max(amounts)
     low, high = float(lowest), float(highest)
     width = _RIGHT - _LEFT
@@ -105,8 +118,8 @@ def chart(points: Sequence[_Point], title: str) -> Chart | None:
         return _BOTTOM - height * ((float(value) - low) / (high - low))
 
     labels = (
-        Label(str(highest), _LEFT - _LABEL_GAP, _TOP + 4, "end", "y"),
-        Label(str(lowest), _LEFT - _LABEL_GAP, _BOTTOM, "end", "y"),
+        Label(_label(highest), _LEFT - _LABEL_GAP, _TOP + 4, "end", "y"),
+        Label(_label(lowest), _LEFT - _LABEL_GAP, _BOTTOM, "end", "y"),
         Label(show_when(first_at), _LEFT, _X_LABEL_Y, "start", "x"),
         Label(show_when(last_at), _RIGHT, _X_LABEL_Y, "end", "x"),
     )
@@ -115,8 +128,8 @@ def chart(points: Sequence[_Point], title: str) -> Chart | None:
         points=" ".join(f"{x_of(at):.1f},{y_of(value):.1f}" for at, value in drawn),
         axes=f"{_LEFT},{_TOP} {_LEFT},{_BOTTOM} {_RIGHT},{_BOTTOM}",
         labels=labels,
-        first=str(drawn[0][1]),
-        last=str(drawn[-1][1]),
+        first=_label(drawn[0][1]),
+        last=_label(drawn[-1][1]),
         count=len(points),
         span=span_text(span),
     )

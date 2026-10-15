@@ -743,10 +743,10 @@ def test_the_line_page_charts_the_history_and_the_overview_does_not(tmp_path):
     hl = load_line(directory, "hl-paper", now=NOW + timedelta(minutes=3), stale=STALE)
     assert hl is not None and hl.tone == OK
     assert _rows(hl)["history"] == (
-        "paper-BTC-8: 3 series, up to 2 point(s) (of 4000 kept), last changed 2026-10-14 05:02Z (1 min ago)"
+        "paper-BTC-8: 2 series, up to 2 point(s) (max 4000), last changed 2026-10-14 05:02Z (1 min ago)"
     )
     titles = [chart.title for chart in hl.charts]
-    assert titles == ["account equity (USDC)", "total pnl (USDC)", "position notional (USDC)"]
+    assert titles == ["account equity (USDC)", "position notional (USDC)"]
     equity = hl.charts[0]
     assert equity.first == "10234.56" and equity.last == "10300.00" and equity.count == 2
     assert equity.span == "4 h 0 min" and equity.viewbox == "0 0 640 200"
@@ -763,17 +763,17 @@ def test_the_line_page_charts_the_history_and_the_overview_does_not(tmp_path):
 def test_a_series_with_one_point_has_no_chart_but_the_row_says_so(tmp_path):
     hl = load_line(status_dir(tmp_path), "hl-paper", now=NOW, stale=STALE)
     assert hl is not None and hl.charts == ()
-    assert _rows(hl)["history"].startswith("paper-BTC-8: 3 series, up to 1 point(s)")
+    assert _rows(hl)["history"].startswith("paper-BTC-8: 2 series, up to 1 point(s)")
 
 
 def test_the_carry_page_adds_the_cumulative_net(tmp_path):
     carry = load_line(status_dir(tmp_path), "carry", now=NOW, stale=STALE)
     assert carry is not None
     assert [chart.title for chart in carry.charts] == [
-        "net per day",
-        "perp leg equity",
-        "spot leg equity",
-        "net, cumulative",
+        "net per day (USDC)",
+        "perp leg equity (USDC)",
+        "spot leg equity (USDC)",
+        "net, cumulative (USDC)",
     ]
     assert carry.charts[3].last == "0.00" and carry.charts[3].count == 3
 
@@ -879,3 +879,75 @@ def test_a_chart_thins_a_long_series_and_keeps_the_last_point():
 
     with pytest.raises(ValueError, match="instants rise"):
         chart([(start, Decimal(1)), (start, Decimal(2))], "x")
+
+
+# --- the first review-loop round ------------------------------------------------------
+
+
+def test_a_chart_is_drawn_against_time_and_keeps_the_last_of_a_thinned_series():
+    from datetime import datetime, timezone
+    from decimal import Decimal
+
+    from contrib.dashboard.app.charts import MAX_DRAWN, chart
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    uneven = chart(
+        [
+            (start, Decimal(0)),
+            (start + timedelta(hours=1), Decimal(5)),
+            (start + timedelta(hours=10), Decimal(10)),
+        ],
+        "x",
+    )
+    assert uneven is not None
+    # An hour of ten is a tenth of the width; five of ten is the middle height.
+    assert uneven.points == "76.0,170.0 131.6,93.0 632.0,16.0"
+    n = 3 * MAX_DRAWN + 2
+    points = [(start + timedelta(minutes=i), Decimal(i)) for i in range(n)]
+    points[7] = (points[7][0], Decimal(99999))  # a spike the thinning drops
+    long = chart(points, "x")
+    assert long is not None and long.count == n
+    drawn = long.points.split(" ")
+    assert len(drawn) == -(-n // 4) + 1 and drawn[-1].startswith("632.0,")
+    assert long.last == str(n - 1)
+    # The extremes are the whole series', thinned or not.
+    assert [label.text for label in long.labels][:2] == ["99999", "0"]
+
+
+def test_chart_labels_are_plain_digits_to_two_decimals():
+    from datetime import datetime, timezone
+    from decimal import Decimal
+
+    from contrib.dashboard.app.charts import chart
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    drawn = chart(
+        [
+            (start, Decimal("10012.345678901234567890123456")),
+            (start + timedelta(hours=1), Decimal("0.0000001")),
+            (start + timedelta(hours=2), Decimal("10000")),
+        ],
+        "x",
+    )
+    assert drawn is not None
+    assert [label.text for label in drawn.labels][:2] == ["10012.35", "0.00"]
+    assert drawn.first == "10012.35" and drawn.last == "10000"
+
+
+def test_a_long_history_reaches_the_page_thinned(tmp_path):
+    from datetime import datetime, timezone
+
+    from contrib.dashboard.history import history_file
+
+    directory = status_dir(tmp_path)
+    path = directory / history_file("hl-paper")
+    document = json.loads(path.read_text(encoding="utf-8"))
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    document["series"]["equity"]["points"] = [
+        [(base + timedelta(hours=i)).isoformat(), str(10000 + i)] for i in range(3000)
+    ]
+    path.write_text(json.dumps(document), encoding="utf-8")
+    hl = load_line(directory, "hl-paper", now=NOW, stale=STALE)
+    assert hl is not None
+    equity = next(chart for chart in hl.charts if chart.title == "account equity (USDC)")
+    assert equity.count == 3000 and equity.points.count(" ") + 1 <= 1281

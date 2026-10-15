@@ -125,22 +125,23 @@ a unit `systemctl` could not show — a failed look never clears a condition.
 ## The history
 
 A line's document carries a tail — the perp run's last `--recent` account
-snapshots, a Uniswap run's last `--bars` valuations, the carry report's days
-— and no more. Each tick the exporter **harvests** the numbers of that tail
-(`history.py`, one whitelist per kind: the perp run's `account_equity`,
-`total_pnl` and `total_position_notional` by snapshot; the Uniswap run's
-`total_value` by bar; the carry sleeve's `net`, `perp_equity` and
-`spot_equity` by day, plus the running total `net_cumulative`; the host's
-disk used, memory available and load, one sample per tick) and carries the
-line's history on: a point is appended when its instant is later than the
+snapshots, a Uniswap run's last `--bars` valuations — and no more, and the
+carry report its whole span. Each tick the exporter **harvests** the numbers
+of that (`history.py`, one whitelist per kind: the perp run's
+`account_equity` and `total_position_notional` by snapshot — its total pnl
+is the equity less the opening balance, so the one curve says it; the
+Uniswap run's `total_value` by bar; the carry sleeve's `net`, `perp_equity`
+and `spot_equity` by day, plus the running total `net_cumulative`; the
+host's disk used, memory available and load, one sample per tick) and
+carries the line's history on: a point is appended when its instant is later than the
 series' last, so a tail seen twice adds nothing and one that overlaps the
 last tick's fills the gap, and the oldest points fall off past
-`max_points`. The carry report is the sleeve's whole span rather than a
-tail, and a day of it is revised after the fact (a settlement priced
-later), so its series are replaced by the document's each tick. The host
-is thinned to one sample per `host_sample_minutes`. A tick that adds no
-point rewrites nothing: the file's `generated_at` is when a series last
-changed.
+`max_points`. A day of the carry report is revised after the fact (a
+settlement priced later), so its series are replaced by the document's
+each tick. The host is thinned to one sample per `host_sample_minutes`
+(at the defaults the host keeps about 83 days, a perp run a year or more,
+a Uniswap run or the carry sleeve ten years). A tick that adds no point
+rewrites nothing: the file's `generated_at` is when a series last changed.
 
 A history belongs to a run: when the line's run changes (a segment switch,
 a new run id in the YAML) the history starts afresh — a curve across two
@@ -150,11 +151,14 @@ cannot read is left as it is and named in `exporter.json`
 harvest cannot read leaves the history as it was; a line that was not read
 leaves it untouched too.
 
-Nothing but instants and plain decimal digits enters a history, and the
-reader holds every stored point to those two spellings (and to float's
-range, which the charts plot in): no free text, so no address or key can
-(`tests/test_history.py` holds that, and the documents' secret-field test
-covers the history files).
+A history's points hold instants and plain decimal digits and nothing
+else, and the types hold that: a `Series` refuses a point not spelled as
+the exporter writes one, not parsable as a date, past float's range (the
+charts plot in it) or out of order, so what `advance` builds is what the
+reader accepts and the page parses. The rest of the file is the line's
+name, kind, run and this package's own labels — no free text from a
+document, so no address or key (`tests/test_history.py` holds that, and
+the documents' secret-field test covers the history files).
 
 ## The letters
 
@@ -194,9 +198,9 @@ downloads) — the trader's venv runs the exporter and needs none of it.
   events (perp); decisions, reason codes, the store (Uniswap); days, weeks,
   sidecar problems (carry) — and its **history charts**: one inline SVG per
   series of `history/<name>.json` (`charts.py`: the instants on the x axis,
-  so a gap in the series is a gap on the page; the highest and lowest values
-  on the left, the first and last instants below; a long series is thinned
-  to a point per pixel before it is drawn). The `history` row names the run,
+  so a gap in the series is spaced as time on the page; the series' highest
+  and lowest values on the left, to two decimals, the first and last instants
+  below; a long series is thinned to a point per pixel before it is drawn). The `history` row names the run,
   the depth and when a series last changed. A history that is not there yet,
   or not one this build reads, is a warning row, never a red card: the
   history is the exporter's extra, appended after the card is built, so it

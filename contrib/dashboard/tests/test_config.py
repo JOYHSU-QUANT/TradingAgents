@@ -282,7 +282,11 @@ def test_half_an_account_without_the_host_is_refused_not_mail_off():
 def test_the_history_block_is_optional_and_bounded(tmp_path):
     from contrib.dashboard.config import HistorySettings
 
-    assert load_config(_write(tmp_path, MINIMAL)).history == HistorySettings(4000, 10)
+    assert load_config(_write(tmp_path, MINIMAL)).history == HistorySettings(4000, 30)
+    with pytest.raises(ValueError, match="at least 2"):
+        HistorySettings(max_points=1)
+    with pytest.raises(ValueError, match="at least 1"):
+        HistorySettings(host_sample_minutes=0)
     assert load_config(EXAMPLE).history == HistorySettings()
     config = load_config(
         _write(tmp_path, MINIMAL + "history:\n  max_points: 500\n  host_sample_minutes: 5\n")

@@ -20,7 +20,7 @@ Python 是該 checkout 的 `.venv/bin/python`；裝 unit 的步驟用 `ubuntu`�
 | 信箱與 dead-man URL | `/home/trader/TradingAgents/.env` 裡的 `DASHBOARD_*` 行（§1.3；600；只讀這些名字） |
 | 輸出目錄 | `/home/trader/status/`（owner `trader`、group `dashboard`、mode `2750`；檔案 `0640`） |
 | 文件 | `hl-paper.json`、`carry-perp.json`、`uniswap-trend.json`、`uniswap-ai.json`、`uniswap-carry.json`、`carry.json`、`host.json`、`alerts.json`、`exporter.json` |
-| 歷史曲線（PR 5） | `/home/trader/status/history/<line>.json`＋`history/host.json`（目錄 2750、檔 0640；每條線幾個序列：權益／價值／每日淨額、主機磁碟與記憶體；`exporter.local.yaml` 的 `history:` 管上限，預設每序列 4000 點、主機每 10 分鐘一點） |
+| 歷史曲線（PR 5） | `/home/trader/status/history/<line>.json`＋`history/host.json`（目錄 2750、檔 0640；每條線幾個序列：權益／價值／每日淨額、主機磁碟與記憶體；`exporter.local.yaml` 的 `history:` 管上限，預設每序列 4000 點、主機每 30 分鐘一點＝主機約 83 天、perp 一年以上、uniswap 與 carry 十年） |
 | exporter 自己的狀態 | `/home/trader/status/alerts-state.json`（§5.3） |
 | units | `/etc/systemd/system/dashboard-exporter.service`、`dashboard-exporter.timer`（§2；來源在 `contrib/dashboard/schedule/`） |
 | 唯讀網頁 | `dashboard` 帳號；程式碼 `/home/dashboard/app`（`COMMIT` 檔寫著哪個 commit）、venv `/home/dashboard/venv`、unit `dashboard-web.service`、`http://127.0.0.1:8787/`，tailnet 內 `https://<機器名>.<tailnet>.ts.net/`（§7） |
@@ -166,7 +166,7 @@ tick 會 exit 1、stderr 說 `is not a state file this build reads ... move it a
 ### 5.4 改門檻、改摘要時間、加減一條線
 
 改 `exporter.local.yaml`，下一個 tick 生效。拿掉一條線後它的 `<line>.json` 與 `history/<line>.json` 留在目錄裡不會被刪，自己 `rm`。
-改了名字＝新的一條線（舊檔同上）。換段（§5.1 改 `run_id`）之後那條線的歷史曲線**從頭開始**（舊段的曲線在它的 store 裡，`status` 還讀得到）；
+改了名字＝新的一條線（舊檔同上）。換段（§5.1 改 `run_id`）之後那條線的歷史曲線**從頭開始**、舊段的點被覆寫（store 裡的 snapshot 都還在，但 `status` 只印最近 10 筆、頁面不會重畫舊段）；要留就先 `cp history/<line>.json history/<line>.<舊 run>.json`；
 `history:` 的 `max_points` 調小，下一個 tick 就把最舊的點砍掉。
 
 ### 5.6 `history/<line>.json` 壞了
@@ -187,7 +187,7 @@ tick 照常跑（文件、信、ping 都不受影響），只是那條線的歷�
 
 - 密碼只在 `.env`（600、owner trader）；exporter 只讀 `DASHBOARD_*` 行，refusal 只講名字不印值；`MailSettings` 的 repr 不含密碼。
 - 寫出的 JSON＝各套件自己的白名單文件（`dataclasses.asdict`），exporter 不加任何 config 內容；`stderr_line` 有 0x＋40／64 hex 就遮罩。
-- `history/` 只有時間戳與十進位數字（每種線一份固定的欄位白名單），沒有任何自由文字；`tests/test_history.py` 逐檔證明。
+- `history/` 的點只有時間戳與十進位數字（每種線一份固定的欄位白名單），其餘欄位是線名、kind、run id 與本套件自己的標籤，沒有任何來自文件的自由文字；`tests/test_history.py` 逐檔證明。
 - 信只有「哪條線、什麼狀態、幾點」（`tests/test_mail.py` 證明文件裡的任何小數字串與 hex 都不會進信）。
 - 目錄 `2750`、檔 `0640`、unit `UMask=0027`：只有 trader 與 `dashboard` 群組讀得到。
 - exporter unit 不加 `ProtectSystem=strict`：它跑的是各套件的指令，要讀 WAL store（讀者也要寫 `-shm`）；硬化在唯讀網頁的 unit（§7.2、§7.7）。
@@ -255,10 +255,10 @@ unit 的硬化（計畫 §4）：`ProtectHome=tmpfs`＋`BindReadOnlyPaths=` 只�
   灰虛線＋灰標題＋`STALE`＝文件超過 6 分鐘（3 個 tick）沒更新（stale 的綠卡不再掛 `OK` 標籤；紅卡仍紅邊、`BAD` 標籤照掛）。
 - 頁首紅色橫幅＝exporter 自己停了（`exporter.json` 太舊或沒有）：先看 §3、`systemctl list-timers dashboard-exporter.timer`。
 - 每張卡都有 `generated ...` 一行（文件的 `generated_at`＋多久以前）；點線名進明細（cycles／fills／events；decisions／reason codes／store；days／weeks）。
-- **明細頁的歷史曲線（PR 5）**：每條線的明細頁在表格前面有幾張圖——perp run 的權益、總損益、倉位名目；uniswap run 每根 bar 後的價值；carry 每日淨額（另一張累計）與兩腿權益——
-  x 軸是時間（exporter 停過的那段就是空白）、左邊標最高與最低值、下面標最早與最晚的時間；`history` 那列寫哪個 run、幾個序列、累積到幾點、最後一次有新點是什麼時候（`last changed`；沒新點的 tick 不重寫檔案）。
-  點頁首的 `host` 進主機明細（`/host`）：磁碟使用率、可用記憶體、load 的曲線（每 10 分鐘一點）。
-  剛裝好的前幾個 tick 只有一點、沒有圖，`history` 列會寫 `up to 1 point(s)`；perp 的曲線每個 cycle 多一點（4 小時）、uniswap 與 carry 每天一點，**要幾天才看得出形狀**。
+- **明細頁的歷史曲線（PR 5）**：每條線的明細頁在表格前面有幾張圖——perp run 的權益與倉位名目；uniswap run 每根 bar 後的價值；carry 每日淨額（另一張累計）與兩腿權益——
+  x 軸是時間（exporter 停過的那段就是兩點之間一條直線）、左邊標整條序列的最高與最低值（最多兩位小數）、下面標最早與最晚的時間；`history` 那列寫哪個 run、幾個序列、累積到幾點、最後一次有新點是什麼時候（`last changed`；沒新點的 tick 不重寫檔案）。
+  點首頁 host 卡的標題進主機明細（`/host`）：磁碟使用率、可用記憶體、load 的曲線（每 30 分鐘一點）。
+  第一個 tick 就把文件尾巴整條收進來（perp 最近 10 個 snapshot、uniswap 最近 5 根、carry 整段），所以各線一開始就有圖；只有主機從一點開始（`history` 列寫 `up to 1 point(s)`、沒有圖）。perp 的曲線每個 cycle 多一點（4 小時）、uniswap 與 carry 每天一點，**要幾天才看得出形狀**。
 - 頁面每 60 秒自己重載；數字是各套件文件的原文（Decimal 字串），地址與 key 一律折成 `0x1234...abcd`。
 
 ### 7.5 升級

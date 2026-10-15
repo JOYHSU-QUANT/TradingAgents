@@ -39,7 +39,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from .alerts import Evaluation, State, advance, evaluate, load_state, save_state
 from .config import ExporterConfig, HistorySettings, MailSettings, Settings
@@ -70,6 +70,7 @@ from .times import clock_reached, iso, utc_day
 __all__ = [
     "STATE_FILE",
     "HostReader",
+    "NotKept",
     "TickReport",
     "failure_lines",
     "history_lines",
@@ -83,6 +84,13 @@ _PING_TIMEOUT = 10.0
 # The seams a test binds: how the host is read, how a URL is opened.
 HostReader = Callable[..., HostFacts]
 _Urlopen = Callable[..., Any]
+
+
+class NotKept(NamedTuple):
+    """A history not kept this tick: which (a line's name, or ``host``) and why."""
+
+    name: str
+    why: str
 
 
 @dataclass(frozen=True)
@@ -102,8 +110,7 @@ class TickReport:
     ping: str | None
     ping_error: str | None
     written: tuple[str, ...]
-    # The histories not kept this tick: ``(name, why)``; the host's under ``host``.
-    history_errors: tuple[tuple[str, str], ...]
+    history_errors: tuple[NotKept, ...]
     duration_ms: int
 
 
@@ -120,7 +127,7 @@ def _alerts_document(now: datetime, state: State, evaluation: Evaluation) -> dic
 
 
 def _exporter_document(now: datetime, report: TickReport) -> dict[str, Any]:
-    history_errors = dict(report.history_errors)
+    history_errors = {item.name: item.why for item in report.history_errors}
     return {
         "schema_version": 1,
         "source": "dashboard",
@@ -189,16 +196,19 @@ def _keep_history(
         harvested = harvest(kind, document)
     except HarvestError as exc:
         return False, f"the document is not shaped as this build harvests it ({exc})"
-    advanced = advance_history(
-        history,
-        line=name,
-        kind=kind,
-        run=run,
-        harvested=harvested,
-        now=now,
-        max_points=max_points,
-        min_interval=min_interval,
-    )
+    try:
+        advanced = advance_history(
+            history,
+            line=name,
+            kind=kind,
+            run=run,
+            harvested=harvested,
+            now=now,
+            max_points=max_points,
+            min_interval=min_interval,
+        )
+    except ValueError as exc:  # the model refused what was built (a reader would too)
+        return False, f"the history could not be carried on ({type(exc).__name__})"
     if history is not None and replace(advanced, generated_at=history.generated_at) == history:
         return False, None
     try:
@@ -214,20 +224,22 @@ def _keep_histories(
     host: HostFacts,
     now: datetime,
     settings: HistorySettings,
-) -> tuple[list[str], list[tuple[str, str]]]:
-    """Step 6: every readable line's history and the host's; ``(files written, (name, why) not kept)``.
+) -> tuple[list[str], list[NotKept]]:
+    """Step 6: every readable line's history and the host's; ``(files written, not kept)``.
 
     A history that cannot be kept — the directory cannot be made, a file
     cannot be read or written — is reported, never raised: the tick's ping
     and ``exporter.json`` still follow.
     """
     written: list[str] = []
-    errors: list[tuple[str, str]] = []
+    errors: list[NotKept] = []
     try:
         ensure_private_dir(status_dir / HISTORY_DIR)
     except OSError as exc:
         why = f"{HISTORY_DIR}/ could not be made ({type(exc).__name__})"
-        return [], [(read.name, why) for read in reads if read.ok] + [(HOST_KIND, why)]
+        return [], [NotKept(read.name, why) for read in reads if read.ok] + [
+            NotKept(HOST_KIND, why)
+        ]
 
     def keep(name: str, kind: str, run: str, document: Mapping[str, Any], gap: timedelta) -> None:
         was_written, error = _keep_history(
@@ -243,7 +255,7 @@ def _keep_histories(
         if was_written:
             written.append(history_file(name))
         if error is not None:
-            errors.append((name, error))
+            errors.append(NotKept(name, error))
 
     for read in reads:
         if read.document is not None:
@@ -452,4 +464,4 @@ def failure_lines(reads: Sequence[LineRead]) -> list[str]:
 
 def history_lines(report: TickReport) -> list[str]:
     """One line per history not kept this tick, for stderr."""
-    return [f"{name}: {why}" for name, why in report.history_errors]
+    return [f"{item.name}: {item.why}" for item in report.history_errors]

@@ -190,7 +190,7 @@ def test_the_host_page_renders_and_the_line_page_carries_its_charts_without_scri
     # The quiet tick's carry history has three days: a chart with axes and labels, no script.
     carry = client.get("/line/carry").text
     assert '<figure class="chart">' in carry and "<script" not in carry
-    assert 'aria-label="net, cumulative"' in carry
+    assert 'aria-label="net, cumulative (USDC)"' in carry
     assert '<polyline class="axes" points="76,16 76,170 632,170" />' in carry
     assert 'text-anchor="end">2026-10-13 00:00Z</text>' in carry
     assert '<figure class="chart">' not in client.get("/").text

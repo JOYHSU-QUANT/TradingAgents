@@ -319,14 +319,19 @@ def _history(status_dir: Path, name: str, now: datetime) -> tuple[Row, tuple[Cha
     if history is None:
         return Row("history", "not written yet", WARN), ()
     charts = []
-    for series in history.series.values():
-        drawn = chart([parse_point(point) for point in series.points], _s(series.label))
-        if drawn is not None:
-            charts.append(drawn)
+    try:
+        for series in history.series.values():
+            drawn = chart([parse_point(point) for point in series.points], _s(series.label))
+            if drawn is not None:
+                charts.append(drawn)
+    except (ValueError, OverflowError) as exc:
+        # A stored series parses and rises (the model holds it); this is the
+        # guard for a page that outlives the model, and it is a row.
+        return Row("history", f"{_s(file)} cannot be charted ({type(exc).__name__})", WARN), ()
     longest = max((len(series.points) for series in history.series.values()), default=0)
     text = (
         f"{_s(history.run)}: {len(history.series)} series, up to {longest} point(s) "
-        f"(of {history.max_points} kept), last changed {_when(history.generated_at, now)}"
+        f"(max {history.max_points}), last changed {_when(history.generated_at, now)}"
     )
     return Row("history", text), tuple(charts)
 

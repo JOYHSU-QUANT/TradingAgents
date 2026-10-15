@@ -51,4 +51,12 @@ jobs:
           if systemctl is-enabled --quiet hl-paper-carry-eth 2>/dev/null; then
             sudo systemctl is-active hl-paper-carry-eth
           fi
+          # The read-only page (contrib/dashboard/RUNBOOK.md section 7) runs
+          # from its own copy of the package; when it is installed, the
+          # installer takes the new commit. A page that fails to come up is
+          # a warning on the run, not a failed deploy of the daemons.
+          if systemctl is-enabled --quiet dashboard-web.service 2>/dev/null; then
+            sudo /home/trader/TradingAgents/contrib/dashboard/schedule/install-web.sh ||
+              echo "::warning::dashboard-web: install-web.sh failed; the page is on the previous commit"
+          fi
           EOF

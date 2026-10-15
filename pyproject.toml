@@ -126,6 +126,15 @@ ignore_missing_imports = true
 module = ["yaml", "yaml.*", "langchain_core", "langchain_core.*"]
 ignore_missing_imports = true
 
+# The dashboard's page (``contrib/dashboard/app``, dashboard plan PR 4) is
+# built on FastAPI, Starlette and Jinja, pinned in the package's own
+# requirements.txt and installed on the dashboard account's venv only. The
+# CI job installs mypy alone, so they are read as ``Any`` there; with them
+# installed (a dev machine) their own types are checked.
+[[tool.mypy.overrides]]
+module = ["fastapi", "fastapi.*", "starlette", "starlette.*", "jinja2", "jinja2.*", "uvicorn", "uvicorn.*"]
+ignore_missing_imports = true
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"

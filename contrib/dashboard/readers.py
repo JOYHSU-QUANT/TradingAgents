@@ -20,7 +20,6 @@ documents mask their free text. It is never put in a mail.
 from __future__ import annotations
 
 import json
-import re
 import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -29,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import CarryLine, Line
+from .text import cut, mask_hex
 
 __all__ = [
     "KNOWN_SCHEMA_VERSIONS",
@@ -45,7 +45,6 @@ __all__ = [
 # The document version of each source this build reads; see the module docstring.
 KNOWN_SCHEMA_VERSIONS: Mapping[str, int] = {"hyperliquid_perp": 1, "uniswap_v3": 1, "carry": 1}
 STDERR_LIMIT = 200
-_HEX_SECRET = re.compile(r"0x(?:[0-9a-fA-F]{64}|[0-9a-fA-F]{40})")
 
 
 @dataclass(frozen=True)
@@ -92,8 +91,7 @@ def masked_line(text: str) -> str | None:
     for raw in text.splitlines():
         line = raw.strip()
         if line:
-            masked = _HEX_SECRET.sub(lambda m: f"{m.group(0)[:6]}...{m.group(0)[-4:]}", line)
-            return masked if len(masked) <= STDERR_LIMIT else masked[: STDERR_LIMIT - 3] + "..."
+            return cut(mask_hex(line), STDERR_LIMIT)
     return None
 
 

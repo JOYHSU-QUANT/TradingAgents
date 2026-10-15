@@ -88,6 +88,14 @@ def test_the_uniswap_document_carries_the_fields_of_the_uniswap_status_model():
     assert sorted(doc) == sorted(_fields(module, "Status"))
     assert sorted(doc["run"]) == sorted(_fields(module, "RunStatus"))
     assert sorted(doc["run"]["clock"]) == sorted(_fields(module, "Clock"))
+    assert sorted(doc["store"]) == sorted(_fields(module, "StoreStatus"))
+    assert sorted(doc["run"]["holdings"]) == sorted(_fields(module, "Holdings"))
+    assert sorted(doc["run"]["metrics"]) == sorted(_fields(module, "Metrics"))
+    assert sorted(doc["run"]["metrics"]["strategy"]) == sorted(_fields(module, "CurveStatus"))
+    assert sorted(doc["run"]["metrics"]["costs"]) == sorted(_fields(module, "CostsStatus"))
+    assert sorted(doc["run"]["recent_decisions"][0]) == sorted(_fields(module, "DecisionStatus"))
+    assert sorted(doc["run"]["recent_valuations"][0]) == sorted(_fields(module, "ValuationPoint"))
+    assert _fields(module, "VerdictsSeen") == ["source", "every", "some", "none"]
 
 
 def test_the_carry_document_carries_the_fields_of_the_carry_report_model():
@@ -97,8 +105,10 @@ def test_the_carry_document_carries_the_fields_of_the_carry_report_model():
     assert sorted(doc["handoff"]) == sorted(_fields(module, "HandoffStatus"))
     assert sorted(doc["days"][0]) == sorted(_fields(module, "DayStatus"))
     assert sorted(support.light("x")) == sorted(_fields(module, "AlertStatus"))
+    assert sorted(support.problem()) == sorted(_fields(module, "ProblemStatus"))
     report = _module(_CONTRIB / "carry" / "report.py")
-    assert {"days", "alerts"} <= set(_fields(report, "SpanTotals"))
+    assert sorted(doc["span"]) == sorted(_fields(report, "SpanTotals"))
+    assert sorted(doc["weeks"][0]) == sorted(_fields(report, "WeekRow"))
 
 
 def test_the_vocabulary_words_the_rules_match_are_the_packages_words():

@@ -1,0 +1,61 @@
+# The read-only status page on the Lightsail host (contrib/dashboard/app,
+# dashboard plan PR 4). install-web.sh beside this file installs it: the
+# dashboard account's own copy of the package under /home/dashboard/app and
+# its own venv under /home/dashboard/venv, so the account reads the trader's
+# status directory and nothing else of the trader's (plan section 4).
+# tailscale serve fronts the loopback port inside the tailnet (RUNBOOK
+# section 7); no public port is opened.
+[Unit]
+Description=contrib/dashboard read-only status page
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dashboard
+Group=dashboard
+WorkingDirectory=/home/dashboard/app
+ExecStart=/home/dashboard/venv/bin/python -m contrib.dashboard.app --status-dir /home/trader/status --port 8787
+Restart=on-failure
+RestartSec=10s
+UMask=0077
+
+# --- hardening (plan section 4) -------------------------------------------
+# Everything the page needs is bound read-only into an otherwise empty
+# /home: its code, its venv, the status directory. The trader's checkout,
+# .env, stores and keys are not there to read.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindReadOnlyPaths=/home/dashboard/app /home/dashboard/venv /home/trader/status
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+# The loopback only: the page binds 127.0.0.1 and tailscale serve, on the
+# same host, is its only client.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+# A page that grows restarts; the daemons beside it are not touched.
+MemoryMax=256M
+OOMScoreAdjust=800
+
+[Install]
+WantedBy=multi-user.target

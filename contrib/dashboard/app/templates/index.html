@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% from "_card.html" import card %}
+{% block meta %}{{ page.now }}{% endblock %}
+{% block body %}
+  {% if page.banner %}
+  <p class="banner">{{ page.banner }}</p>
+  {% endif %}
+  <div class="grid">
+    {{ card(page.exporter) }}
+    {{ card(page.alerts) }}
+    {% for line in page.lines %}
+    {{ card(line) }}
+    {% endfor %}
+    {{ card(page.host) }}
+  </div>
+  {% if not page.lines %}
+  <p class="empty">No lines: exporter.json names none.</p>
+  {% endif %}
+{% endblock %}

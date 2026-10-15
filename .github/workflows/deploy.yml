@@ -58,8 +58,8 @@ jobs:
           fi
           # The read-only page (contrib/dashboard/RUNBOOK.md section 7) runs
           # from its own copy of the package; when it is installed, the
-          # installer takes the new commit (and restores the previous tree and
-          # unit file if any step after the stop fails). A page that fails to upgrade is a
+          # installer takes the new commit (and restores the previous tree, unit
+          # file and venv if any step after the stop fails). A page that fails to upgrade is a
           # warning on the run, not a failed deploy of the daemons — except a
           # wheel pip refused because its hash is not in requirements.txt
           # (--require-hashes): the daemons are deployed by now, so the run

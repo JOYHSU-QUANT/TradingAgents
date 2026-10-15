@@ -16,11 +16,12 @@
 #   3. that account's own venv under /home/dashboard/venv, installed from the
 #      package's requirements.txt (pinned, and every wheel listed by sha256:
 #      pip installs nothing whose hash is not in the file; the venv is made
-#      afresh whenever that file changed since the last install);
+#      afresh whenever that file differs from the one root recorded at the
+#      last install that went live);
 #   4. the unit verified where it is staged, the swap, the unit file into
 #      /etc/systemd/system, enabled, started and probed with curl; a failure
-#      after the page was stopped restores the previous tree and unit file and
-#      starts the page on them again.
+#      after the page was stopped restores the previous tree, unit file and,
+#      when this run set one aside, venv, and starts the page on them again.
 # It never touches the trader's files, the exporter or the daemons.
 
 set -euo pipefail
@@ -89,9 +90,12 @@ sudo -u trader git -C "$CHECKOUT" show "HEAD:contrib/dashboard/schedule/$UNIT" >
 
 # 3. the venv, the account's own, from the pinned requirements. The page is
 #    stopped first when it is installed, active or not (a unit waiting in
-#    auto-restart would come back mid-swap): pip writes into the venv the
-#    running page imports from (a no-op while the pins hold, a few seconds
-#    when they moved), and the tree is swapped next. From the stop on, a
+#    auto-restart would come back mid-swap): while requirements.txt matches
+#    root's record pip is a no-op on the venv the page imports from; when it
+#    differs (or there is no record: the first run of this version) that
+#    venv is set aside and a new one is built, every wheel downloaded and
+#    verified, taking a minute on the small host; the tree is swapped next.
+#    From the stop on, a
 #    failure restores the previous tree and unit file and starts the page
 #    on them again (the trap), the venv included when this run set one
 #    aside to make a new one.

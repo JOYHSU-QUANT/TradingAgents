@@ -44,10 +44,14 @@ Breaking changes within the 0.x line are called out explicitly.
   a pinned version is refused and the installer restores the previous page
   (#366). pip hashes only what it downloads, so the installer remakes the
   venv whenever `requirements.txt` differs from root's record of the last
-  install (the venv in use is set aside and restored by the rollback), and
-  CI passes `--force-reinstall`; `deploy.yml` turns a hash
-  refusal into an `::error` on the run (every other installer failure stays
-  a warning); `tests/test_web.py` skips without them
+  install that went live (the venv in use is set aside and restored by the
+  rollback; the record is written only after the probe, so a run that rolled
+  back is followed by a rebuild), and CI passes `--force-reinstall`;
+  `deploy.yml` turns a hash refusal into an `::error` on the run (every
+  other installer failure stays a warning). The installer now refuses a
+  `python3` older than 3.11 (`PYTHON=` to point at another): the pinned set
+  was resolved on 3.12 and holds no `exceptiongroup`. `tests/test_web.py`
+  skips without them
   and is required in CI (`DASHBOARD_WEB_TESTS=required`). The hex mask the
   exporter's readers used is now `contrib/dashboard/text.py`, shared with the
   page; the test fixtures carry the packages' nested shapes (Uniswap metrics,

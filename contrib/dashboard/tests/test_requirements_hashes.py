@@ -20,6 +20,7 @@ REQUIREMENTS = DASHBOARD / "requirements.txt"
 INSTALLER = DASHBOARD / "schedule" / "install-web.sh"
 PIN_HASHES = DASHBOARD / "schedule" / "pin-hashes.py"
 CI = DASHBOARD.parents[1] / ".github" / "workflows" / "ci.yml"
+DEPLOY = DASHBOARD.parents[1] / ".github" / "workflows" / "deploy.yml"
 
 
 def _load_pin_hashes():
@@ -109,6 +110,21 @@ def test_the_installer_and_the_ci_job_install_with_require_hashes():
     # moved is put back, and pip check then reports the conflict
     assert installs[-1] == pinned[0]
     assert "pip check" in step.split(pinned[0], 1)[1]
+
+
+def test_the_deploy_turns_a_hash_refusal_into_a_red_run_and_nothing_else():
+    deploy = DEPLOY.read_text(encoding="utf-8")
+    # captured, not piped: the remote shell has no pipefail
+    assert (
+        "if out=$(sudo bash /home/trader/TradingAgents/contrib/dashboard/schedule/install-web.sh 2>&1); then"
+        in deploy
+    )
+    assert deploy.count("install-web.sh") == 1 + deploy.count("install-web.sh failed")
+    refusal = deploy.index('grep -q "DO NOT MATCH THE HASHES" <<<"$out"')
+    error = deploy.index("::error::dashboard-web: pip refused a wheel", refusal)
+    assert deploy.index("exit 1", error) < deploy.index(
+        "::warning::dashboard-web: install-web.sh failed", error
+    )
 
 
 def test_pin_hashes_rewrite_keeps_comments_replaces_hashes_and_is_idempotent():

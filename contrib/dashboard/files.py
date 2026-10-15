@@ -23,10 +23,14 @@ from contrib.core.atomic_io import atomic_write_text
 __all__ = ["dump_json", "ensure_private_dir", "read_json_object", "write_private"]
 
 _FILE_MODE = 0o640
-# A directory under the status directory: group can enter and read, setgid
-# so what is written there keeps the dashboard group (as the RUNBOOK makes
-# the status directory itself, 2750).
-_DIR_MODE = 0o2750
+# A directory under the status directory: group can enter and read. The
+# setgid bit, which keeps what is written there in the dashboard group, is
+# inherited from the status directory (the RUNBOOK makes it 2750, as root)
+# and never touched here: the exporter runs as trader, who is not in the
+# dashboard group, and any chmod by such a user has the kernel clear the
+# bit, whatever mode it names — so a directory whose bits are right is
+# not chmod'ed at all.
+_DIR_MODE = 0o750
 
 
 def write_private(path: Path, text: str) -> None:
@@ -36,9 +40,16 @@ def write_private(path: Path, text: str) -> None:
 
 
 def ensure_private_dir(path: Path) -> None:
-    """Make ``path`` (one directory under the status directory) if it is not there, mode 2750."""
-    path.mkdir(exist_ok=True)
-    os.chmod(path, _DIR_MODE)
+    """Make ``path`` (one directory under the status directory) if it is not there, mode 750.
+
+    Made with that mode (the unit's umask leaves it), so no chmod follows:
+    a chmod by the exporter's user would have the kernel drop the setgid
+    bit the directory inherited from its parent, and with it the group of
+    every file written there later. Only bits that are wrong are set.
+    """
+    path.mkdir(mode=_DIR_MODE, exist_ok=True)
+    if path.stat().st_mode & 0o777 != _DIR_MODE:
+        os.chmod(path, _DIR_MODE)
 
 
 def _default(value: object) -> Any:

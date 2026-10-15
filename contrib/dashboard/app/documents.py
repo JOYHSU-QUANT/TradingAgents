@@ -434,7 +434,7 @@ def _unit_text(unit: Mapping[str, Any] | None, now: datetime) -> tuple[str, RowT
         tone = "" if active == "active" else BAD
         since = unit.get("exec_main_start")
     if since:
-        text += f", since {_when(since, now)}"
+        text += f", since {_s(since)}"
     restarts = unit.get("n_restarts")
     if isinstance(restarts, int) and restarts:
         text += f", {restarts} restart(s)"
@@ -537,13 +537,17 @@ def _alerts_card(
         )
         for event in events
     )
+    red = [row.label for row in rows if row.tone == BAD]
+    status = _status_sentence(active, "nothing holds")
+    if red:
+        status += f"; {', '.join(red)}"
     return Card(
         name="alerts",
         title="alerts",
         kind="alerts",
-        tone=BAD if active else OK,
+        tone=BAD if active or red else OK,
         stale=is_stale,
-        status=_status_sentence(active, "nothing holds"),
+        status=status,
         generated_at=shown,
         rows=tuple(rows),
         tables=(
@@ -581,7 +585,9 @@ def _exporter_card(loaded: Loaded, now: datetime, stale: timedelta) -> Card:
     else:
         rows.append(Row("dead-man ping", "off", WARN))
     red = [row.label for row in rows if row.tone == BAD]
-    if is_stale:
+    if shown is None:
+        status = f"{EXPORTER_FILE} carries no generated_at this build reads"
+    elif is_stale:
         status = "the last tick is older than the page's threshold"
     elif red:
         status = f"ticking, with a failure: {', '.join(red)}"
@@ -1017,13 +1023,12 @@ def _carry(doc: Mapping[str, Any], now: datetime, detail: bool) -> _Built:
     rows.append(
         Row(
             "span",
-            f"{_when(doc.get('since'), now)} to {_when(doc.get('until'), now)}: "
-            f"{_s(span.get('days'))} day(s), "
+            f"{_s(doc.get('since'))} to {_s(doc.get('until'))}: {_s(span.get('days'))} day(s), "
             f"{_s(span.get('days_in'))} in; net {_s(span.get('net'))} "
             f"(funding {_s(span.get('funding'))}, costs {_s(span.get('costs'))}, "
             f"{_s(span.get('unpriced'))} unpriced); {_s(span.get('alerts'))} light(s), "
             f"{_s(span.get('held_by_d5'))} day(s) held by D5",
-            BAD if span.get("alerts") else "",
+            WARN if span.get("alerts") else "",
         )
     )
     days = _items(doc.get("days"))
@@ -1060,7 +1065,7 @@ def _carry(doc: Mapping[str, Any], now: datetime, detail: bool) -> _Built:
         rows.append(Row("days", "none in the span yet", WARN))
     problems = _items(doc.get("problems"))
     if problems:
-        rows.append(Row("problems", f"{len(problems)} sidecar(s) unreadable", BAD))
+        rows.append(Row("problems", f"{len(problems)} sidecar(s) unreadable", WARN))
     cumulative: list[Decimal] = []
     total = Decimal(0)
     for day in days:
@@ -1177,9 +1182,12 @@ def _line_card(
     tables: tuple[Table, ...] = ()
     is_stale, shown = True, None
     if loaded is not None and loaded.document is not None:
-        is_stale, shown = _freshness(loaded.document.get("generated_at"), now, stale)
-        if shown is None:
+        generated_at = loaded.document.get("generated_at")
+        is_stale, shown = _freshness(generated_at, now, stale)
+        if generated_at is None:
             sentences.append("the document carries no generated_at")
+        elif _instant(generated_at) is None:
+            sentences.append("the document's generated_at is not an instant")
         builder = _BUILDERS.get(kind)
         if builder is None:
             sentences.append(f"a line of kind {kind} is not one this build shows")
@@ -1254,7 +1262,7 @@ _complained: dict[str, str] = {}
 
 
 def _complain(loaded: Loaded) -> None:
-    """One warning in the journal when a shared document cannot be shown (deduplicated)."""
+    """One journal line when a shared document cannot be read or indexed (deduplicated per file)."""
     if loaded.error is None:
         _complained.pop(loaded.file, None)
     elif _complained.get(loaded.file) != loaded.error:
@@ -1323,7 +1331,7 @@ def load_page(status_dir: Path, *, now: datetime, stale: timedelta) -> Page:
     if context.exporter.document is None:
         banner = f"No exporter tick to show: exporter.json {context.exporter.error}."
     elif exporter_card.generated_at is None:
-        banner = f"The exporter's document is {exporter_card.status}."
+        banner = f"{exporter_card.status}: every card may be out of date."
     elif exporter_card.stale:
         banner = (
             f"The exporter's last tick was {exporter_card.generated_at}, "

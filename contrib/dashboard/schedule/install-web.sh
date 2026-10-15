@@ -13,9 +13,10 @@
 #      imports and nothing else (no .env, no local.yaml, no stores);
 #   3. that account's own venv under /home/dashboard/venv, installed from the
 #      package's requirements.txt (pinned);
-#   4. the swap and the unit file into /etc/systemd/system, verified, enabled,
-#      started and probed with curl; a failure after the page was stopped
-#      restores the previous tree and starts the page on it again.
+#   4. the unit verified where it is staged, the swap, the unit file into
+#      /etc/systemd/system, enabled, started and probed with curl; a failure
+#      after the page was stopped restores the previous tree and unit file and
+#      starts the page on them again.
 # It never touches the trader's files, the exporter or the daemons.
 
 set -euo pipefail
@@ -66,19 +67,33 @@ chown -R $ACCOUNT:$ACCOUNT "$APP_DIR.new"
 chmod -R u=rX,g=rX,o= "$APP_DIR.new"
 
 # 3. the venv, the account's own, from the pinned requirements. The page is
-#    stopped first: pip writes into the venv the running page imports from
-#    (a no-op while the pins hold, a few seconds when they moved), and the
-#    tree is swapped next. From here a failure restores the old tree and
-#    starts the page on it again (the trap), so the page is never left down
-#    with its tree gone.
-if systemctl is-active --quiet $UNIT; then
-    systemctl stop $UNIT
+#    stopped first (unconditionally: a unit waiting in auto-restart is not
+#    "active" yet would come back mid-swap): pip writes into the venv the
+#    running page imports from (a no-op while the pins hold, a few seconds
+#    when they moved), and the tree is swapped next. From the stop on, a
+#    failure restores the previous tree and unit file and starts the page
+#    on them again (the trap); the venv is not restored, so a pip failure
+#    halfway through a pin change can still leave the page down, loudly.
+command -v curl >/dev/null || { echo "install-web.sh: curl is needed for the probe" >&2; exit 1; }
+# A .old left by a run killed mid-way (an ssh session dropping) must not be
+# what a rollback restores: only this run's .old counts.
+rm -rf "$APP_DIR.old"
+UNIT_PREV="$HOME_DIR/$UNIT.prev"
+rm -f "$UNIT_PREV"
+if [ -f /etc/systemd/system/$UNIT ]; then
+    cp /etc/systemd/system/$UNIT "$UNIT_PREV"
 fi
+systemctl stop $UNIT 2>/dev/null || true
+systemctl reset-failed $UNIT 2>/dev/null || true
 rollback() {
-    echo "install-web.sh: failed at line $1; restoring the previous tree" >&2
+    echo "install-web.sh: failed at line $1; restoring the previous page" >&2
     if [ -d "$APP_DIR.old" ]; then
-        rm -rf "$APP_DIR"
-        mv "$APP_DIR.old" "$APP_DIR"
+        rm -rf "$APP_DIR" || true
+        mv "$APP_DIR.old" "$APP_DIR" || true
+    fi
+    if [ -f "$UNIT_PREV" ]; then
+        install -m 644 "$UNIT_PREV" /etc/systemd/system/$UNIT || true
+        systemctl daemon-reload || true
     fi
     systemctl start $UNIT || true
     systemctl is-active $UNIT >&2 || true
@@ -93,26 +108,29 @@ fi
 # Pinned exactly, so this is a no-op (no index contact) when nothing moved.
 sudo -u $ACCOUNT -H "$VENV_DIR/bin/python" -m pip install --quiet -r "$APP_DIR.new/contrib/dashboard/requirements.txt"
 
-# 4. the swap and the unit.
-rm -rf "$APP_DIR.old"
+# 4. the unit, verified where it is staged before it is installed: a verify
+#    that fails, or that only warns "Unknown key name" (a hardening line this
+#    systemd would drop), is a failure here; edit the committed unit instead
+#    (RUNBOOK section 7.2).
+STAGED="$APP_DIR.new/contrib/dashboard/schedule/$UNIT"
+VERIFY_STATUS=0
+VERIFY=$(systemd-analyze verify "$STAGED" 2>&1) || VERIFY_STATUS=$?
+if [ -n "$VERIFY" ]; then
+    echo "$VERIFY" >&2
+fi
+if [ "$VERIFY_STATUS" -ne 0 ] || echo "$VERIFY" | grep -qi "unknown key"; then
+    false
+fi
+# the swap, then the unit
 if [ -d "$APP_DIR" ]; then mv "$APP_DIR" "$APP_DIR.old"; fi
 mv "$APP_DIR.new" "$APP_DIR"
 install -m 644 "$APP_DIR/contrib/dashboard/schedule/$UNIT" /etc/systemd/system/$UNIT
-# verify exits 0 on a directive this systemd does not know and only prints
-# "Unknown key name": that is a unit installed with a hardening line dropped,
-# which is a failure here (edit the committed unit, RUNBOOK section 7.2).
-VERIFY=$(systemd-analyze verify /etc/systemd/system/$UNIT 2>&1 || true)
-if [ -n "$VERIFY" ]; then
-    echo "$VERIFY" >&2
-    if echo "$VERIFY" | grep -qi "unknown key"; then
-        false
-    fi
-fi
 systemctl daemon-reload
 systemctl enable $UNIT
 systemctl start $UNIT
 # Type=simple is "active" the moment the process forks: the page is up only
-# when it answers. Fifteen seconds covers the imports on the small host.
+# when it answers (curl -f fails on a 5xx). Fifteen seconds covers the
+# imports on the small host.
 for _ in $(seq 1 15); do
     if curl -sf -o /dev/null http://127.0.0.1:8787/; then
         break
@@ -126,4 +144,5 @@ curl -sf -o /dev/null http://127.0.0.1:8787/ || {
 }
 trap - ERR
 rm -rf "$APP_DIR.old"
+rm -f "$UNIT_PREV"
 echo "dashboard-web: $COMMIT installed, $(systemctl is-active $UNIT); try: curl -s http://127.0.0.1:8787/ | head -5"

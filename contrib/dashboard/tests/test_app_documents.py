@@ -582,7 +582,8 @@ def test_a_readable_exporter_document_of_another_shape_is_not_called_a_stale_tic
     (directory / "exporter.json").write_text(json.dumps(exporter), encoding="utf-8")
     page = load_page(directory, now=NOW, stale=STALE)
     assert page.banner == (
-        "The exporter's document is exporter.json not shaped as this build reads it (TypeError)."
+        "exporter.json not shaped as this build reads it (TypeError): "
+        "every card may be out of date."
     )
     assert tuple(card.name for card in page.lines) == LINE_NAMES
 
@@ -615,3 +616,48 @@ def test_the_view_models_hold_their_invariants():
     with pytest.raises(ValueError):
         Table("t", ("a", "b"), (("only one",),))
     assert Sparkline("0,0 1,1", "x", "1", "2", 2).viewbox == "0 0 240 48"
+
+
+# --- the second review round ------------------------------------------------------
+
+
+def test_a_light_in_the_spans_history_does_not_keep_the_carry_card_red(tmp_path):
+    documents = quiet_documents()
+    document = carry_document()
+    document["span"]["alerts"] = 3
+    document["problems"] = [{"path": "payloads/2026-10-01.json", "reason": "not JSON"}]
+    documents[CARRY_KEY] = document
+    carry = _line(page_at(tmp_path, documents), "carry")
+    assert carry.tone == OK and carry.status == "quiet"
+    rows = {row.label: row for row in carry.rows}
+    assert rows["span"].tone == "warn" and rows["problems"].tone == "warn"
+
+
+def test_letters_pending_redden_the_alerts_card(tmp_path):
+    directory = status_dir(tmp_path)
+    alerts = json.loads((directory / "alerts.json").read_text(encoding="utf-8"))
+    alerts["pending_letters"] = 2
+    (directory / "alerts.json").write_text(json.dumps(alerts), encoding="utf-8")
+    page = load_page(directory, now=NOW, stale=STALE)
+    assert page.alerts.tone == BAD
+    assert page.alerts.status == "nothing holds; letters pending"
+
+
+def test_an_exporter_document_without_generated_at_says_so_in_the_banner(tmp_path):
+    directory = status_dir(tmp_path)
+    exporter = json.loads((directory / "exporter.json").read_text(encoding="utf-8"))
+    del exporter["generated_at"]
+    (directory / "exporter.json").write_text(json.dumps(exporter), encoding="utf-8")
+    page = load_page(directory, now=NOW, stale=STALE)
+    assert page.exporter.status == "exporter.json carries no generated_at this build reads"
+    assert page.banner == (
+        "exporter.json carries no generated_at this build reads: every card may be out of date."
+    )
+
+
+def test_a_generated_at_that_is_not_an_instant_is_bad_not_merely_stale(tmp_path):
+    documents = quiet_documents()
+    documents[HL_KEY] = hyperliquid_document(generated_at="yesterday-ish")
+    hl = _line(page_at(tmp_path, documents), "hl-paper")
+    assert hl.tone == BAD and hl.stale
+    assert hl.status == "the document's generated_at is not an instant"

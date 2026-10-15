@@ -90,6 +90,7 @@ header a:hover, h2 a:hover { text-decoration: underline; }
 .card.tone-ok { border-left-color: var(--ok); }
 .card.tone-bad { border-left-color: var(--bad); background: var(--bad-bg); }
 .card.stale { border-style: dashed; border-left-color: var(--stale); color: var(--muted); }
+.card.tone-bad.stale { border-left-color: var(--bad); }
 .card.stale h2 { color: var(--stale); }
 
 .card h2 {

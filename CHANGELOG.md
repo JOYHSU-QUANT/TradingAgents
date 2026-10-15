@@ -44,7 +44,8 @@ Breaking changes within the 0.x line are called out explicitly.
   a pinned version is refused and the installer restores the previous page
   (#366). pip hashes only what it downloads, so the installer remakes the
   venv whenever `requirements.txt` differs from root's record of the last
-  install, and CI passes `--ignore-installed`; `deploy.yml` turns a hash
+  install (the venv in use is set aside and restored by the rollback), and
+  CI passes `--force-reinstall`; `deploy.yml` turns a hash
   refusal into an `::error` on the run (every other installer failure stays
   a warning); `tests/test_web.py` skips without them
   and is required in CI (`DASHBOARD_WEB_TESTS=required`). The hex mask the

@@ -208,7 +208,7 @@ sudo /home/trader/TradingAgents/contrib/dashboard/schedule/install-web.sh
 unit 檔則從同一個 committed tree 直接取到 root 的 `/var/lib/dashboard-web/new/`（保留原檔名，`systemd-analyze verify` 只認合法的 unit 名；root 驗證與安裝的檔案永遠不是帳號寫得到的）；
 先停頁面、建 `/home/dashboard/venv` 並照 `contrib/dashboard/requirements.txt`（整組釘死，每個 wheel 的 sha256 都列在 pin 下；`pip install --require-hashes`：下載到的檔案 hash 不在清單裡就拒裝。pip 只驗它下載的檔案，所以 requirements.txt 跟 root 記在 `/var/lib/dashboard-web/requirements.sha256` 的上一次成功安裝不同時，venv 整個重建、每個 wheel 重新下載驗過；相同時 pip 是 no-op、不碰 index）裝；`systemd-analyze verify` 暫存的 unit、換樹、裝 `dashboard-web.service`、enable、start，
 再用 curl 探到頁面真的回應才算裝好（`Type=simple` 一 fork 就算 active，不能信）。停頁面之後任何一步失敗都會把舊樹與舊 unit 檔換回去、把頁面重新啟動
-（venv 不會還原：pin 換版到一半 pip 失敗時頁面可能還是起不來，但 stderr 會說）。
+（這一輪若重建了 venv，舊 venv 也會搬回來）。
 不碰 trader 的任何檔案、不碰 exporter、不碰 daemon。
 
 ```bash
@@ -267,7 +267,7 @@ hash 不能手改：`tests/test_requirements_hashes.py` 會比對檔案就是腳
 | 每張卡都 stale＋橫幅 | exporter 停了：§3、§5 |
 | 卡片 `not written yet` | exporter 沒跑過，或 unit 的 `--status-dir` 不是 exporter 的 `status_dir` |
 | 卡片 `not readable (PermissionError)` | 檔不是 0640／group `dashboard`：§1.1 的目錄要 2750（setgid），exporter unit 的 `UMask=0027` |
-| `install-web.sh` 在 pip 那步失敗 | 主機沒網路或 PyPI 不通；會自動換回舊頁面（venv 不還原）；重跑即可（idempotent；半成品的 venv、或 requirements.txt 變了但沒裝完的 venv，下次都會重建） |
+| `install-web.sh` 在 pip 那步失敗 | 主機沒網路或 PyPI 不通；會自動換回舊頁面（含舊 venv）；重跑即可（idempotent；半成品的 venv、或 requirements.txt 變了但沒裝完的 venv，下次都會重建） |
 | pip 說 `THESE PACKAGES DO NOT MATCH THE HASHES` | 下載到的 wheel 不在 `requirements.txt` 的 hash 清單裡。先看 pip 印的檔名對 PyPI 該 release 的檔案列表：**檔名是清單裡沒有的新檔**（PyPI 允許事後補上新平台的 wheel；pin 換了版沒重產也長這樣）＝腳本過時，跑 §7.5 重產、commit；**檔名清單裡有、digest 卻不同**＝PyPI 不會換既有檔案，這是鏡像／線路／主機被動了手腳，不要重產，當事件查 |
 | 第一次安裝就失敗（例如 curl 探不到） | 沒有舊頁面可回：unit 會被 disable 並移除、樹留在原地；看 stderr 的 `systemctl status`／`journalctl` 輸出，修了再重跑 |
 | 卡片 `document not shaped ...` | 頁面版本落後套件：§7.5 |

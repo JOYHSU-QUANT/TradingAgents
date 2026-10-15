@@ -93,8 +93,8 @@ sudo -u trader git -C "$CHECKOUT" show "HEAD:contrib/dashboard/schedule/$UNIT" >
 #    running page imports from (a no-op while the pins hold, a few seconds
 #    when they moved), and the tree is swapped next. From the stop on, a
 #    failure restores the previous tree and unit file and starts the page
-#    on them again (the trap); the venv is not restored, so a pip failure
-#    halfway through a pin change can still leave the page down, loudly.
+#    on them again (the trap), the venv included when this run set one
+#    aside to make a new one.
 command -v curl >/dev/null || { echo "install-web.sh: curl is needed for the probe" >&2; exit 1; }
 # Below 3.11 the pinned set wants a package it does not pin (exceptiongroup;
 # see the header of requirements.txt), which pip would report as a pinning
@@ -106,7 +106,7 @@ command -v "$PYTHON" >/dev/null || { echo "install-web.sh: $PYTHON not found (PY
 }
 # A .old left by a run killed mid-way (an ssh session dropping) must not be
 # what a rollback restores: only this run's .old counts.
-rm -rf "$APP_DIR.old"
+rm -rf "$APP_DIR.old" "$VENV_DIR.old"
 UNIT_PREV="$STATE_DIR/$UNIT.prev"
 rm -f "$UNIT_PREV"
 if [ -f /etc/systemd/system/$UNIT ]; then
@@ -126,6 +126,10 @@ rollback() {
     if [ -d "$APP_DIR.old" ]; then
         rm -rf "$APP_DIR" || true
         mv "$APP_DIR.old" "$APP_DIR" || true
+    fi
+    if [ -d "$VENV_DIR.old" ]; then
+        rm -rf "$VENV_DIR" || true
+        mv "$VENV_DIR.old" "$VENV_DIR" || true
     fi
     if [ -f "$UNIT_PREV" ]; then
         install -m 644 "$UNIT_PREV" /etc/systemd/system/$UNIT || true
@@ -160,7 +164,11 @@ if [ "$(cat "$REQUIREMENTS_RECORD" 2>/dev/null)" != "$REQUIREMENTS_SUM" ] ||
     # pins; an unpinned `--upgrade pip` from PyPI is one moving part this
     # host does not need.
     rm -f "$REQUIREMENTS_RECORD"
-    rm -rf "$VENV_DIR"
+    # The venv in use is set aside, not removed: a pip failure (PyPI down, a
+    # hash refused) must leave the previous page something to run on, and
+    # the trap moves it back. A venv holds absolute paths, so the new one is
+    # built where it will live.
+    if [ -d "$VENV_DIR" ]; then mv "$VENV_DIR" "$VENV_DIR.old"; fi
     install -d -o $ACCOUNT -g $ACCOUNT -m 750 "$VENV_DIR"
     sudo -u $ACCOUNT -H "$PYTHON" -m venv "$VENV_DIR"
 fi
@@ -209,7 +217,7 @@ curl -sf -o /dev/null http://127.0.0.1:8787/ || {
     false
 }
 trap - ERR
-rm -rf "$APP_DIR.old"
+rm -rf "$APP_DIR.old" "$VENV_DIR.old"
 rm -f "$UNIT_PREV"
 rm -rf "$STAGE_DIR"
 echo "dashboard-web: $COMMIT installed, $(systemctl is-active $UNIT); try: curl -s http://127.0.0.1:8787/ | head -5"

@@ -78,7 +78,12 @@ def test_the_installer_and_the_ci_job_install_with_require_hashes():
     # the same already-installed gap on the host: the venv is remade when the
     # file differs from root's record of the last successful install
     assert 'REQUIREMENTS_RECORD="$STATE_DIR/requirements.sha256"' in installer
-    assert installer.index('rm -rf "$VENV_DIR"') < installer.index("-m pip install")
+    assert '!= "$REQUIREMENTS_SUM" ]' in installer
+    assert installer.index('rm -f "$REQUIREMENTS_RECORD"') < installer.index("-m pip install")
+    # the venv in use is set aside for the rollback, not removed
+    assert 'mv "$VENV_DIR" "$VENV_DIR.old"' in installer
+    assert 'mv "$VENV_DIR.old" "$VENV_DIR" || true' in installer
+    assert installer.index('mv "$VENV_DIR" "$VENV_DIR.old"') < installer.index("-m pip install")
     assert installer.index("-m pip install") < installer.index(
         'echo "$REQUIREMENTS_SUM" > "$REQUIREMENTS_RECORD"'
     )
@@ -89,10 +94,10 @@ def test_the_installer_and_the_ci_job_install_with_require_hashes():
         line.strip() for line in step.splitlines() if line.strip().startswith("pip install")
     ]
     pinned = [line for line in installs if "contrib/dashboard/requirements.txt" in line]
-    # --ignore-installed: a pin the job's venv already holds at that version
+    # --force-reinstall: a pin the job's venv already holds at that version
     # would otherwise be skipped unverified (pip hashes what it downloads)
     assert pinned == [
-        "pip install --require-hashes --ignore-installed -r contrib/dashboard/requirements.txt"
+        "pip install --require-hashes --force-reinstall -r contrib/dashboard/requirements.txt"
     ]
     # the pinned install is the last one: whatever the test client's httpx
     # moved is put back, and pip check then reports the conflict

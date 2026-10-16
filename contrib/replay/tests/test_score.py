@@ -12,10 +12,19 @@ import statistics
 import pytest
 
 from contrib.replay.score import (
+    RESEARCH_AGAINST,
+    RESEARCH_EFFECT,
+    RESEARCH_NEVER_CHANGED,
+    RESEARCH_NEVER_SIDED,
+    RESEARCH_NO_CLAIM,
+    RESEARCH_NO_EFFECT,
+    RESEARCH_THIN_SIDE,
+    RESEARCH_TOO_FEW,
     Answer,
     HitStats,
     Outcome,
     Question,
+    ResearchFollow,
     ScoreError,
     bar_open_ms,
     build_split,
@@ -37,6 +46,7 @@ from .conftest import (
     ANCHOR_MS,
     RESEARCH_CLOSES,
     STEP_MS,
+    STRATEGY_ID,
     at_ms,
     attempt_id,
     fixture_answers,
@@ -576,7 +586,7 @@ def test_a_baseline_pays_the_turnover_of_a_row_it_could_not_score_on_the_next_sc
     def q(slot: int, mark: float, bias: str) -> Question:
         return _question(
             input_id=f"s{slot}", at_ms=at_ms(slot), mark=mark, current_side="flat",
-            current_margin_pct=0.0, research_bias=bias,
+            current_margin_pct=0.0, research_bias=bias, strategy_id="rule#1",
         )
 
     questions = [q(0, 100.0, "long"), q(1, 101.0, "long"), q(2, 102.0, "short"), q(4, 103.0, "short"), q(5, 104.0, "short")]
@@ -934,3 +944,179 @@ def test_csv_table_has_one_row_per_question_with_the_horizons_by_label():
     # The hit pair where the two readings disagree: the rejected row 6.
     row6 = by_id[input_id(6)]
     assert (row6["ai_hit_4h"], row6["executed_hit_4h"]) == (False, True)
+
+
+# -- did the model follow the research bias (plan section 7.3) ------------------
+
+
+def test_the_research_table_counts_the_fixture_by_rule_side_and_model_side():
+    """Rows 0, 1, 6 and 7 carry a long bias and a long claim (a maintain is the
+    side held, a rejection the side refused); rows 2, 9 and 10 a short bias
+    and a short claim; row 5 a flat bias and a flat claim; row 8 a short bias
+    and no claim; row 3 no bias; row 11 no answer."""
+    summary = _card().summary()
+    (follow,) = summary.research
+    long, short, flat = TargetSide.LONG, TargetSide.SHORT, TargetSide.FLAT
+    assert follow.strategy_id == STRATEGY_ID
+    assert dict(follow.cells) == {(long, long): 4, (short, short): 3, (flat, flat): 1}
+    assert dict(follow.fail_closed) == {short: 1}
+    assert (follow.n, follow.agreed) == (8, 8)
+    assert follow.expected == pytest.approx((4 * 4 + 3 * 3 + 1 * 1) / (8 * 8))
+    assert follow.kappa == pytest.approx(1.0)
+    assert follow.verdict == RESEARCH_TOO_FEW
+    # Nine answered rows carried a bias (row 8's fail-closed one included);
+    # row 3 had neither the section nor a bias.
+    assert (summary.research_carried, summary.research_unrecorded) == (9, 0)
+
+
+def _follow(
+    cells: dict[tuple[str, str], int], fail_closed: dict[str, int] | None = None
+) -> ResearchFollow:
+    return ResearchFollow(
+        strategy_id="rule#1",
+        cells={(TargetSide(b), TargetSide(m)): n for (b, m), n in cells.items()},
+        fail_closed={TargetSide(b): n for b, n in (fail_closed or {}).items()},
+    )
+
+
+@pytest.mark.parametrize(
+    ("cells", "kappa", "verdict"),
+    [
+        # The model takes the rule's side exactly when the rule takes one.
+        ({("long", "long"): 15, ("flat", "flat"): 15}, 1.0, RESEARCH_EFFECT),
+        # The model sits long whatever the rule says: no more agreement than
+        # the two frequencies produce on their own.
+        ({("long", "long"): 15, ("flat", "long"): 15}, 0.0, RESEARCH_NO_EFFECT),
+        # 18 of 30 agree with both sides half long: (0.6 - 0.5) / (1 - 0.5),
+        # exactly the floor.
+        (
+            {("long", "long"): 9, ("long", "flat"): 6, ("flat", "long"): 6, ("flat", "flat"): 9},
+            0.2,
+            RESEARCH_EFFECT,
+        ),
+        # 16 of 30: (16/30 - 0.5) / 0.5, under the floor.
+        (
+            {("long", "long"): 8, ("long", "flat"): 7, ("flat", "long"): 7, ("flat", "flat"): 8},
+            (16 / 30 - 0.5) / 0.5,
+            RESEARCH_NO_EFFECT,
+        ),
+        # Agreement against the rule: short when told long and the other way.
+        ({("long", "short"): 15, ("short", "long"): 15}, -1.0, RESEARCH_AGAINST),
+        # Mildly against: under the floor either way.
+        (
+            {("long", "long"): 7, ("long", "flat"): 8, ("flat", "long"): 8, ("flat", "flat"): 7},
+            (14 / 30 - 0.5) / 0.5,
+            RESEARCH_NO_EFFECT,
+        ),
+    ],
+)
+def test_the_verdict_is_kappa_against_the_floor_once_both_sides_are_in(cells, kappa, verdict):
+    follow = _follow(cells)
+    assert follow.n == 30
+    assert follow.kappa == pytest.approx(kappa)
+    assert follow.verdict == verdict
+
+
+def test_the_verdict_refuses_to_judge_what_cannot_be_measured():
+    short_of = _follow({("long", "long"): 15, ("flat", "flat"): 14})
+    assert (short_of.kappa, short_of.verdict) == (1.0, RESEARCH_TOO_FEW)
+    # Thirty-five readable claims but the rule was long on only five of them:
+    # the model following all five proves little.
+    thin = _follow({("long", "long"): 5, ("flat", "flat"): 30})
+    assert (thin.kappa, thin.verdict) == (1.0, RESEARCH_THIN_SIDE)
+    # The rule flat on every question: nothing to follow, however many
+    # questions come in, so no floor is what is reported.
+    never = _follow({("flat", "flat"): 20, ("flat", "long"): 5})
+    assert (never.kappa, never.verdict) == (None, RESEARCH_NEVER_SIDED)
+    # The rule long on every question: kappa would be 0 whatever the model
+    # did, which is not a finding about the model.
+    stuck = _follow({("long", "long"): 29, ("long", "flat"): 1})
+    assert (stuck.kappa, stuck.verdict) == (None, RESEARCH_NEVER_CHANGED)
+    # The rule's other side fell only on fail-closed rows: it did change
+    # side, but the readable claims cannot show it. The table still shows
+    # that side, as a row of zeros.
+    unread = _follow({("long", "long"): 30}, fail_closed={"flat": 5})
+    assert (unread.n, unread.kappa, unread.verdict) == (30, None, RESEARCH_THIN_SIDE)
+    assert unread.describe()[0] == (
+        "research bias (rule#1): 35 answered question(s) carried it; "
+        "rule long 30 -> model long 30, short 0, flat 0; "
+        "rule flat 0 -> model long 0, short 0, flat 0; fail-closed 5 (flat 5)"
+    )
+
+
+def test_a_sparse_third_side_neither_blocks_the_verdict_nor_is_left_out_of_it():
+    """Two sides clear the floor, so kappa is judged, and over all three sides."""
+    third = _follow(
+        {("long", "long"): 20, ("flat", "flat"): 20, ("short", "long"): 1}, fail_closed={"short": 1}
+    )
+    assert third.verdict == RESEARCH_EFFECT
+    assert third.kappa == pytest.approx((41 * 40 - (20 * 21 + 20 * 20)) / (41 * 41 - 820))
+    # The suffix spells the floors only where one is unmet.
+    assert third.describe()[1].endswith("-> the section has an effect")
+    only_fail_closed = _follow({}, fail_closed={"long": 3})
+    assert (only_fail_closed.n, only_fail_closed.kappa) == (0, None)
+    assert only_fail_closed.verdict == RESEARCH_NO_CLAIM
+    assert only_fail_closed.describe() == [
+        "research bias (rule#1): 3 answered question(s) carried it; no readable claim; "
+        "fail-closed 3 (long 3)",
+        "research effect (rule#1): readable claims 0, agreement 0/0, by chance n/a, "
+        "kappa n/a -> no readable claim",
+    ]
+
+
+def test_describe_prints_the_research_table_and_the_verdict():
+    card = _card()
+    lines = card.summary().describe(card)
+    table = (
+        f"research bias ({STRATEGY_ID}): 9 answered question(s) carried it; "
+        "rule long 4 -> model long 4, short 0, flat 0; "
+        "rule short 3 -> model long 0, short 3, flat 0; "
+        "rule flat 1 -> model long 0, short 0, flat 1; fail-closed 1 (short 1)"
+    )
+    verdict = (
+        f"research effect ({STRATEGY_ID}): readable claims 8, agreement 8/8 (100.0%), "
+        "by chance 40.6%, kappa +1.00 -> not enough readable claims (needs >= 30 readable "
+        "claims, >= 10 on each of two sides, |kappa| >= 0.20)"
+    )
+    count = "research bias: 9 of 10 answered question(s) carried one"
+    assert lines.index(count) + 1 == lines.index(table)
+    assert lines.index(table) + 1 == lines.index(verdict)
+    assert lines.index(verdict) < lines.index("-- 4h ahead (1 bar(s)) --")
+
+
+def test_a_run_without_a_bias_says_so_and_tells_history_from_absence():
+    """A NULL bias under a shape with the section is a pre-v13 row, not a cycle without it."""
+    card = score_run([_question()], [_answer()], step_ms=STEP_MS, costs=TAKER)
+    summary = card.summary()
+    assert summary.research == ()
+    assert "research bias: 0 of 1 answered question(s) carried one" in summary.describe(card)
+    before_v13 = _question(context_shape="price|market|autoresearch|position")
+    card = score_run([before_v13], [_answer()], step_ms=STEP_MS, costs=TAKER)
+    summary = card.summary()
+    assert (summary.research_carried, summary.research_unrecorded) == (0, 1)
+    assert (
+        "research bias: 0 of 1 answered question(s) carried one; 1 had the section but no "
+        "recorded bias (written before schema v13)"
+    ) in summary.describe(card)
+
+
+def test_each_rule_gets_its_own_table_in_first_seen_order():
+    """The radar promotes a new rule mid-run; two rules' questions never pool."""
+    questions = [
+        _question(input_id="b", at_ms=at_ms(1), research_bias="flat", strategy_id="rule#2"),
+        _question(input_id="a", at_ms=at_ms(0), research_bias="long", strategy_id="rule#1"),
+    ]
+    answers = [_answer(input_id=name) for name in "ab"]
+    card = score_run(questions, answers, step_ms=STEP_MS, costs=TAKER)
+    tables = {follow.strategy_id: dict(follow.cells) for follow in card.summary().research}
+    assert list(tables) == ["rule#1", "rule#2"]
+    assert tables["rule#1"] == {(TargetSide.LONG, TargetSide.LONG): 1}
+    assert tables["rule#2"] == {(TargetSide.FLAT, TargetSide.LONG): 1}
+
+
+def test_a_bias_without_its_rule_is_refused_either_way_round():
+    """The store writes the two columns together (phase2-data: both set or both empty)."""
+    with pytest.raises(ScoreError, match="comes with its rule's id"):
+        _question(research_bias="long")
+    with pytest.raises(ScoreError, match="comes with its rule's id"):
+        _question(strategy_id="rule#1")

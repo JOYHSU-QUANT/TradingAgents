@@ -13,6 +13,7 @@ from ._base import _UNSET, _encode, _insert, _iso_utc, _Unset
 from ._vocab import _FLIP_LEGS, _PLAN_STATUSES
 
 __all__ = [
+    "count_execution_plans_without_output",
     "get_execution_plan",
     "insert_execution_plan",
     "iter_execution_plans",
@@ -125,3 +126,11 @@ def update_execution_plan(
         f"UPDATE execution_plans SET {assignments} WHERE plan_id = ?",
         (*provided.values(), plan_id),
     )
+
+
+def count_execution_plans_without_output(conn: sqlite3.Connection, run_id: str) -> int:
+    """The run's plans with no ``ai_outputs`` row behind them: the trend guardrail's sweep closes."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM execution_plans WHERE run_id = ? AND output_id IS NULL",
+        (run_id,),
+    ).fetchone()[0]

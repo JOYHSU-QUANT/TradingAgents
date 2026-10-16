@@ -1012,3 +1012,49 @@ def test_a_blocked_row_is_never_a_maintain():
             order_created=False,
             no_order_reason="maintain_current",
         )
+
+
+# -- the gate's own blocked shapes, read back through Answer ------------------------
+# ``Answer.__post_init__`` restates ``RiskGateResult._check_blocked_to_flat``;
+# this pins the two copies to each other through the gate itself.
+
+from contrib.hyperliquid_perp.domains.perp.schema import GuardrailSide  # noqa: E402
+from contrib.hyperliquid_perp.tests.domains import test_risk_gate as _gate  # noqa: E402
+
+
+def _recorded(result) -> Answer:
+    return Answer(
+        input_id="q",
+        decision_mode=result.decision_mode.value,
+        target_side=None if result.target_side is None else result.target_side.value,
+        requested_margin_pct=result.requested_target_margin_pct,
+        approved_margin_pct=result.approved_target_margin_pct,
+        risk_action=result.risk_action.value,
+        risk_reason=result.risk_reason,
+        confidence=None if result.confidence is None else float(result.confidence),
+        order_created=result.order_created,
+        no_order_reason=result.no_order_reason,
+    )
+
+
+@pytest.mark.parametrize(
+    ("parsed", "current", "rule", "asked"),
+    [
+        (_gate._parsed("set_target", "short", 35), None, GuardrailSide.LONG, True),
+        (_gate._maintain(), _gate._long_state("30", "300"), GuardrailSide.SHORT, False),
+        (_gate._invalid_parsed(), _gate._long_state("30", "300"), GuardrailSide.FLAT, False),
+        (
+            _gate._parsed("set_target", "flat", 0, confidence="0.1"),
+            _gate._long_state("30", "300"),
+            GuardrailSide.SHORT,
+            True,
+        ),
+    ],
+    ids=["ask-against-rule", "maintain-over-held", "fail-closed-over-held", "refused-flat-ask"],
+)
+def test_every_blocked_shape_the_gate_writes_is_one_answer_reads(parsed, current, rule, asked):
+    result = _gate._evaluate(parsed, current=current, guardrail=rule)
+    assert result.risk_action.value == "blocked_to_flat", result
+    answer = _recorded(result)
+    assert answer.blocked
+    assert answer.asked_target is asked

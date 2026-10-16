@@ -16,8 +16,9 @@ version this build does not read, another coin's document, a bar too old, a
 bar from ahead of the clock — answers ``None`` with ONE named WARNING, and
 the engine turns ``None`` into :attr:`.schema.GuardrailSide.UNKNOWN`, whose
 answer at the gate was decided 2026-10-16: open nothing new, keep what is
-held. A missing document therefore never flattens the account, and never
-lets a new position through either.
+held. A document that itself says ``unknown`` is read as that side, with the
+same one WARNING. A missing document therefore never flattens the account,
+and never lets a new position through either.
 
 Freshness is judged against the HOST clock at the gate rather than against
 the context's bar: the gate runs when the scheduler says, and the document
@@ -49,6 +50,8 @@ _CONSEQUENCE = "so the gate opens nothing new and keeps what is held"
 def load_guardrail_signal(path: str, *, coin: str, now_ms: int) -> GuardrailSignal | None:
     """The guardrail's reading at ``path``, or ``None`` with one WARNING saying why not.
 
+    A reading whose side is ``unknown`` is returned, and also costs the one
+    WARNING: it is the producer's own way of not knowing.
     ``coin`` is the one this run trades; ``now_ms`` is the gate's own instant
     (the engine's clock, in UTC epoch milliseconds). A document stamped after
     ``now_ms`` is a clock that disagrees with this host, not a closed bar.
@@ -116,9 +119,9 @@ def guardrail_side_for(path: str, *, coin: str, now: datetime) -> GuardrailSide 
 
     A document that cannot be read or trusted is ``UNKNOWN`` — the reader has
     already said why, as it has when the document itself says ``unknown`` —
-    so nothing new opens and what is held is kept. The one
-    place the switch's two meanings (off, and on-but-unreadable) are told
-    apart, used by the paper engine and the one-shot command alike.
+    so nothing new opens and what is held is kept. The one place the switch's
+    two meanings (off, and on-but-unreadable) are told apart, used by the
+    paper engine and the one-shot command alike.
     """
     if not path:
         return None

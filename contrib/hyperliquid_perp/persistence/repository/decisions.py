@@ -27,9 +27,11 @@ __all__ = [
     "UnstampedInput",
     "ai_inputs_without_format_fingerprint",
     "attempt_status_counts",
+    "count_ai_outputs_with_risk_action",
     "count_decision_attempts",
     "find_in_progress_attempt",
     "get_decision_attempt",
+    "guardrail_sides_newest_first",
     "insert_account_snapshot",
     "insert_ai_input",
     "insert_ai_output",
@@ -539,3 +541,30 @@ def recent_account_snapshots(
         "SELECT * FROM account_snapshots WHERE run_id = ? ORDER BY snapshot_id DESC LIMIT ?",
         (run_id, limit),
     ).fetchall()
+
+
+def count_ai_outputs_with_risk_action(
+    conn: sqlite3.Connection, run_id: str, *, risk_action: str
+) -> int:
+    """How many of the run's verdicts the gate disposed of as ``risk_action`` (vocabulary-checked)."""
+    check_enum(risk_action, _RISK_ACTIONS, name="risk_action")
+    return conn.execute(
+        "SELECT COUNT(*) FROM ai_outputs WHERE run_id = ? AND risk_action = ?",
+        (run_id, risk_action),
+    ).fetchone()[0]
+
+
+def guardrail_sides_newest_first(conn: sqlite3.Connection, run_id: str) -> list[str | None]:
+    """What the trend guardrail read on each of the run's decided cycles, newest first.
+
+    One entry per decision attempt that carries a verdict (its ``output_id``
+    names the ``ai_outputs`` row); ``None`` is a gate run without the
+    guardrail. A cycle with no verdict (``api_failed``) has no entry.
+    """
+    rows = conn.execute(
+        "SELECT o.guardrail_side FROM decision_attempts a"
+        " JOIN ai_outputs o ON o.output_id = a.output_id"
+        " WHERE a.run_id = ? ORDER BY a.scheduled_at DESC",
+        (run_id,),
+    )
+    return [row["guardrail_side"] for row in rows]

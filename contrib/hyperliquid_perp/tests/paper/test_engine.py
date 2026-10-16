@@ -1505,15 +1505,21 @@ def _with_guardrail(engine, path: str) -> None:
     engine._risk = RiskConfig(leverage=D("5"), max_target_margin_pct=60, trend_guardrail=path)
 
 
-def test_the_guardrail_closes_a_held_position_against_the_rule(tmp_path):
+def test_the_guardrail_closes_a_held_position_against_the_rule(tmp_path, caplog):
     seed = (PositionState(coin="BTC", size=D("0.001"), entry_price=D(50000)),)
     db, clock, engine, _ = _engine(tmp_path, seed=seed)
     _with_guardrail(engine, _guardrail_document(tmp_path, "short"))
     _provider(engine, [snap()] * 4)
-    start = engine.start_plan(set_target("long", 2))
+    with caplog.at_level(logging.WARNING):
+        start = engine.start_plan(set_target("long", 2))
     assert start.gate.risk_action is RiskAction.BLOCKED_TO_FLAT
     assert start.gate.target_side.value == "long"  # what the model asked is kept
     assert start.plan_id is not None
+    assert any(
+        "trend guardrail: the rule (short) closes the held position; the model asked for long"
+        in r.getMessage()
+        for r in caplog.records
+    )
     clock.advance(30)
     engine.tick()
     assert _size(db) == 0
@@ -1608,7 +1614,7 @@ def test_a_sweep_that_must_close_but_cannot_read_the_market_says_so(tmp_path, ca
     db.close()
 
 
-def test_a_sweep_that_cannot_read_the_market_does_not_halt_the_engine(tmp_path):
+def test_a_sweep_whose_fetch_raises_does_not_halt_the_engine(tmp_path):
     seed = (PositionState(coin="BTC", size=D("0.001"), entry_price=D(50000)),)
     db, clock, engine, _ = _engine(tmp_path, seed=seed)
     _with_guardrail(engine, _guardrail_document(tmp_path, "flat"))
@@ -1618,4 +1624,58 @@ def test_a_sweep_that_cannot_read_the_market_does_not_halt_the_engine(tmp_path):
     # Still trading: the next round's plan builds as usual.
     _provider(engine, [snap()] * 4)
     assert engine.start_plan(set_target("flat", 0)).gate is not None
+    db.close()
+
+
+def _held_long_with_rule(tmp_path, side: str):
+    seed = (PositionState(coin="BTC", size=D("0.001"), entry_price=D(50000)),)
+    db, clock, engine, _ = _engine(tmp_path, seed=seed)
+    _with_guardrail(engine, _guardrail_document(tmp_path, side))
+    _provider(engine, [snap()] * 12)
+    return db, clock, engine
+
+
+def test_a_flip_onto_the_rules_side_runs_both_legs(tmp_path):
+    db, clock, engine = _held_long_with_rule(tmp_path, "short")
+    start = engine.start_plan(set_target("short", 5))
+    assert start.gate.risk_action in (RiskAction.APPROVED, RiskAction.CLAMPED)
+    assert engine._flip is not None
+    for _ in range(8):
+        clock.advance(30)
+        engine.tick()
+        if _size(db) < 0:
+            break
+    assert _size(db) < 0
+    db.close()
+
+
+def test_a_rule_that_turns_between_a_flips_legs_leaves_the_book_flat_and_says_so(tmp_path, caplog):
+    db, clock, engine = _held_long_with_rule(tmp_path, "short")
+    engine.start_plan(set_target("short", 5))
+    _with_guardrail(engine, _guardrail_document(tmp_path, "long"))  # the producer ran meanwhile
+    with caplog.at_level(logging.WARNING):
+        clock.advance(30)
+        engine.tick()
+    assert _size(db) == 0
+    row = db.conn.execute(
+        "SELECT status_reason FROM execution_plans WHERE status = 'flip_incomplete'"
+    ).fetchone()
+    assert row["status_reason"] == "open_leg_gate_rejected"
+    assert any(
+        "trend guardrail: the rule (long) blocks the ask over a flat book" in r.getMessage()
+        for r in caplog.records
+    )
+    db.close()
+
+
+def test_a_flip_under_an_unknown_rule_never_starts(tmp_path, caplog):
+    db, clock, engine = _held_long_with_rule(tmp_path, "unknown")
+    with caplog.at_level(logging.WARNING):
+        start = engine.start_plan(set_target("short", 5))
+    assert start.plan_id is None and start.gate.risk_reason == "guardrail_rule_unknown"
+    assert _size(db) == D("0.001")
+    assert any(
+        "trend guardrail: the rule (unknown) is unreadable, so the ask is refused" in r.getMessage()
+        for r in caplog.records
+    )
     db.close()

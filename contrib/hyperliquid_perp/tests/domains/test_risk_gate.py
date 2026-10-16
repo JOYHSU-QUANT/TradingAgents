@@ -1195,3 +1195,19 @@ def test_an_ask_record_carries_a_side_and_a_margin_together():
     with pytest.raises(ValueError, match="flat ask carries no margin"):
         _Ask(side=TargetSide.FLAT, requested=10, confidence=Decimal("0.5"))
     assert _Ask.of(_maintain(), _DECISION_CFG).side is None
+
+
+def test_a_blocked_result_is_tied_to_the_rule_that_closed_the_book():
+    # The reading is part of the verdict's shape, not a label added after the
+    # fact: a hand-built row cannot claim a close by a rule it did not read.
+    blocked = _evaluate(_parsed("set_target", "short", 35), guardrail=GuardrailSide.LONG)
+    assert blocked.guardrail is GuardrailSide.LONG
+    for side in (None, GuardrailSide.UNKNOWN):
+        with pytest.raises(ValueError, match="records the rule's side"):
+            replace(blocked, guardrail=side)
+    with pytest.raises(ValueError, match="names the rule's state"):
+        replace(blocked, guardrail=GuardrailSide.FLAT)
+    unknown = _evaluate(_parsed("set_target", "short", 35), guardrail=GuardrailSide.UNKNOWN)
+    assert (unknown.risk_action, unknown.guardrail) == (RiskAction.REJECTED, GuardrailSide.UNKNOWN)
+    with pytest.raises(ValueError, match="records an unknown rule"):
+        replace(unknown, guardrail=GuardrailSide.LONG)

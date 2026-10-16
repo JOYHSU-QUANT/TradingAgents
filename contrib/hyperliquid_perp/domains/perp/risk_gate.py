@@ -71,8 +71,6 @@ RISK_REASON_GUARDRAIL_RULE_FLAT = "guardrail_rule_flat"
 RISK_REASON_GUARDRAIL_AGAINST_RULE = "guardrail_against_rule"
 RISK_REASON_GUARDRAIL_RULE_UNKNOWN = "guardrail_rule_unknown"
 # The two a blocked_to_flat row may carry; the third only ever rejects.
-_GUARDRAIL_REASONS = frozenset({RISK_REASON_GUARDRAIL_RULE_FLAT, RISK_REASON_GUARDRAIL_AGAINST_RULE})
-
 NO_ORDER_MAINTAIN_CURRENT = "maintain_current"
 NO_ORDER_WITHIN_DEADBAND = "within_deadband"
 NO_ORDER_INVALID_FAIL_CLOSED = "invalid_fail_closed"
@@ -388,17 +386,23 @@ class RiskGateResult:
             # record *why*. A contradictory ``ParsedDecision`` (is_valid False,
             # invalid_reason None) would otherwise reach here with a null reason.
             raise ValueError("a rejected/fail-closed result must name why in risk_reason")
+        if self.risk_reason == RISK_REASON_GUARDRAIL_RULE_UNKNOWN and (
+            self.risk_action is not RiskAction.REJECTED or self.guardrail is not GuardrailSide.UNKNOWN
+        ):
+            raise ValueError("a guardrail_rule_unknown rejection records an unknown rule")
 
     def _check_blocked_to_flat(self, sized: tuple[Decimal | None, ...]) -> None:
         """The guardrail's shape: a ``set_target`` whose approved target is flat.
 
-        ``target_side`` is the side the model asked for (kept, with its margin
-        and confidence, so the audit row shows what was blocked) or ``FLAT``
-        with no margin when the book was closed over a maintain, a fail-closed
-        round or the model's own refused close; the approved target is zero
-        either way, an order exists exactly when something was held (else
-        ``already_flat``), and ``risk_reason`` is one of the two rule states
-        that close a book (an unknown rule only ever rejects).
+        ``target_side`` is the side the model asked for (kept with its margin
+        and confidence, so the audit row shows what was blocked), or ``FLAT``
+        when there was no sided ask to keep: a maintain or a fail-closed
+        round (no margin), or a flat ask the plain gate refused (margin 0).
+        The approved target is zero either way; an order exists exactly when
+        something was held (else ``already_flat``); ``guardrail`` is the
+        rule's side that closed the book and ``risk_reason`` names its state
+        (``rule_flat`` under a flat rule, ``against_rule`` otherwise) — an
+        unknown rule only ever rejects.
         """
         if self.decision_mode is not DecisionMode.SET_TARGET or self.target_side is None:
             raise ValueError("a blocked_to_flat result is a set_target carrying a side")
@@ -420,8 +424,13 @@ class RiskGateResult:
             raise ValueError("a blocked_to_flat result orders exactly when something is held")
         if not self.order_created and self.no_order_reason != NO_ORDER_ALREADY_FLAT:
             raise ValueError("a blocked_to_flat result over a flat book says already_flat")
-        if self.risk_reason not in _GUARDRAIL_REASONS:
-            raise ValueError("a blocked_to_flat result names the rule's state in risk_reason")
+        if self.guardrail not in (GuardrailSide.LONG, GuardrailSide.SHORT, GuardrailSide.FLAT):
+            raise ValueError("a blocked_to_flat result records the rule's side that closed the book")
+        if self.risk_reason != _guardrail_reason(self.guardrail):
+            raise ValueError(
+                "a blocked_to_flat result names the rule's state in risk_reason:"
+                " rule_flat under a flat rule, against_rule otherwise"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-ready dict; Decimals become strings so no precision is lost."""
@@ -459,6 +468,7 @@ def _no_target_result(
     requested: int | None = None,
     target_side: TargetSide | None = None,
     confidence: Decimal | None = None,
+    guardrail: GuardrailSide | None = None,
 ) -> RiskGateResult:
     """A no-target outcome: maintain-current shape, no sized target, no order.
 
@@ -482,6 +492,7 @@ def _no_target_result(
         delta_notional=Decimal(0),
         configured_leverage=risk.leverage,
         confidence=confidence,
+        guardrail=guardrail,
     )
 
 
@@ -520,6 +531,7 @@ def _rejected(
     requested: int | None = None,
     target_side: TargetSide | None = None,
     confidence: Decimal | None = None,
+    guardrail: GuardrailSide | None = None,
 ) -> RiskGateResult:
     """A schema-valid ``set_target`` the gate refused — maintain-current, no order.
 
@@ -536,11 +548,12 @@ def _rejected(
         requested=requested,
         target_side=target_side,
         confidence=confidence,
+        guardrail=guardrail,
     )
 
 
 def _blocked_to_flat(
-    risk_reason: str, ask: _Ask, current: CurrentPositionState, risk: RiskConfig
+    rule: GuardrailSide, ask: _Ask, current: CurrentPositionState, risk: RiskConfig
 ) -> RiskGateResult:
     """The guardrail's outcome: close what is held, open nothing; the ask is kept for the audit."""
     held = current.signed_notional != 0
@@ -550,7 +563,7 @@ def _blocked_to_flat(
         requested_target_margin_pct=ask.requested,
         approved_target_margin_pct=0,
         risk_action=RiskAction.BLOCKED_TO_FLAT,
-        risk_reason=risk_reason,
+        risk_reason=_guardrail_reason(rule),
         order_created=held,
         no_order_reason=None if held else NO_ORDER_ALREADY_FLAT,
         target_margin=Decimal(0),
@@ -560,6 +573,7 @@ def _blocked_to_flat(
         delta_notional=-current.signed_notional,
         configured_leverage=risk.leverage,
         confidence=ask.confidence,
+        guardrail=rule,
     )
 
 
@@ -661,9 +675,10 @@ def _guardrail_before(
             requested=ask.requested,
             target_side=ask.side,
             confidence=ask.confidence,
+            guardrail=rule,
         )
     if guardrail_forbids(rule, ask.side):
-        return _blocked_to_flat(_guardrail_reason(rule), ask, current, risk)
+        return _blocked_to_flat(rule, ask, current, risk)
     return None
 
 
@@ -691,7 +706,7 @@ def _guardrail_after(
     )
     if leaves_the_side:
         return result
-    return _blocked_to_flat(_guardrail_reason(rule), ask, current, risk)
+    return _blocked_to_flat(rule, ask, current, risk)
 
 
 def evaluate(

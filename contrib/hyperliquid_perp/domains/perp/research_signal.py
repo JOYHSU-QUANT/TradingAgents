@@ -64,10 +64,10 @@ MAX_SIGNAL_AGE_INTERVALS = 2
 
 # What ``read_document`` returns when it has already logged the refusal. A
 # sentinel, shared with the guardrail's reader, rather than ``None``, because
-# ``None`` is also what
-# ``json.loads`` returns for a document holding ``null`` — and that document
-# has a named refusal waiting for it in ``ResearchSignal.from_document`` ("a
-# research signal document is a JSON object, got NoneType"). Sharing the two
+# ``None`` is also what ``json.loads`` returns for a document holding ``null``
+# — and that document has a named refusal waiting for it in
+# ``ResearchSignal.from_document`` ("a research signal document is a JSON
+# object, got NoneType"). Sharing the two
 # meanings suppressed it: a four-byte file made the section vanish with no log
 # line at all, which is the one outcome this module's whole design forbids.
 UNREAD = object()

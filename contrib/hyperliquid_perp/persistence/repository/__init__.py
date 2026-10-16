@@ -59,9 +59,11 @@ from .decisions import (
     UnstampedInput,
     ai_inputs_without_format_fingerprint,
     attempt_status_counts,
+    count_ai_outputs_with_risk_action,
     count_decision_attempts,
     find_in_progress_attempt,
     get_decision_attempt,
+    guardrail_sides_newest_first,
     insert_account_snapshot,
     insert_ai_input,
     insert_ai_output,
@@ -133,6 +135,7 @@ from .orders import (
     update_order,
 )
 from .plans import (
+    count_execution_plans_without_output,
     get_execution_plan,
     insert_execution_plan,
     iter_execution_plans,

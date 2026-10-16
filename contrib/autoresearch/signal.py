@@ -1,4 +1,6 @@
-"""The one thing this package ever hands the live path: a qualitative signal.
+"""One of the two things this package hands the live path: a qualitative signal.
+
+(The other is the trend guardrail's document, :mod:`.guardrail`, since 2026-10-16.)
 
 Plan §7 / PR C1. Everything else here stays offline — this module takes the
 coin's most recently promoted rule, replays its DECISIONS up to the newest bar

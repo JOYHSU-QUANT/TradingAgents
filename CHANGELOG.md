@@ -25,9 +25,10 @@ Breaking changes within the 0.x line are called out explicitly.
   bars, wrong coin, from the future, or `side: unknown`) nothing new opens
   — no other side, no larger margin on the held side — and what is held is
   kept (`rejected` / `guardrail_rule_unknown`, one WARNING per gate read).
-  A cycle that ended `api_failed` gets the same book
-  check through `PaperExecutionEngine.guardrail_sweep` (its close is a plan
-  with no `ai_outputs` row). Schema v14 adds `ai_outputs.guardrail_side`,
+  A cycle that ended `api_failed` gets the same book check through
+  `PaperExecutionEngine.guardrail_sweep` (its close is a plan with no
+  `ai_outputs` row; the plan itself can still be rejected, e.g. a position
+  under the minimum order size). Schema v14 adds `ai_outputs.guardrail_side`,
   what the gate read each round, so `validate` can count
   `guardrail_unknown_streak` (>= 6 decided cycles in a row is a `shortfall:`,
   exit 4; decided 2026-10-16: visible, not acted on) beside

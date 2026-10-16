@@ -2,7 +2,8 @@
 
 Mirrors ``test_research_signal``: the contract (``GuardrailSignal``) is tested
 as a value, and the reader (``load_guardrail_signal``) for answering ``None``
-with exactly one named WARNING on every untrustworthy document — this one
+with exactly one named WARNING on every untrustworthy document (and a
+document saying ``unknown`` with that side and the same one WARNING) — this one
 reaches a gate, so a refusal must never flatten the book and never let a new
 position through (the engine turns ``None`` into ``UNKNOWN``).
 """

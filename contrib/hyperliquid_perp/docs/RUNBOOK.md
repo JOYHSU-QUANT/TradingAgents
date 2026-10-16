@@ -256,12 +256,14 @@ maker 成本下重跑通過才可以翻這個開關。這條有程式擋著：`s
 `/home/trader/research/producer.sh`，cron 兩小時一次）在 `fetch` 之後、`signal` 旁多一行
 `python -m contrib.autoresearch guardrail-signal --coin BTC --out /home/trader/data/guardrail_signal.json`
 ——文件的時戳是 store 最新一根 4h 收盤，讀端只容忍 2 根文件 bar＝8 小時，`fetch` 連續漏跑幾次文件就可能
-過期，指令在 store 已過期時會拒寫（exit 1，要先 `fetch`）；(2) 先跑一次、看 `guardrail signal: <side>`
+過期，指令在 store 已過期時會拒寫（exit 1，要先 `fetch`）；它要**獨立於 `signal` 的結束碼**跑（`signal` 有幾種
+設計上的拒絕會 exit 1，腳本若 `set -e` 或把它串在後面，文件就斷供、8 小時後全 `unknown`），cron 對它自己的
+exit code 告警；(2) 先跑一次、看 `guardrail signal: <side>`
 那行與文件存在；(3) 再把路徑填進 `local.yaml` 的 `risk.trend_guardrail`、開新 run。日常看 log，
-`trend guardrail` 開頭的 WARNING 有四族：文件讀不到／過期／幣不對／時戳在未來、文件說 `unknown`——這兩族那一輪
-不開新倉、既有倉位照舊；`trend guardrail sweep: closing …` 是 API 失敗那一輪**下了平倉 plan**（plan 沒有
-`ai_outputs` 列；plan 仍可能被拒，例如倉位小於最小單額，看 `execution_plans.status`）；
-`trend guardrail sweep: … no market snapshot could be read` 是規則要平、那輪卻讀不到行情，倉位留到下一輪。
+`trend guardrail` 開頭的 WARNING 有四族：(1) 文件讀不到、不合契約、過期、幣不對或時戳在未來；(2) 文件說
+`unknown`——族 1、2 那一輪不開新倉、既有倉位照舊；(3) `trend guardrail sweep: closing …` 是 API 失敗那一輪
+**下了平倉 plan**（plan 沒有 `ai_outputs` 列；plan 仍可能被拒，例如倉位小於最小單額，看 `execution_plans.status`）；
+(4) `trend guardrail sweep: … no market snapshot could be read` 是規則要平、那輪卻讀不到行情，倉位留到下一輪。
 `ai_outputs.risk_action = blocked_to_flat` 是有答案的那一輪護欄擋了單或平了倉；
 `validate` 印 `guardrail_unknown_streak`／`guardrail_blocked`／`guardrail_sweep_plans`，連續未知 ≥ 6 個決策
 cycle 印 `shortfall:` 並 exit 4；`contrib.replay score` 的 `guardrail blocked` 行只數有 `ai_outputs` 列的介入。
@@ -345,6 +347,10 @@ knows vM`，連唯讀指令都拒），所以升上去之後要退回舊 binary 
 正因如此，**不要在
 run 5 跑到一半單獨部署它**：那等於拿現行 run 的「退回上一個 binary」去換一個只有 run 6 用得到的欄位。
 排進換段 SOP 當一個步驟：**停 run 5 → 備份 DB → 部署 v13 → 開 run 6**。
+**v14（2026-10-16，`ai_outputs.guardrail_side`）同一條規則**：帶它的 build 一部署，daemon 重啟就把現行
+run 的 store 升到 v14——護欄開不開都一樣，不是只有開了才升；所以同樣先備份、同樣排在換段。另一個徵兆：
+本機 checkout 比伺服器新時，對快照跑 `validate`／`export`／`status` 會具名拒絕（store 落後、不升級），
+那不是壞掉，是伺服器還沒部署到這一版。
 
 判讀時**主判準是提案率**（`requested_target_margin_pct` 非 null 的佔比）。**但這一欄
 會低估**：fail-closed 的 cycle 一律把它寫成 NULL，模型實際要求了什麼在 parse 接縫就被
@@ -381,7 +387,7 @@ PnL，正是跨段對照要避免的汙染。等 cycle 自然回到空倉（或 
 1. 確認空倉後，SSH 上伺服器 `sudo systemctl stop hl-paper`，把 unit 的
    `ExecStart` 改成新段參數（`--run-id paper-BTC-2 --create`），
    `sudo systemctl daemon-reload`，**先不要啟動**。
-2. **這次部署若帶 schema migration（例如 v13，見 §4），在這裡備份 DB。**
+2. **這次部署若帶 schema migration（例如 v13、v14，見 §4），在這裡備份 DB。**
    停了、還沒 push，是唯一一個「舊 code 與舊 schema 都還在」的時點；一旦下一步
    的新 binary 開過 store 把它升上去，要退回舊 binary 就只剩還原備份這條路。
    沒有 migration 的部署跳過這步。
@@ -439,7 +445,8 @@ LLM 呼叫**之前**的失敗（連線、warmup、payload 寫入）零 AI 花費
 `invalid_output` cycle（模型輸出不合契約、fail-closed 成 `maintain_current`）
 與 `api_failed` 不同：它**計入** 30 輪門檻，且每筆都會把
 `ai_outputs.risk_action` 寫成 `invalid_fail_closed`——那是文件上的 model-drift
-告警值（見 phase2-data.md）。`phase2-target-v3` 起這個值會成批出現屬預期
+告警值（見 phase2-data.md；護欄開著、帳上倉位又逆著規則的那一輪會改寫成 `blocked_to_flat`，
+要數 drift 就看 `decision_attempts.status = invalid_output`）。`phase2-target-v3` 起這個值會成批出現屬預期
 （模型照抄 schema 區塊由「合法」變成「不合法」），不是新故障；真正要看的是它
 有沒有隨著時間下降、以及提案率有沒有上來。判斷成因看 `risk_reason`，但要知道它是**多對一**的：照抄記
 `invalid_decision_mode`，然而任何落在兩個 enum 值以外的 mode（模型自己編的 `hold`、
@@ -501,8 +508,8 @@ python -m contrib.hyperliquid_perp validate --run-id paper-BTC
 
 | `validate` exit | 意義 | 下一步 |
 |---|---|---|
-| `0` | `cycle_count >= 30` 且 orphan／snapshot／replay mismatch 全為 0 | **可進 Phase 3**——但 `cycle_count` 含 `invalid_output`（那裡量的是「排程有沒有在跑」），而 paper 報告沒有 live 那個 `invalid_output_count` 欄可以拆。下判斷前先看同一份報告的 `order_count`，必要時到 export 的 `decision_attempts.csv` 數 status 分佈：30 個解不開、一單沒下的 run 一樣會印 exit 0 |
-| `4` | 資料一致但 cycles 未滿 30；**或 `guardrail_unknown_streak` ≥ 6**（趨勢護欄連續讀到 `unknown`；只算有判決的 cycle，`shortfall:` 行指向 producer 的 `guardrail-signal` 與 `fetch`）；**或 `no_decision_streak` ≥ 3**（最近連續 ≥3 個 cycle 都沒出決策——不分成因，報告會印 `shortfall:` 行說明，並另印 `stale_feed_refusal_streak` 讓你分辨是不是 K 線 feed／時鐘問題；下一個決策 cycle 自動歸零，run 停掉超過 2 個 cycle 後也不再套用） | 繼續掛著跑；stale streak 照 §7 `freshness limit` 列處置，其餘看 `decision_attempts.error_type` |
+| `0` | `cycle_count >= 30` 且 orphan／snapshot／replay mismatch 全為 0、`no_decision_streak < 3`、`guardrail_unknown_streak < 6` | **可進 Phase 3**——但 `cycle_count` 含 `invalid_output`（那裡量的是「排程有沒有在跑」），而 paper 報告沒有 live 那個 `invalid_output_count` 欄可以拆。下判斷前先看同一份報告的 `order_count`，必要時到 export 的 `decision_attempts.csv` 數 status 分佈：30 個解不開、一單沒下的 run 一樣會印 exit 0 |
+| `4` | 資料一致但 cycles 未滿 30；**或 `guardrail_unknown_streak` ≥ 6**（趨勢護欄連續讀到 `unknown`；只算有判決的 cycle，`shortfall:` 行指向 producer 的 `guardrail-signal` 與 `fetch`，同樣在 run 停掉超過 2 個 cycle 後不再套用）；**或 `no_decision_streak` ≥ 3**（最近連續 ≥3 個 cycle 都沒出決策——不分成因，報告會印 `shortfall:` 行說明，並另印 `stale_feed_refusal_streak` 讓你分辨是不是 K 線 feed／時鐘問題；下一個決策 cycle 自動歸零，run 停掉超過 2 個 cycle 後也不再套用） | 繼續掛著跑；stale streak 照 §7 `freshness limit` 列處置，其餘看 `decision_attempts.error_type` |
 | `5` | integrity failure（orphan／mismatch／store 壞掉） | 先調查再相信任何結果 |
 | `1` | 操作錯誤（db／run 不存在，**或 `--db` 指到別的應用程式的資料庫、目錄、不是普通檔案的東西、一個打不開來讀的檔、一個開不起來的檔、或一個內容其實在 `-wal`／`-journal` 裡的檔**） | 檢查 `--db`／`--run-id`；訊息會說是哪一種，各列見 RUNBOOK-live §8。**「打不開來讀」與「開不起來」這兩種以前都印成 exit 5**（`store integrity failure`）——檔案權限問題被當成帳本問題，現在都歸這一列（issue #210／#235；後者是長度 0、讀得到但**寫不進去**的檔，因為開一個 store 本身就是寫入）。**「內容在 log 裡」那種以前更糟**：長度 0（或根本不存在）的主檔旁邊有裝著資料的 `-wal`，會被當成空 store 整套建進去，而且開檔那一下就先把那個 log 刪掉；現在具名拒絕、兩個檔都不碰（issue #236） |
 

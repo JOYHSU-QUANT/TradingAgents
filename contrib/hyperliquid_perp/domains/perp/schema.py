@@ -183,11 +183,13 @@ class GuardrailSide(VocabEnum, noun="guardrail side"):
     The gate's reading of the rule (design 2026-10-02 §2): a position may not
     stand against it, and none may stand while it is ``FLAT``. ``UNKNOWN`` is
     a reading of its own, written when the rule could not evaluate its newest
-    bar (a hole in the history, features still warming up); the gate's answer
-    to it was decided 2026-10-16 — open nothing new, keep what is held. A
-    document that could not be read at all is not a side either: the reader
-    answers ``None`` with a WARNING naming why, and the engine treats that as
-    ``UNKNOWN``. The two facts are logged apart and must not share a spelling.
+    bar (a hole in the history, features still warming up) or never took a
+    side in the stored history; the gate's answer to it was decided
+    2026-10-16 — open nothing new, keep what is held. A document that could
+    not be read at all is not a side either: the reader answers ``None`` with
+    a WARNING naming why, and the engine treats that as ``UNKNOWN``. The two
+    are logged apart (each its own WARNING); downstream — the audit row, the
+    validator's streak — they share this spelling.
     """
 
     LONG = "long"

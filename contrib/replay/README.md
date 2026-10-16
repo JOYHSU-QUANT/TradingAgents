@@ -363,9 +363,10 @@ python -m contrib.replay guardrail --db paper_trading.db --research-db autoresea
     --run-id paper-BTC-6 --run-id paper-BTC-7 [--rule FILE] [--out DIR]
 ```
 
-趨勢護欄（2026-10-02 拍板，**還沒做進交易員**）的政策是：帳上的倉位只能站在一條固定規則的那一邊。
-規則持多才能持多、持空才能持空，規則空手就空手。這個指令是它的影子模式：把這條政策對著 paper
-交易員**已經做過**的決策讀一遍，印出護欄當時會怎麼做，不改任何交易行為。
+趨勢護欄（2026-10-02 拍板，**2026-10-16 做進 paper 交易員的閘門**、`risk.trend_guardrail` 預設關）的政策是：
+帳上的倉位只能站在一條固定規則的那一邊。規則持多才能持多、持空才能持空，規則空手就空手。這個指令是它的
+離線版：把這條政策對著 paper 交易員**已經做過**的決策讀一遍（不管那段護欄有沒有開），印出護欄當時會怎麼做，
+不改任何交易行為。
 
 每一題讀三件事：
 
@@ -373,7 +374,8 @@ python -m contrib.replay guardrail --db paper_trading.db --research-db autoresea
   （`contrib/autoresearch/guardrail.py`），取決策時刻之前最新收盤那一根之後的方向。三種情況讀不到：
   規則還在暖機；那一根比決策時刻早超過 2 根（研究 store 沒抓到那麼新）；規則在那一根讀不到條件
   （它凍在原本那一邊，不是它選的）。後兩種是線上那條路自己的拒絕：讀端丟掉超過
-  `MAX_SIGNAL_AGE_INTERVALS` 根的文件，寫端在最新一根讀不到條件時不寫文件。讀不到的那一題，
+  `MAX_SIGNAL_AGE_INTERVALS` 根的文件；`signal` 在最新一根讀不到條件時不寫文件，`guardrail-signal` 則寫
+  `unknown`（閘門對它與過期文件做同一件事）。讀不到的那一題，
   帳上有倉位就記成 `rule_unknown`，空手則照樣 `pass`。
 - **決策之後 paper 帳上的方向**：有下單就是核准的目標；沒下單（維持、被拒、fail-closed、落在
   deadband 內、整輪沒答案）就是原本的倉位。有下單時讀到的是交易員**想**持有的方向；掛單若沒成交，

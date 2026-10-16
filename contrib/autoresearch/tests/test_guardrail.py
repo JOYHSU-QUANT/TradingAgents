@@ -364,3 +364,14 @@ def test_a_store_that_cannot_answer_refuses_the_command_by_name(tmp_path, capsys
     err = capsys.readouterr().err
     assert err.startswith("error: ") and "btc-20d-breakout@" in err
     assert not (tmp_path / "g.json").exists()
+
+
+def test_a_bar_from_ahead_of_the_clock_is_refused_before_it_is_written():
+    from contrib.autoresearch.guardrail import require_fresh
+
+    signal = GuardrailSignal(
+        coin="BTC", interval="4h", as_of_ms=ANCHOR_MS, rule_id="band@deadbeef", side="long"
+    )
+    require_fresh(signal, now_ms=ANCHOR_MS)  # on the bar's own close is fine
+    with pytest.raises(GuardrailError, match="AFTER this command's clock"):
+        require_fresh(signal, now_ms=ANCHOR_MS - 1)

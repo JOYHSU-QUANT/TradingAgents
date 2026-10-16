@@ -4,9 +4,9 @@
 
 它不下單、不持倉、不碰 `contrib/hyperliquid_perp/` 的 SQLite 或 schema，也不越過
 RiskGate。它做的事只有一件：把 BTC 的歷史資料落到**自己的** store，在上面跑一個確定性
-的回測評估器，替 LLM 提出的擇時假說打分。唯一會流回實盤路徑的東西，是 prompt 裡一段
-**定性**的研究訊號——用一份小 JSON 文件交接（計畫 §7、run 6），而且藏在一個預設關閉的
-config 開關後面。
+的回測評估器，替 LLM 提出的擇時假說打分。會流回實盤路徑的只有兩份小 JSON 交接文件：prompt 裡
+一段**定性**的研究訊號（計畫 §7、run 6），以及 2026-10-16 起趨勢護欄規則的**方向**（給風控閘門）；
+兩者都藏在預設關閉的 config 開關後面。
 
 上面那句話就是這個套件的 scope 判準：**任何需要把它放寬的改動，都是 scope creep，不是
 更大的功能。**
@@ -66,8 +66,8 @@ PR C1（本次）＝交接文件：`signal` 指令，以及 `hyperliquid_perp` �
   `hyperliquid_perp` 用標準函式庫讀它、當成 prompt 裡的一段 analyst 輸入，開關預設關。
   見下面「交接文件」段。
 - **護欄規則**（`guardrail.py`、`guardrails/`、`evaluator.replay_sides`）：一條寫死的規則，
-  以及它在 store 裡每一根 K 線之後站在哪一邊。只給 `contrib.replay` 的離線報表讀，不進 ledger、
-  不流回實盤路徑。見下面「護欄規則」段。
+  以及它在 store 裡每一根 K 線之後站在哪一邊。離線報表 `contrib.replay` 讀它；2026-10-16 起
+  `guardrail-signal` 把它最新一根的方向寫成交接文件給閘門；不進 ledger。見下面「護欄規則」段。
 
 **還沒有的東西**：無——計畫 §5 的 A1–A4、B1、C1 都做完了。C1 的開關要不要在 paper
 翻開是部署節奏的決定（計畫 §7：run 5 換 maker 之後，promoted 規則要先在 maker 成本下
@@ -494,7 +494,7 @@ exit 0；要補洞請跑 `fetch`。**被拒絕的 spec 則相反**：文件本�
 
 ## 護欄規則
 
-趨勢護欄（2026-10-02 拍板，還沒做進交易員）用一條固定規則的**方向**限制帳上能持有的倉位。
+趨勢護欄（2026-10-02 拍板，2026-10-16 做進 paper 交易員的閘門、預設關）用一條固定規則的**方向**限制帳上能持有的倉位。
 這個套件只負責其中研究的那一半：是哪一條規則、報表上怎麼稱呼它、它在每一根 K 線之後站在哪一邊。
 
 - **規則是一個 spec 檔**：`guardrails/btc-20d-breakout.json`，跟任何 trial 一樣是本套件的 DSL
@@ -512,7 +512,7 @@ exit 0；要補洞請跑 `fetch`。**被拒絕的 spec 則相反**：文件本�
 - **`reading_at(時刻)` 讀不到就回 `None`**，三種情況：規則還在暖機（第一根能評估的 K 線之前）；
   store 的最後一根比那個時刻早超過 `MAX_SIGNAL_AGE_INTERVALS` 根；規則在那一根讀不到條件
   （方向是凍住的，不是它選的）。後兩種與交接文件一致：讀端丟掉過期文件，`signal` 在最新一根讀不到
-  條件時不寫文件。回傳值本身是 `None`＝讀不到；讀到了而 `side` 是 `None`＝規則空手，兩者不同。
+  條件時不寫文件、`guardrail-signal` 寫 `unknown`。回傳值本身是 `None`＝讀不到；讀到了而 `side` 是 `None`＝規則空手，兩者不同。
 - **重放從空手開始**：store 第一根之前規則抱著什麼看不到，所以規則第一次站到某一邊之前的「空手」
   可能是更早開的倉位。`first_taken_ms` 是那一根的收盤（整段歷史都沒站邊就是 `None`），`describe()` 會印。
 
@@ -531,9 +531,9 @@ python -m contrib.autoresearch guardrail-signal --coin BTC --out /srv/guardrail-
 
 - `side` 四種：`long`／`short`／`flat`／`unknown`。`unknown`＝最新一根規則讀不到條件，或整段歷史規則從未站邊
   （重放從 store 第一根空手起算，那個「空手」可能是 store 之前就開的倉，閘門不該憑它平倉）。文件照寫、指令 exit 0，
-  讀端對 `unknown` 留一行 WARNING（跟文件缺／過期同一族），閘門對兩者做同一件事：不開新倉、既有倉位照舊。
-- 跟 `signal` 同一個寫法（暫存檔＋rename）、同一條過期規則（讀端丟掉比**自己時鐘**舊超過
-  `MAX_SIGNAL_AGE_INTERVALS` 根文件 bar 的文件），指令會印出要多常跑。`--rule` 可換 spec 檔，
+  讀端對 `unknown` 留一行 WARNING（與文件缺／過期是不同的 WARNING，效果相同），閘門對兩者做同一件事：不開新倉、既有倉位照舊。
+- 跟 `signal` 同一個寫法（暫存檔＋rename）、同一條過期上限（丟掉舊超過 `MAX_SIGNAL_AGE_INTERVALS` 根文件
+  bar 的文件；但護欄的讀端以**閘門主機的時鐘**為準，研究訊號的讀端以 context 那根 bar 為準），指令會印出要多常跑。`--rule` 可換 spec 檔，
   `rule_id` 會跟著 hash 變，指令的輸出與讀端的 `unknown` WARNING 都印它（閘門本身不比對）。
 - 這是這個套件第一個會碰到閘門的輸出；它仍然只寫**方向**，數字一個都不過河。
 

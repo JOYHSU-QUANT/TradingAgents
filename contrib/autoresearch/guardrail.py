@@ -274,7 +274,9 @@ def build_guardrail_signal(
 
     ``UNKNOWN`` when the rule could not evaluate that bar (the side there is
     one it carried in, not one it took — the same bar :meth:`RuleTimeline.reading_at`
-    answers ``None`` for); ``FLAT`` when it holds nothing. The timeline is
+    answers ``None`` for) or never took a side in the stored history
+    (``first_taken_ms`` is ``None``: the replay's opening "flat" may be a
+    position older than the store); ``FLAT`` when it holds nothing. The timeline is
     returned beside the document so the command can print where the side
     came from without replaying twice.
     """
@@ -324,6 +326,14 @@ def require_fresh(signal: GuardrailSignal, *, now_ms: int) -> None:
     """
     age_ms = now_ms - signal.as_of_ms
     bound_ms = max_signal_age_ms(signal.interval)
+    if age_ms < 0:
+        # The reader refuses such a document on arrival ("AFTER this gate's
+        # own clock"); refusing it here keeps this command's exit code honest.
+        raise GuardrailError(
+            f"the research store's newest {signal.coin} {signal.interval} bar closed "
+            f"{gap_label(-age_ms)} AFTER this command's clock, which no closed bar can be — "
+            "check this host's clock (or the store's bars); the document was not written"
+        )
     if age_ms > bound_ms:
         # Two figures, the way the readers' refusals print them: the age, and
         # how far past the bound it is (which can be small).

@@ -59,7 +59,7 @@ Breaking changes within the 0.x line are called out explicitly.
   reading the paper engine does. `guardrail-signal` refuses to write when
   the store's newest bar is already past the gate's bound (fetch first).
   The replay scorecard reads the new action (`guardrail blocked: N`); the
-  `replay` command re-gates without the guardrail, a documented limitation.
+  `replay` command's re-gate under the recorded reading is in the entry above.
 - **`contrib/replay score`: did the trader follow the research bias.** One
   summary line counts the answered questions that carried a bias (telling
   pre-v13 rows, which had the section but no recorded bias, from cycles

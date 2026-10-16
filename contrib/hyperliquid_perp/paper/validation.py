@@ -78,6 +78,7 @@ __all__ = [
 # (the §20.3 acceptance gate on a LIVE run) — two specs, two gates, one number
 # by coincidence; deliberately not tied together (issue #102).
 MIN_CYCLES_FOR_PHASE3 = 30
+
 # Cycles that actually produced (or fail-closed) a decision. api_failed is
 # deliberately NOT counted toward cycle_count / the ≥30 gate: spec §3.1 grants
 # "此 cycle 視為已完成" to invalid_output only, and an api_failed cycle never

@@ -407,8 +407,8 @@ class PaperExecutionEngine:
         self._stop = stop_config or StopConfig()
         self._funding = funding_source
         # The in-process count behind the ERROR escalation
-        # (``runtime.no_decision.note_guardrail_reading``): gated rounds in a
-        # row that read the guardrail as unknown.
+        # (``runtime.no_decision.note_guardrail_reading``): decided rounds in
+        # a row that read the guardrail as unknown.
         self._guardrail_unknown_streak = 0
         # Off and healthy must not look alike in the log: say once which it is.
         logger.info(

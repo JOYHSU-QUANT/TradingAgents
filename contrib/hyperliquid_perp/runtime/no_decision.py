@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 # feed was before this mechanism existed.
 NO_DECISION_STREAK_THRESHOLD = 3
 
-# How many gated rounds in a row the trend guardrail may read as ``unknown``
+# How many decided rounds in a row the trend guardrail may read as ``unknown``
 # before the condition escalates (wired 2026-10-16; decided the same day: the
 # book is kept, the condition made visible): ``validate`` prints a shortfall
 # (exit 4), the paper engine's log turns the per-round WARNINGs into an ERROR

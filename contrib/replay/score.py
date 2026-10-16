@@ -53,7 +53,7 @@ Replay plan §3-7 fixes the definitions, and they are written here once:
   model's side over the answered rows that carried a bias, and Cohen's
   kappa over it -- agreement beyond what the two sides' own frequencies
   would produce by chance, so a model that sits long through every bias
-  scores 0 and a rule that never takes a side scores nothing. The verdict
+  scores 0 and a rule that never changes side scores nothing. The verdict
   needs :data:`RESEARCH_MIN_QUESTIONS` readable claims, :data:`RESEARCH_MIN_SIDE`
   of them on each of two sides, and :data:`RESEARCH_MIN_KAPPA` either way
   (against the rule is a finding of its own). The rows are the card's, so the
@@ -151,7 +151,7 @@ RESEARCH_NO_CLAIM: Final = "no readable claim"
 RESEARCH_NEVER_SIDED: Final = "the rule never took a side"
 RESEARCH_NEVER_CHANGED: Final = "the rule never changed side"
 # The verdicts that say nothing about the model: the structural ones (more
-# questions would not change them) and the two floors.
+# questions of the same kind would not change them) and the two floors.
 RESEARCH_STRUCTURAL: Final = (RESEARCH_NO_CLAIM, RESEARCH_NEVER_SIDED, RESEARCH_NEVER_CHANGED)
 RESEARCH_UNMEASURED: Final = (*RESEARCH_STRUCTURAL, RESEARCH_TOO_FEW, RESEARCH_THIN_SIDE)
 
@@ -902,7 +902,7 @@ class ResearchFollow:
     @property
     def verdict(self) -> str:
         """What can be said. The structural refusals come before the floors: more
-        questions would not change them."""
+        questions of the same kind would not change them."""
         if self.n == 0:
             return RESEARCH_NO_CLAIM
         if len(self.sides_seen) < 2:
@@ -941,7 +941,7 @@ class ResearchFollow:
         verdict = self.verdict
         needs = (
             ""
-            if verdict in RESEARCH_STRUCTURAL
+            if verdict not in (RESEARCH_TOO_FEW, RESEARCH_THIN_SIDE)
             else (
                 f" (needs >= {RESEARCH_MIN_QUESTIONS} readable claims, >= {RESEARCH_MIN_SIDE} on "
                 f"each of two sides, |kappa| >= {RESEARCH_MIN_KAPPA:.2f})"

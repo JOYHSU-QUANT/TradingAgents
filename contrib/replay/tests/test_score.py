@@ -1042,13 +1042,17 @@ def test_the_verdict_refuses_to_judge_what_cannot_be_measured():
         "rule long 30 -> model long 30, short 0, flat 0; "
         "rule flat 0 -> model long 0, short 0, flat 0; fail-closed 5 (flat 5)"
     )
-    # A sparse third side neither blocks the verdict nor is left out of it:
-    # two sides clear the floor, so kappa is judged over all three.
+
+
+def test_a_sparse_third_side_neither_blocks_the_verdict_nor_is_left_out_of_it():
+    """Two sides clear the floor, so kappa is judged, and over all three sides."""
     third = _follow(
         {("long", "long"): 20, ("flat", "flat"): 20, ("short", "long"): 1}, fail_closed={"short": 1}
     )
     assert third.verdict == RESEARCH_EFFECT
     assert third.kappa == pytest.approx((41 * 40 - (20 * 21 + 20 * 20)) / (41 * 41 - 820))
+    # The suffix spells the floors only where one is unmet.
+    assert third.describe()[1].endswith("-> the section has an effect")
     only_fail_closed = _follow({}, fail_closed={"long": 3})
     assert (only_fail_closed.n, only_fail_closed.kappa) == (0, None)
     assert only_fail_closed.verdict == RESEARCH_NO_CLAIM

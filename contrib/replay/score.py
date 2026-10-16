@@ -323,21 +323,41 @@ class Answer:
             set_(self, name, value)
         requested, approved = self.requested_margin_pct, self.approved_margin_pct
         sized = self.target_side is not None and requested is not None
+        if self.blocked and self.decision_mode is not DecisionMode.SET_TARGET:
+            raise ScoreError(f"{me}: a blocked_to_flat decision is recorded as set_target")
         if self.decision_mode is DecisionMode.SET_TARGET:
             if self.risk_action in _REFUSED:
                 raise ScoreError(
                     f"{me}: a rejected/fail-closed decision is recorded as maintain_current, "
                     "never as set_target"
                 )
-            if not sized or approved is None:
-                raise ScoreError(f"{me}: a set_target carries a side and both margins")
-            assert requested is not None
-            if approved > requested:
-                raise ScoreError(f"{me}: approved margin can never exceed requested")
-            if self.risk_action is RiskAction.CLAMPED and approved >= requested:
-                raise ScoreError(f"{me}: a clamped target strictly reduces the margin")
-            if self.risk_action is RiskAction.APPROVED and approved != requested:
-                raise ScoreError(f"{me}: an approved target keeps approved == requested")
+            if self.risk_action is RiskAction.BLOCKED_TO_FLAT:
+                # The guardrail's shape (``RiskGateResult._check_blocked_to_flat``):
+                # the side the model asked for with its margin and confidence,
+                # or flat with no margin over a maintain or a fail-closed round;
+                # the approved target flat whatever was requested.
+                if self.target_side is None or approved != 0:
+                    raise ScoreError(
+                        f"{me}: a blocked_to_flat decision keeps the side it blocked and "
+                        "approves a flat target"
+                    )
+                if self.target_side is TargetSide.FLAT:
+                    if requested not in (None, 0):
+                        raise ScoreError(f"{me}: a blocked_to_flat over no sided ask carries no margin")
+                elif requested is None or requested <= 0 or self.confidence is None:
+                    raise ScoreError(
+                        f"{me}: a blocked_to_flat over a sided ask keeps its margin and confidence"
+                    )
+            else:
+                if not sized or approved is None:
+                    raise ScoreError(f"{me}: a set_target carries a side and both margins")
+                assert requested is not None
+                if approved > requested:
+                    raise ScoreError(f"{me}: approved margin can never exceed requested")
+                if self.risk_action is RiskAction.CLAMPED and approved >= requested:
+                    raise ScoreError(f"{me}: a clamped target strictly reduces the margin")
+                if self.risk_action is RiskAction.APPROVED and approved != requested:
+                    raise ScoreError(f"{me}: an approved target keeps approved == requested")
         else:
             if self.risk_action is RiskAction.CLAMPED:
                 raise ScoreError(f"{me}: only a set_target can be clamped")
@@ -357,13 +377,22 @@ class Answer:
         return self.risk_action is RiskAction.INVALID_FAIL_CLOSED
 
     @property
+    def blocked(self) -> bool:
+        """The trend guardrail closed the book this round."""
+        return self.risk_action is RiskAction.BLOCKED_TO_FLAT
+
+    @property
     def asked_target(self) -> bool:
         """Whether the model asked for a target: a sized ``set_target``, or a REJECTED one.
 
         The gate collapses a rejection to ``maintain_current`` and keeps the
         refused side beside it (pinned above), so the mode alone would file
-        every rejection as a maintain.
+        every rejection as a maintain. A guardrail round that closed the book
+        over a maintain or a fail-closed answer is a ``set_target`` with no
+        requested margin: the model asked for nothing.
         """
+        if self.blocked:
+            return self.requested_margin_pct is not None
         return self.decision_mode is DecisionMode.SET_TARGET or (
             self.risk_action is RiskAction.REJECTED
         )
@@ -555,6 +584,12 @@ def _read(question: Question, answer: Answer | None) -> _Reading:
     current = question.current_exposure
     if answer is None or answer.fail_closed:
         return _Reading(None, None, 0.0, current, 0.0)
+    if answer.blocked and not answer.asked_target:
+        # The guardrail closed the book over a round the model asked nothing
+        # of: the model's reading is the side it held, the executed one is
+        # flat. (A blocked ASK falls through: its approved margin is pinned
+        # at zero, so the general path already reads it as executed flat.)
+        return _Reading(question.current_side, current, 0.0, 0.0, abs(current))
     if not answer.asked_target:
         return _Reading(question.current_side, current, 0.0, current, 0.0)
     assert answer.target_side is not None and answer.requested_margin_pct is not None
@@ -987,6 +1022,7 @@ class Summary:
     fail_closed_by_reason: Mapping[str, int]
     clamped: int
     rejected: int
+    blocked: int
     flips: int
     set_target: int
     maintain_current: int
@@ -1024,6 +1060,8 @@ class Summary:
             f"costs: {card.costs.fill_role.value} fills at {card.costs.fee_rate:g} fee + "
             f"{card.costs.slippage_bps:g} bps slippage; exposure = margin x configured leverage",
         ]
+        if self.blocked:
+            lines.append(f"guardrail blocked: {_rate(self.blocked, self.answered)}")
         if card.split is not None:
             lines.extend(card.split.describe())
             counted = ", ".join(f"{name} {n}" for name, n in self.segments.items())
@@ -1248,6 +1286,7 @@ def _summarise(card: Scorecard) -> Summary:
         fail_closed_by_reason=dict(reasons),
         clamped=sum(1 for row, _ in answered if row.clamped),
         rejected=sum(1 for row, _ in answered if row.rejected),
+        blocked=sum(1 for _, answer in answered if answer.blocked),
         flips=sum(1 for row, _ in answered if row.flip),
         set_target=modes[DecisionMode.SET_TARGET.value],
         maintain_current=modes[DecisionMode.MAINTAIN_CURRENT.value],

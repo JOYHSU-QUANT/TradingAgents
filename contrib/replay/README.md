@@ -71,6 +71,15 @@ carry 計畫 PR 2）整個 run 具名拒絕——沒有題目，成績單與考�
 - **兩種讀法，湊成 2×2**：**模型**讀法用 requested margin 與模型的方向；**執行**讀法用
   approved margin（且真的下了單）——被拒、fail-closed、落在 deadband 內沒下單的，都是「倉位不變」。
   摘要印 both／model only／rule only／neither，回答「AI 對、規則對、兩者都錯」。
+  **趨勢護欄擋下的那一輪（`risk_action = blocked_to_flat`，2026-10-16 起）**：模型讀法照它要的方向與
+  margin（護欄在 maintain／fail-closed 之上平倉的那種，`requested` 是 NULL、模型讀法＝持有的那邊，不算
+  「要了一個目標」），執行讀法一律空手——帳被護欄關了；有被擋的題時摘要多印 `guardrail blocked: N/M (x%)`。
+  護欄在無效輸出之上平倉的那一輪，`risk_action` 是 `blocked_to_flat` 不是 `invalid_fail_closed`，所以 fail-closed
+  率少算那幾題（已知取捨）；API 失敗那一輪由 sweep 平的倉沒有 `ai_outputs` 列，這裡看不到。
+  **已知限制**：`replay` 指令重新過閘門時**沒有**護欄（它不知道規則那一題的方向），所以護欄開著的段落，
+  被擋的題重放會變成 gate 原本的判定（approved／clamped／rejected／maintain／invalid），與 paper 的偏差是閘門
+  不是模型——比對那種段落要先把 `blocked_to_flat` 的題排除；`ai_outputs.guardrail_side`（schema v14）已把每題
+  的方向記下來，正式啟用前讓重放帶著它過閘門（follow-up）。
 - **「模型要了一個目標」（asked a target）**＝`set_target`，或被拒的那種（gate 記成 `maintain_current`
   但保留方向與 margin）。摘要的 `asked a target: N` 用這個定義，clamp 率與拒絕率以它為分母，
   信心校準也只算這些題（`confidence` 十等分，每桶模型讀法的命中率）。它與 CSV 的
@@ -371,9 +380,10 @@ python -m contrib.replay guardrail --db paper_trading.db --research-db autoresea
     --run-id paper-BTC-6 --run-id paper-BTC-7 [--rule FILE] [--out DIR]
 ```
 
-趨勢護欄（2026-10-02 拍板，**還沒做進交易員**）的政策是：帳上的倉位只能站在一條固定規則的那一邊。
-規則持多才能持多、持空才能持空，規則空手就空手。這個指令是它的影子模式：把這條政策對著 paper
-交易員**已經做過**的決策讀一遍，印出護欄當時會怎麼做，不改任何交易行為。
+趨勢護欄（2026-10-02 拍板，**2026-10-16 做進 paper 交易員的閘門**、`risk.trend_guardrail` 預設關）的政策是：
+帳上的倉位只能站在一條固定規則的那一邊。規則持多才能持多、持空才能持空，規則空手就空手。這個指令是它的
+離線版：把這條政策對著 paper 交易員**已經做過**的決策讀一遍（不管那段護欄有沒有開），印出護欄當時會怎麼做，
+不改任何交易行為。
 
 每一題讀三件事：
 
@@ -381,7 +391,8 @@ python -m contrib.replay guardrail --db paper_trading.db --research-db autoresea
   （`contrib/autoresearch/guardrail.py`），取決策時刻之前最新收盤那一根之後的方向。三種情況讀不到：
   規則還在暖機；那一根比決策時刻早超過 2 根（研究 store 沒抓到那麼新）；規則在那一根讀不到條件
   （它凍在原本那一邊，不是它選的）。後兩種是線上那條路自己的拒絕：讀端丟掉超過
-  `MAX_SIGNAL_AGE_INTERVALS` 根的文件，寫端在最新一根讀不到條件時不寫文件。讀不到的那一題，
+  `MAX_SIGNAL_AGE_INTERVALS` 根的文件；`signal` 在最新一根讀不到條件時不寫文件，`guardrail-signal` 則寫
+  `unknown`（閘門對它與過期文件做同一件事）。讀不到的那一題，
   帳上有倉位就記成 `rule_unknown`，空手則照樣 `pass`。
 - **決策之後 paper 帳上的方向**：有下單就是核准的目標；沒下單（維持、被拒、fail-closed、落在
   deadband 內、整輪沒答案）就是原本的倉位。有下單時讀到的是交易員**想**持有的方向；掛單若沒成交，

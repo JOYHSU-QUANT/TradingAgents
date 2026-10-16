@@ -394,9 +394,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "Read the decision attempts of one or more paper runs and, for each question, the "
             "side the guardrail rule held at that instant (replayed on the research store's "
             f"{RULE_INTERVAL} candles), and print what the guardrail would have done: pass, block "
-            "an order's target to flat, or close a position already held. The guardrail is not "
-            "built into the trader; this is its shadow mode. Scores nothing and reads no later "
-            "price, so every finished question is read. Never writes to the paper store."
+            "an order's target to flat, or close a position already held. The guardrail is "
+            "wired into the paper trader behind risk.trend_guardrail (off by default); this "
+            "command re-reads recorded decisions offline, with or without it. Scores nothing and "
+            "reads no later price, so every finished question is read. Never writes to the paper "
+            "store."
         ),
     )
     guardrail.add_argument(

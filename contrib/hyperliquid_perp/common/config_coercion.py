@@ -24,7 +24,9 @@ __all__ = [
     "bool_from_yaml",
     "config_overrides",
     "decimal_from_yaml",
+    "document_path_from_yaml",
     "int_from_yaml",
+    "refuse_padded_path",
     "str_from_yaml",
 ]
 
@@ -162,3 +164,48 @@ def config_overrides(
         except ValueError as exc:
             raise ValueError(f"config key {key!r}: {exc}") from None
     return out
+
+
+def document_path_from_yaml(document: str, *, off: str) -> Callable[[object], str]:
+    """A switch whose "on" value is the path of ``document`` and whose off value is ``""``.
+
+    Its own converter rather than :func:`str_from_yaml`, for one reason that
+    is worth a function: YAML 1.1 reads a bare ``off`` — the obvious thing to
+    write for a switch — as the BOOLEAN false, and ``str_from_yaml`` would
+    refuse it with "expected a string, got False", which is true and says
+    nothing about what to write instead. ``no`` and ``false`` are the same
+    trap. So the boolean case is answered by name, with both legal spellings
+    in the sentence. ``off`` is what leaving the key out keeps ("the section
+    off", "the guardrail off").
+    """
+
+    def convert(value: object) -> str:
+        if isinstance(value, bool):
+            raise ValueError(
+                f"expected a path to the {document}, got a YAML boolean ({value!r}) — "
+                f'YAML reads a bare off/no/false as one; leave the key out (or write "") to keep '
+                f"{off}, and quote the path to turn it on"
+            )
+        if not isinstance(value, str):
+            raise ValueError(f"expected a path to the {document}, got {value!r}")
+        return value
+
+    return convert
+
+
+def refuse_padded_path(value: str, *, key: str) -> None:
+    """Refuse a document path with surrounding whitespace, naming ``key``.
+
+    Every way of getting such a key wrong fails SILENTLY at runtime — the
+    document is simply never found, which is exactly what ``""`` means on
+    purpose. A value that is only whitespace is the reachable case (a
+    trailing space after the colon, a key someone half-deleted), so it is a
+    named load-time failure rather than an accidental off switch. Whether
+    the file exists is deliberately NOT checked: it is written out of band,
+    and turning the switch on before the first producer run is a normal
+    order of operations.
+    """
+    if value != value.strip():
+        raise ValueError(
+            f"'{key}' has leading or trailing whitespace ({value!r}); write the path without it"
+        )

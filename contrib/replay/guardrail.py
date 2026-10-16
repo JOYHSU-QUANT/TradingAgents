@@ -1,10 +1,11 @@
 """What the trend guardrail would have done to a paper run's recorded decisions.
 
-The guardrail (decided 2026-10-02, not built into the trader) lets the book
+The guardrail (decided 2026-10-02; wired into the paper trader's gate on
+2026-10-16 behind ``risk.trend_guardrail``, off by default) lets the book
 hold only the side one fixed rule holds: no position against the rule, and
 none while the rule is flat. This module reads that policy against decisions
-the paper trader already took — the guardrail's shadow mode — so what it
-would block can be seen before any of it reaches the trading path.
+the paper trader already took — offline, whether or not the gate had it on —
+so what it would block can be seen on any run.
 
 Per question, three facts:
 
@@ -24,7 +25,7 @@ Per question, three facts:
   cannot say which side the rule held (a flat book passes there too).
 
 Three things the verdicts mean, each decided 2026-10-02 and binding on the
-guardrail when it is built:
+gate as wired:
 
 - A blocked order sends the book FLAT, also when it reverses a position the
   guardrail allowed: leaving the old side is honoured, opening the new one

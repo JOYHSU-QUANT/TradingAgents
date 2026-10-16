@@ -39,6 +39,7 @@ from . import engine_bridge
 from .audit.decision_log import log_target_decision
 from .config import dotenv_diagnosis, load_dotenv_files, wallet_address
 from .domains.perp import context_guards, risk_gate
+from .domains.perp.guardrail_signal import guardrail_side_for
 from .domains.perp.market_data_config import MarketDataConfig
 from .domains.perp.prompt_context import context_shape, render_market_context
 from .domains.perp.target_decision import decision_format_instructions, format_fingerprint
@@ -448,6 +449,10 @@ def run_engine(config: dict, coin: str) -> int:
         current=current,
         risk=risk_cfg,
         decision_cfg=decision_cfg,
+        # The same reading the paper engine takes, judged at this instant.
+        guardrail=guardrail_side_for(
+            risk_cfg.trend_guardrail, coin=coin, now=datetime.now(timezone.utc)
+        ),
     )
 
     models = {

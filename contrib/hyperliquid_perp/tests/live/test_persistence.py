@@ -862,10 +862,10 @@ def test_a_read_only_open_refuses_a_behind_store_instead_of_upgrading_it(tmp_pat
     behind = sorted(MIGRATIONS)[-2]
     with migrations_up_to(behind), Database(path) as built:
         assert stored_schema_version(built.conn) == behind
-        # The LATEST migration's column (v13: ai_inputs.autoresearch_bias) is
+        # The LATEST migration's column (v14: ai_outputs.guardrail_side) is
         # what a one-behind store must lack — re-point this when a new version
         # lands.
-        assert "autoresearch_bias" not in _columns(built.conn, "ai_inputs")
+        assert "guardrail_side" not in _columns(built.conn, "ai_outputs")
 
     with pytest.raises(SchemaVersionError, match="will not migrate"):
         Database(path, migrate=False)
@@ -874,7 +874,7 @@ def test_a_read_only_open_refuses_a_behind_store_instead_of_upgrading_it(tmp_pat
     # byte-for-byte the version it was, so the daemon that owns it is unharmed.
     conn = connect(path)
     assert stored_schema_version(conn) == behind
-    assert "autoresearch_bias" not in _columns(conn, "ai_inputs")
+    assert "guardrail_side" not in _columns(conn, "ai_outputs")
     assert (
         conn.execute(
             "SELECT COUNT(*) FROM schema_migrations WHERE version > ?", (behind,)
@@ -894,7 +894,7 @@ def test_a_read_only_open_refuses_a_behind_store_instead_of_upgrading_it(tmp_pat
         # the newest one — that column is already present in the one-behind
         # store, so the assertion passes even if the newest migration adds no
         # columns at all.
-        assert "autoresearch_bias" in _columns(upgraded.conn, "ai_inputs")
+        assert "guardrail_side" in _columns(upgraded.conn, "ai_outputs")
 
 
 def test_a_deferred_open_owes_an_upgrade_only_when_the_store_is_not_current(tmp_path):

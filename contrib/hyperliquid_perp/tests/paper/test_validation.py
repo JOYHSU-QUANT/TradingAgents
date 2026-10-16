@@ -1043,13 +1043,13 @@ def test_streak_is_dated_by_when_the_cycle_terminalized_not_by_its_slot(tmp_path
 def test_streak_recency_window_boundary_is_exclusive(tmp_path):
     # Pins the comparison direction: exactly at the window the streak still
     # describes the run, one second past it does not.
-    from contrib.hyperliquid_perp.runtime.no_decision import _STREAK_RECENCY_WINDOW
+    from contrib.hyperliquid_perp.runtime.no_decision import STREAK_RECENCY_WINDOW
 
     db = _bare_run(tmp_path)
     last = _insert_outcomes(db, [_STALE] * NO_DECISION_STREAK_THRESHOLD)
     streaks = trailing_failure_streaks(db.conn, "r")
-    assert no_decision_shortfall(streaks, now=last + _STREAK_RECENCY_WINDOW) is not None
-    just_past = last + _STREAK_RECENCY_WINDOW + timedelta(seconds=1)
+    assert no_decision_shortfall(streaks, now=last + STREAK_RECENCY_WINDOW) is not None
+    just_past = last + STREAK_RECENCY_WINDOW + timedelta(seconds=1)
     assert no_decision_shortfall(streaks, now=just_past) is None
     db.close()
 
@@ -1147,3 +1147,111 @@ def test_note_cycle_outcome_counts_any_failure_class(caplog):
     assert len(errors) == 1
     assert "connection" in errors[0]
     assert "stale market data" not in errors[0]
+
+
+# --------------------------------------------------------------------------
+# the trend guardrail's trail (wired 2026-10-16)
+# --------------------------------------------------------------------------
+
+from contrib.hyperliquid_perp.paper.validation import (  # noqa: E402
+    GUARDRAIL_UNKNOWN_STREAK_THRESHOLD,
+    guardrail_unknown_shortfall,
+)
+from contrib.hyperliquid_perp.persistence.ids import decision_attempt_id  # noqa: E402
+from contrib.hyperliquid_perp.runtime.no_decision import TrailingFailureStreaks  # noqa: E402
+
+
+def _ai_output(db, when, *, guardrail_side, risk_action="approved"):
+    """The verdict row of the cycle scheduled at ``when``, which the attempt then points at."""
+    blocked = risk_action == "blocked_to_flat"
+    output_id = f"o-{when.isoformat()}"
+    with db.transaction() as conn:
+        conn.execute(
+            "UPDATE decision_attempts SET output_id = ? WHERE decision_attempt_id = ?",
+            (output_id, decision_attempt_id("r", when)),
+        )
+        repo.insert_ai_output(
+            conn,
+            output_id=output_id,
+            timestamp=when,
+            mode="paper",
+            run_id="r",
+            symbol="BTC",
+            decision_mode="set_target" if blocked else "maintain_current",
+            target_side="flat" if blocked else None,
+            requested_target_margin_pct=None,
+            approved_target_margin_pct=0 if blocked else None,
+            risk_action=risk_action,
+            risk_reason="guardrail_rule_flat" if blocked else None,
+            order_created=False,
+            no_order_reason="already_flat" if blocked else "maintain_current",
+            guardrail_side=guardrail_side,
+        )
+
+
+def test_the_guardrail_lines_are_zero_with_the_guardrail_off(tmp_path):
+    db = _bare_run(tmp_path)
+    insert_decision_attempts(db, ["completed"] * 3, start=_T0)
+    for i in range(3):
+        _ai_output(db, _T0 + timedelta(hours=4 * i), guardrail_side=None)
+    report = validate_run(db, run_id="r", now=_T0 + timedelta(hours=9))
+    assert (
+        report.guardrail_unknown_streak,
+        report.guardrail_blocked,
+        report.guardrail_sweep_plans,
+    ) == (0, 0, 0)
+    assert "guardrail_unknown_streak: 0" in report.summary_lines()
+    assert report.shortfalls == ()
+    db.close()
+
+
+def test_a_trailing_run_of_unknown_readings_is_a_shortfall_at_the_threshold(tmp_path):
+    db = _bare_run(tmp_path)
+    n = GUARDRAIL_UNKNOWN_STREAK_THRESHOLD
+    insert_decision_attempts(db, ["completed"] * (n + 2), start=_T0)
+    # Two readable rounds, then the producer goes dark.
+    for i in range(n + 2):
+        side = "long" if i < 2 else "unknown"
+        _ai_output(db, _T0 + timedelta(hours=4 * i), guardrail_side=side)
+    now = _T0 + timedelta(hours=4 * (n + 1) + 1)
+    report = validate_run(db, run_id="r", now=now)
+    assert report.guardrail_unknown_streak == n
+    assert len(report.shortfalls) == 1
+    assert f"read 'unknown' for {n} decided cycles in a row" in report.shortfalls[0]
+    assert "check the producer (`guardrail-signal`) and its `fetch`" in report.shortfalls[0]
+    # A cycle with no verdict neither counts nor breaks it; one readable
+    # decided round clears it.
+    failed_at = _T0 + timedelta(hours=4 * (n + 2))
+    insert_decision_attempts(db, [("api_failed", "rate_limit")], start=failed_at)
+    assert validate_run(db, run_id="r", now=failed_at).guardrail_unknown_streak == n
+    cleared_at = failed_at + timedelta(hours=4)
+    insert_decision_attempts(db, ["completed"], start=cleared_at)
+    _ai_output(db, cleared_at, guardrail_side="flat")
+    assert validate_run(db, run_id="r", now=cleared_at).guardrail_unknown_streak == 0
+    db.close()
+
+
+def test_a_stopped_runs_old_unknown_streak_is_not_a_shortfall():
+    streaks = TrailingFailureStreaks(0, 0, _T0)
+    n = GUARDRAIL_UNKNOWN_STREAK_THRESHOLD
+    assert guardrail_unknown_shortfall(n, streaks, now=_T0 + timedelta(days=2)) is None
+    assert guardrail_unknown_shortfall(n - 1, streaks, now=_T0) is None
+    assert guardrail_unknown_shortfall(n, streaks, now=_T0) is not None
+
+
+def test_blocked_rows_and_sweep_plans_are_counted(tmp_path):
+    db = _bare_run(tmp_path)
+    insert_decision_attempts(db, ["completed"] * 2, start=_T0)
+    _ai_output(db, _T0, guardrail_side="flat", risk_action="blocked_to_flat")
+    _ai_output(db, _T0 + timedelta(hours=4), guardrail_side="long")
+    with db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO execution_plans"
+            " (plan_id, run_id, output_id, symbol, status, created_at, updated_at)"
+            " VALUES ('p-sweep', 'r', NULL, 'BTC', 'rejected', ?, ?)",
+            (_T0.isoformat(), _T0.isoformat()),
+        )
+    report = validate_run(db, run_id="r", now=_T0 + timedelta(hours=5))
+    assert (report.guardrail_blocked, report.guardrail_sweep_plans) == (1, 1)
+    assert "guardrail_blocked: 1" in report.summary_lines() and "guardrail_sweep_plans: 1" in report.summary_lines()
+    db.close()

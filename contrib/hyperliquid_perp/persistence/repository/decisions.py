@@ -13,6 +13,7 @@ from ._base import _UNSET, _encode, _insert, _iso_utc, _Unset
 from ._vocab import (
     _ATTEMPT_STATUSES,
     _DECISION_MODES,
+    _GUARDRAIL_SIDES,
     _MODES,
     _RISK_ACTIONS,
     _TARGET_SIDES,
@@ -26,9 +27,11 @@ __all__ = [
     "UnstampedInput",
     "ai_inputs_without_format_fingerprint",
     "attempt_status_counts",
+    "count_ai_outputs_with_risk_action",
     "count_decision_attempts",
     "find_in_progress_attempt",
     "get_decision_attempt",
+    "guardrail_sides_newest_first",
     "insert_account_snapshot",
     "insert_ai_input",
     "insert_ai_output",
@@ -94,6 +97,7 @@ def insert_ai_output(conn: sqlite3.Connection, **fields: Any) -> None:
         ("decision_mode", _DECISION_MODES),
         ("target_side", _TARGET_SIDES),
         ("risk_action", _RISK_ACTIONS),
+        ("guardrail_side", _GUARDRAIL_SIDES),
     ):
         if fields.get(column) is not None:
             check_enum(fields[column], allowed, name=column)
@@ -501,7 +505,8 @@ def recent_decision_cycles(
         " a.error_message, a.attempt_count, a.next_decision_at,"
         " o.symbol, o.decision_mode, o.target_side, o.requested_target_margin_pct,"
         " o.approved_target_margin_pct, o.risk_action, o.risk_reason, o.confidence,"
-        " o.mark_price, o.account_equity, o.order_created, o.no_order_reason, o.decision_reason"
+        " o.mark_price, o.account_equity, o.order_created, o.no_order_reason, o.decision_reason,"
+        " o.guardrail_side"
         " FROM decision_attempts a LEFT JOIN ai_outputs o ON o.output_id = a.output_id"
         " WHERE a.run_id = ? ORDER BY a.scheduled_at DESC LIMIT ?",
         (run_id, limit),
@@ -536,3 +541,34 @@ def recent_account_snapshots(
         "SELECT * FROM account_snapshots WHERE run_id = ? ORDER BY snapshot_id DESC LIMIT ?",
         (run_id, limit),
     ).fetchall()
+
+
+def count_ai_outputs_with_risk_action(
+    conn: sqlite3.Connection, run_id: str, *, risk_action: str
+) -> int:
+    """How many of the run's verdicts the gate disposed of as ``risk_action``.
+
+    The value is vocabulary-checked, so a misspelt action is a ``ValueError``
+    rather than a count of zero.
+    """
+    check_enum(risk_action, _RISK_ACTIONS, name="risk_action")
+    return conn.execute(
+        "SELECT COUNT(*) FROM ai_outputs WHERE run_id = ? AND risk_action = ?",
+        (run_id, risk_action),
+    ).fetchone()[0]
+
+
+def guardrail_sides_newest_first(conn: sqlite3.Connection, run_id: str) -> list[str | None]:
+    """What the trend guardrail read on each of the run's decided cycles, newest first.
+
+    One entry per decision attempt that carries a verdict (its ``output_id``
+    names the ``ai_outputs`` row); ``None`` is a gate run without the
+    guardrail. A cycle with no verdict (``api_failed``) has no entry.
+    """
+    rows = conn.execute(
+        "SELECT o.guardrail_side FROM decision_attempts a"
+        " JOIN ai_outputs o ON o.output_id = a.output_id"
+        " WHERE a.run_id = ? ORDER BY a.scheduled_at DESC",
+        (run_id,),
+    )
+    return [row["guardrail_side"] for row in rows]

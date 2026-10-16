@@ -48,18 +48,23 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from contrib.core.enum_guard import VocabEnum
-from contrib.core.instants import epoch_ms, from_epoch_ms
+from contrib.core.instants import epoch_ms, from_epoch_ms, gap_label
 from contrib.hyperliquid_perp.domains.perp.indicator_vocab import (
     REGIME_INDICATORS,
     required_candles,
     supported_indicators,
 )
 from contrib.hyperliquid_perp.domains.perp.market_data_config import MarketDataConfig
-from contrib.hyperliquid_perp.domains.perp.research_signal import MAX_SIGNAL_AGE_INTERVALS
+from contrib.hyperliquid_perp.domains.perp.research_signal import (
+    MAX_SIGNAL_AGE_INTERVALS,
+    max_signal_age_ms,
+)
 from contrib.hyperliquid_perp.domains.perp.schema import (
     Candle,
     CandleInterval,
     FundingPoint,
+    GuardrailSide,
+    GuardrailSignal,
     MarketRegime,
     ResearchBias,
     ResearchConfidence,
@@ -90,6 +95,8 @@ __all__ = [
     "ExchangeError",
     "ExchangeThrottledError",
     "FundingPoint",
+    "GuardrailSide",
+    "GuardrailSignal",
     "MarketDataConfig",
     "MarketRegime",
     "ResearchBias",
@@ -102,7 +109,9 @@ __all__ = [
     "context_analytics",
     "epoch_ms",
     "from_epoch_ms",
+    "gap_label",
     "interval_to_ms",
+    "max_signal_age_ms",
     "parse_interval",
     "required_candles",
     "supported_indicators",
@@ -121,6 +130,7 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.core.enum_guard", "VocabEnum"),
     ("contrib.core.instants", "epoch_ms"),
     ("contrib.core.instants", "from_epoch_ms"),
+    ("contrib.core.instants", "gap_label"),
     ("contrib.hyperliquid_perp.domains.perp.context_builder", "classify_regime"),
     ("contrib.hyperliquid_perp.domains.perp.context_builder", "funding_zscore"),
     ("contrib.hyperliquid_perp.domains.perp.indicator_vocab", "REGIME_INDICATORS"),
@@ -133,9 +143,14 @@ BORROWED: tuple[tuple[str, str], ...] = (
     # enforce — a second copy of the number here would keep printing the old
     # cadence for as long as it took someone to notice the section had gone.
     ("contrib.hyperliquid_perp.domains.perp.research_signal", "MAX_SIGNAL_AGE_INTERVALS"),
+    ("contrib.hyperliquid_perp.domains.perp.research_signal", "max_signal_age_ms"),
     ("contrib.hyperliquid_perp.domains.perp.schema", "Candle"),
     ("contrib.hyperliquid_perp.domains.perp.schema", "CandleInterval"),
     ("contrib.hyperliquid_perp.domains.perp.schema", "FundingPoint"),
+    # The trend guardrail's handoff document (decided 2026-10-02, wired
+    # 2026-10-16): same seam, same reason as the research signal below.
+    ("contrib.hyperliquid_perp.domains.perp.schema", "GuardrailSide"),
+    ("contrib.hyperliquid_perp.domains.perp.schema", "GuardrailSignal"),
     ("contrib.hyperliquid_perp.domains.perp.schema", "MarketRegime"),
     # The handoff document's contract (plan §7 / PR C1). Borrowed rather than
     # re-declared for the reason this module exists: the trading package READS

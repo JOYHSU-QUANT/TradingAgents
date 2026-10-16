@@ -297,6 +297,19 @@ def _add_signal_args(sub: argparse.ArgumentParser) -> None:
     _add_db(sub)
 
 
+def _add_guardrail_signal_args(sub: argparse.ArgumentParser) -> None:
+    # Like ``signal``: ``--coin`` but no ``--interval`` — the rule's cadence is
+    # part of what the rule is (``guardrail.RULE_INTERVAL``).
+    _add_coin(sub)
+    sub.add_argument("--out", required=True, help="path to write the handoff document to (JSON)")
+    sub.add_argument(
+        "--rule",
+        default=None,
+        help="the guardrail rule's spec file (default: the committed btc-20d-breakout rule)",
+    )
+    _add_db(sub)
+
+
 def _add_research_args(sub: argparse.ArgumentParser) -> None:
     sub.add_argument("--experiment", required=True)
     sub.add_argument(
@@ -394,6 +407,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "signal", help="write the promoted rule's current qualitative signal for the live path"
     )
     _add_signal_args(signal_cmd)
+
+    guardrail_signal_cmd = subparsers.add_parser(
+        "guardrail-signal",
+        help="write the trend guardrail rule's current side for the risk gate",
+    )
+    _add_guardrail_signal_args(guardrail_signal_cmd)
 
     research_cmd = subparsers.add_parser(
         "research", help="ask a model for rules, score each one, and file what it answered"
@@ -918,6 +937,35 @@ def _cmd_signal(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_guardrail_signal(args: argparse.Namespace) -> int:
+    # Inside the command, like ``signal``: the replay pays for the feature stack.
+    from datetime import datetime, timezone
+
+    from .guardrail import (
+        DEFAULT_RULE,
+        build_guardrail_signal,
+        describe_guardrail_signal,
+        load_rule,
+        require_fresh,
+    )
+    from .signal import write_signal
+    from .upstream import epoch_ms
+
+    rule = load_rule(DEFAULT_RULE if args.rule is None else args.rule)
+    store = ResearchStore(_store_path(args))
+    print(f"store: {store.path} (schema v{store.version})")
+    with store:
+        signal, timeline = build_guardrail_signal(store, rule, coin=args.coin)
+        require_fresh(
+            signal, now_ms=epoch_ms(datetime.now(timezone.utc), what="guardrail-signal clock")
+        )
+        target = write_signal(args.out, signal)
+    for line in describe_guardrail_signal(signal, timeline):
+        print(line)
+    print(f"wrote {target}")
+    return 0
+
+
 _COMMANDS = {
     "fetch": _cmd_fetch,
     "gaps": _cmd_gaps,
@@ -930,6 +978,7 @@ _COMMANDS = {
     "calibrate": _cmd_calibrate,
     "research": _cmd_research,
     "signal": _cmd_signal,
+    "guardrail-signal": _cmd_guardrail_signal,
 }
 
 # The two refusals that live beside the feature stack, named by module and

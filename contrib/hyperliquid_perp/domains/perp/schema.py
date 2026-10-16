@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from types import MappingProxyType
-from typing import Final
+from typing import Any, Final
 
 from contrib.core.enum_guard import VocabEnum
 from contrib.core.instants import MAX_EPOCH_MS, MIN_EPOCH_MS
@@ -177,6 +177,27 @@ class ResearchBias(VocabEnum, noun="research signal bias"):
     FLAT = "flat"
 
 
+class GuardrailSide(VocabEnum, noun="guardrail side"):
+    """Which side the trend guardrail's rule holds at its newest bar, or that it could not say.
+
+    The gate's reading of the rule (design 2026-10-02 §2): a position may not
+    stand against it, and none may stand while it is ``FLAT``. ``UNKNOWN`` is
+    a reading of its own, written when the rule could not evaluate its newest
+    bar (a hole in the history, features still warming up) or never took a
+    side in the stored history; the gate's answer to it was decided
+    2026-10-16 — open nothing new, keep what is held. A document that could
+    not be read at all is not a side either: the reader answers ``None`` with
+    a WARNING naming why, and the engine treats that as ``UNKNOWN``. The two
+    are logged apart (each its own WARNING); downstream — the audit row, the
+    validator's streak — they share this spelling.
+    """
+
+    LONG = "long"
+    SHORT = "short"
+    FLAT = "flat"
+    UNKNOWN = "unknown"
+
+
 class ResearchConfidence(VocabEnum, noun="research signal confidence band"):
     """How well the promoted rule scored on the window it was selected on.
 
@@ -229,6 +250,24 @@ _RESEARCH_SIGNAL_KEYS: Final = frozenset(
         "eval_window_days",
         "holdout_window_days",
         "notes",
+    }
+)
+
+# The trend guardrail's handoff document (decided 2026-10-02, wired
+# 2026-10-16): the research package replays one fixed rule and writes the
+# side it holds; the trading daemon's risk gate reads it. The same seam as the
+# research signal, for the same reasons, with its own version: the two
+# documents change for different reasons and are read by different code.
+GUARDRAIL_SIGNAL_DOCUMENT_VERSION: Final = 1
+
+_GUARDRAIL_SIGNAL_KEYS: Final = frozenset(
+    {
+        "document_version",
+        "coin",
+        "interval",
+        "as_of_ms",
+        "rule_id",
+        "side",
     }
 )
 
@@ -1342,6 +1381,53 @@ def _rendered_text(value: object, *, what: str) -> str:
     return text
 
 
+def _read_versioned(
+    payload: object, *, version: int, keys: frozenset[str], what: str
+) -> dict[str, Any]:
+    """A handoff document's envelope: a JSON object of exactly ``keys`` declaring ``version``.
+
+    Strict about the version and the key set, so a producer that added a
+    field without bumping the version is refused as not being the version
+    it claims; everything else is the field guards' job. ``bool`` first:
+    ``True != 1`` is False, so a document declaring the JSON literal
+    ``true`` would pass the one check whose entire purpose is to refuse any
+    other version by name, and ``1.0`` is the same pun.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError(f"a {what} document is a JSON object, got {type(payload).__name__}")
+    declared = payload.get("document_version")
+    if isinstance(declared, bool) or not isinstance(declared, int) or declared != version:
+        raise ValueError(
+            f"this build reads {what} document version {version}, the document declares "
+            f"{declared!r}"
+        )
+    present = set(payload)
+    if present != keys:
+        raise ValueError(
+            f"a version {version} {what} document has exactly the keys {sorted(keys)}; "
+            f"missing {sorted(keys - present)}, unknown {sorted(present - keys)}"
+        )
+    return payload
+
+
+def _identifier(value: object, *, what: str) -> str:
+    """A name the document carries for the reader's logs: one token, non-blank, bounded.
+
+    Not :func:`_rendered_text`'s rule — nothing here reaches a prompt — but
+    the same bound, so a producer cannot grow a log line without limit.
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"{what} must be a string, got {type(value).__name__} ({value!r})")
+    text = value.strip()
+    if not text:
+        raise ValueError(f"{what} must not be blank")
+    if any(ch.isspace() for ch in text):
+        raise ValueError(f"{what} must be a single token without whitespace, got {text!r}")
+    if len(text) > MAX_RESEARCH_TEXT_CHARS:
+        raise ValueError(f"{what} must be at most {MAX_RESEARCH_TEXT_CHARS} characters, got {len(text)}")
+    return text
+
+
 def _window_days(value: object, *, what: str) -> int:
     """A measurement window's length in whole days: an ``int`` of at least one."""
     if isinstance(value, bool) or not isinstance(value, int):
@@ -1459,34 +1545,12 @@ class ResearchSignal:
         signal is. Says nothing about freshness — that needs this run's clock
         and belongs to :mod:`.research_signal`.
         """
-        if not isinstance(payload, dict):
-            raise ValueError(
-                f"a research signal document is a JSON object, got {type(payload).__name__}"
-            )
-        version = payload.get("document_version")
-        # ``bool`` first: ``True != 1`` is False, so a document declaring the
-        # JSON literal ``true`` would pass the one check whose entire purpose
-        # is to refuse any other version by name, and ``1.0`` is the same pun.
-        # The rest of this module already speaks that sentence twice
-        # (``_window_days``, ``_require_venue_stamp``).
-        if (
-            isinstance(version, bool)
-            or not isinstance(version, int)
-            or version != RESEARCH_SIGNAL_DOCUMENT_VERSION
-        ):
-            raise ValueError(
-                f"this build reads research signal document version "
-                f"{RESEARCH_SIGNAL_DOCUMENT_VERSION}, the document declares {version!r}"
-            )
-        keys = set(payload)
-        if keys != _RESEARCH_SIGNAL_KEYS:
-            missing = sorted(_RESEARCH_SIGNAL_KEYS - keys)
-            unknown = sorted(keys - _RESEARCH_SIGNAL_KEYS)
-            raise ValueError(
-                f"a version {RESEARCH_SIGNAL_DOCUMENT_VERSION} research signal document has "
-                f"exactly the keys {sorted(_RESEARCH_SIGNAL_KEYS)}; missing {missing}, "
-                f"unknown {unknown}"
-            )
+        payload = _read_versioned(
+            payload,
+            version=RESEARCH_SIGNAL_DOCUMENT_VERSION,
+            keys=_RESEARCH_SIGNAL_KEYS,
+            what="research signal",
+        )
         return cls(
             coin=payload["coin"],
             interval=payload["interval"],
@@ -1498,6 +1562,68 @@ class ResearchSignal:
             eval_window_days=payload["eval_window_days"],
             holdout_window_days=payload["holdout_window_days"],
             notes=payload["notes"],
+        )
+
+
+@dataclass(frozen=True)
+class GuardrailSignal:
+    """The trend guardrail's one reading: which side its rule holds, decided at which bar.
+
+    The whole contract between the research package (which replays the rule
+    over its own history store and writes this) and the risk gate (which
+    reads it and lets no position stand against it). Nothing numeric
+    crosses, and unlike :class:`ResearchSignal` this one DOES reach a gate:
+    it is the only document that may close a position, which is why its
+    reader refuses anything stale or from ahead of the clock out loud.
+
+    ``as_of_ms`` is the CLOSE of the bar the side was decided at, in UTC
+    epoch milliseconds; freshness is judged against it by
+    :mod:`.guardrail_signal`. ``rule_id`` names the rule and the hash of its
+    spec, for the producer's own report and for the reader's warning when the
+    document says ``unknown``; the gate does not compare it to anything.
+    """
+
+    coin: str
+    interval: str
+    as_of_ms: int
+    rule_id: str
+    side: GuardrailSide
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "side", GuardrailSide(self.side))
+        if not isinstance(self.coin, str) or not self.coin.strip():
+            raise ValueError("GuardrailSignal.coin must be a non-empty string")
+        object.__setattr__(self, "coin", self.coin.strip().upper())
+        object.__setattr__(self, "interval", parse_interval(self.interval).value)
+        _require_venue_stamp(self.as_of_ms, what="GuardrailSignal.as_of_ms")
+        object.__setattr__(self, "rule_id", _identifier(self.rule_id, what="GuardrailSignal.rule_id"))
+
+    def to_document(self) -> dict[str, object]:
+        """The JSON-ready document the research package writes; ``from_document`` reads it back equal."""
+        return {
+            "document_version": GUARDRAIL_SIGNAL_DOCUMENT_VERSION,
+            "coin": self.coin,
+            "interval": self.interval,
+            "as_of_ms": self.as_of_ms,
+            "rule_id": self.rule_id,
+            "side": self.side.value,
+        }
+
+    @classmethod
+    def from_document(cls, payload: object) -> GuardrailSignal:
+        """Read a decoded document back; ``ValueError`` naming what is wrong with it."""
+        payload = _read_versioned(
+            payload,
+            version=GUARDRAIL_SIGNAL_DOCUMENT_VERSION,
+            keys=_GUARDRAIL_SIGNAL_KEYS,
+            what="guardrail signal",
+        )
+        return cls(
+            coin=payload["coin"],
+            interval=payload["interval"],
+            as_of_ms=payload["as_of_ms"],
+            rule_id=payload["rule_id"],
+            side=payload["side"],
         )
 
 

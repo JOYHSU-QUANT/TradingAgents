@@ -15,9 +15,10 @@ must be traceable, entirely from the SQLite store —
 - accounting replay consistency (:func:`accounting.replay`).
 
 The Phase-3 gate (§5 可以進 Phase 3 的條件): ``cycle_count >= 30``, zero
-orphans / snapshot mismatches / replay mismatches, and no CURRENT run of
-cycles that all failed to decide (issue #50). ``total_pnl > 0`` is
-explicitly *not* a criterion.
+orphans / snapshot mismatches / replay mismatches, no CURRENT run of
+cycles that all failed to decide (issue #50), and no current run of cycles
+on which the trend guardrail read ``unknown`` (wired 2026-10-16).
+``total_pnl > 0`` is explicitly *not* a criterion.
 
 A checker that *raises* on a corrupt store (a cell ``Decimal()`` cannot read,
 a replay that cannot complete) is contained as an integrity outcome — a
@@ -49,11 +50,14 @@ from decimal import Decimal, InvalidOperation, localcontext
 from contrib.core.instants import parse_instant
 
 from ..common.prompt_regime import prompt_regime_line
+from ..domains.perp.risk_gate import RiskAction
+from ..domains.perp.schema import GuardrailSide
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from ..persistence.models import DECIMAL_CONTEXT
 from ..runtime import accounting
 from ..runtime.no_decision import (
+    STREAK_RECENCY_WINDOW,
     TrailingFailureStreaks,
     no_decision_shortfall,
     trailing_failure_streaks,
@@ -61,8 +65,10 @@ from ..runtime.no_decision import (
 from .reconcile import STALE_PENDING_FUNDING
 
 __all__ = [
+    "GUARDRAIL_UNKNOWN_STREAK_THRESHOLD",
     "MIN_CYCLES_FOR_PHASE3",
     "ValidationReport",
+    "guardrail_unknown_shortfall",
     "validate_run",
 ]
 
@@ -71,6 +77,12 @@ __all__ = [
 # (the §20.3 acceptance gate on a LIVE run) — two specs, two gates, one number
 # by coincidence; deliberately not tied together (issue #102).
 MIN_CYCLES_FOR_PHASE3 = 30
+# How many decided cycles in a row the trend guardrail may read as ``unknown``
+# before the report says the run is not yet acceptable (exit 4): about a day
+# of 4h rounds with the producer or its `fetch` down, during which nothing new
+# opens and nothing held can be closed by the rule (decided 2026-10-16: the
+# book is kept, and the condition is made visible here rather than acted on).
+GUARDRAIL_UNKNOWN_STREAK_THRESHOLD = 6
 
 
 # Cycles that actually produced (or fail-closed) a decision. api_failed is
@@ -146,7 +158,8 @@ class ValidationReport:
     # newest terminal cycle: ``no_decision`` is every ``api_failed``,
     # ``stale_feed`` the leading run of those that were freshness refusals.
     streaks: TrailingFailureStreaks = TrailingFailureStreaks(0, 0, None)
-    # Not-yet-at-the-gate reasons that carry a printed cause (exit 4). STORED,
+    # Not-yet-at-the-gate reasons that carry a printed cause (exit 4): the
+    # no-decision streak, and the guardrail's unknown streak. STORED,
     # not derived from ``streaks``: whether a streak still describes the run's
     # CURRENT state depends on ``now``, which is an input to the validator and
     # not a field of this report. Same shape as the live report's field, whose
@@ -154,6 +167,14 @@ class ValidationReport:
     # report can therefore state a streak without the matching line, exactly as
     # it can for those six, and the tests own that.
     shortfalls: tuple[str, ...] = ()
+    # The trend guardrail's trail (wired 2026-10-16), informational except for
+    # the streak's shortfall: rows whose gate closed or blocked
+    # (``risk_action = blocked_to_flat``), plans the api_failed sweep started
+    # (no ``ai_outputs`` row: ``output_id`` NULL), and the trailing run of
+    # decided cycles the gate read as ``unknown`` (0 with the guardrail off).
+    guardrail_blocked: int = 0
+    guardrail_sweep_plans: int = 0
+    guardrail_unknown_streak: int = 0
     # The run's cycles split by the three prompt segmentation keys
     # (``prompt_version``, ``context_shape``, ``format_fingerprint`` —
     # phase2-data §5.2), in order of first appearance, so a run that straddled
@@ -219,7 +240,9 @@ class ValidationReport:
 
         ...and a run that is currently REACHING decisions: one whose last
         three cycles all failed is not ready however many cycles it
-        accumulated before its inputs went wrong (issue #50).
+        accumulated before its inputs went wrong (issue #50); nor is one
+        whose trend guardrail has read ``unknown`` for its last six decided
+        cycles (wired 2026-10-16).
         """
         return (
             self.cycle_count >= MIN_CYCLES_FOR_PHASE3
@@ -258,6 +281,9 @@ class ValidationReport:
             f"net_funding_pnl: {_fmt(self.net_funding_pnl)}",
             f"no_decision_streak: {self.streaks.no_decision}",
             f"stale_feed_refusal_streak: {self.streaks.stale_feed}",
+            f"guardrail_unknown_streak: {self.guardrail_unknown_streak}",
+            f"guardrail_blocked: {self.guardrail_blocked}",
+            f"guardrail_sweep_plans: {self.guardrail_sweep_plans}",
         ]
         lines.extend(prompt_regime_lines(self.prompt_regimes))
         lines.append(f"phase3_ready: {'yes' if self.phase3_ready else 'no'}")
@@ -469,7 +495,7 @@ def validate_run(db: Database, *, run_id: str, now: datetime | None = None) -> V
 
     ``now`` (default: wall clock) ages still-pending funding events for the
     non-gating staleness warning, and dates the no-decision streak against
-    :data:`_STREAK_RECENCY_WINDOW`. That second use makes ``now`` a GATING
+    :data:`STREAK_RECENCY_WINDOW`. That second use makes ``now`` a GATING
     input: the same store validated hours apart can move from exit 4 to exit
     0 as a stopped run ages out of the window. The verdict is reproducible
     given the same ``now``, not from the store alone.
@@ -491,6 +517,11 @@ def validate_run(db: Database, *, run_id: str, now: datetime | None = None) -> V
             (run_id,),
         )
         streaks = trailing_failure_streaks(conn, run_id)
+        guardrail_blocked = repo.count_ai_outputs_with_risk_action(
+            conn, run_id, risk_action=RiskAction.BLOCKED_TO_FLAT.value
+        )
+        guardrail_sweep_plans = repo.count_execution_plans_without_output(conn, run_id)
+        guardrail_unknown_streak = _guardrail_unknown_streak(conn, run_id)
         prompt_regimes = repo.prompt_regime_counts(conn, run_id, statuses=_COMPLETED_CYCLE_STATUSES)
         order_count = _count(conn, "SELECT COUNT(*) FROM orders WHERE run_id = ?", (run_id,))
         fill_count = _count(conn, "SELECT COUNT(*) FROM fills WHERE run_id = ?", (run_id,))
@@ -729,6 +760,54 @@ def validate_run(db: Database, *, run_id: str, now: datetime | None = None) -> V
         failures=tuple(failures),
         warnings=tuple(warnings),
         streaks=streaks,
-        shortfalls=tuple(line for line in (no_decision_shortfall(streaks, now=now),) if line),
+        shortfalls=tuple(
+            line
+            for line in (
+                no_decision_shortfall(streaks, now=now),
+                guardrail_unknown_shortfall(guardrail_unknown_streak, streaks, now=now),
+            )
+            if line
+        ),
+        guardrail_blocked=guardrail_blocked,
+        guardrail_sweep_plans=guardrail_sweep_plans,
+        guardrail_unknown_streak=guardrail_unknown_streak,
         prompt_regimes=prompt_regimes,
+    )
+
+
+def _guardrail_unknown_streak(conn: sqlite3.Connection, run_id: str) -> int:
+    """How many of the run's newest decided cycles in a row read the guardrail as ``unknown``.
+
+    Walked over the run's decided cycles newest first
+    (:func:`repo.guardrail_sides_newest_first`); the first verdict reading
+    anything else — a side, or NULL for a gate run without the guardrail —
+    ends the count, so it measures "how long has the rule been unreadable
+    RIGHT NOW". A cycle with no verdict (``api_failed``) neither counts nor
+    breaks the streak.
+    """
+    streak = 0
+    for side in repo.guardrail_sides_newest_first(conn, run_id):
+        if side != GuardrailSide.UNKNOWN.value:
+            break
+        streak += 1
+    return streak
+
+
+def guardrail_unknown_shortfall(
+    streak: int, streaks: TrailingFailureStreaks, *, now: datetime
+) -> str | None:
+    """The ``shortfall:`` line for a guardrail that has been unreadable too long, or ``None``.
+
+    Withheld on the same terms as :func:`no_decision_shortfall`: an undated
+    or stopped run's last hours are not a reason it "cannot read the rule
+    now".
+    """
+    if streak < GUARDRAIL_UNKNOWN_STREAK_THRESHOLD:
+        return None
+    if streaks.latest_terminal_at is None or now - streaks.latest_terminal_at > STREAK_RECENCY_WINDOW:
+        return None
+    return (
+        f"the trend guardrail has read 'unknown' for {streak} decided cycles in a row "
+        f"(>= {GUARDRAIL_UNKNOWN_STREAK_THRESHOLD}): nothing new opens and nothing held can be "
+        "closed by the rule — check the producer (`guardrail-signal`) and its `fetch`"
     )

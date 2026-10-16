@@ -149,6 +149,7 @@ EXPORT_SPECS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
             "key_risks",
             "order_created",
             "no_order_reason",
+            "guardrail_side",
         ),
         (),
     ),

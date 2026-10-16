@@ -788,6 +788,14 @@ def validate_live_risk_consistency(
 
     Raises ``ValueError`` (a config error — callers exit 1, never clamp).
     """
+    if risk.trend_guardrail:
+        # The live engine gates without the guardrail (it is paper-only in
+        # this build); a config staged for live that names a document would
+        # otherwise load clean and trade as if the guardrail were on.
+        raise ValueError(
+            "risk.trend_guardrail is paper-only in this build — the live engine does not read "
+            'the guardrail document; leave the key out (or write "") in a config staged for live'
+        )
     missing = [k for k in _RISK_CROSS_CHECK_KEYS if raw_risk.get(k) is None]
     if missing:
         raise ValueError(

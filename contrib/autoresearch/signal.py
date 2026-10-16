@@ -1,4 +1,6 @@
-"""The one thing this package ever hands the live path: a qualitative signal.
+"""One of the two things this package hands the live path: a qualitative signal.
+
+(The other is the trend guardrail's document, :mod:`.guardrail`, since 2026-10-16.)
 
 Plan §7 / PR C1. Everything else here stays offline — this module takes the
 coin's most recently promoted rule, replays its DECISIONS up to the newest bar
@@ -45,6 +47,7 @@ from .ledger import Experiment, Ledger, Trial
 from .metrics import SegmentMetrics
 from .upstream import (
     MAX_SIGNAL_AGE_INTERVALS,
+    GuardrailSignal,
     ResearchBias,
     ResearchConfidence,
     ResearchDrawdown,
@@ -247,8 +250,12 @@ def build_signal(
     )
 
 
-def write_signal(path: str | Path, signal: ResearchSignal) -> Path:
+def write_signal(path: str | Path, signal: ResearchSignal | GuardrailSignal) -> Path:
     """Write ``signal`` to ``path`` as JSON, atomically; return where it landed.
+
+    Either handoff document: the research signal's and the trend guardrail's
+    share the writer because their readers share the same half-written-file
+    hazard.
 
     Through a temporary file and :func:`os.replace`, which is atomic on both
     platforms this runs on. The reader is a trading daemon on its own

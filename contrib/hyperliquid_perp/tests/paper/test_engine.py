@@ -1475,3 +1475,233 @@ def test_a_slice_missed_before_the_first_post_does_not_halt_the_maker_leg(tmp_pa
     assert engine._leg.resting.index == 1
     assert (engine._leg.consumed, engine._leg.executed) == (2, 0)
     db.close()
+
+
+# --------------------------------------------------------------------------
+# the trend guardrail at the engine (wired 2026-10-16)
+# --------------------------------------------------------------------------
+
+import json  # noqa: E402
+import logging  # noqa: E402
+
+from contrib.hyperliquid_perp.domains.perp.risk_gate import RiskAction  # noqa: E402
+from contrib.hyperliquid_perp.domains.perp.schema import GuardrailSignal  # noqa: E402
+
+
+def _guardrail_document(tmp_path, side: str) -> str:
+    path = tmp_path / "guardrail.json"
+    signal = GuardrailSignal(
+        coin="BTC",
+        interval="4h",
+        as_of_ms=int(_T0.timestamp() * 1000) - 1,
+        rule_id="band@deadbeef",
+        side=side,
+    )
+    path.write_text(json.dumps(signal.to_document()), encoding="utf-8")
+    return str(path)
+
+
+def _with_guardrail(engine, path: str) -> None:
+    engine._risk = RiskConfig(leverage=D("5"), max_target_margin_pct=60, trend_guardrail=path)
+
+
+def test_the_guardrail_closes_a_held_position_against_the_rule(tmp_path, caplog):
+    seed = (PositionState(coin="BTC", size=D("0.001"), entry_price=D(50000)),)
+    db, clock, engine, _ = _engine(tmp_path, seed=seed)
+    _with_guardrail(engine, _guardrail_document(tmp_path, "short"))
+    _provider(engine, [snap()] * 4)
+    with caplog.at_level(logging.WARNING):
+        start = engine.start_plan(set_target("long", 2))
+    assert start.gate.risk_action is RiskAction.BLOCKED_TO_FLAT
+    assert start.gate.target_side.value == "long"  # what the model asked is kept
+    assert start.plan_id is not None
+    assert any(
+        "trend guardrail: the rule (short) closes the held position; the model asked for long"
+        in r.getMessage()
+        for r in caplog.records
+    )
+    clock.advance(30)
+    engine.tick()
+    assert _size(db) == 0
+    db.close()
+
+
+def test_a_missing_guardrail_document_opens_nothing_new_but_keeps_the_book(tmp_path, caplog):
+    seed = (PositionState(coin="BTC", size=D("0.001"), entry_price=D(50000)),)
+    db, clock, engine, _ = _engine(tmp_path, seed=seed)
+    _with_guardrail(engine, str(tmp_path / "nowhere.json"))
+    _provider(engine, [snap()] * 4)
+    with caplog.at_level(logging.WARNING):
+        start = engine.start_plan(set_target("short", 2))
+    assert start.gate.risk_action is RiskAction.REJECTED
+    assert start.gate.risk_reason == "guardrail_rule_unknown"
+    assert start.plan_id is None
+    assert _size(db) == D("0.001")
+    assert any("trend guardrail document" in r.getMessage() for r in caplog.records)
+    db.close()
+
+
+def test_the_guardrail_sweep_closes_the_book_on_a_round_with_no_decision(tmp_path):
+    seed = (PositionState(coin="BTC", size=D("0.001"), entry_price=D(50000)),)
+    db, clock, engine, _ = _engine(tmp_path, seed=seed)
+    _provider(engine, [snap()] * 4)
+    # Not configured: nothing happens, no snapshot is consumed.
+    assert engine.guardrail_sweep() is None
+    _with_guardrail(engine, _guardrail_document(tmp_path, "flat"))
+    swept = engine.guardrail_sweep()
+    assert swept is not None and swept.plan_id is not None
+    assert swept.gate.risk_action is RiskAction.BLOCKED_TO_FLAT
+    clock.advance(30)
+    engine.tick()
+    assert _size(db) == 0
+    # No ai_outputs row was ever written by the engine; the plan is the trail.
+    assert db.conn.execute("SELECT COUNT(*) FROM ai_outputs").fetchone()[0] == 0
+    row = db.conn.execute(
+        "SELECT output_id FROM execution_plans WHERE plan_id = ?", (swept.plan_id,)
+    ).fetchone()
+    assert row[0] is None
+    # Flat now: a second sweep has nothing to do.
+    assert engine.guardrail_sweep() is None
+    db.close()
+
+
+def test_the_sweep_still_runs_after_a_plan_this_engine_completed(tmp_path):
+    # The engine keeps a finished leg around (terminal); the sweep must read
+    # it as "nothing in flight", as every other in-flight check does.
+    db, clock, engine, _ = _engine(tmp_path)
+    _provider(engine, [snap()] * 8)
+    assert engine.start_plan(set_target("long", 1)).plan_id is not None
+    clock.advance(30)
+    engine.tick()
+    assert _size(db) == D("0.001")
+    _with_guardrail(engine, _guardrail_document(tmp_path, "short"))
+    swept = engine.guardrail_sweep()
+    assert swept is not None and swept.plan_id is not None
+    clock.advance(30)
+    engine.tick()
+    assert _size(db) == 0
+    db.close()
+
+
+def test_a_document_saying_unknown_is_said_out_loud(tmp_path, caplog):
+    seed = (PositionState(coin="BTC", size=D("0.001"), entry_price=D(50000)),)
+    db, clock, engine, _ = _engine(tmp_path, seed=seed)
+    _with_guardrail(engine, _guardrail_document(tmp_path, "unknown"))
+    _provider(engine, [snap()] * 4)
+    with caplog.at_level(logging.WARNING):
+        start = engine.start_plan(set_target("short", 2))
+    assert start.gate.risk_reason == "guardrail_rule_unknown"
+    assert start.gate.guardrail is not None and start.gate.guardrail.value == "unknown"
+    assert any(
+        "says the rule band@deadbeef has no side at its newest bar" in r.getMessage()
+        for r in caplog.records
+    )
+    db.close()
+
+
+def test_a_sweep_that_must_close_but_cannot_read_the_market_says_so(tmp_path, caplog):
+    seed = (PositionState(coin="BTC", size=D("0.001"), entry_price=D(50000)),)
+    db, clock, engine, _ = _engine(tmp_path, seed=seed)
+    _with_guardrail(engine, _guardrail_document(tmp_path, "flat"))
+    _provider(engine, [SnapshotOutcome.ERROR])
+    with caplog.at_level(logging.WARNING):
+        assert engine.guardrail_sweep() is None
+    assert any(
+        "forbids the held long position but no market snapshot" in r.getMessage()
+        for r in caplog.records
+    )
+    assert _size(db) == D("0.001")
+    db.close()
+
+
+def test_a_sweep_whose_fetch_raises_does_not_halt_the_engine(tmp_path):
+    seed = (PositionState(coin="BTC", size=D("0.001"), entry_price=D(50000)),)
+    db, clock, engine, _ = _engine(tmp_path, seed=seed)
+    _with_guardrail(engine, _guardrail_document(tmp_path, "flat"))
+    _provider(engine, [])  # an exhausted script raises on fetch
+    with pytest.raises(AssertionError):
+        engine.guardrail_sweep()
+    # Still trading: the next round's plan builds as usual.
+    _provider(engine, [snap()] * 4)
+    assert engine.start_plan(set_target("flat", 0)).gate is not None
+    db.close()
+
+
+def _held_long_with_rule(tmp_path, side: str):
+    seed = (PositionState(coin="BTC", size=D("0.001"), entry_price=D(50000)),)
+    db, clock, engine, _ = _engine(tmp_path, seed=seed)
+    _with_guardrail(engine, _guardrail_document(tmp_path, side))
+    _provider(engine, [snap()] * 12)
+    return db, clock, engine
+
+
+def test_a_flip_onto_the_rules_side_runs_both_legs(tmp_path):
+    db, clock, engine = _held_long_with_rule(tmp_path, "short")
+    start = engine.start_plan(set_target("short", 5))
+    assert start.gate.risk_action in (RiskAction.APPROVED, RiskAction.CLAMPED)
+    assert engine._flip is not None
+    for _ in range(8):
+        clock.advance(30)
+        engine.tick()
+        if _size(db) < 0:
+            break
+    assert _size(db) < 0
+    db.close()
+
+
+def test_a_rule_that_turns_between_a_flips_legs_leaves_the_book_flat_and_says_so(tmp_path, caplog):
+    db, clock, engine = _held_long_with_rule(tmp_path, "short")
+    engine.start_plan(set_target("short", 5))
+    _with_guardrail(engine, _guardrail_document(tmp_path, "long"))  # the producer ran meanwhile
+    with caplog.at_level(logging.WARNING):
+        clock.advance(30)
+        engine.tick()
+    assert _size(db) == 0
+    row = db.conn.execute(
+        "SELECT status_reason FROM execution_plans WHERE status = 'flip_incomplete'"
+    ).fetchone()
+    assert row["status_reason"] == "open_leg_gate_rejected"
+    assert any(
+        "trend guardrail: the rule (long) blocks the ask over a flat book" in r.getMessage()
+        for r in caplog.records
+    )
+    db.close()
+
+
+def test_a_flip_under_an_unknown_rule_never_starts(tmp_path, caplog):
+    db, clock, engine = _held_long_with_rule(tmp_path, "unknown")
+    with caplog.at_level(logging.WARNING):
+        start = engine.start_plan(set_target("short", 5))
+    assert start.plan_id is None and start.gate.risk_reason == "guardrail_rule_unknown"
+    assert _size(db) == D("0.001")
+    assert any(
+        "trend guardrail: the rule (unknown) reads unknown, so the ask is refused" in r.getMessage()
+        for r in caplog.records
+    )
+    db.close()
+
+
+def test_a_maintain_closed_by_the_rule_is_logged_as_asking_for_nothing(tmp_path, caplog):
+    db, clock, engine = _held_long_with_rule(tmp_path, "short")
+    maintain = ParsedDecision(
+        decision=TargetDecision(
+            decision_mode=DecisionMode.MAINTAIN_CURRENT,
+            target_side=None,
+            requested_target_margin_pct=None,
+            confidence=D("0.8"),
+            rationale="hold",
+            key_risks=(),
+        ),
+        is_valid=True,
+        invalid_reason=None,
+        raw_response="raw",
+    )
+    with caplog.at_level(logging.WARNING):
+        start = engine.start_plan(maintain)
+    assert start.gate.risk_action is RiskAction.BLOCKED_TO_FLAT and start.plan_id is not None
+    assert any(
+        "closes the held position; the model asked for nothing (guardrail_against_rule)"
+        in r.getMessage()
+        for r in caplog.records
+    )
+    db.close()

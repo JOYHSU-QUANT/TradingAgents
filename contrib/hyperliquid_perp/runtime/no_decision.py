@@ -29,6 +29,7 @@ from ..common.constants import CYCLE_INTERVAL, STALE_MARKET_DATA_ERROR
 
 __all__ = [
     "NO_DECISION_STREAK_THRESHOLD",
+    "STREAK_RECENCY_WINDOW",
     "TrailingFailureStreaks",
     "no_decision_shortfall",
     "note_cycle_outcome",
@@ -64,7 +65,7 @@ NO_DECISION_STREAK_THRESHOLD = 3
 # during an exchange maintenance window would report exit 4 forever, with
 # "start it again and get one more decided cycle" as the only remedy. Two
 # cycles: one is inside the ordinary jitter of a live run's next boundary.
-_STREAK_RECENCY_WINDOW = 2 * CYCLE_INTERVAL
+STREAK_RECENCY_WINDOW = 2 * CYCLE_INTERVAL
 
 
 @dataclass(frozen=True)
@@ -83,7 +84,7 @@ class TrailingFailureStreaks:
 
     ``latest_terminal_at`` is when the newest terminal cycle last CHANGED STATE
     (its ``timestamp``), which is what decides whether these numbers still
-    describe the run's current state (see :data:`_STREAK_RECENCY_WINDOW`).
+    describe the run's current state (see :data:`STREAK_RECENCY_WINDOW`).
     Deliberately not ``scheduled_at``: a cycle stranded by a crash is
     terminalized on restart carrying its ORIGINAL slot, hours or days old, so
     dating the streak by the slot would read a run that just came back as
@@ -260,7 +261,7 @@ def no_decision_shortfall(streaks: TrailingFailureStreaks, *, now: datetime) -> 
     about the same store shape. ``None`` in three cases: the streak is under
     the threshold; the newest terminal cycle's stamp is unparseable
     (``latest_terminal_at is None`` — withhold rather than guess); or that
-    cycle is older than :data:`_STREAK_RECENCY_WINDOW` — a stopped or archived
+    cycle is older than :data:`STREAK_RECENCY_WINDOW` — a stopped or archived
     run's last hours are not a reason it "cannot decide now", and gating on
     them would disqualify an otherwise complete acceptance run for having
     ended during an exchange outage.
@@ -282,7 +283,7 @@ def no_decision_shortfall(streaks: TrailingFailureStreaks, *, now: datetime) -> 
         return None
     if (
         streaks.latest_terminal_at is None
-        or now - streaks.latest_terminal_at > _STREAK_RECENCY_WINDOW
+        or now - streaks.latest_terminal_at > STREAK_RECENCY_WINDOW
     ):
         return None
     count = streaks.no_decision

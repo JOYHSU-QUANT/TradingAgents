@@ -1,6 +1,6 @@
 """One definition of the §5 / §7 audit-row assembly (phase2-data).
 
-``ai_inputs`` (40 columns) and ``ai_outputs`` (26 columns) are written from two
+``ai_inputs`` (40 columns) and ``ai_outputs`` (27 columns) are written from two
 call sites — the paper scheduler and the live decision driver — that previously
 each carried a full copy of the field mapping ("mirror of PaperScheduler",
 live/decision.py). A schema column added to one copy but not the other would
@@ -191,6 +191,7 @@ def write_ai_output(
         approved_target_margin_pct=gate.approved_target_margin_pct,
         risk_action=gate.risk_action.value,
         risk_reason=gate.risk_reason,
+        guardrail_side=None if gate.guardrail is None else gate.guardrail.value,
         target_margin=gate.target_margin,
         configured_leverage=gate.configured_leverage,
         target_notional=gate.target_notional,

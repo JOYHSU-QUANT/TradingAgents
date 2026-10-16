@@ -8,9 +8,18 @@ rather than as the number the code happened to print.
 from __future__ import annotations
 
 import statistics
+from decimal import Decimal
 
 import pytest
 
+from contrib.hyperliquid_perp.domains.perp import risk_gate as _gate
+from contrib.hyperliquid_perp.domains.perp.schema import GuardrailSide
+from contrib.hyperliquid_perp.domains.perp.target_decision import (
+    DecisionConfig,
+    DecisionMode,
+    ParsedDecision,
+    TargetDecision,
+)
 from contrib.replay.score import (
     RESEARCH_AGAINST,
     RESEARCH_EFFECT,
@@ -946,6 +955,159 @@ def test_csv_table_has_one_row_per_question_with_the_horizons_by_label():
     assert (row6["ai_hit_4h"], row6["executed_hit_4h"]) == (False, True)
 
 
+# -- the trend guardrail's rows (blocked_to_flat, wired 2026-10-16) ----------------
+
+
+def test_a_blocked_row_keeps_the_side_it_blocked_and_approves_a_flat_target():
+    blocked = _answer(risk_action="blocked_to_flat", approved_margin_pct=0.0)
+    assert blocked.blocked and blocked.asked_target
+    with pytest.raises(ScoreError, match="approves a flat target"):
+        _answer(risk_action="blocked_to_flat", approved_margin_pct=10.0)
+    with pytest.raises(ScoreError, match="keeps the side it blocked"):
+        _answer(risk_action="blocked_to_flat", approved_margin_pct=0.0, target_side=None)
+    # Over a maintain or a fail-closed round the gate records flat with no
+    # requested margin: the model asked for nothing.
+    closed = _answer(
+        risk_action="blocked_to_flat",
+        target_side="flat",
+        requested_margin_pct=None,
+        approved_margin_pct=0.0,
+        confidence=None,
+    )
+    assert closed.blocked and not closed.asked_target
+    assert closed.mode == "maintain_current"
+    # The gate's ties: a sided block keeps its margin and confidence, a flat
+    # one carries no margin.
+    with pytest.raises(ScoreError, match="keeps its margin and confidence"):
+        _answer(risk_action="blocked_to_flat", approved_margin_pct=0.0, confidence=None)
+    with pytest.raises(ScoreError, match="keeps its margin and confidence"):
+        _answer(risk_action="blocked_to_flat", approved_margin_pct=0.0, requested_margin_pct=None)
+    with pytest.raises(ScoreError, match="carries no margin"):
+        _answer(
+            risk_action="blocked_to_flat",
+            target_side="flat",
+            requested_margin_pct=50.0,
+            approved_margin_pct=0.0,
+        )
+
+
+def test_a_blocked_row_reads_the_models_ask_and_executes_flat():
+    # The fixture question holds long 30% at 1x: current exposure +0.3; the
+    # guardrail's execution is flat whatever the model asked.
+    asked = _answer(
+        risk_action="blocked_to_flat",
+        target_side="short",
+        requested_margin_pct=40.0,
+        approved_margin_pct=0.0,
+    )
+    card = score_run([_question()], [asked], step_ms=STEP_MS, costs=TAKER)
+    (row,) = card.rows
+    assert (row.ai_side, row.ai_exposure) == (TargetSide.SHORT, pytest.approx(-0.4))
+    assert (row.executed_side, row.executed_exposure) == (TargetSide.FLAT, 0.0)
+    closed = _answer(
+        risk_action="blocked_to_flat",
+        target_side="flat",
+        requested_margin_pct=None,
+        approved_margin_pct=0.0,
+        confidence=None,
+    )
+    card = score_run([_question()], [closed], step_ms=STEP_MS, costs=TAKER)
+    (row,) = card.rows
+    assert (row.ai_side, row.ai_exposure) == (TargetSide.LONG, pytest.approx(0.3))
+    assert (row.executed_side, row.executed_exposure) == (TargetSide.FLAT, 0.0)
+    summary = card.summary()
+    assert summary.blocked == 1
+    assert "guardrail blocked: 1/1 (100.0%)" in summary.describe(card)
+
+
+def test_a_blocked_row_is_never_a_maintain():
+    with pytest.raises(ScoreError, match="recorded as set_target"):
+        _answer(
+            decision_mode="maintain_current",
+            risk_action="blocked_to_flat",
+            target_side=None,
+            requested_margin_pct=None,
+            approved_margin_pct=None,
+            order_created=False,
+            no_order_reason="maintain_current",
+        )
+
+
+# -- the gate's own blocked shapes, read back through Answer ------------------------
+# ``Answer.__post_init__`` restates ``RiskGateResult._check_blocked_to_flat``;
+# this pins the two copies to each other through the gate itself. The
+# decisions are built here (the perp package's own tests are not reached).
+
+
+def _decision(mode: str, side: str | None, margin: int | None, confidence: str) -> ParsedDecision:
+    decision = TargetDecision(
+        decision_mode=DecisionMode(mode),
+        target_side=None if side is None else TargetSide(side),
+        requested_target_margin_pct=margin,
+        confidence=Decimal(confidence),
+        rationale="pin",
+        key_risks=(),
+    )
+    return ParsedDecision(decision=decision, is_valid=True, invalid_reason=None, raw_response="raw")
+
+
+def _fail_closed() -> ParsedDecision:
+    return ParsedDecision(
+        decision=TargetDecision.fail_closed(),
+        is_valid=False,
+        invalid_reason="invalid_output",
+        raw_response="raw",
+    )
+
+
+def _held_long() -> _gate.CurrentPositionState:
+    return _gate.CurrentPositionState(
+        side=TargetSide.LONG, signed_notional=Decimal(300), margin_pct=Decimal(30)
+    )
+
+
+def _gated(parsed: ParsedDecision, current, rule: GuardrailSide) -> _gate.RiskGateResult:
+    return _gate.evaluate(
+        parsed,
+        account_equity=Decimal(1000),
+        current=current or _gate.CurrentPositionState.flat(),
+        risk=_gate.RiskConfig(),
+        decision_cfg=DecisionConfig(),
+        guardrail=rule,
+    )
+
+
+def _recorded(result) -> Answer:
+    return Answer(
+        input_id="q",
+        decision_mode=result.decision_mode.value,
+        target_side=None if result.target_side is None else result.target_side.value,
+        requested_margin_pct=result.requested_target_margin_pct,
+        approved_margin_pct=result.approved_target_margin_pct,
+        risk_action=result.risk_action.value,
+        risk_reason=result.risk_reason,
+        confidence=None if result.confidence is None else float(result.confidence),
+        order_created=result.order_created,
+        no_order_reason=result.no_order_reason,
+    )
+
+
+@pytest.mark.parametrize(
+    ("parsed", "current", "rule", "asked"),
+    [
+        (_decision("set_target", "short", 35, "0.78"), None, GuardrailSide.LONG, True),
+        (_decision("maintain_current", None, None, "0.78"), _held_long(), GuardrailSide.SHORT, False),
+        (_fail_closed(), _held_long(), GuardrailSide.FLAT, False),
+        (_decision("set_target", "flat", 0, "0.1"), _held_long(), GuardrailSide.SHORT, True),
+    ],
+    ids=["ask-against-rule", "maintain-over-held", "fail-closed-over-held", "refused-flat-ask"],
+)
+def test_every_blocked_shape_the_gate_writes_is_one_answer_reads(parsed, current, rule, asked):
+    result = _gated(parsed, current, rule)
+    assert result.risk_action.value == "blocked_to_flat", result
+    answer = _recorded(result)
+    assert answer.blocked
+    assert answer.asked_target is asked
 # -- did the model follow the research bias (plan section 7.3) ------------------
 
 

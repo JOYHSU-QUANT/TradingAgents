@@ -125,7 +125,9 @@ DEFAULT_DELTA_ALERT_PCT: Final = 10
 # D5: this many days held for want of a document in a row is the operator's.
 DEFAULT_D5_DAYS: Final = 3
 # The gate's words for an applied target that was not acted on.
-_REFUSED: Final = frozenset({RiskAction.REJECTED, RiskAction.INVALID_FAIL_CLOSED})
+_REFUSED: Final = frozenset(
+    {RiskAction.REJECTED, RiskAction.INVALID_FAIL_CLOSED, RiskAction.BLOCKED_TO_FLAT}
+)
 # The spot engine's word for a bar it did not ask the strategy about (the
 # bar was suspect): a target written for that bar was not acted on. Spelled
 # here because the spot package may not be imported.

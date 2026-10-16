@@ -1529,3 +1529,72 @@ def test_ai_input_leaves_both_research_columns_null_when_the_prompt_had_no_secti
     assert inp["autoresearch_strategy_id"] is None
     assert "autoresearch" not in inp["context_shape"]
     db.close()
+
+
+# --------------------------------------------------------------------------
+# the trend guardrail on an api_failed round (wired 2026-10-16)
+# --------------------------------------------------------------------------
+
+import json  # noqa: E402
+
+from contrib.hyperliquid_perp.domains.perp.schema import GuardrailSignal  # noqa: E402
+from contrib.hyperliquid_perp.persistence.models import PositionState  # noqa: E402
+
+
+def test_an_api_failed_round_still_has_its_book_checked_by_the_guardrail(tmp_path):
+    db = Database(tmp_path / "s.db")
+    accounting.initialize_run(
+        db,
+        run_id="r",
+        mode="paper",
+        initial_balance_usdc=D(1000),
+        schema_version=1,
+        initial_positions=(PositionState(coin="BTC", size=D("0.001"), entry_price=D(50000)),),
+    )
+    document = tmp_path / "guardrail.json"
+    signal = GuardrailSignal(
+        coin="BTC",
+        interval="4h",
+        as_of_ms=int(_T0.timestamp() * 1000) - 1,
+        rule_id="band@deadbeef",
+        side="short",
+    )
+    document.write_text(json.dumps(signal.to_document()), encoding="utf-8")
+    clock = ManualClock(_T0)
+    asset = AssetSpec(coin="BTC", sz_decimals=3, margin_schedule=margin_schedule())
+    risk = RiskConfig(leverage=D(5), max_target_margin_pct=60, trend_guardrail=str(document))
+    engine = PaperExecutionEngine(
+        db=db,
+        run_id="r",
+        asset=asset,
+        clock=clock,
+        provider=ScriptedSnapshotProvider("BTC", [snap()] * 10),
+        risk_config=risk,
+        decision_config=DecisionConfig(),
+        paper_config=PaperTradingConfig.from_dict(None),
+    )
+    provider = _FakeProvider([_err("timeout"), _err("connection"), _err("server_error")])
+    scheduler = PaperScheduler(
+        db=db,
+        run_id="r",
+        engine=engine,
+        clock=clock,
+        provider=provider,
+        asset=asset,
+        risk_config=risk,
+        decision_config=DecisionConfig(),
+    )
+    scheduler.poll()
+    clock.advance(10)
+    scheduler.poll()
+    clock.advance(30)
+    r3 = scheduler.poll()
+    assert r3.event is CycleEvent.API_FAILED
+    # The terminal record stands, no AI output exists, and the book was closed.
+    assert _attempt_row(db, r3.decision_attempt_id)["status"] == "api_failed"
+    assert db.conn.execute("SELECT COUNT(*) FROM ai_outputs").fetchone()[0] == 0
+    assert db.conn.execute("SELECT COUNT(*) FROM execution_plans").fetchone()[0] == 1
+    clock.advance(30)
+    engine.tick()
+    assert repo.get_current_position(db.conn, "r", "BTC").size == 0
+    db.close()

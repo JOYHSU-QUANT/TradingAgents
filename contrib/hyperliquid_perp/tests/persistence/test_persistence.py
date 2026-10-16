@@ -155,6 +155,21 @@ def test_migrations_record_version(tmp_path):
     db.close()
 
 
+def test_v14_adds_a_nullable_guardrail_side_to_ai_outputs(tmp_path):
+    # Wired 2026-10-16: what the trend guardrail read at the gate. Nullable,
+    # so every pre-v14 row and every row the gate wrote with the guardrail
+    # off reads as "no reading", and vocabulary-checked at the write.
+    db = Database(tmp_path / "p.db")
+    columns = {r[1] for r in db.conn.execute("PRAGMA table_info(ai_outputs)")}
+    assert "guardrail_side" in columns
+    with db.transaction() as conn:
+        repo.insert_ai_output(conn, **{**_ai_output_kwargs("paper"), "guardrail_side": "unknown"})
+    assert db.conn.execute("SELECT guardrail_side FROM ai_outputs").fetchone()[0] == "unknown"
+    with pytest.raises(ValueError, match="^guardrail_side must be one of"), db.transaction() as conn:
+        repo.insert_ai_output(conn, **{**_ai_output_kwargs("live"), "guardrail_side": "sideways"})
+    db.close()
+
+
 def test_v10_adds_a_nullable_context_shape_to_ai_inputs(tmp_path):
     # Issue #97: the prompt's structure beside its version stamp. Nullable
     # on purpose — every pre-v10 row stays valid and reads as "written before

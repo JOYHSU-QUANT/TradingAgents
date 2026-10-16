@@ -584,6 +584,7 @@ _SCHEMA_1_PATHS = {
     "cycles.recent[].verdict.order_created",
     "cycles.recent[].verdict.no_order_reason",
     "cycles.recent[].verdict.decision_reason",
+    "cycles.recent[].verdict.guardrail_side",
     "models",
     "models[].model",
     "models[].prompt_version",

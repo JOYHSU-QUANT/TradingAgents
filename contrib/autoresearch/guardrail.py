@@ -178,8 +178,9 @@ class RuleTimeline:
         rule could not evaluate that bar, because the side there is one it
         took earlier and could not have left. The last two are the live path's
         own refusals, read off each bar in turn: its reader drops a document
-        older than that bound, and :func:`~.signal.build_signal` writes none
-        when the newest bar is one the rule could not evaluate.
+        older than that bound, and the guardrail's producer
+        (:func:`build_guardrail_signal`) writes ``unknown`` off a newest bar
+        the rule could not evaluate.
         """
         index = bisect_right(self.close_times, at_ms) - 1
         if index < self.first_decided or self.unevaluable[index]:
@@ -279,7 +280,11 @@ def build_guardrail_signal(
     """
     timeline = build_timeline(store, rule, coin=coin)
     last = len(timeline.close_times) - 1
-    if timeline.unevaluable[last]:
+    if timeline.unevaluable[last] or timeline.first_taken_ms is None:
+        # Unevaluable, or a history in which the rule never took a side: the
+        # replay started flat at the store's first bar, so "flat" there may
+        # be a position opened before the store begins — and the gate would
+        # close a book on it. Unknown keeps what is held instead.
         side = GuardrailSide.UNKNOWN
     else:
         held = timeline.sides[last]

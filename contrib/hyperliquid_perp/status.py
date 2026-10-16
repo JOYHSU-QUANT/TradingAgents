@@ -183,6 +183,10 @@ class Verdict:
     order_created: bool
     no_order_reason: str | None
     decision_reason: str | None
+    # What the trend guardrail read for this verdict (``long`` / ``short`` /
+    # ``flat`` / ``unknown``); ``None`` with the guardrail off, and on rows
+    # written before schema v14.
+    guardrail_side: str | None = None
 
 
 @dataclass(frozen=True)
@@ -474,6 +478,10 @@ def _verdict(row: sqlite3.Row) -> Verdict | None:
         order_created=bool(row["order_created"]),
         no_order_reason=_text_or_none(row["no_order_reason"]),
         decision_reason=_text_or_none(row["decision_reason"]),
+        # ``sqlite3.Row`` has no ``in``; a store older than v14 has no column.
+        guardrail_side=(
+            _str_or_none(row["guardrail_side"]) if "guardrail_side" in row.keys() else None  # noqa: SIM118
+        ),
     )
 
 

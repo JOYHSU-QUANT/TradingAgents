@@ -1537,6 +1537,7 @@ def test_ai_input_leaves_both_research_columns_null_when_the_prompt_had_no_secti
 
 import json  # noqa: E402
 
+from contrib.hyperliquid_perp.domains.perp.schema import GuardrailSignal  # noqa: E402
 from contrib.hyperliquid_perp.persistence.models import PositionState  # noqa: E402
 
 
@@ -1551,19 +1552,14 @@ def test_an_api_failed_round_still_has_its_book_checked_by_the_guardrail(tmp_pat
         initial_positions=(PositionState(coin="BTC", size=D("0.001"), entry_price=D(50000)),),
     )
     document = tmp_path / "guardrail.json"
-    document.write_text(
-        json.dumps(
-            {
-                "document_version": 1,
-                "coin": "BTC",
-                "interval": "4h",
-                "as_of_ms": int(_T0.timestamp() * 1000) - 1,
-                "rule_id": "band@deadbeef",
-                "side": "short",
-            }
-        ),
-        encoding="utf-8",
+    signal = GuardrailSignal(
+        coin="BTC",
+        interval="4h",
+        as_of_ms=int(_T0.timestamp() * 1000) - 1,
+        rule_id="band@deadbeef",
+        side="short",
     )
+    document.write_text(json.dumps(signal.to_document()), encoding="utf-8")
     clock = ManualClock(_T0)
     asset = AssetSpec(coin="BTC", sz_decimals=3, margin_schedule=margin_schedule())
     risk = RiskConfig(leverage=D(5), max_target_margin_pct=60, trend_guardrail=str(document))

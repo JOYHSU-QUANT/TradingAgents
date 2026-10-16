@@ -646,11 +646,13 @@ class PaperScheduler:
             )
         # The trend guardrail judges the book even on a round with no answer
         # (PR #321 review decision 2). Contained: a failure here must not
-        # un-write the terminal record above, and the engine's own fail-stop
-        # has already halted it.
+        # un-write the terminal record above. A read or fetch failure leaves
+        # the engine trading (the sweep is tried again next round); only a
+        # failure while registering the close halts it, as ``start_plan``'s
+        # would.
         try:
             self._engine.guardrail_sweep()
-        except Exception:  # noqa: BLE001 — the terminal record stands; the engine is halted
+        except Exception:  # noqa: BLE001 — the terminal record stands
             logger.exception("api_failed cycle %s: the guardrail sweep failed", pending.attempt_id)
         return PollResult(
             event=CycleEvent.API_FAILED,

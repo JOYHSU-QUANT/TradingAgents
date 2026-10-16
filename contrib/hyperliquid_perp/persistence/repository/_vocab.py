@@ -6,6 +6,7 @@ from contrib.core.enum_guard import VocabEnum
 
 from ...common.constants import ERROR_TYPES
 from ...domains.perp.risk_gate import RiskAction
+from ...domains.perp.schema import GuardrailSide
 from ...domains.perp.target_decision import DecisionMode, TargetSide
 from ..cloid import LIVE_ORDER_ROLES, OrderRole
 
@@ -108,6 +109,7 @@ _FUNDING_SOURCES = frozenset(
 _DECISION_MODES = frozenset(mode.value for mode in DecisionMode)
 _TARGET_SIDES = frozenset(side.value for side in TargetSide)
 _RISK_ACTIONS = frozenset(action.value for action in RiskAction)
+_GUARDRAIL_SIDES = frozenset(side.value for side in GuardrailSide)
 # scheduler_state CSV-export breadcrumb states (schema v3).
 _EXPORT_STATUSES = frozenset({"ok", "failed"})
 # Replay breadcrumb vocabulary: "mismatch" = replay ran and contradicted the

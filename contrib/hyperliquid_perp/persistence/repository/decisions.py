@@ -13,6 +13,7 @@ from ._base import _UNSET, _encode, _insert, _iso_utc, _Unset
 from ._vocab import (
     _ATTEMPT_STATUSES,
     _DECISION_MODES,
+    _GUARDRAIL_SIDES,
     _MODES,
     _RISK_ACTIONS,
     _TARGET_SIDES,
@@ -94,6 +95,7 @@ def insert_ai_output(conn: sqlite3.Connection, **fields: Any) -> None:
         ("decision_mode", _DECISION_MODES),
         ("target_side", _TARGET_SIDES),
         ("risk_action", _RISK_ACTIONS),
+        ("guardrail_side", _GUARDRAIL_SIDES),
     ):
         if fields.get(column) is not None:
             check_enum(fields[column], allowed, name=column)

@@ -957,10 +957,24 @@ def test_a_blocked_row_keeps_the_side_it_blocked_and_approves_a_flat_target():
     )
     assert closed.blocked and not closed.asked_target
     assert closed.mode == "maintain_current"
+    # The gate's ties: a sided block keeps its margin and confidence, a flat
+    # one carries no margin.
+    with pytest.raises(ScoreError, match="keeps its margin and confidence"):
+        _answer(risk_action="blocked_to_flat", approved_margin_pct=0.0, confidence=None)
+    with pytest.raises(ScoreError, match="keeps its margin and confidence"):
+        _answer(risk_action="blocked_to_flat", approved_margin_pct=0.0, requested_margin_pct=None)
+    with pytest.raises(ScoreError, match="carries no margin"):
+        _answer(
+            risk_action="blocked_to_flat",
+            target_side="flat",
+            requested_margin_pct=50.0,
+            approved_margin_pct=0.0,
+        )
 
 
-def test_a_blocked_row_reads_the_models_ask_against_a_flat_book():
-    # The fixture question holds long 30% at 1x: current exposure +0.3.
+def test_a_blocked_row_reads_the_models_ask_and_executes_flat():
+    # The fixture question holds long 30% at 1x: current exposure +0.3; the
+    # guardrail's execution is flat whatever the model asked.
     asked = _answer(
         risk_action="blocked_to_flat",
         target_side="short",

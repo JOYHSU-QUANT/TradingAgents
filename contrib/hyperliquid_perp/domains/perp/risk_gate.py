@@ -23,7 +23,7 @@ trusting the parse seam.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import ROUND_FLOOR, Decimal, localcontext
 from enum import Enum
 from typing import Any, Final
@@ -70,6 +70,8 @@ RISK_REASON_NO_EQUITY = "no_account_equity"
 RISK_REASON_GUARDRAIL_RULE_FLAT = "guardrail_rule_flat"
 RISK_REASON_GUARDRAIL_AGAINST_RULE = "guardrail_against_rule"
 RISK_REASON_GUARDRAIL_RULE_UNKNOWN = "guardrail_rule_unknown"
+# The two a blocked_to_flat row may carry; the third only ever rejects.
+_GUARDRAIL_REASONS = frozenset({RISK_REASON_GUARDRAIL_RULE_FLAT, RISK_REASON_GUARDRAIL_AGAINST_RULE})
 
 NO_ORDER_MAINTAIN_CURRENT = "maintain_current"
 NO_ORDER_WITHIN_DEADBAND = "within_deadband"
@@ -295,6 +297,9 @@ class RiskGateResult:
     delta_notional: Decimal
     configured_leverage: Decimal
     confidence: Decimal | None
+    # What the trend guardrail READ for this verdict (``None`` when it is not
+    # configured); the audit row keeps it beside what the gate did with it.
+    guardrail: GuardrailSide | None = None
 
     def __post_init__(self) -> None:
         """Reject illegal field combinations at construction.
@@ -397,14 +402,24 @@ class RiskGateResult:
             raise ValueError("a blocked_to_flat result is a set_target carrying a side")
         if self.approved_target_margin_pct != 0 or any(v != 0 for v in sized):
             raise ValueError("a blocked_to_flat result approves a flat, zero-sized target")
+        requested = self.requested_target_margin_pct
+        if self.target_side is TargetSide.FLAT:
+            if requested not in (None, 0):
+                raise ValueError("a blocked_to_flat result over no sided ask carries no margin")
+        elif requested is None or requested <= 0 or self.confidence is None:
+            raise ValueError(
+                "a blocked_to_flat result over a sided ask keeps its margin and confidence"
+            )
         if self.delta_notional != -self.current_signed_notional:
             raise ValueError(
                 "delta_notional must equal target_signed_notional - current_signed_notional"
             )
         if self.order_created != (self.current_signed_notional != 0):
             raise ValueError("a blocked_to_flat result orders exactly when something is held")
-        if self.risk_reason is None:
-            raise ValueError("a blocked_to_flat result must name the rule's state in risk_reason")
+        if not self.order_created and self.no_order_reason != NO_ORDER_ALREADY_FLAT:
+            raise ValueError("a blocked_to_flat result over a flat book says already_flat")
+        if self.risk_reason not in _GUARDRAIL_REASONS:
+            raise ValueError("a blocked_to_flat result names the rule's state in risk_reason")
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-ready dict; Decimals become strings so no precision is lost."""
@@ -419,6 +434,7 @@ class RiskGateResult:
             "approved_target_margin_pct": self.approved_target_margin_pct,
             "risk_action": self.risk_action.value,
             "risk_reason": self.risk_reason,
+            "guardrail_side": None if self.guardrail is None else self.guardrail.value,
             "order_created": self.order_created,
             "no_order_reason": self.no_order_reason,
             "target_margin": _s(self.target_margin),
@@ -559,10 +575,23 @@ class _Ask:
     requested: int | None
     confidence: Decimal | None
 
+    def __post_init__(self) -> None:
+        if (self.side is None) != (self.requested is None):
+            raise ValueError("an ask carries a side and a margin together or neither")
+        if self.side is TargetSide.FLAT and self.requested != 0:
+            raise ValueError("a flat ask carries no margin")
+
     @classmethod
-    def of(cls, parsed: ParsedDecision) -> _Ask:
+    def of(cls, parsed: ParsedDecision, decision_cfg: DecisionConfig) -> _Ask:
         decision = parsed.decision
-        asking = parsed.is_valid and decision.decision_mode is DecisionMode.SET_TARGET
+        # A hand-built set_target the gate would fail closed is no ask either:
+        # the plain gate keeps its promise about such input, and the guardrail
+        # then judges only the book.
+        asking = (
+            parsed.is_valid
+            and decision.decision_mode is DecisionMode.SET_TARGET
+            and validate_target_decision(decision, decision_cfg) is None
+        )
         return cls(
             side=decision.target_side if asking else None,
             requested=decision.requested_target_margin_pct if asking else None,
@@ -570,24 +599,25 @@ class _Ask:
         )
 
 
-# The sides a position may stand on under each reading of the rule (design
-# 2026-10-02 §2): on the rule's own side only, none while it is flat, and no
-# say at all while it is unknown. Spelled as a table so the two vocabularies
-# (the rule's and the book's) never meet in a string comparison.
-_PERMITTED: Final[dict[GuardrailSide, frozenset[TargetSide] | None]] = {
+# The sides a HELD position may stand on under each reading of the rule
+# (design 2026-10-02 §2): on the rule's own side only, none while it is flat,
+# and either while it is unknown — an unknown rule closes nothing (decided
+# 2026-10-16); what it refuses to OPEN is :func:`_guardrail_before`'s rule,
+# not this table's. Spelled as a table so the two vocabularies (the rule's
+# and the book's) never meet in a string comparison.
+_PERMITTED: Final[dict[GuardrailSide, frozenset[TargetSide]]] = {
     GuardrailSide.LONG: frozenset({TargetSide.LONG}),
     GuardrailSide.SHORT: frozenset({TargetSide.SHORT}),
     GuardrailSide.FLAT: frozenset(),
-    GuardrailSide.UNKNOWN: None,
+    GuardrailSide.UNKNOWN: frozenset({TargetSide.LONG, TargetSide.SHORT}),
 }
 
 
 def guardrail_forbids(rule: GuardrailSide, side: TargetSide | None) -> bool:
-    """Whether the rule's reading forbids a book on ``side`` (``None``/flat is no book)."""
-    permitted = _PERMITTED[rule]
-    if permitted is None or side is None or side is TargetSide.FLAT:
+    """Whether a book HELD on ``side`` must close under the rule's reading (``None``/flat: no book)."""
+    if side is None or side is TargetSide.FLAT:
         return False
-    return side not in permitted
+    return side not in _PERMITTED[rule]
 
 
 def _guardrail_reason(rule: GuardrailSide) -> str:
@@ -683,23 +713,21 @@ def evaluate(
     (:func:`_guardrail_after`), so a round the model failed still has its
     held position checked. See :func:`_evaluate_plain` for the gate itself.
     """
-    ask = _Ask.of(parsed) if guardrail is not None else None
-    if guardrail is not None and ask is not None:
-        blocked = _guardrail_before(ask, guardrail, current, risk)
-        if blocked is not None:
-            return blocked
-    result = _evaluate_plain(
-        parsed,
-        account_equity=account_equity,
-        current=current,
-        risk=risk,
-        decision_cfg=decision_cfg,
-        other_used_margin=other_used_margin,
-        other_positions_notional=other_positions_notional,
-    )
-    if guardrail is not None and ask is not None:
-        result = _guardrail_after(result, ask, guardrail, current, risk)
-    return result
+    plain = {
+        "account_equity": account_equity,
+        "current": current,
+        "risk": risk,
+        "decision_cfg": decision_cfg,
+        "other_used_margin": other_used_margin,
+        "other_positions_notional": other_positions_notional,
+    }
+    if guardrail is None:
+        return _evaluate_plain(parsed, **plain)
+    ask = _Ask.of(parsed, decision_cfg)
+    result = _guardrail_before(ask, guardrail, current, risk)
+    if result is None:
+        result = _guardrail_after(_evaluate_plain(parsed, **plain), ask, guardrail, current, risk)
+    return replace(result, guardrail=guardrail)
 
 
 def _snap_down_to_grid(pct: Decimal, decision_cfg: DecisionConfig) -> int:

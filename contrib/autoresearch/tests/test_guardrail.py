@@ -284,6 +284,15 @@ def test_a_rule_holding_nothing_at_the_newest_bar_is_written_as_flat(store, tmp_
     assert signal.side is GuardrailSide.FLAT
 
 
+def test_a_history_in_which_the_rule_never_took_a_side_is_written_as_unknown(store, tmp_path):
+    # Flat from the store's first bar may be a position opened before it;
+    # the gate must not close a book on that.
+    store.upsert_candles("BTC", "4h", candles([100, 100, 101, 100]))
+    signal, timeline = build_guardrail_signal(store, _rule(tmp_path), coin="BTC")
+    assert timeline.first_taken_ms is None
+    assert signal.side is GuardrailSide.UNKNOWN
+
+
 def test_a_newest_bar_the_rule_could_not_evaluate_is_written_as_unknown(store, tmp_path):
     frozen = {
         "family": "breakout",
@@ -352,5 +361,6 @@ def test_a_store_that_cannot_answer_refuses_the_command_by_name(tmp_path, capsys
     with ResearchStore(db):
         pass
     assert main(["guardrail-signal", "--db", str(db), "--out", str(tmp_path / "g.json")]) == 1
-    assert "error: " in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert err.startswith("error: ") and "btc-20d-breakout@" in err
     assert not (tmp_path / "g.json").exists()

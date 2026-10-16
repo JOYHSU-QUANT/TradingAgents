@@ -445,7 +445,7 @@ exit 0；要補洞請跑 `fetch`。**被拒絕的 spec 則相反**：文件本�
 
 ## 交接文件（C1）
 
-`signal` 是這個套件唯一會流回實盤路徑的東西，形狀刻意小：
+`signal` 是這個套件流回實盤路徑的兩份文件之一（另一份是護欄規則的方向，見「護欄規則」），形狀刻意小：
 
 ```json
 {
@@ -529,9 +529,9 @@ python -m contrib.autoresearch guardrail-signal --coin BTC --out /srv/guardrail-
  "rule_id": "btc-20d-breakout@ca50e67a", "side": "long"}
 ```
 
-- `side` 四種：`long`／`short`／`flat`／`unknown`（最新一根規則讀不到條件——`reading_at` 回 `None` 的
-  那一種；文件照寫，讓讀端分得出「producer 跑了但規則不知道」與「producer 沒跑」，閘門對兩者做同一件事：
-  不開新倉、既有倉位照舊）。
+- `side` 四種：`long`／`short`／`flat`／`unknown`。`unknown`＝最新一根規則讀不到條件，或整段歷史規則從未站邊
+  （重放從 store 第一根空手起算，那個「空手」可能是 store 之前就開的倉，閘門不該憑它平倉）。文件照寫、指令 exit 0，
+  讀端對 `unknown` 留一行 WARNING（跟文件缺／過期同一族），閘門對兩者做同一件事：不開新倉、既有倉位照舊。
 - 跟 `signal` 同一個寫法（暫存檔＋rename）、同一條過期規則（讀端丟掉比**自己時鐘**舊超過
   `MAX_SIGNAL_AGE_INTERVALS` 根文件 bar 的文件），指令會印出要多常跑。`--rule` 可換 spec 檔，
   `rule_id` 會跟著 hash 變，報表與閘門都看得出來不是 commit 的規則。

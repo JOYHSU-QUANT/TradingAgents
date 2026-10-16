@@ -313,6 +313,7 @@ AI input
 | `key_risks` | 1–3 項主要風險（至少 1 項）；CSV 可存 JSON array string |
 | `order_created` | 本 output 是否產生 rebalance / flip order |
 | `no_order_reason` | `maintain_current` / `within_deadband` / `rejected` / `invalid_fail_closed` / 其他；有 order 時留空 |
+| `guardrail_side` | **schema v14 起**：趨勢護欄在這一輪讀到的方向（`long` / `short` / `flat` / `unknown`）；護欄沒開＝NULL（v14 之前的列也是 NULL，靠 run 的 `risk.trend_guardrail` 分辨）。說的是護欄「看到什麼」，`risk_action`／`risk_reason` 說它「做了什麼」 |
 
 `maintain_current` 的 requested / approved target、target margin / notional 與 target side 皆為空，`delta_notional = 0`，並記錄 `order_created = false` 與 `no_order_reason = maintain_current`。`flat` 則有明確 target：`target_side = flat`、requested / approved margin = `0`、`target_signed_notional = 0`。
 

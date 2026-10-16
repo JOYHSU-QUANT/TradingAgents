@@ -84,7 +84,7 @@ def test_the_coin_is_normalised_the_way_the_research_signal_normalises_its_own()
         ("interval", "4H", "interval"),
         ("as_of_ms", "2024-01-02", "GuardrailSignal.as_of_ms"),
         ("rule_id", " ", "GuardrailSignal.rule_id must not be blank"),
-        ("rule_id", "a\nb", "single line"),
+        ("rule_id", "a b", "single token without whitespace"),
     ],
 )
 def test_every_field_is_refused_by_name(field, value, message):
@@ -153,7 +153,7 @@ def test_the_stale_bound_is_two_of_the_documents_own_bars(tmp_path, caplog):
     assert _load(path, caplog, now_ms=_AS_OF_MS + bound + 1) is None
     message = _the_one_warning(caplog)
     assert "past the 2 x 4h bound" in message
-    assert "re-run the research package's `guardrail-signal` command" in message
+    assert "run the research package's `fetch` and then its `guardrail-signal` command" in message
 
 
 def test_a_document_from_ahead_of_this_clock_is_refused(tmp_path, caplog):

@@ -23,10 +23,17 @@ Breaking changes within the 0.x line are called out explicitly.
   becomes flat instead of "maintain"; a model asking for flat passes; and
   with the rule unknown (document missing, unreadable, stale past 2 of its
   bars, wrong coin, from the future, or `side: unknown`) nothing new opens
-  and what is held is kept (`rejected` / `guardrail_rule_unknown`, one
-  WARNING per round). A cycle that ended `api_failed` gets the same book
-  check through `PaperExecutionEngine.guardrail_sweep`. Position sizing is
-  untouched; the drawdown stop-line of the design is a later change.
+  — no other side, no larger margin on the held side — and what is held is
+  kept (`rejected` / `guardrail_rule_unknown`, one WARNING per gate read; a
+  flip reads twice). A cycle that ended `api_failed` gets the same book
+  check through `PaperExecutionEngine.guardrail_sweep` (its close is a plan
+  with no `ai_outputs` row). Schema v14 adds `ai_outputs.guardrail_side`,
+  what the gate read each round, so `validate` can count
+  `guardrail_unknown_streak` (>= 6 decided cycles in a row is a `shortfall:`,
+  exit 4; decided 2026-10-16: visible, not acted on) beside
+  `guardrail_blocked` and `guardrail_sweep_plans`; `status --json` carries
+  the side on each verdict. Position sizing is untouched; the drawdown
+  stop-line of the design is a later change.
   Turning the switch on is an execution-side segment point (new run-id).
   A config staged for live that names the key is refused by name (the live
   engine does not read it); the one-shot `decide` path takes the same

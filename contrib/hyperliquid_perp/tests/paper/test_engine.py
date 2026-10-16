@@ -1485,23 +1485,19 @@ import json  # noqa: E402
 import logging  # noqa: E402
 
 from contrib.hyperliquid_perp.domains.perp.risk_gate import RiskAction  # noqa: E402
+from contrib.hyperliquid_perp.domains.perp.schema import GuardrailSignal  # noqa: E402
 
 
 def _guardrail_document(tmp_path, side: str) -> str:
     path = tmp_path / "guardrail.json"
-    path.write_text(
-        json.dumps(
-            {
-                "document_version": 1,
-                "coin": "BTC",
-                "interval": "4h",
-                "as_of_ms": int(_T0.timestamp() * 1000) - 1,
-                "rule_id": "band@deadbeef",
-                "side": side,
-            }
-        ),
-        encoding="utf-8",
+    signal = GuardrailSignal(
+        coin="BTC",
+        interval="4h",
+        as_of_ms=int(_T0.timestamp() * 1000) - 1,
+        rule_id="band@deadbeef",
+        side=side,
     )
+    path.write_text(json.dumps(signal.to_document()), encoding="utf-8")
     return str(path)
 
 
@@ -1563,12 +1559,61 @@ def test_the_guardrail_sweep_closes_the_book_on_a_round_with_no_decision(tmp_pat
     db.close()
 
 
+def test_the_sweep_still_runs_after_a_plan_this_engine_completed(tmp_path):
+    # The engine keeps a finished leg around (terminal); the sweep must read
+    # it as "nothing in flight", as every other in-flight check does.
+    db, clock, engine, _ = _engine(tmp_path)
+    _provider(engine, [snap()] * 8)
+    assert engine.start_plan(set_target("long", 1)).plan_id is not None
+    clock.advance(30)
+    engine.tick()
+    assert _size(db) == D("0.001")
+    _with_guardrail(engine, _guardrail_document(tmp_path, "short"))
+    swept = engine.guardrail_sweep()
+    assert swept is not None and swept.plan_id is not None
+    clock.advance(30)
+    engine.tick()
+    assert _size(db) == 0
+    db.close()
+
+
+def test_a_document_saying_unknown_is_said_out_loud(tmp_path, caplog):
+    seed = (PositionState(coin="BTC", size=D("0.001"), entry_price=D(50000)),)
+    db, clock, engine, _ = _engine(tmp_path, seed=seed)
+    _with_guardrail(engine, _guardrail_document(tmp_path, "unknown"))
+    _provider(engine, [snap()] * 4)
+    with caplog.at_level(logging.WARNING):
+        start = engine.start_plan(set_target("short", 2))
+    assert start.gate.risk_reason == "guardrail_rule_unknown"
+    assert start.gate.guardrail is not None and start.gate.guardrail.value == "unknown"
+    assert any(
+        "says the rule band@deadbeef could not evaluate its newest bar" in r.getMessage()
+        for r in caplog.records
+    )
+    db.close()
+
+
+def test_a_sweep_that_must_close_but_cannot_read_the_market_says_so(tmp_path, caplog):
+    seed = (PositionState(coin="BTC", size=D("0.001"), entry_price=D(50000)),)
+    db, clock, engine, _ = _engine(tmp_path, seed=seed)
+    _with_guardrail(engine, _guardrail_document(tmp_path, "flat"))
+    _provider(engine, [SnapshotOutcome.ERROR])
+    with caplog.at_level(logging.WARNING):
+        assert engine.guardrail_sweep() is None
+    assert any(
+        "forbids the held long position but no market snapshot" in r.getMessage()
+        for r in caplog.records
+    )
+    assert _size(db) == D("0.001")
+    db.close()
+
+
 def test_a_sweep_that_cannot_read_the_market_does_not_halt_the_engine(tmp_path):
     seed = (PositionState(coin="BTC", size=D("0.001"), entry_price=D(50000)),)
     db, clock, engine, _ = _engine(tmp_path, seed=seed)
     _with_guardrail(engine, _guardrail_document(tmp_path, "flat"))
     _provider(engine, [])  # an exhausted script raises on fetch
-    with pytest.raises(Exception):  # noqa: B017 — any failure on the read side
+    with pytest.raises(AssertionError):
         engine.guardrail_sweep()
     # Still trading: the next round's plan builds as usual.
     _provider(engine, [snap()] * 4)

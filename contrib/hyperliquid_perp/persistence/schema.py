@@ -28,7 +28,7 @@ from __future__ import annotations
 
 __all__ = ["LEASE_READABLE_SINCE", "MIGRATIONS", "SCHEMA_MIGRATIONS_DDL", "SCHEMA_VERSION"]
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 # The oldest schema an OWNING command (``paper``, ``live``, a real ``live-smoke``
 # run) can open AS-IS and consult the run lease in before it upgrades the store
@@ -795,4 +795,15 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         "ALTER TABLE ai_inputs ADD COLUMN autoresearch_bias TEXT",
         "ALTER TABLE ai_inputs ADD COLUMN autoresearch_strategy_id TEXT",
     ),
+    # v14: the side the trend guardrail read at the gate (``GuardrailSide``:
+    # ``long`` / ``short`` / ``flat`` / ``unknown``), on every ``ai_outputs``
+    # row the gate wrote with the guardrail configured; NULL when it was off
+    # (and on every row written before v14 — the two read the same, and the
+    # run's ``risk.trend_guardrail`` tells them apart). The gate's verdict
+    # columns say what it DID (``risk_action`` ``blocked_to_flat``,
+    # ``risk_reason`` ``guardrail_*``); this says what it SAW, which is what
+    # ``validate`` needs to count how long the rule has been unreadable
+    # (``guardrail_unknown_streak``) — a state that leaves no other trace
+    # when the model maintains or fails closed.
+    14: ("ALTER TABLE ai_outputs ADD COLUMN guardrail_side TEXT",),
 }

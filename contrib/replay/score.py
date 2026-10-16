@@ -290,13 +290,21 @@ class Answer:
                     "never as set_target"
                 )
             if self.risk_action is RiskAction.BLOCKED_TO_FLAT:
-                # The guardrail's shape: the side the model asked for (or
-                # flat, over a maintain or a fail-closed round), with the
-                # approved target flat whatever was requested.
+                # The guardrail's shape (``RiskGateResult._check_blocked_to_flat``):
+                # the side the model asked for with its margin and confidence,
+                # or flat with no margin over a maintain or a fail-closed round;
+                # the approved target flat whatever was requested.
                 if self.target_side is None or approved != 0:
                     raise ScoreError(
                         f"{me}: a blocked_to_flat decision keeps the side it blocked and "
                         "approves a flat target"
+                    )
+                if self.target_side is TargetSide.FLAT:
+                    if requested not in (None, 0):
+                        raise ScoreError(f"{me}: a blocked_to_flat over no sided ask carries no margin")
+                elif requested is None or requested <= 0 or self.confidence is None:
+                    raise ScoreError(
+                        f"{me}: a blocked_to_flat over a sided ask keeps its margin and confidence"
                     )
             else:
                 if not sized or approved is None:
@@ -882,8 +890,9 @@ class Summary:
             # evaluator's account, which the scorecard does not keep.
             f"costs: {card.costs.fill_role.value} fills at {card.costs.fee_rate:g} fee + "
             f"{card.costs.slippage_bps:g} bps slippage; exposure = margin x configured leverage",
-            f"guardrail blocked: {_rate(self.blocked, self.answered)}",
         ]
+        if self.blocked:
+            lines.append(f"guardrail blocked: {_rate(self.blocked, self.answered)}")
         if card.split is not None:
             lines.extend(card.split.describe())
             counted = ", ".join(f"{name} {n}" for name, n in self.segments.items())

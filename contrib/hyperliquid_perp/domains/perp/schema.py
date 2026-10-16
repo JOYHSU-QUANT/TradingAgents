@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from types import MappingProxyType
-from typing import Final
+from typing import Any, Final
 
 from contrib.core.enum_guard import VocabEnum
 from contrib.core.instants import MAX_EPOCH_MS, MIN_EPOCH_MS
@@ -1381,7 +1381,7 @@ def _rendered_text(value: object, *, what: str) -> str:
 
 def _read_versioned(
     payload: object, *, version: int, keys: frozenset[str], what: str
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """A handoff document's envelope: a JSON object of exactly ``keys`` declaring ``version``.
 
     Strict about the version and the key set, so a producer that added a
@@ -1406,6 +1406,24 @@ def _read_versioned(
             f"missing {sorted(keys - present)}, unknown {sorted(present - keys)}"
         )
     return payload
+
+
+def _identifier(value: object, *, what: str) -> str:
+    """A name the document carries for the reader's logs: one token, non-blank, bounded.
+
+    Not :func:`_rendered_text`'s rule — nothing here reaches a prompt — but
+    the same bound, so a producer cannot grow a log line without limit.
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"{what} must be a string, got {type(value).__name__} ({value!r})")
+    text = value.strip()
+    if not text:
+        raise ValueError(f"{what} must not be blank")
+    if any(ch.isspace() for ch in text):
+        raise ValueError(f"{what} must be a single token without whitespace, got {text!r}")
+    if len(text) > MAX_RESEARCH_TEXT_CHARS:
+        raise ValueError(f"{what} must be at most {MAX_RESEARCH_TEXT_CHARS} characters, got {len(text)}")
+    return text
 
 
 def _window_days(value: object, *, what: str) -> int:
@@ -1559,8 +1577,8 @@ class GuardrailSignal:
     ``as_of_ms`` is the CLOSE of the bar the side was decided at, in UTC
     epoch milliseconds; freshness is judged against it by
     :mod:`.guardrail_signal`. ``rule_id`` names the rule and the hash of its
-    spec, so a document written under an edited rule cannot pass as one
-    written under the committed rule.
+    spec; the reader prints it in its warnings, so a document written under
+    an edited rule is visible as such in the log.
     """
 
     coin: str
@@ -1576,9 +1594,7 @@ class GuardrailSignal:
         object.__setattr__(self, "coin", self.coin.strip().upper())
         object.__setattr__(self, "interval", parse_interval(self.interval).value)
         _require_venue_stamp(self.as_of_ms, what="GuardrailSignal.as_of_ms")
-        object.__setattr__(
-            self, "rule_id", _rendered_text(self.rule_id, what="GuardrailSignal.rule_id")
-        )
+        object.__setattr__(self, "rule_id", _identifier(self.rule_id, what="GuardrailSignal.rule_id"))
 
     def to_document(self) -> dict[str, object]:
         """The JSON-ready document the research package writes; ``from_document`` reads it back equal."""

@@ -75,8 +75,8 @@ def load_guardrail_signal(path: str, *, coin: str, now_ms: int) -> GuardrailSign
     max_age_ms = max_signal_age_ms(signal.interval)
     if age_ms > max_age_ms:
         logger.warning(
-            "%s document at %s was decided %s ago, %s past the %d x %s bound, %s — re-run "
-            "the research package's `guardrail-signal` command",
+            "%s document at %s was decided %s ago, %s past the %d x %s bound, %s — run the "
+            "research package's `fetch` and then its `guardrail-signal` command",
             _WHAT,
             resolved,
             gap_label(age_ms),
@@ -112,4 +112,17 @@ def guardrail_side_for(path: str, *, coin: str, now: datetime) -> GuardrailSide 
     signal = load_guardrail_signal(
         path, coin=coin, now_ms=epoch_ms(now, what="the guardrail gate's instant")
     )
-    return GuardrailSide.UNKNOWN if signal is None else signal.side
+    if signal is None:
+        return GuardrailSide.UNKNOWN
+    if signal.side is GuardrailSide.UNKNOWN:
+        # Said out loud like every other way of not knowing: the producer
+        # ran and could not read the rule's newest bar, which the operator
+        # cannot tell from a healthy document without this line.
+        logger.warning(
+            "%s document at %s says the rule %s could not evaluate its newest bar, %s",
+            _WHAT,
+            path,
+            signal.rule_id,
+            _CONSEQUENCE,
+        )
+    return signal.side

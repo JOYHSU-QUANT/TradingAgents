@@ -760,7 +760,11 @@ class PaperExecutionEngine:
         round, accepted over threading a snapshot through the terminal path.
         """
         self._ensure_not_halted()
-        if not self._risk.trend_guardrail or self._leg is not None or self._flip is not None:
+        if not self._risk.trend_guardrail:
+            return None
+        # A leg stays on the engine after it ends (``terminal``), the same way
+        # every other in-flight check reads it; a flip is cleared when done.
+        if (self._leg is not None and not self._leg.terminal) or self._flip is not None:
             return None
         position = self._read_position()
         if position.is_flat:
@@ -774,6 +778,12 @@ class PaperExecutionEngine:
             return None
         result = self._provider.fetch(self._coin, requested_at=now, timeout_seconds=self._timeout)
         if not result.is_valid:
+            logger.warning(
+                "trend guardrail sweep: the rule (%s) forbids the held %s position but no market "
+                "snapshot could be read, so it stands until the next round",
+                rule.value,
+                held.value,
+            )
             return None
         snap = result.snapshot
         assert snap is not None
@@ -787,7 +797,8 @@ class PaperExecutionEngine:
         if not gate.order_created:
             return None
         logger.warning(
-            "trend guardrail: closing the held position on a round with no decision (%s)",
+            "trend guardrail sweep: closing the held %s position on a round with no decision (%s)",
+            held.value,
             gate.risk_reason,
         )
         try:

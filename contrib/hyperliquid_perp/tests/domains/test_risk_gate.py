@@ -1077,12 +1077,7 @@ def test_an_unknown_rule_opens_nothing_new_and_keeps_what_is_held():
         _parsed("set_target", "short", 35), current=held, guardrail=GuardrailSide.UNKNOWN
     )
     assert flipped.risk_action is RiskAction.REJECTED
-    # A smaller margin on the held side opens nothing new; a larger one does
-    # (the sibling test below).
-    resized = _evaluate(
-        _parsed("set_target", "long", 20), current=held, guardrail=GuardrailSide.UNKNOWN
-    )
-    assert resized.risk_action is RiskAction.APPROVED
+    # A same-side resize is the sibling test below.
     kept = _evaluate(_invalid_parsed(), current=held, guardrail=GuardrailSide.UNKNOWN)
     assert (kept.risk_action, kept.order_created) == (RiskAction.INVALID_FAIL_CLOSED, False)
 
@@ -1094,8 +1089,24 @@ def test_the_blocked_shape_is_guarded_at_construction():
         replace(good, approved_target_margin_pct=10)
     with pytest.raises(ValueError, match="orders exactly when something is held"):
         replace(good, order_created=False, no_order_reason="already_flat")
-    with pytest.raises(ValueError, match="name the rule's state"):
+    with pytest.raises(ValueError, match="names the rule's state"):
         replace(good, risk_reason=None)
+    with pytest.raises(ValueError, match="names the rule's state"):
+        replace(good, risk_reason=risk_gate.RISK_REASON_GUARDRAIL_RULE_UNKNOWN)
+    # Over no sided ask the row carries flat and no margin; over a sided ask
+    # it keeps the margin and the confidence.
+    with pytest.raises(ValueError, match="carries no margin"):
+        replace(good, requested_target_margin_pct=30)
+    asked = _evaluate(_parsed("set_target", "short", 35), current=held, guardrail=GuardrailSide.LONG)
+    with pytest.raises(ValueError, match="keeps its margin and confidence"):
+        replace(asked, confidence=None)
+    flat_book = _evaluate(_parsed("set_target", "short", 35), guardrail=GuardrailSide.LONG)
+    with pytest.raises(ValueError, match="says already_flat"):
+        replace(flat_book, no_order_reason="maintain_current")
+    # And every guardrail verdict records what the rule read.
+    assert (good.guardrail, asked.guardrail) == (GuardrailSide.SHORT, GuardrailSide.LONG)
+    assert good.to_dict()["guardrail_side"] == "short"
+    assert _evaluate(_parsed("set_target", "long", 35)).guardrail is None
 
 
 def test_the_guardrail_switch_is_parsed_like_the_research_signals():
@@ -1158,3 +1169,29 @@ def test_an_unknown_rule_lets_no_exposure_grow_on_the_held_side():
         ).risk_action
         is RiskAction.REJECTED
     )
+
+
+def test_a_hand_built_invalid_set_target_still_fails_closed_under_the_guardrail():
+    # ``is_valid`` True with a confidence out of range: the plain gate fails
+    # it closed, and the guardrail judges only the book (here: nothing held).
+    decision = TargetDecision(
+        decision_mode=DecisionMode.SET_TARGET,
+        target_side=TargetSide.SHORT,
+        requested_target_margin_pct=35,
+        confidence=Decimal("1.5"),
+        rationale="r",
+        key_risks=("k",),
+    )
+    parsed = ParsedDecision(decision=decision, is_valid=True, invalid_reason=None, raw_response="")
+    result = _evaluate(parsed, guardrail=GuardrailSide.LONG)
+    assert result.risk_action is RiskAction.INVALID_FAIL_CLOSED
+
+
+def test_an_ask_record_carries_a_side_and_a_margin_together():
+    from contrib.hyperliquid_perp.domains.perp.risk_gate import _Ask
+
+    with pytest.raises(ValueError, match="together or neither"):
+        _Ask(side=TargetSide.LONG, requested=None, confidence=None)
+    with pytest.raises(ValueError, match="flat ask carries no margin"):
+        _Ask(side=TargetSide.FLAT, requested=10, confidence=Decimal("0.5"))
+    assert _Ask.of(_maintain(), _DECISION_CFG).side is None

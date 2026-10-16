@@ -99,6 +99,7 @@ def hyperliquid_document(**overrides: Any) -> dict[str, Any]:
         "order_created": True,
         "no_order_reason": None,
         "decision_reason": f"trend up; wallet {WALLET} fine",
+        "guardrail_side": None,
     }
     cycle = {
         "scheduled_at": hl_instant(NOW - timedelta(hours=1)),

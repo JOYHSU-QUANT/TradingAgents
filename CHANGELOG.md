@@ -24,8 +24,8 @@ Breaking changes within the 0.x line are called out explicitly.
   with the rule unknown (document missing, unreadable, stale past 2 of its
   bars, wrong coin, from the future, or `side: unknown`) nothing new opens
   — no other side, no larger margin on the held side — and what is held is
-  kept (`rejected` / `guardrail_rule_unknown`, one WARNING per gate read; a
-  flip reads twice). A cycle that ended `api_failed` gets the same book
+  kept (`rejected` / `guardrail_rule_unknown`, one WARNING per gate read).
+  A cycle that ended `api_failed` gets the same book
   check through `PaperExecutionEngine.guardrail_sweep` (its close is a plan
   with no `ai_outputs` row). Schema v14 adds `ai_outputs.guardrail_side`,
   what the gate read each round, so `validate` can count

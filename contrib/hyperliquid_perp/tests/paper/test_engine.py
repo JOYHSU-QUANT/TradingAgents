@@ -1587,7 +1587,7 @@ def test_a_document_saying_unknown_is_said_out_loud(tmp_path, caplog):
     assert start.gate.risk_reason == "guardrail_rule_unknown"
     assert start.gate.guardrail is not None and start.gate.guardrail.value == "unknown"
     assert any(
-        "says the rule band@deadbeef could not evaluate its newest bar" in r.getMessage()
+        "says the rule band@deadbeef has no side at its newest bar" in r.getMessage()
         for r in caplog.records
     )
     db.close()

@@ -255,12 +255,14 @@ maker 成本下重跑通過才可以翻這個開關。這條有程式擋著：`s
 `context_shape` 不會標，翻開關要開新 run-id（§4 換段 SOP）。翻之前：(1) producer 腳本（伺服器上是
 `/home/trader/research/producer.sh`，cron 兩小時一次）在 `fetch` 之後、`signal` 旁多一行
 `python -m contrib.autoresearch guardrail-signal --coin BTC --out /home/trader/data/guardrail_signal.json`
-——文件的時戳是 store 最新一根 4h 收盤，讀端只容忍 2 根文件 bar＝8 小時，實際上 `fetch` 漏兩次（一根 bar）
-文件就過期，指令在 store 已過期時會拒寫（exit 1，要先 `fetch`）；(2) 先跑一次、看 `guardrail signal: <side>`
+——文件的時戳是 store 最新一根 4h 收盤，讀端只容忍 2 根文件 bar＝8 小時，`fetch` 連續漏跑幾次文件就可能
+過期，指令在 store 已過期時會拒寫（exit 1，要先 `fetch`）；(2) 先跑一次、看 `guardrail signal: <side>`
 那行與文件存在；(3) 再把路徑填進 `local.yaml` 的 `risk.trend_guardrail`、開新 run。日常看 log，
-`trend guardrail` 開頭的 WARNING 有三族：文件讀不到／過期／幣不對／時戳在未來、文件說 `unknown`——這兩族那一輪
-不開新倉、既有倉位照舊；`trend guardrail sweep: closing …` 是 API 失敗那一輪**真的平了倉**（plan 沒有
-`ai_outputs` 列）。`ai_outputs.risk_action = blocked_to_flat` 是有答案的那一輪護欄擋了單或平了倉；
+`trend guardrail` 開頭的 WARNING 有四族：文件讀不到／過期／幣不對／時戳在未來、文件說 `unknown`——這兩族那一輪
+不開新倉、既有倉位照舊；`trend guardrail sweep: closing …` 是 API 失敗那一輪**下了平倉 plan**（plan 沒有
+`ai_outputs` 列；plan 仍可能被拒，例如倉位小於最小單額，看 `execution_plans.status`）；
+`trend guardrail sweep: … no market snapshot could be read` 是規則要平、那輪卻讀不到行情，倉位留到下一輪。
+`ai_outputs.risk_action = blocked_to_flat` 是有答案的那一輪護欄擋了單或平了倉；
 `validate` 印 `guardrail_unknown_streak`／`guardrail_blocked`／`guardrail_sweep_plans`，連續未知 ≥ 6 個決策
 cycle 印 `shortfall:` 並 exit 4；`contrib.replay score` 的 `guardrail blocked` 行只數有 `ai_outputs` 列的介入。
 
@@ -500,7 +502,7 @@ python -m contrib.hyperliquid_perp validate --run-id paper-BTC
 | `validate` exit | 意義 | 下一步 |
 |---|---|---|
 | `0` | `cycle_count >= 30` 且 orphan／snapshot／replay mismatch 全為 0 | **可進 Phase 3**——但 `cycle_count` 含 `invalid_output`（那裡量的是「排程有沒有在跑」），而 paper 報告沒有 live 那個 `invalid_output_count` 欄可以拆。下判斷前先看同一份報告的 `order_count`，必要時到 export 的 `decision_attempts.csv` 數 status 分佈：30 個解不開、一單沒下的 run 一樣會印 exit 0 |
-| `4` | 資料一致但 cycles 未滿 30；**或 `no_decision_streak` ≥ 3**（最近連續 ≥3 個 cycle 都沒出決策——不分成因，報告會印 `shortfall:` 行說明，並另印 `stale_feed_refusal_streak` 讓你分辨是不是 K 線 feed／時鐘問題；下一個決策 cycle 自動歸零，run 停掉超過 2 個 cycle 後也不再套用） | 繼續掛著跑；stale streak 照 §7 `freshness limit` 列處置，其餘看 `decision_attempts.error_type` |
+| `4` | 資料一致但 cycles 未滿 30；**或 `guardrail_unknown_streak` ≥ 6**（趨勢護欄連續讀到 `unknown`；只算有判決的 cycle，`shortfall:` 行指向 producer 的 `guardrail-signal` 與 `fetch`）；**或 `no_decision_streak` ≥ 3**（最近連續 ≥3 個 cycle 都沒出決策——不分成因，報告會印 `shortfall:` 行說明，並另印 `stale_feed_refusal_streak` 讓你分辨是不是 K 線 feed／時鐘問題；下一個決策 cycle 自動歸零，run 停掉超過 2 個 cycle 後也不再套用） | 繼續掛著跑；stale streak 照 §7 `freshness limit` 列處置，其餘看 `decision_attempts.error_type` |
 | `5` | integrity failure（orphan／mismatch／store 壞掉） | 先調查再相信任何結果 |
 | `1` | 操作錯誤（db／run 不存在，**或 `--db` 指到別的應用程式的資料庫、目錄、不是普通檔案的東西、一個打不開來讀的檔、一個開不起來的檔、或一個內容其實在 `-wal`／`-journal` 裡的檔**） | 檢查 `--db`／`--run-id`；訊息會說是哪一種，各列見 RUNBOOK-live §8。**「打不開來讀」與「開不起來」這兩種以前都印成 exit 5**（`store integrity failure`）——檔案權限問題被當成帳本問題，現在都歸這一列（issue #210／#235；後者是長度 0、讀得到但**寫不進去**的檔，因為開一個 store 本身就是寫入）。**「內容在 log 裡」那種以前更糟**：長度 0（或根本不存在）的主檔旁邊有裝著資料的 `-wal`，會被當成空 store 整套建進去，而且開檔那一下就先把那個 log 刪掉；現在具名拒絕、兩個檔都不碰（issue #236） |
 

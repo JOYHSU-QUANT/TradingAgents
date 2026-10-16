@@ -96,6 +96,18 @@ def load_guardrail_signal(path: str, *, coin: str, now_ms: int) -> GuardrailSign
             _CONSEQUENCE,
         )
         return None
+    if signal.side is GuardrailSide.UNKNOWN:
+        # Said out loud like every other way of not knowing: the producer ran
+        # and had no side to write (the rule could not evaluate its newest
+        # bar, or never took a side in the stored history), which the
+        # operator cannot tell from a healthy document without this line.
+        logger.warning(
+            "%s document at %s says the rule %s has no side at its newest bar, %s",
+            _WHAT,
+            resolved,
+            signal.rule_id,
+            _CONSEQUENCE,
+        )
     return signal
 
 
@@ -103,7 +115,8 @@ def guardrail_side_for(path: str, *, coin: str, now: datetime) -> GuardrailSide 
     """What the gate is handed: ``None`` when ``path`` is empty (the guardrail is off), else a side.
 
     A document that cannot be read or trusted is ``UNKNOWN`` — the reader has
-    already said why — so nothing new opens and what is held is kept. The one
+    already said why, as it has when the document itself says ``unknown`` —
+    so nothing new opens and what is held is kept. The one
     place the switch's two meanings (off, and on-but-unreadable) are told
     apart, used by the paper engine and the one-shot command alike.
     """
@@ -112,17 +125,4 @@ def guardrail_side_for(path: str, *, coin: str, now: datetime) -> GuardrailSide 
     signal = load_guardrail_signal(
         path, coin=coin, now_ms=epoch_ms(now, what="the guardrail gate's instant")
     )
-    if signal is None:
-        return GuardrailSide.UNKNOWN
-    if signal.side is GuardrailSide.UNKNOWN:
-        # Said out loud like every other way of not knowing: the producer
-        # ran and could not read the rule's newest bar, which the operator
-        # cannot tell from a healthy document without this line.
-        logger.warning(
-            "%s document at %s says the rule %s could not evaluate its newest bar, %s",
-            _WHAT,
-            path,
-            signal.rule_id,
-            _CONSEQUENCE,
-        )
-    return signal.side
+    return GuardrailSide.UNKNOWN if signal is None else signal.side

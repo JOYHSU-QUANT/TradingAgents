@@ -1157,15 +1157,22 @@ from contrib.hyperliquid_perp.paper.validation import (  # noqa: E402
     GUARDRAIL_UNKNOWN_STREAK_THRESHOLD,
     guardrail_unknown_shortfall,
 )
+from contrib.hyperliquid_perp.persistence.ids import decision_attempt_id  # noqa: E402
 from contrib.hyperliquid_perp.runtime.no_decision import TrailingFailureStreaks  # noqa: E402
 
 
-def _ai_output(db, when, *, guardrail_side, risk_action="approved", suffix=""):
+def _ai_output(db, when, *, guardrail_side, risk_action="approved"):
+    """The verdict row of the cycle scheduled at ``when``, which the attempt then points at."""
     blocked = risk_action == "blocked_to_flat"
+    output_id = f"o-{when.isoformat()}"
     with db.transaction() as conn:
+        conn.execute(
+            "UPDATE decision_attempts SET output_id = ? WHERE decision_attempt_id = ?",
+            (output_id, decision_attempt_id("r", when)),
+        )
         repo.insert_ai_output(
             conn,
-            output_id=f"o-{when.isoformat()}{suffix}",
+            output_id=output_id,
             timestamp=when,
             mode="paper",
             run_id="r",
@@ -1212,10 +1219,15 @@ def test_a_trailing_run_of_unknown_readings_is_a_shortfall_at_the_threshold(tmp_
     assert len(report.shortfalls) == 1
     assert f"read 'unknown' for {n} decided cycles in a row" in report.shortfalls[0]
     assert "check the producer (`guardrail-signal`) and its `fetch`" in report.shortfalls[0]
-    assert not report.phase3_ready
-    # One readable round clears it.
-    _ai_output(db, now, guardrail_side="flat", suffix="-clear")
-    assert validate_run(db, run_id="r", now=now + timedelta(minutes=1)).guardrail_unknown_streak == 0
+    # A cycle with no verdict neither counts nor breaks it; one readable
+    # decided round clears it.
+    failed_at = _T0 + timedelta(hours=4 * (n + 2))
+    insert_decision_attempts(db, [("api_failed", "rate_limit")], start=failed_at)
+    assert validate_run(db, run_id="r", now=failed_at).guardrail_unknown_streak == n
+    cleared_at = failed_at + timedelta(hours=4)
+    insert_decision_attempts(db, ["completed"], start=cleared_at)
+    _ai_output(db, cleared_at, guardrail_side="flat")
+    assert validate_run(db, run_id="r", now=cleared_at).guardrail_unknown_streak == 0
     db.close()
 
 

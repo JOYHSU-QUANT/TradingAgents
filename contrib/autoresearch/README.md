@@ -534,7 +534,7 @@ python -m contrib.autoresearch guardrail-signal --coin BTC --out /srv/guardrail-
   讀端對 `unknown` 留一行 WARNING（跟文件缺／過期同一族），閘門對兩者做同一件事：不開新倉、既有倉位照舊。
 - 跟 `signal` 同一個寫法（暫存檔＋rename）、同一條過期規則（讀端丟掉比**自己時鐘**舊超過
   `MAX_SIGNAL_AGE_INTERVALS` 根文件 bar 的文件），指令會印出要多常跑。`--rule` 可換 spec 檔，
-  `rule_id` 會跟著 hash 變，報表與閘門都看得出來不是 commit 的規則。
+  `rule_id` 會跟著 hash 變，指令的輸出與讀端的 `unknown` WARNING 都印它（閘門本身不比對）。
 - 這是這個套件第一個會碰到閘門的輸出；它仍然只寫**方向**，數字一個都不過河。
 
 ## 對 `hyperliquid_perp` 的關係

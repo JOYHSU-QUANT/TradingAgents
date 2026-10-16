@@ -156,6 +156,14 @@ def test_the_stale_bound_is_two_of_the_documents_own_bars(tmp_path, caplog):
     assert "run the research package's `fetch` and then its `guardrail-signal` command" in message
 
 
+def test_a_document_saying_unknown_is_read_and_said_out_loud(tmp_path, caplog):
+    path = _write(tmp_path, _document(side="unknown"))
+    assert _load(path, caplog) == _signal(side="unknown")
+    message = _the_one_warning(caplog)
+    assert "says the rule btc-20d-breakout@ca50e67a has no side at its newest bar" in message
+    assert message.endswith("so the gate opens nothing new and keeps what is held")
+
+
 def test_a_document_from_ahead_of_this_clock_is_refused(tmp_path, caplog):
     path = _write(tmp_path, _document())
     assert _load(path, caplog, now_ms=_AS_OF_MS - 1) is None

@@ -118,6 +118,7 @@ def _stage_a_busy_run(db: Database) -> None:
             order_created=True,
             no_order_reason=None,
             decision_reason="Momentum\tis  up.\n" + "x" * 200,
+            guardrail_side="unknown",
         )
         insert_minimal_ai_output(
             conn, run_id="r", attempt_id=second, timestamp=_at(4), confidence=D("0.6")
@@ -633,6 +634,19 @@ _SCHEMA_1_PATHS = {
     "safe_mode_events[].released_by",
     "safe_mode_events[].detail",
 }
+
+
+def test_a_verdict_carries_what_the_guardrail_read(db):
+    # v14: the oldest staged verdict was gated with the rule unreadable, the
+    # next with the guardrail off, and the newest cycle has no verdict at all
+    # — the document tells the three apart (newest first).
+    _stage_a_busy_run(db)
+    recent = json.loads(status_json(_read(db)))["cycles"]["recent"]
+    assert [None if c["verdict"] is None else c["verdict"]["guardrail_side"] for c in recent] == [
+        None,
+        None,
+        "unknown",
+    ]
 
 
 def test_the_document_has_exactly_the_schema_1_paths(db):

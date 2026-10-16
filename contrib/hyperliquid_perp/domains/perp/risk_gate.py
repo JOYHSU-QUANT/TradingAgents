@@ -394,9 +394,11 @@ class RiskGateResult:
 
         ``target_side`` is the side the model asked for (kept, with its margin
         and confidence, so the audit row shows what was blocked) or ``FLAT``
-        when the book was closed over a maintain or a fail-closed round; the
-        approved target is zero either way, and an order exists exactly when
-        something was held.
+        with no margin when the book was closed over a maintain, a fail-closed
+        round or the model's own refused close; the approved target is zero
+        either way, an order exists exactly when something was held (else
+        ``already_flat``), and ``risk_reason`` is one of the two rule states
+        that close a book (an unknown rule only ever rejects).
         """
         if self.decision_mode is not DecisionMode.SET_TARGET or self.target_side is None:
             raise ValueError("a blocked_to_flat result is a set_target carrying a side")
@@ -568,7 +570,8 @@ class _Ask:
     ``side`` is ``None`` when the model asked for no target (a maintain, or
     a fail-closed round). A valid maintain carries a confidence too; it is
     kept so a blocked maintain and a blocked fail-closed round can be told
-    apart.
+    apart — and a set_target the plain gate fails closed carries none, so it
+    reads as the fail-closed round it is.
     """
 
     side: TargetSide | None
@@ -587,15 +590,12 @@ class _Ask:
         # A hand-built set_target the gate would fail closed is no ask either:
         # the plain gate keeps its promise about such input, and the guardrail
         # then judges only the book.
-        asking = (
-            parsed.is_valid
-            and decision.decision_mode is DecisionMode.SET_TARGET
-            and validate_target_decision(decision, decision_cfg) is None
-        )
+        valid = parsed.is_valid and validate_target_decision(decision, decision_cfg) is None
+        asking = valid and decision.decision_mode is DecisionMode.SET_TARGET
         return cls(
             side=decision.target_side if asking else None,
             requested=decision.requested_target_margin_pct if asking else None,
-            confidence=decision.confidence if parsed.is_valid else None,
+            confidence=decision.confidence if valid else None,
         )
 
 
@@ -711,22 +711,28 @@ def evaluate(
     when the guardrail is not configured. It has its say on the ask before
     the plain gate runs (:func:`_guardrail_before`) and on the book after it
     (:func:`_guardrail_after`), so a round the model failed still has its
-    held position checked. See :func:`_evaluate_plain` for the gate itself.
+    held position checked; the result records the reading
+    (:attr:`RiskGateResult.guardrail`) beside what the gate did with it. See
+    :func:`_evaluate_plain` for the gate itself.
     """
-    plain = {
-        "account_equity": account_equity,
-        "current": current,
-        "risk": risk,
-        "decision_cfg": decision_cfg,
-        "other_used_margin": other_used_margin,
-        "other_positions_notional": other_positions_notional,
-    }
+
+    def plain() -> RiskGateResult:
+        return _evaluate_plain(
+            parsed,
+            account_equity=account_equity,
+            current=current,
+            risk=risk,
+            decision_cfg=decision_cfg,
+            other_used_margin=other_used_margin,
+            other_positions_notional=other_positions_notional,
+        )
+
     if guardrail is None:
-        return _evaluate_plain(parsed, **plain)
+        return plain()
     ask = _Ask.of(parsed, decision_cfg)
     result = _guardrail_before(ask, guardrail, current, risk)
     if result is None:
-        result = _guardrail_after(_evaluate_plain(parsed, **plain), ask, guardrail, current, risk)
+        result = _guardrail_after(plain(), ask, guardrail, current, risk)
     return replace(result, guardrail=guardrail)
 
 

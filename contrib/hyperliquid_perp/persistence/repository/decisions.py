@@ -503,7 +503,8 @@ def recent_decision_cycles(
         " a.error_message, a.attempt_count, a.next_decision_at,"
         " o.symbol, o.decision_mode, o.target_side, o.requested_target_margin_pct,"
         " o.approved_target_margin_pct, o.risk_action, o.risk_reason, o.confidence,"
-        " o.mark_price, o.account_equity, o.order_created, o.no_order_reason, o.decision_reason"
+        " o.mark_price, o.account_equity, o.order_created, o.no_order_reason, o.decision_reason,"
+        " o.guardrail_side"
         " FROM decision_attempts a LEFT JOIN ai_outputs o ON o.output_id = a.output_id"
         " WHERE a.run_id = ? ORDER BY a.scheduled_at DESC LIMIT ?",
         (run_id, limit),

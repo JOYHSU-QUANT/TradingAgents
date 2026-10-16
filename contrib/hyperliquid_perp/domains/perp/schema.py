@@ -1577,8 +1577,8 @@ class GuardrailSignal:
     ``as_of_ms`` is the CLOSE of the bar the side was decided at, in UTC
     epoch milliseconds; freshness is judged against it by
     :mod:`.guardrail_signal`. ``rule_id`` names the rule and the hash of its
-    spec; the reader prints it in its warnings, so a document written under
-    an edited rule is visible as such in the log.
+    spec, for the producer's own report and for the reader's warning when the
+    document says ``unknown``; the gate does not compare it to anything.
     """
 
     coin: str

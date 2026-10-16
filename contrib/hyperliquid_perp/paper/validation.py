@@ -66,6 +66,7 @@ __all__ = [
     "GUARDRAIL_UNKNOWN_STREAK_THRESHOLD",
     "MIN_CYCLES_FOR_PHASE3",
     "ValidationReport",
+    "guardrail_unknown_shortfall",
     "validate_run",
 ]
 
@@ -489,7 +490,7 @@ def validate_run(db: Database, *, run_id: str, now: datetime | None = None) -> V
 
     ``now`` (default: wall clock) ages still-pending funding events for the
     non-gating staleness warning, and dates the no-decision streak against
-    :data:`_STREAK_RECENCY_WINDOW`. That second use makes ``now`` a GATING
+    :data:`STREAK_RECENCY_WINDOW`. That second use makes ``now`` a GATING
     input: the same store validated hours apart can move from exit 4 to exit
     0 as a stopped run ages out of the window. The verdict is reproducible
     given the same ``now``, not from the store alone.
@@ -776,17 +777,20 @@ def validate_run(db: Database, *, run_id: str, now: datetime | None = None) -> V
 
 
 def _guardrail_unknown_streak(conn: sqlite3.Connection, run_id: str) -> int:
-    """How many of the run's newest gate verdicts in a row read the guardrail as ``unknown``.
+    """How many of the run's newest decided cycles in a row read the guardrail as ``unknown``.
 
-    Walked over ``ai_outputs`` newest first (its ``timestamp`` is the gate's
-    instant); the first row reading anything else — a side, or NULL for a
+    Walked over the run's decision attempts newest first, each through the
+    ``ai_outputs`` row its ``output_id`` names — one verdict per decided
+    cycle, so the earlier tries of a cycle that was retried do not count
+    twice; the first verdict reading anything else — a side, or NULL for a
     gate run without the guardrail — ends the count, so it measures "how long
-    has the rule been unreadable RIGHT NOW". A round that produced no output
-    at all is not a row here and neither counts nor breaks the streak.
+    has the rule been unreadable RIGHT NOW". A cycle with no verdict
+    (``api_failed``) neither counts nor breaks the streak.
     """
     rows = conn.execute(
-        "SELECT guardrail_side FROM ai_outputs WHERE run_id = ?"
-        " ORDER BY timestamp DESC, rowid DESC",
+        "SELECT o.guardrail_side FROM decision_attempts a"
+        " JOIN ai_outputs o ON o.output_id = a.output_id"
+        " WHERE a.run_id = ? ORDER BY a.scheduled_at DESC",
         (run_id,),
     )
     streak = 0

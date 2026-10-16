@@ -1475,3 +1475,102 @@ def test_a_slice_missed_before_the_first_post_does_not_halt_the_maker_leg(tmp_pa
     assert engine._leg.resting.index == 1
     assert (engine._leg.consumed, engine._leg.executed) == (2, 0)
     db.close()
+
+
+# --------------------------------------------------------------------------
+# the trend guardrail at the engine (wired 2026-10-16)
+# --------------------------------------------------------------------------
+
+import json  # noqa: E402
+import logging  # noqa: E402
+
+from contrib.hyperliquid_perp.domains.perp.risk_gate import RiskAction  # noqa: E402
+
+
+def _guardrail_document(tmp_path, side: str) -> str:
+    path = tmp_path / "guardrail.json"
+    path.write_text(
+        json.dumps(
+            {
+                "document_version": 1,
+                "coin": "BTC",
+                "interval": "4h",
+                "as_of_ms": int(_T0.timestamp() * 1000) - 1,
+                "rule_id": "band@deadbeef",
+                "side": side,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+def _with_guardrail(engine, path: str) -> None:
+    engine._risk = RiskConfig(leverage=D("5"), max_target_margin_pct=60, trend_guardrail=path)
+
+
+def test_the_guardrail_closes_a_held_position_against_the_rule(tmp_path):
+    seed = (PositionState(coin="BTC", size=D("0.001"), entry_price=D(50000)),)
+    db, clock, engine, _ = _engine(tmp_path, seed=seed)
+    _with_guardrail(engine, _guardrail_document(tmp_path, "short"))
+    _provider(engine, [snap()] * 4)
+    start = engine.start_plan(set_target("long", 2))
+    assert start.gate.risk_action is RiskAction.BLOCKED_TO_FLAT
+    assert start.gate.target_side.value == "long"  # what the model asked is kept
+    assert start.plan_id is not None
+    clock.advance(30)
+    engine.tick()
+    assert _size(db) == 0
+    db.close()
+
+
+def test_a_missing_guardrail_document_opens_nothing_new_but_keeps_the_book(tmp_path, caplog):
+    seed = (PositionState(coin="BTC", size=D("0.001"), entry_price=D(50000)),)
+    db, clock, engine, _ = _engine(tmp_path, seed=seed)
+    _with_guardrail(engine, str(tmp_path / "nowhere.json"))
+    _provider(engine, [snap()] * 4)
+    with caplog.at_level(logging.WARNING):
+        start = engine.start_plan(set_target("short", 2))
+    assert start.gate.risk_action is RiskAction.REJECTED
+    assert start.gate.risk_reason == "guardrail_rule_unknown"
+    assert start.plan_id is None
+    assert _size(db) == D("0.001")
+    assert any("trend guardrail document" in r.getMessage() for r in caplog.records)
+    db.close()
+
+
+def test_the_guardrail_sweep_closes_the_book_on_a_round_with_no_decision(tmp_path):
+    seed = (PositionState(coin="BTC", size=D("0.001"), entry_price=D(50000)),)
+    db, clock, engine, _ = _engine(tmp_path, seed=seed)
+    _provider(engine, [snap()] * 4)
+    # Not configured: nothing happens, no snapshot is consumed.
+    assert engine.guardrail_sweep() is None
+    _with_guardrail(engine, _guardrail_document(tmp_path, "flat"))
+    swept = engine.guardrail_sweep()
+    assert swept is not None and swept.plan_id is not None
+    assert swept.gate.risk_action is RiskAction.BLOCKED_TO_FLAT
+    clock.advance(30)
+    engine.tick()
+    assert _size(db) == 0
+    # No ai_outputs row was ever written by the engine; the plan is the trail.
+    assert db.conn.execute("SELECT COUNT(*) FROM ai_outputs").fetchone()[0] == 0
+    row = db.conn.execute(
+        "SELECT output_id FROM execution_plans WHERE plan_id = ?", (swept.plan_id,)
+    ).fetchone()
+    assert row[0] is None
+    # Flat now: a second sweep has nothing to do.
+    assert engine.guardrail_sweep() is None
+    db.close()
+
+
+def test_a_sweep_that_cannot_read_the_market_does_not_halt_the_engine(tmp_path):
+    seed = (PositionState(coin="BTC", size=D("0.001"), entry_price=D(50000)),)
+    db, clock, engine, _ = _engine(tmp_path, seed=seed)
+    _with_guardrail(engine, _guardrail_document(tmp_path, "flat"))
+    _provider(engine, [])  # an exhausted script raises on fetch
+    with pytest.raises(Exception):  # noqa: B017 — any failure on the read side
+        engine.guardrail_sweep()
+    # Still trading: the next round's plan builds as usual.
+    _provider(engine, [snap()] * 4)
+    assert engine.start_plan(set_target("flat", 0)).gate is not None
+    db.close()

@@ -247,3 +247,110 @@ def test_a_rule_that_never_takes_a_side_says_so(store, tmp_path):
         "  the replay starts flat at the store's first bar; the rule never takes a side in this "
         "history"
     )
+
+
+# -- the handoff document (wired 2026-10-16) -----------------------------------------
+
+import time  # noqa: E402
+
+from contrib.autoresearch.cli import main  # noqa: E402
+from contrib.autoresearch.guardrail import (  # noqa: E402
+    build_guardrail_signal,
+    describe_guardrail_signal,
+)
+from contrib.autoresearch.store import ResearchStore  # noqa: E402
+from contrib.autoresearch.upstream import GuardrailSide, GuardrailSignal  # noqa: E402
+from contrib.hyperliquid_perp.domains.perp.guardrail_signal import (  # noqa: E402
+    load_guardrail_signal,
+)
+
+
+def test_the_signal_is_the_side_after_the_newest_bar(store, tmp_path):
+    rule = _rule(tmp_path)
+    store.upsert_candles("BTC", "4h", candles(_CLOSES))
+    signal, timeline = build_guardrail_signal(store, rule, coin="btc")
+    assert signal == GuardrailSignal(
+        coin="BTC",
+        interval=RULE_INTERVAL,
+        as_of_ms=timeline.close_times[-1],
+        rule_id=rule.rule_id,
+        side=GuardrailSide.LONG,
+    )
+
+
+def test_a_rule_holding_nothing_at_the_newest_bar_is_written_as_flat(store, tmp_path):
+    store.upsert_candles("BTC", "4h", candles(_CLOSES[:7]))
+    signal, _ = build_guardrail_signal(store, _rule(tmp_path), coin="BTC")
+    assert signal.side is GuardrailSide.FLAT
+
+
+def test_a_newest_bar_the_rule_could_not_evaluate_is_written_as_unknown(store, tmp_path):
+    frozen = {
+        "family": "breakout",
+        "entry": {"long": [{"left": "funding_rate", "op": ">", "right": -1}]},
+        "sizing": {"mode": "fixed_margin_fraction", "fraction": 0.5},
+    }
+    store.upsert_funding("BTC", funding_points(8, start_ms=ANCHOR_MS + MS_PER_HOUR))
+    store.upsert_candles("BTC", "4h", candles([100, 101, 102, 103]))
+    signal, timeline = build_guardrail_signal(store, _rule(tmp_path, frozen), coin="BTC")
+    assert signal.side is GuardrailSide.UNKNOWN
+    assert signal.as_of_ms == timeline.close_times[-1]
+
+
+def test_describe_names_the_side_and_the_cadence_the_gate_enforces(store, tmp_path):
+    store.upsert_candles("BTC", "4h", candles(_CLOSES))
+    signal, timeline = build_guardrail_signal(store, _rule(tmp_path), coin="BTC")
+    lines = describe_guardrail_signal(signal, timeline)
+    assert lines[: len(timeline.describe())] == timeline.describe()
+    assert lines[-2].startswith("guardrail signal: long as of the bar closing ")
+    assert lines[-2].endswith(f"UTC ({signal.rule_id})")
+    assert "more than 2 x 4h old (8h)" in lines[-1]
+
+
+def _recent_start_ms() -> int:
+    # Eight bars whose newest closes just before now, so the command's own
+    # freshness refusal is not what the contract test exercises.
+    now_ms = int(time.time() * 1000)
+    return now_ms - now_ms % _STEP - 8 * _STEP
+
+
+def test_the_command_writes_a_document_the_trading_package_reads_back(tmp_path, capsys):
+    db = tmp_path / "research.sqlite"
+    with ResearchStore(db) as opened:
+        opened.upsert_candles("BTC", "4h", candles(_CLOSES, start_ms=_recent_start_ms()))
+    rule = tmp_path / "band.json"
+    rule.write_text(json.dumps(_BAND), encoding="utf-8")
+    out = tmp_path / "out" / "guardrail.json"
+    argv = ["guardrail-signal", "--coin", "BTC", "--db", str(db), "--rule", str(rule), "--out", str(out)]
+    assert main(argv) == 0
+    printed = capsys.readouterr().out
+    assert "guardrail signal: long as of the bar closing" in printed
+    assert printed.rstrip().endswith(f"wrote {out.resolve()}")
+    written = json.loads(out.read_text(encoding="utf-8"))
+    read = load_guardrail_signal(str(out), coin="BTC", now_ms=written["as_of_ms"] + 1)
+    assert read is not None and read.side is GuardrailSide.LONG
+    assert read.rule_id == load_rule(rule).rule_id
+
+
+def test_a_store_whose_newest_bar_is_past_the_gates_bound_is_refused_not_written(
+    tmp_path, capsys
+):
+    db = tmp_path / "research.sqlite"
+    with ResearchStore(db) as opened:
+        opened.upsert_candles("BTC", "4h", candles(_CLOSES))  # 2023: long past the bound
+    rule = tmp_path / "band.json"
+    rule.write_text(json.dumps(_BAND), encoding="utf-8")
+    out = tmp_path / "guardrail.json"
+    assert main(["guardrail-signal", "--db", str(db), "--rule", str(rule), "--out", str(out)]) == 1
+    err = capsys.readouterr().err
+    assert "past the 2 x 4h bound the gate enforces" in err and "run `fetch` first" in err
+    assert not out.exists()
+
+
+def test_a_store_that_cannot_answer_refuses_the_command_by_name(tmp_path, capsys):
+    db = tmp_path / "research.sqlite"
+    with ResearchStore(db):
+        pass
+    assert main(["guardrail-signal", "--db", str(db), "--out", str(tmp_path / "g.json")]) == 1
+    assert "error: " in capsys.readouterr().err
+    assert not (tmp_path / "g.json").exists()

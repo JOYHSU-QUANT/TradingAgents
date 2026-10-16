@@ -854,7 +854,7 @@ def test_audit_insert_missing_mode_keeps_its_not_null_failure_shape(tmp_path):
 _GATE_VERDICT_WORDS = {
     "decision_mode": ["set_target", "maintain_current"],
     "target_side": ["long", "short", "flat", None],
-    "risk_action": ["approved", "clamped", "rejected", "invalid_fail_closed"],
+    "risk_action": ["approved", "clamped", "rejected", "invalid_fail_closed", "blocked_to_flat"],
 }
 
 

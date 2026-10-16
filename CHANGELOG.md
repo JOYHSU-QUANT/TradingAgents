@@ -8,6 +8,33 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ## [Unreleased]
 
+### Added
+
+- **`contrib/hyperliquid_perp`: the trend guardrail gate, off by default
+  (`risk.trend_guardrail`).** The design of 2026-10-02 (shadow mode shipped
+  as PR #321's offline report) now sits in the trading path: the research
+  package's new `guardrail-signal` command writes the fixed rule's side at
+  its newest 4h bar as a small JSON document (`GuardrailSignal`,
+  `long`/`short`/`flat`/`unknown`), and the risk gate reads it with the
+  standard library before every verdict. The guardrail judges the book as
+  well as the answer: a held position against the rule, or any position
+  while the rule is flat, is closed (`risk_action = blocked_to_flat`, the
+  model's own side and margin kept on the row); an order against the rule
+  becomes flat instead of "maintain"; a model asking for flat passes; and
+  with the rule unknown (document missing, unreadable, stale past 2 of its
+  bars, wrong coin, from the future, or `side: unknown`) nothing new opens
+  and what is held is kept (`rejected` / `guardrail_rule_unknown`, one
+  WARNING per round). A cycle that ended `api_failed` gets the same book
+  check through `PaperExecutionEngine.guardrail_sweep`. Position sizing is
+  untouched; the drawdown stop-line of the design is a later change.
+  Turning the switch on is an execution-side segment point (new run-id).
+  A config staged for live that names the key is refused by name (the live
+  engine does not read it); the one-shot `decide` path takes the same
+  reading the paper engine does. `guardrail-signal` refuses to write when
+  the store's newest bar is already past the gate's bound (fetch first).
+  The replay scorecard reads the new action (`guardrail blocked: N`); the
+  `replay` command re-gates without the guardrail, a documented limitation.
+
 ### Fixed
 
 - **`contrib/dashboard`: the `history/` directory keeps its setgid bit.** The

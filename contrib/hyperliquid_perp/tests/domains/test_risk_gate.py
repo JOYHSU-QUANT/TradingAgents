@@ -977,3 +977,184 @@ def test_result_to_dict_is_json_ready_for_no_order_variants():
         assert payload["risk_action"] == action
         assert payload["target_margin"] is None
         assert payload["approved_target_margin_pct"] is None
+
+
+# --------------------------------------------------------------------------
+# the trend guardrail (design 2026-10-02 §2; wired 2026-10-16)
+# --------------------------------------------------------------------------
+
+from dataclasses import replace  # noqa: E402
+
+from contrib.hyperliquid_perp.domains.perp.schema import GuardrailSide  # noqa: E402
+
+
+def _short_state(margin_pct: str, notional: str) -> CurrentPositionState:
+    return CurrentPositionState(
+        side=TargetSide.SHORT,
+        signed_notional=Decimal(f"-{notional}"),
+        margin_pct=Decimal(margin_pct),
+    )
+
+
+def _maintain() -> ParsedDecision:
+    return _parsed("maintain_current", None, None, None)
+
+
+def test_without_a_guardrail_the_gate_is_unchanged():
+    assert _evaluate(_parsed("set_target", "short", 35)).risk_action is RiskAction.APPROVED
+
+
+def test_a_target_on_the_rules_side_passes():
+    result = _evaluate(_parsed("set_target", "long", 35), guardrail=GuardrailSide.LONG)
+    assert (result.risk_action, result.target_side) == (RiskAction.APPROVED, TargetSide.LONG)
+
+
+def test_a_target_against_the_rule_becomes_flat_and_keeps_what_was_asked():
+    result = _evaluate(_parsed("set_target", "short", 35), guardrail=GuardrailSide.LONG)
+    assert result.risk_action is RiskAction.BLOCKED_TO_FLAT
+    assert result.risk_reason == risk_gate.RISK_REASON_GUARDRAIL_AGAINST_RULE
+    assert (result.target_side, result.requested_target_margin_pct) == (TargetSide.SHORT, 35)
+    assert result.confidence == Decimal("0.78")
+    assert (result.approved_target_margin_pct, result.target_signed_notional) == (0, 0)
+    # Nothing held: nothing to close.
+    assert (result.order_created, result.no_order_reason) == (False, "already_flat")
+
+
+def test_a_held_position_against_the_rule_is_closed_over_a_maintain():
+    held = _short_state("30", "300")
+    result = _evaluate(_maintain(), current=held, guardrail=GuardrailSide.LONG)
+    assert result.risk_action is RiskAction.BLOCKED_TO_FLAT
+    assert result.decision_mode is DecisionMode.SET_TARGET
+    assert (result.target_side, result.requested_target_margin_pct, result.confidence) == (
+        TargetSide.FLAT,
+        None,
+        None,
+    )
+    assert (result.order_created, result.delta_notional) == (True, Decimal(300))
+
+
+def test_the_book_is_judged_even_when_the_model_said_nothing_usable():
+    held = _long_state("30", "300")
+    result = _evaluate(_invalid_parsed(), current=held, guardrail=GuardrailSide.SHORT)
+    assert result.risk_action is RiskAction.BLOCKED_TO_FLAT
+    assert (result.target_side, result.order_created, result.delta_notional) == (
+        TargetSide.FLAT,
+        True,
+        Decimal(-300),
+    )
+
+
+def test_a_flat_rule_allows_no_position_at_all():
+    held = _long_state("30", "300")
+    result = _evaluate(_parsed("set_target", "long", 35), current=held, guardrail=GuardrailSide.FLAT)
+    assert result.risk_action is RiskAction.BLOCKED_TO_FLAT
+    assert result.risk_reason == risk_gate.RISK_REASON_GUARDRAIL_RULE_FLAT
+    assert (result.target_side, result.requested_target_margin_pct) == (TargetSide.LONG, 35)
+    assert result.order_created is True
+    # A flat book under a flat rule is not an intervention.
+    plain = _evaluate(_maintain(), guardrail=GuardrailSide.FLAT)
+    assert (plain.risk_action, plain.decision_mode) == (
+        RiskAction.APPROVED,
+        DecisionMode.MAINTAIN_CURRENT,
+    )
+
+
+def test_a_model_closing_on_its_own_is_let_through_not_counted():
+    held = _short_state("30", "300")
+    result = _evaluate(_parsed("set_target", "flat", 0), current=held, guardrail=GuardrailSide.LONG)
+    assert (result.risk_action, result.target_side) == (RiskAction.APPROVED, TargetSide.FLAT)
+
+
+def test_an_unknown_rule_opens_nothing_new_and_keeps_what_is_held():
+    opened = _evaluate(_parsed("set_target", "long", 35), guardrail=GuardrailSide.UNKNOWN)
+    assert (opened.risk_action, opened.risk_reason) == (
+        RiskAction.REJECTED,
+        risk_gate.RISK_REASON_GUARDRAIL_RULE_UNKNOWN,
+    )
+    assert (opened.target_side, opened.requested_target_margin_pct) == (TargetSide.LONG, 35)
+    held = _long_state("30", "300")
+    flipped = _evaluate(
+        _parsed("set_target", "short", 35), current=held, guardrail=GuardrailSide.UNKNOWN
+    )
+    assert flipped.risk_action is RiskAction.REJECTED
+    # A smaller margin on the held side opens nothing new; a larger one does
+    # (the sibling test below).
+    resized = _evaluate(
+        _parsed("set_target", "long", 20), current=held, guardrail=GuardrailSide.UNKNOWN
+    )
+    assert resized.risk_action is RiskAction.APPROVED
+    kept = _evaluate(_invalid_parsed(), current=held, guardrail=GuardrailSide.UNKNOWN)
+    assert (kept.risk_action, kept.order_created) == (RiskAction.INVALID_FAIL_CLOSED, False)
+
+
+def test_the_blocked_shape_is_guarded_at_construction():
+    held = _long_state("30", "300")
+    good = _evaluate(_invalid_parsed(), current=held, guardrail=GuardrailSide.SHORT)
+    with pytest.raises(ValueError, match="approves a flat, zero-sized target"):
+        replace(good, approved_target_margin_pct=10)
+    with pytest.raises(ValueError, match="orders exactly when something is held"):
+        replace(good, order_created=False, no_order_reason="already_flat")
+    with pytest.raises(ValueError, match="name the rule's state"):
+        replace(good, risk_reason=None)
+
+
+def test_the_guardrail_switch_is_parsed_like_the_research_signals():
+    assert RiskConfig.from_dict({"trend_guardrail": "/srv/guardrail.json"}).trend_guardrail == (
+        "/srv/guardrail.json"
+    )
+    assert RiskConfig.from_dict(None).trend_guardrail == ""
+    with pytest.raises(ValueError, match="YAML boolean"):
+        RiskConfig.from_dict({"trend_guardrail": False})
+    with pytest.raises(ValueError, match="leading or trailing whitespace"):
+        RiskConfig(trend_guardrail=" /srv/g.json")
+
+
+def test_an_ask_on_the_rules_side_flips_a_held_position_against_it():
+    held = _short_state("30", "300")
+    result = _evaluate(_parsed("set_target", "long", 35), current=held, guardrail=GuardrailSide.LONG)
+    assert (result.risk_action, result.target_side) == (RiskAction.APPROVED, TargetSide.LONG)
+    assert result.order_created and result.target_signed_notional > 0
+
+
+def test_a_held_side_the_rule_forbids_is_closed_when_the_gate_refused_the_aligned_ask():
+    held = _short_state("30", "300")
+    low = _parsed("set_target", "long", 35, confidence="0.2")
+    result = _evaluate(low, current=held, guardrail=GuardrailSide.LONG)
+    assert result.risk_action is RiskAction.BLOCKED_TO_FLAT
+    assert result.risk_reason == risk_gate.RISK_REASON_GUARDRAIL_AGAINST_RULE
+    assert (result.target_side, result.requested_target_margin_pct) == (TargetSide.LONG, 35)
+    assert result.confidence == Decimal("0.2")
+    assert (result.order_created, result.delta_notional) == (True, Decimal(300))
+
+
+def test_a_blocked_maintain_keeps_the_models_confidence():
+    held = _long_state("30", "300")
+    result = _evaluate(
+        _parsed("maintain_current", None, None, "0.6"), current=held, guardrail=GuardrailSide.FLAT
+    )
+    assert result.risk_action is RiskAction.BLOCKED_TO_FLAT
+    assert (result.target_side, result.confidence) == (TargetSide.FLAT, Decimal("0.6"))
+
+
+def test_an_unknown_rule_lets_no_exposure_grow_on_the_held_side():
+    held = _long_state("30", "300")
+    bigger = _evaluate(
+        _parsed("set_target", "long", 40), current=held, guardrail=GuardrailSide.UNKNOWN
+    )
+    assert (bigger.risk_action, bigger.risk_reason) == (
+        RiskAction.REJECTED,
+        risk_gate.RISK_REASON_GUARDRAIL_RULE_UNKNOWN,
+    )
+    smaller = _evaluate(
+        _parsed("set_target", "long", 20), current=held, guardrail=GuardrailSide.UNKNOWN
+    )
+    assert smaller.risk_action is RiskAction.APPROVED
+    unreadable = CurrentPositionState(
+        side=TargetSide.LONG, signed_notional=Decimal(300), margin_pct=None
+    )
+    assert (
+        _evaluate(
+            _parsed("set_target", "long", 20), current=unreadable, guardrail=GuardrailSide.UNKNOWN
+        ).risk_action
+        is RiskAction.REJECTED
+    )

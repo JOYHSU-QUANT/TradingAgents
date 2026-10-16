@@ -54,6 +54,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation, localcontext
 from enum import Enum
 
+from ..domains.perp.guardrail_signal import guardrail_side_for
 from ..domains.perp.margin import (
     DECIMAL_CONTEXT,
     position_notional,
@@ -64,8 +65,16 @@ from ..domains.perp.risk_gate import (
     RiskConfig,
     RiskGateResult,
     evaluate,
+    guardrail_forbids,
 )
-from ..domains.perp.target_decision import DecisionConfig, ParsedDecision, TargetSide
+from ..domains.perp.schema import GuardrailSide
+from ..domains.perp.target_decision import (
+    INVALID_NO_DECISION,
+    DecisionConfig,
+    ParsedDecision,
+    TargetDecision,
+    TargetSide,
+)
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from ..persistence.ids import fill_id as derive_fill_id, slice_id as derive_slice_id
@@ -673,15 +682,7 @@ class PaperExecutionEngine:
         snap = result.snapshot
         assert snap is not None  # is_valid guarantees a snapshot (SnapshotResult invariant)
         position = self._read_position()
-        equity = self._equity(position, snap.mark_price)
-        current = self._current_position_state(position, snap.mark_price, equity)
-        gate = evaluate(
-            parsed,
-            account_equity=equity,
-            current=current,
-            risk=self._risk,
-            decision_cfg=self._decision,
-        )
+        gate, equity = self._gate(parsed, position, snap.mark_price, now)
         if not gate.order_created:
             return PlanStartResult(
                 gate,
@@ -705,6 +706,97 @@ class PaperExecutionEngine:
         return self._start_rebalance(
             gate, position, snap.mark_price, snap.mid_price, output_id, equity
         )
+
+    def _guardrail_side(self, now: datetime) -> GuardrailSide | None:
+        """The trend guardrail's reading at ``now``, or ``None`` when it is not configured.
+
+        A document that cannot be read or trusted is ``UNKNOWN`` (the reader
+        has already said why): nothing new opens, what is held is kept. Read
+        at every gate rather than cached: a producer run between a flip's
+        two legs can change the side, and freshness is judged at the gate's
+        own instant either way.
+        """
+        return guardrail_side_for(self._risk.trend_guardrail, coin=self._coin, now=now)
+
+    def _gate(
+        self, parsed: ParsedDecision, position: PositionState, mark: Decimal, now: datetime
+    ) -> tuple[RiskGateResult, Decimal]:
+        """Run the RiskGate over fresh books at ``mark``; ``(gate, equity)``.
+
+        The one site every gate in this engine goes through (plan start, the
+        flip's open leg, the guardrail sweep), so a gate input threads once.
+        """
+        equity = self._equity(position, mark)
+        current = self._current_position_state(position, mark, equity)
+        gate = evaluate(
+            parsed,
+            account_equity=equity,
+            current=current,
+            risk=self._risk,
+            decision_cfg=self._decision,
+            guardrail=self._guardrail_side(now),
+        )
+        return gate, equity
+
+    def guardrail_sweep(self) -> PlanStartResult | None:
+        """Check the book against the guardrail on a round the model gave no answer at all.
+
+        The guardrail judges the book, not the answer (PR #321 review decision
+        2): a cycle that ended ``api_failed`` never reaches :meth:`start_plan`,
+        so the scheduler calls this instead. Nothing happens unless the
+        guardrail is configured, something is held, no plan is in flight and
+        a fresh snapshot exists; the gate then runs over a fail-closed
+        decision, which it answers ``blocked_to_flat`` exactly when the held
+        side stands against the rule. The audit trail is the plan itself (no
+        ``ai_outputs`` row: there was no output). ``None`` when nothing was
+        started.
+
+        Not ``@_fail_stop``: this runs on a path that could never halt the
+        engine before (a transient read or fetch failure here is contained by
+        the scheduler and tried again next round), so only the plan
+        registration — engine state, the same hazard ``start_plan`` guards —
+        halts on failure. The snapshot is fetched again even though the
+        cycle-end snapshot just fetched one: a second round-trip per failed
+        round, accepted over threading a snapshot through the terminal path.
+        """
+        self._ensure_not_halted()
+        if not self._risk.trend_guardrail or self._leg is not None or self._flip is not None:
+            return None
+        position = self._read_position()
+        if position.is_flat:
+            return None
+        now = self._clock.now()
+        # The held side needs no mark price: skip the fetch unless the rule
+        # forbids it (the common case is a rule that agrees, or is unknown).
+        rule = self._guardrail_side(now)
+        held = TargetSide.LONG if position.size > 0 else TargetSide.SHORT
+        if rule is None or not guardrail_forbids(rule, held):
+            return None
+        result = self._provider.fetch(self._coin, requested_at=now, timeout_seconds=self._timeout)
+        if not result.is_valid:
+            return None
+        snap = result.snapshot
+        assert snap is not None
+        no_decision = ParsedDecision(
+            decision=TargetDecision.fail_closed(),
+            is_valid=False,
+            invalid_reason=INVALID_NO_DECISION,
+            raw_response="",
+        )
+        gate, equity = self._gate(no_decision, position, snap.mark_price, now)
+        if not gate.order_created:
+            return None
+        logger.warning(
+            "trend guardrail: closing the held position on a round with no decision (%s)",
+            gate.risk_reason,
+        )
+        try:
+            return self._start_rebalance(
+                gate, position, snap.mark_price, snap.mid_price, None, equity
+            )
+        except Exception:
+            self._halted = True
+            raise
 
     def _current_position_state(
         self, position: PositionState, mark: Decimal, equity: Decimal
@@ -1695,15 +1787,7 @@ class PaperExecutionEngine:
             self._record_flip_incomplete("open_leg_no_market_data")
             return
         osnap = snap
-        equity = self._equity(position, osnap.mark_price)
-        current = self._current_position_state(position, osnap.mark_price, equity)
-        gate = evaluate(
-            flip.parsed,
-            account_equity=equity,
-            current=current,
-            risk=self._risk,
-            decision_cfg=self._decision,
-        )
+        gate, equity = self._gate(flip.parsed, position, osnap.mark_price, now)
         if not gate.order_created or gate.target_signed_notional is None:
             self._record_flip_incomplete("open_leg_gate_rejected")
             return

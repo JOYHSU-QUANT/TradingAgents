@@ -298,7 +298,7 @@ AI input
 | `target_side` | `long` / `short` / `flat` / 空 |
 | `requested_target_margin_pct` | AI 要求的 account equity margin allocation 比例；合法範圍 `0–100` |
 | `approved_target_margin_pct` | RiskGate 核准後用於下單的比例；目前上限 `60` |
-| `risk_action` | `approved` / `clamped` / `rejected`（契約合法但被風控拒絕：low confidence——基本門檻或同向 resize 的較高門檻（`low_confidence_resize`）——無淨值、無 grid 容量）/ `invalid_fail_closed`（契約違規，model-drift 告警訊號） |
+| `risk_action` | `approved` / `clamped` / `rejected`（契約合法但被風控拒絕：low confidence——基本門檻或同向 resize 的較高門檻（`low_confidence_resize`）——無淨值、無 grid 容量；`guardrail_rule_unknown`＝護欄方向未知時不開新倉、既有倉位照舊）/ `invalid_fail_closed`（契約違規，model-drift 告警訊號）/ `blocked_to_flat`（**趨勢護欄**：模型要的方向或帳上已持有的方向逆著規則、或規則空手——記成 `set_target`，`target_side`／`requested_target_margin_pct` 保留模型要的（模型沒要就是 `flat`／NULL），`approved_target_margin_pct = 0`，有倉位就下平倉單；`risk_reason` 是 `guardrail_against_rule` 或 `guardrail_rule_flat`） |
 | `risk_reason` | RiskGate 調整或拒絕的原因；未調整可留空。fail-closed 列記 parse 的 `invalid_reason`：`invalid_output`（沒有可用的 JSON 區塊）、`truncated_output`（同形，但供應商說 completion 停在 token 上限——是 `engine.max_completion_tokens` 的問題不是 prompt，issue #182）、`missing_fields`／`unexpected_fields`／`invalid_decision_mode`／… |
 | `target_margin` | `account_equity * approved_target_margin_pct / 100` |
 | `configured_leverage` | 本次目標倉位使用的槓桿 |

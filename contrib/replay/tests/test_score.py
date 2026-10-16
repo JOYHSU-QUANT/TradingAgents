@@ -934,3 +934,67 @@ def test_csv_table_has_one_row_per_question_with_the_horizons_by_label():
     # The hit pair where the two readings disagree: the rejected row 6.
     row6 = by_id[input_id(6)]
     assert (row6["ai_hit_4h"], row6["executed_hit_4h"]) == (False, True)
+
+
+# -- the trend guardrail's rows (blocked_to_flat, wired 2026-10-16) ----------------
+
+
+def test_a_blocked_row_keeps_the_side_it_blocked_and_approves_a_flat_target():
+    blocked = _answer(risk_action="blocked_to_flat", approved_margin_pct=0.0)
+    assert blocked.blocked and blocked.asked_target
+    with pytest.raises(ScoreError, match="approves a flat target"):
+        _answer(risk_action="blocked_to_flat", approved_margin_pct=10.0)
+    with pytest.raises(ScoreError, match="keeps the side it blocked"):
+        _answer(risk_action="blocked_to_flat", approved_margin_pct=0.0, target_side=None)
+    # Over a maintain or a fail-closed round the gate records flat with no
+    # requested margin: the model asked for nothing.
+    closed = _answer(
+        risk_action="blocked_to_flat",
+        target_side="flat",
+        requested_margin_pct=None,
+        approved_margin_pct=0.0,
+        confidence=None,
+    )
+    assert closed.blocked and not closed.asked_target
+    assert closed.mode == "maintain_current"
+
+
+def test_a_blocked_row_reads_the_models_ask_against_a_flat_book():
+    # The fixture question holds long 30% at 1x: current exposure +0.3.
+    asked = _answer(
+        risk_action="blocked_to_flat",
+        target_side="short",
+        requested_margin_pct=40.0,
+        approved_margin_pct=0.0,
+    )
+    card = score_run([_question()], [asked], step_ms=STEP_MS, costs=TAKER)
+    (row,) = card.rows
+    assert (row.ai_side, row.ai_exposure) == (TargetSide.SHORT, pytest.approx(-0.4))
+    assert (row.executed_side, row.executed_exposure) == (TargetSide.FLAT, 0.0)
+    closed = _answer(
+        risk_action="blocked_to_flat",
+        target_side="flat",
+        requested_margin_pct=None,
+        approved_margin_pct=0.0,
+        confidence=None,
+    )
+    card = score_run([_question()], [closed], step_ms=STEP_MS, costs=TAKER)
+    (row,) = card.rows
+    assert (row.ai_side, row.ai_exposure) == (TargetSide.LONG, pytest.approx(0.3))
+    assert (row.executed_side, row.executed_exposure) == (TargetSide.FLAT, 0.0)
+    summary = card.summary()
+    assert summary.blocked == 1
+    assert "guardrail blocked: 1/1 (100.0%)" in summary.describe(card)
+
+
+def test_a_blocked_row_is_never_a_maintain():
+    with pytest.raises(ScoreError, match="recorded as set_target"):
+        _answer(
+            decision_mode="maintain_current",
+            risk_action="blocked_to_flat",
+            target_side=None,
+            requested_margin_pct=None,
+            approved_margin_pct=None,
+            order_created=False,
+            no_order_reason="maintain_current",
+        )

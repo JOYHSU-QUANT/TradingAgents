@@ -71,6 +71,11 @@ carry 計畫 PR 2）整個 run 具名拒絕——沒有題目，成績單與考�
 - **兩種讀法，湊成 2×2**：**模型**讀法用 requested margin 與模型的方向；**執行**讀法用
   approved margin（且真的下了單）——被拒、fail-closed、落在 deadband 內沒下單的，都是「倉位不變」。
   摘要印 both／model only／rule only／neither，回答「AI 對、規則對、兩者都錯」。
+  **趨勢護欄擋下的那一輪（`risk_action = blocked_to_flat`，2026-10-16 起）**：模型讀法照它要的方向與
+  margin（沒要就是持有的那邊），執行讀法一律空手——帳被護欄關了；摘要另印 `guardrail blocked: N`。
+  **已知限制**：`replay` 指令重新過閘門時**沒有**護欄（它不知道規則那一題的方向），所以護欄開著的段落，
+  被擋的那幾輪重放會變成 approved，與 paper 的偏差是閘門不是模型——比對那種段落要先把 `blocked_to_flat`
+  的題排除；護欄正式啟用前另外補（follow-up）。
 - **「模型要了一個目標」（asked a target）**＝`set_target`，或被拒的那種（gate 記成 `maintain_current`
   但保留方向與 margin）。摘要的 `asked a target: N` 用這個定義，clamp 率與拒絕率以它為分母，
   信心校準也只算這些題（`confidence` 十等分，每桶模型讀法的命中率）。它與 CSV 的

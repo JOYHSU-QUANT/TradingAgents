@@ -56,6 +56,9 @@ __all__ = [
 # Kept apart so an operator reading the trail audits the cap, not the prompt.
 INVALID_OUTPUT = "invalid_output"
 TRUNCATED_OUTPUT = "truncated_output"
+# A round that produced no output at all (the engine's guardrail sweep gates
+# the book over this); never persisted as an ai_outputs row.
+INVALID_NO_DECISION = "no_decision"
 
 # The ``final_state`` key this seam parses — upstream ``AgentState``'s field
 # name, spelled ONCE here for the parse (``integration/engine_drive``) and the

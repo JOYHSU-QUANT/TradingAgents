@@ -251,6 +251,15 @@ merge 進來不動任何既有 prompt，分段點是「你改 config 那一刻�
 maker 成本下重跑通過才可以翻這個開關。這條有程式擋著：`signal` 遇到 taker 成本的 experiment
 直接 exit 1，要照發得明寫 `--allow-taker`。
 
+**`risk.trend_guardrail`（趨勢護欄，預設 `""`）是執行面分段點，不是輸入面**：prompt 一個字不變、
+`context_shape` 不會標，翻開關要開新 run-id（§4 換段 SOP）。翻之前：(1) producer 的 cron 多一行
+`python -m contrib.autoresearch guardrail-signal --coin BTC --out /home/trader/data/guardrail_signal.json`
+（跟 `signal` 同一支腳本、同一個兩小時一次的 cron；讀端只容忍 2 根 4h bar＝8 小時）；(2) 先跑一次、
+看 `guardrail signal: <side>` 那行與文件存在；(3) 再把路徑填進 `local.yaml` 的 `risk.trend_guardrail`、
+開新 run。日常看 log：每輪若有 `trend guardrail` 開頭的 WARNING 就是文件讀不到或過期（那一輪不開新倉、
+既有倉位照舊）；`ai_outputs.risk_action = blocked_to_flat` 是護欄真的擋了單或平了倉，
+`contrib.replay score` 的 `guardrail blocked` 行可數介入次數。
+
 **相反方向——只加一行預設值不是分段點，drift 比對現在自己知道。** 把
 `volume_profile_window_candles: 0` 這一行**加進**一個既有 run 的 config（例如照新版
 `hyperliquid.example.yaml` 重抄一份），行為完全沒變。`cli/_drift.py` 對有 typed parser 的區塊

@@ -18,7 +18,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ...common.config_coercion import config_overrides, int_from_yaml, str_from_yaml
+from ...common.config_coercion import (
+    config_overrides,
+    document_path_from_yaml,
+    int_from_yaml,
+    refuse_padded_path,
+    str_from_yaml,
+)
 from ...common.constants import (
     MAX_MACRO_TREND_LOOKBACK,
     MIN_MACRO_TREND_LOOKBACK,
@@ -29,26 +35,8 @@ from .schema import interval_to_ms
 __all__ = ["MarketDataConfig"]
 
 
-def _signal_path_from_yaml(value: object) -> str:
-    """The research-signal switch: a path to the handoff document, or ``""`` for off.
-
-    Its own converter rather than :func:`str_from_yaml`, for one reason that
-    is worth a function: YAML 1.1 reads a bare ``off`` — the obvious thing to
-    write for a switch, and the shorthand the plan's own §7 uses — as the
-    BOOLEAN false. ``str_from_yaml`` would refuse it with "expected a string,
-    got False", which is true and says nothing about what to write instead.
-    ``no`` and ``false`` are the same trap. So the boolean case is answered by
-    name, with both legal spellings in the sentence.
-    """
-    if isinstance(value, bool):
-        raise ValueError(
-            f"expected a path to the research signal document, got a YAML boolean ({value!r}) — "
-            f'YAML reads a bare off/no/false as one; leave the key out (or write "") to keep '
-            f"the section off, and quote the path to turn it on"
-        )
-    if not isinstance(value, str):
-        raise ValueError(f"expected a path to the research signal document, got {value!r}")
-    return value
+# The research-signal switch (see :mod:`.research_signal`).
+_signal_path_from_yaml = document_path_from_yaml("research signal document", off="the section off")
 
 
 @dataclass(frozen=True)
@@ -157,25 +145,7 @@ class MarketDataConfig:
                 f"averages lands on the live tick and nothing this section reports needs "
                 f"that much alignment history"
             )
-        # Same rule as the window above, for the same reason: every way of
-        # getting this key wrong fails SILENTLY at runtime — the prompt simply
-        # has no research-signal section, which is exactly what ``""`` means on
-        # purpose. A value that is only whitespace is the reachable case (a
-        # trailing space after the colon, a key someone half-deleted), so it
-        # is a named load-time failure rather than an accidental off switch.
-        #
-        # What is deliberately NOT checked here: whether the file exists. It is
-        # written out of band by the research radar, so an operator who turns
-        # the switch on before the first producer run has a legal config and a
-        # per-cycle WARNING (``research_signal``) that names the path it looked
-        # for — refusing to start would be refusing a normal order of
-        # operations. The whitespace case has no such excuse: nothing will ever
-        # write to a path made of spaces.
-        if self.autoresearch_signal != self.autoresearch_signal.strip():
-            raise ValueError(
-                f"'market_data.autoresearch_signal' has leading or trailing whitespace "
-                f"({self.autoresearch_signal!r}); write the path without it"
-            )
+        refuse_padded_path(self.autoresearch_signal, key="market_data.autoresearch_signal")
 
     @classmethod
     def from_dict(cls, cfg: dict | None) -> MarketDataConfig:

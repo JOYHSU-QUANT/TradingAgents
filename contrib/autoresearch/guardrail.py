@@ -14,9 +14,13 @@ tuned afterwards. The last of those is the one a test can hold, so
 ``tests/test_guardrail.py`` pins the committed spec's hash, and editing the
 rule is a change to two files rather than a drift in one.
 
-Nothing here reaches the trading path. The one consumer is the replay
-package's offline report, which asks what the guardrail WOULD have done to
-decisions the paper trader already took.
+Two consumers. The replay package's offline report asks what the guardrail
+WOULD have done to decisions the paper trader already took
+(:func:`build_timeline`). The ``guardrail-signal`` command writes the rule's
+newest side as a handoff document (:func:`build_guardrail_signal`), which
+the trading daemon's risk gate reads — the same seam as the research signal,
+and the one thing in this package that reaches a gate (wired 2026-10-16,
+off by default on the daemon's side).
 """
 
 from __future__ import annotations
@@ -30,7 +34,14 @@ from typing import Final
 from .costs import CostModel
 from .dsl import Side, StrategySpec, describe_spec, load_spec, spec_hash
 from .store import ResearchStore, canonical_coin
-from .upstream import MAX_SIGNAL_AGE_INTERVALS, from_epoch_ms, interval_to_ms
+from .upstream import (
+    MAX_SIGNAL_AGE_INTERVALS,
+    GuardrailSide,
+    GuardrailSignal,
+    from_epoch_ms,
+    gap_label,
+    max_signal_age_ms,
+)
 from .vocabulary import SpecError
 
 __all__ = [
@@ -40,8 +51,11 @@ __all__ = [
     "GuardrailRule",
     "RuleReading",
     "RuleTimeline",
+    "build_guardrail_signal",
     "build_timeline",
+    "describe_guardrail_signal",
     "load_rule",
+    "require_fresh",
 ]
 
 # The rule the guardrail was decided on (2026-10-02): enter on a close beyond
@@ -171,7 +185,7 @@ class RuleTimeline:
         if index < self.first_decided or self.unevaluable[index]:
             return None
         close_time = self.close_times[index]
-        if at_ms - close_time > MAX_SIGNAL_AGE_INTERVALS * interval_to_ms(self.interval):
+        if at_ms - close_time > max_signal_age_ms(self.interval):
             return None
         return RuleReading(self.sides[index], close_time)
 
@@ -250,3 +264,67 @@ def build_timeline(store: ResearchStore, rule: GuardrailRule, *, coin: str) -> R
         unevaluable=replayed.unevaluable,
         first_decided=first,
     )
+
+
+def build_guardrail_signal(
+    store: ResearchStore, rule: GuardrailRule, *, coin: str
+) -> tuple[GuardrailSignal, RuleTimeline]:
+    """The rule's side at the store's newest bar, as the handoff document the gate reads.
+
+    ``UNKNOWN`` when the rule could not evaluate that bar (the side there is
+    one it carried in, not one it took — the same bar :meth:`RuleTimeline.reading_at`
+    answers ``None`` for); ``FLAT`` when it holds nothing. The timeline is
+    returned beside the document so the command can print where the side
+    came from without replaying twice.
+    """
+    timeline = build_timeline(store, rule, coin=coin)
+    last = len(timeline.close_times) - 1
+    if timeline.unevaluable[last]:
+        side = GuardrailSide.UNKNOWN
+    else:
+        held = timeline.sides[last]
+        side = GuardrailSide.FLAT if held is None else GuardrailSide(held.value)
+    signal = GuardrailSignal(
+        coin=timeline.coin,
+        interval=timeline.interval,
+        as_of_ms=timeline.close_times[last],
+        rule_id=rule.rule_id,
+        side=side,
+    )
+    return signal, timeline
+
+
+def describe_guardrail_signal(signal: GuardrailSignal, timeline: RuleTimeline) -> list[str]:
+    """The timeline's own lines, then the document's side and the cadence the reader enforces."""
+    bound_h = max_signal_age_ms(signal.interval) / 3_600_000
+    return [
+        *timeline.describe(),
+        f"guardrail signal: {signal.side.value} as of the bar closing "
+        f"{from_epoch_ms(signal.as_of_ms):%Y-%m-%d %H:%M} UTC ({signal.rule_id})",
+        f"the gate drops this document once its bar is more than {MAX_SIGNAL_AGE_INTERVALS} x "
+        f"{signal.interval} old ({bound_h:g}h) and then opens nothing new: the bar is the "
+        "store's newest, so `fetch` and then this command must both run more often than that",
+    ]
+
+
+def require_fresh(signal: GuardrailSignal, *, now_ms: int) -> None:
+    """Refuse a side the gate would drop on arrival; ``GuardrailError`` naming the age.
+
+    ``as_of_ms`` is the STORE's newest bar, not this command's clock: a cron
+    that runs this command on time over a store nobody fetches would rewrite
+    the same stale bar every time and read as healthy, while the gate had
+    long since dropped the document. So the command refuses to write at all
+    once the newest bar is past the reader's bound, and the previous document
+    stays where it is (stale, which the gate already answers with UNKNOWN).
+    """
+    age_ms = now_ms - signal.as_of_ms
+    bound_ms = max_signal_age_ms(signal.interval)
+    if age_ms > bound_ms:
+        # Two figures, the way the readers' refusals print them: the age, and
+        # how far past the bound it is (which can be small).
+        raise GuardrailError(
+            f"the research store's newest {signal.coin} {signal.interval} bar closed "
+            f"{gap_label(age_ms)} ago, {gap_label(age_ms - bound_ms)} past the "
+            f"{MAX_SIGNAL_AGE_INTERVALS} x {signal.interval} bound the gate enforces — run "
+            "`fetch` first; the document was not written"
+        )

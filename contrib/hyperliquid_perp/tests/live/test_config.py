@@ -886,3 +886,11 @@ def test_modes_adds_a_rung_after_the_paper_refusal():
     # ... and a mode in the set passes.
     gates = load_live_gates(_full_config(), modes=(ExecutionMode.TESTNET_LIVE,))
     assert gates.live_cfg.mode is ExecutionMode.TESTNET_LIVE
+
+
+def test_a_live_config_naming_the_trend_guardrail_is_refused_by_name():
+    # The live engine gates without the guardrail; a staged config that names
+    # a document must not load clean (wired 2026-10-16).
+    risk = RiskConfig(trend_guardrail="/srv/guardrail.json")
+    with pytest.raises(ValueError, match="risk.trend_guardrail is paper-only"):
+        validate_live_risk_consistency(_live_cfg(), risk, _raw_risk(risk))

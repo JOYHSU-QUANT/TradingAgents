@@ -516,7 +516,26 @@ exit 0；要補洞請跑 `fetch`。**被拒絕的 spec 則相反**：文件本�
 - **重放從空手開始**：store 第一根之前規則抱著什麼看不到，所以規則第一次站到某一邊之前的「空手」
   可能是更早開的倉位。`first_taken_ms` 是那一根的收盤（整段歷史都沒站邊就是 `None`），`describe()` 會印。
 
-沒有指令：唯一的使用者是 `python -m contrib.replay guardrail`（見那個套件的 README）。
+兩個使用者。離線報表 `python -m contrib.replay guardrail`（見那個套件的 README）；以及 2026-10-16 起的
+**`guardrail-signal` 指令**，把規則在 store 最新一根的方向寫成交接文件給 `hyperliquid_perp` 的風控閘門
+（`risk.trend_guardrail`，daemon 那邊預設關）：
+
+```bash
+python -m contrib.autoresearch guardrail-signal --coin BTC --out /srv/guardrail-signal.json
+```
+
+```json
+{"document_version": 1, "coin": "BTC", "interval": "4h", "as_of_ms": 1704182399999,
+ "rule_id": "btc-20d-breakout@ca50e67a", "side": "long"}
+```
+
+- `side` 四種：`long`／`short`／`flat`／`unknown`（最新一根規則讀不到條件——`reading_at` 回 `None` 的
+  那一種；文件照寫，讓讀端分得出「producer 跑了但規則不知道」與「producer 沒跑」，閘門對兩者做同一件事：
+  不開新倉、既有倉位照舊）。
+- 跟 `signal` 同一個寫法（暫存檔＋rename）、同一條過期規則（讀端丟掉比**自己時鐘**舊超過
+  `MAX_SIGNAL_AGE_INTERVALS` 根文件 bar 的文件），指令會印出要多常跑。`--rule` 可換 spec 檔，
+  `rule_id` 會跟著 hash 變，報表與閘門都看得出來不是 commit 的規則。
+- 這是這個套件第一個會碰到閘門的輸出；它仍然只寫**方向**，數字一個都不過河。
 
 ## 對 `hyperliquid_perp` 的關係
 

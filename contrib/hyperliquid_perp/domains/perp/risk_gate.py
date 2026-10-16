@@ -26,17 +26,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import ROUND_FLOOR, Decimal, localcontext
 from enum import Enum
-from typing import Any
+from typing import Any, Final
 
 from contrib.core.decimal_context import DECIMAL_CONTEXT
 
 from ...common.config_coercion import (
     config_overrides,
     decimal_from_yaml,
+    document_path_from_yaml,
     int_from_yaml,
+    refuse_padded_path,
     str_from_yaml,
 )
-from .schema import PerpPosition
+from .schema import GuardrailSide, PerpPosition
 from .target_decision import (
     DecisionConfig,
     DecisionMode,
@@ -54,6 +56,7 @@ __all__ = [
     "current_position_state",
     "effective_max_target_margin_pct",
     "evaluate",
+    "guardrail_forbids",
 ]
 
 # Stable machine tags for ai_outputs.risk_reason / no_order_reason.
@@ -63,6 +66,10 @@ RISK_REASON_MAX_TARGET_MARGIN = "exceeds_max_target_margin_pct"
 RISK_REASON_EFFECTIVE_LEVERAGE = "effective_leverage_cap"
 RISK_REASON_AVAILABLE_MARGIN = "insufficient_available_margin"
 RISK_REASON_NO_EQUITY = "no_account_equity"
+# The trend guardrail's reasons (design 2026-10-02 §2; wired 2026-10-16).
+RISK_REASON_GUARDRAIL_RULE_FLAT = "guardrail_rule_flat"
+RISK_REASON_GUARDRAIL_AGAINST_RULE = "guardrail_against_rule"
+RISK_REASON_GUARDRAIL_RULE_UNKNOWN = "guardrail_rule_unknown"
 
 NO_ORDER_MAINTAIN_CURRENT = "maintain_current"
 NO_ORDER_WITHIN_DEADBAND = "within_deadband"
@@ -88,6 +95,12 @@ class RiskAction(str, Enum):
     CLAMPED = "clamped"
     REJECTED = "rejected"
     INVALID_FAIL_CLOSED = "invalid_fail_closed"
+    # The trend guardrail closed the book: the model's side (or the side
+    # already held) stands against the rule, or the rule is flat. A
+    # ``set_target`` whose approved target is flat, keeping the side and
+    # margin the model asked for when it asked; ``risk_reason`` names the
+    # rule's state. Unlike REJECTED it does not keep the position.
+    BLOCKED_TO_FLAT = "blocked_to_flat"
 
 
 class MarginMode(str, Enum):
@@ -107,10 +120,16 @@ class RiskConfig:
     leverage: Decimal = Decimal(1)
     margin_mode: MarginMode = MarginMode.CROSS
     max_target_margin_pct: int = 60
+    # The trend guardrail switch: the path of the handoff document the
+    # research package writes (``guardrail-signal``), or ``""`` for off. Read
+    # at every gate; see :mod:`.guardrail_signal` for what a missing or stale
+    # document does.
+    trend_guardrail: str = ""
 
     def __post_init__(self) -> None:
         if self.leverage <= 0:
             raise ValueError(f"risk.leverage must be > 0, got {self.leverage}")
+        refuse_padded_path(self.trend_guardrail, key="risk.trend_guardrail")
         try:
             # Accept the YAML string form and normalise it to the enum, so the
             # field is always a MarginMode after construction.
@@ -134,9 +153,16 @@ class RiskConfig:
                     "leverage": decimal_from_yaml,
                     "margin_mode": str_from_yaml,
                     "max_target_margin_pct": int_from_yaml,
+                    "trend_guardrail": _guardrail_path_from_yaml,
                 },
             )
         )
+
+
+# The trend guardrail switch (see :mod:`.guardrail_signal`).
+_guardrail_path_from_yaml = document_path_from_yaml(
+    "guardrail signal document", off="the guardrail off"
+)
 
 
 @dataclass(frozen=True)
@@ -280,7 +306,9 @@ class RiskGateResult:
         if self.order_created == (self.no_order_reason is not None):
             raise ValueError("exactly one of order_created / no_order_reason must be set")
         sized = (self.target_margin, self.target_notional, self.target_signed_notional)
-        if self.decision_mode is DecisionMode.SET_TARGET:
+        if self.risk_action is RiskAction.BLOCKED_TO_FLAT:
+            self._check_blocked_to_flat(sized)
+        elif self.decision_mode is DecisionMode.SET_TARGET:
             if (
                 self.target_side is None
                 or self.requested_target_margin_pct is None
@@ -355,6 +383,28 @@ class RiskGateResult:
             # record *why*. A contradictory ``ParsedDecision`` (is_valid False,
             # invalid_reason None) would otherwise reach here with a null reason.
             raise ValueError("a rejected/fail-closed result must name why in risk_reason")
+
+    def _check_blocked_to_flat(self, sized: tuple[Decimal | None, ...]) -> None:
+        """The guardrail's shape: a ``set_target`` whose approved target is flat.
+
+        ``target_side`` is the side the model asked for (kept, with its margin
+        and confidence, so the audit row shows what was blocked) or ``FLAT``
+        when the book was closed over a maintain or a fail-closed round; the
+        approved target is zero either way, and an order exists exactly when
+        something was held.
+        """
+        if self.decision_mode is not DecisionMode.SET_TARGET or self.target_side is None:
+            raise ValueError("a blocked_to_flat result is a set_target carrying a side")
+        if self.approved_target_margin_pct != 0 or any(v != 0 for v in sized):
+            raise ValueError("a blocked_to_flat result approves a flat, zero-sized target")
+        if self.delta_notional != -self.current_signed_notional:
+            raise ValueError(
+                "delta_notional must equal target_signed_notional - current_signed_notional"
+            )
+        if self.order_created != (self.current_signed_notional != 0):
+            raise ValueError("a blocked_to_flat result orders exactly when something is held")
+        if self.risk_reason is None:
+            raise ValueError("a blocked_to_flat result must name the rule's state in risk_reason")
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-ready dict; Decimals become strings so no precision is lost."""
@@ -471,6 +521,187 @@ def _rejected(
     )
 
 
+def _blocked_to_flat(
+    risk_reason: str, ask: _Ask, current: CurrentPositionState, risk: RiskConfig
+) -> RiskGateResult:
+    """The guardrail's outcome: close what is held, open nothing; the ask is kept for the audit."""
+    held = current.signed_notional != 0
+    return RiskGateResult(
+        decision_mode=DecisionMode.SET_TARGET,
+        target_side=TargetSide.FLAT if ask.side is None else ask.side,
+        requested_target_margin_pct=ask.requested,
+        approved_target_margin_pct=0,
+        risk_action=RiskAction.BLOCKED_TO_FLAT,
+        risk_reason=risk_reason,
+        order_created=held,
+        no_order_reason=None if held else NO_ORDER_ALREADY_FLAT,
+        target_margin=Decimal(0),
+        target_notional=Decimal(0),
+        target_signed_notional=Decimal(0),
+        current_signed_notional=current.signed_notional,
+        delta_notional=-current.signed_notional,
+        configured_leverage=risk.leverage,
+        confidence=ask.confidence,
+    )
+
+
+@dataclass(frozen=True)
+class _Ask:
+    """What the model asked for this round, as the guardrail's outcomes keep it on the audit row.
+
+    ``side`` is ``None`` when the model asked for no target (a maintain, or
+    a fail-closed round). A valid maintain carries a confidence too; it is
+    kept so a blocked maintain and a blocked fail-closed round can be told
+    apart.
+    """
+
+    side: TargetSide | None
+    requested: int | None
+    confidence: Decimal | None
+
+    @classmethod
+    def of(cls, parsed: ParsedDecision) -> _Ask:
+        decision = parsed.decision
+        asking = parsed.is_valid and decision.decision_mode is DecisionMode.SET_TARGET
+        return cls(
+            side=decision.target_side if asking else None,
+            requested=decision.requested_target_margin_pct if asking else None,
+            confidence=decision.confidence if parsed.is_valid else None,
+        )
+
+
+# The sides a position may stand on under each reading of the rule (design
+# 2026-10-02 §2): on the rule's own side only, none while it is flat, and no
+# say at all while it is unknown. Spelled as a table so the two vocabularies
+# (the rule's and the book's) never meet in a string comparison.
+_PERMITTED: Final[dict[GuardrailSide, frozenset[TargetSide] | None]] = {
+    GuardrailSide.LONG: frozenset({TargetSide.LONG}),
+    GuardrailSide.SHORT: frozenset({TargetSide.SHORT}),
+    GuardrailSide.FLAT: frozenset(),
+    GuardrailSide.UNKNOWN: None,
+}
+
+
+def guardrail_forbids(rule: GuardrailSide, side: TargetSide | None) -> bool:
+    """Whether the rule's reading forbids a book on ``side`` (``None``/flat is no book)."""
+    permitted = _PERMITTED[rule]
+    if permitted is None or side is None or side is TargetSide.FLAT:
+        return False
+    return side not in permitted
+
+
+def _guardrail_reason(rule: GuardrailSide) -> str:
+    return (
+        RISK_REASON_GUARDRAIL_RULE_FLAT
+        if rule is GuardrailSide.FLAT
+        else RISK_REASON_GUARDRAIL_AGAINST_RULE
+    )
+
+
+def _guardrail_before(
+    ask: _Ask, rule: GuardrailSide, current: CurrentPositionState, risk: RiskConfig
+) -> RiskGateResult | None:
+    """The guardrail's say on the ASK, before the gate runs; ``None`` lets the gate go on.
+
+    Design 2026-10-02 §2 with PR #321's review decisions: an ask against the
+    rule (or any sided ask while the rule is flat) becomes flat rather than
+    "maintain"; an ask on the rule's side goes through, flip included, and
+    the book is judged afterwards (:func:`_guardrail_after`); a model asking
+    for flat is closing, which is what the guardrail would do, so it is not
+    an intervention. With the rule ``UNKNOWN`` (decided 2026-10-16) nothing
+    NEW opens — no other side, and no larger margin on the held side — and
+    what is held is kept: a producer that missed a run must not flatten the
+    account, nor let exposure grow while it cannot read.
+    """
+    if ask.side is None or ask.side is TargetSide.FLAT:
+        return None
+    if rule is GuardrailSide.UNKNOWN:
+        assert ask.requested is not None  # a sided ask carries its margin
+        grows = (
+            ask.side is not current.side
+            or current.margin_pct is None
+            or ask.requested > current.margin_pct
+        )
+        if not grows:
+            return None
+        return _rejected(
+            risk_reason=RISK_REASON_GUARDRAIL_RULE_UNKNOWN,
+            current=current,
+            risk=risk,
+            requested=ask.requested,
+            target_side=ask.side,
+            confidence=ask.confidence,
+        )
+    if guardrail_forbids(rule, ask.side):
+        return _blocked_to_flat(_guardrail_reason(rule), ask, current, risk)
+    return None
+
+
+def _guardrail_after(
+    result: RiskGateResult,
+    ask: _Ask,
+    rule: GuardrailSide,
+    current: CurrentPositionState,
+    risk: RiskConfig,
+) -> RiskGateResult:
+    """The guardrail's say on the BOOK, after the gate ran: a held side the rule forbids is closed.
+
+    Unless the gate's own outcome already takes the book off that side — a
+    flip onto the rule's side, or the model's own close — in which case the
+    gate's verdict stands and nothing is counted as an intervention. A
+    maintain, a fail-closed round and a rejected ask all leave the side
+    standing, and all three are closed here (the model's ask, if any, kept
+    on the row). An ``UNKNOWN`` rule never closes anything.
+    """
+    if not guardrail_forbids(rule, current.side):
+        return result
+    target = result.target_signed_notional
+    leaves_the_side = (
+        result.order_created and target is not None and target * current.signed_notional <= 0
+    )
+    if leaves_the_side:
+        return result
+    return _blocked_to_flat(_guardrail_reason(rule), ask, current, risk)
+
+
+def evaluate(
+    parsed: ParsedDecision,
+    *,
+    account_equity: Decimal,
+    current: CurrentPositionState,
+    risk: RiskConfig,
+    decision_cfg: DecisionConfig,
+    other_used_margin: Decimal = Decimal(0),
+    other_positions_notional: Decimal = Decimal(0),
+    guardrail: GuardrailSide | None = None,
+) -> RiskGateResult:
+    """Gate one parsed decision against account state; pure and deterministic.
+
+    ``guardrail`` is the trend guardrail's reading for this round, or ``None``
+    when the guardrail is not configured. It has its say on the ask before
+    the plain gate runs (:func:`_guardrail_before`) and on the book after it
+    (:func:`_guardrail_after`), so a round the model failed still has its
+    held position checked. See :func:`_evaluate_plain` for the gate itself.
+    """
+    ask = _Ask.of(parsed) if guardrail is not None else None
+    if guardrail is not None and ask is not None:
+        blocked = _guardrail_before(ask, guardrail, current, risk)
+        if blocked is not None:
+            return blocked
+    result = _evaluate_plain(
+        parsed,
+        account_equity=account_equity,
+        current=current,
+        risk=risk,
+        decision_cfg=decision_cfg,
+        other_used_margin=other_used_margin,
+        other_positions_notional=other_positions_notional,
+    )
+    if guardrail is not None and ask is not None:
+        result = _guardrail_after(result, ask, guardrail, current, risk)
+    return result
+
+
 def _snap_down_to_grid(pct: Decimal, decision_cfg: DecisionConfig) -> int:
     """Largest grid value <= ``pct``, or ``0`` when no grid value fits under it.
 
@@ -544,7 +775,7 @@ def effective_max_target_margin_pct(risk: RiskConfig, decision: DecisionConfig) 
     return min(decision.ai_target_margin_max_pct, risk.max_target_margin_pct)
 
 
-def evaluate(
+def _evaluate_plain(
     parsed: ParsedDecision,
     *,
     account_equity: Decimal,
@@ -554,7 +785,7 @@ def evaluate(
     other_used_margin: Decimal = Decimal(0),
     other_positions_notional: Decimal = Decimal(0),
 ) -> RiskGateResult:
-    """Gate one parsed decision against account state; pure and deterministic.
+    """The gate without the guardrail: one parsed decision against account state.
 
     ``other_used_margin`` / ``other_positions_notional`` describe cross-margin
     state committed to *other* symbols, so the available-margin and

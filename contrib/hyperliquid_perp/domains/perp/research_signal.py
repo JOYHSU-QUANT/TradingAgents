@@ -37,7 +37,13 @@ from .schema import ResearchSignal, interval_to_ms
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["MAX_SIGNAL_AGE_INTERVALS", "load_research_signal"]
+__all__ = [
+    "MAX_SIGNAL_AGE_INTERVALS",
+    "UNREAD",
+    "load_research_signal",
+    "max_signal_age_ms",
+    "read_document",
+]
 
 # How many of the DOCUMENT's own bars old the signal may be before it is
 # refused.
@@ -56,14 +62,24 @@ __all__ = ["MAX_SIGNAL_AGE_INTERVALS", "load_research_signal"]
 # why the producer BORROWS it from here rather than restating it.
 MAX_SIGNAL_AGE_INTERVALS = 2
 
-# What ``_read_document`` returns when it has already logged the refusal. A
+# What ``read_document`` returns when it has already logged the refusal. A
 # private sentinel rather than ``None``, because ``None`` is also what
 # ``json.loads`` returns for a document holding ``null`` — and that document
 # has a named refusal waiting for it in ``ResearchSignal.from_document`` ("a
 # research signal document is a JSON object, got NoneType"). Sharing the two
 # meanings suppressed it: a four-byte file made the section vanish with no log
 # line at all, which is the one outcome this module's whole design forbids.
-_UNREAD = object()
+UNREAD = object()
+
+
+def max_signal_age_ms(interval: str) -> int:
+    """How old a handoff document stamped at ``interval`` bars may be before a reader drops it.
+
+    The one place the bound is arithmetic: both readers and the producer's
+    own checks (through ``upstream``) call this rather than restating
+    ``MAX_SIGNAL_AGE_INTERVALS × interval``.
+    """
+    return MAX_SIGNAL_AGE_INTERVALS * interval_to_ms(interval)
 
 
 def _why(exc: BaseException) -> str:
@@ -100,8 +116,10 @@ def load_research_signal(
     because "too old" is a statement about the producer's cadence, not about
     this run's.
     """
-    resolved, document = _read_document(path)
-    if document is _UNREAD:
+    resolved, document = read_document(
+        path, what="research signal", consequence="so the prompt omits the section"
+    )
+    if document is UNREAD:
         return None
     try:
         signal = ResearchSignal.from_document(document)
@@ -140,7 +158,7 @@ def load_research_signal(
         return None
 
     age_ms = as_of_ms - signal.as_of_ms
-    max_age_ms = MAX_SIGNAL_AGE_INTERVALS * interval_to_ms(signal.interval)
+    max_age_ms = max_signal_age_ms(signal.interval)
     if age_ms > max_age_ms:
         # This sentence names a bound, so it prints the EXCESS as a second
         # figure; that rule is argued on :func:`.gap_label`. What is local
@@ -179,8 +197,12 @@ def load_research_signal(
     return signal
 
 
-def _read_document(path: str) -> tuple[object, object]:
-    """``(shown, decoded)`` — ``decoded`` is :data:`_UNREAD` after one WARNING.
+def read_document(path: str, *, what: str, consequence: str) -> tuple[object, object]:
+    """``(shown, decoded)`` — ``decoded`` is :data:`UNREAD` after one WARNING.
+
+    Shared with the guardrail's reader (:mod:`.guardrail_signal`): ``what``
+    names the document in every sentence and ``consequence`` says what its
+    absence costs, so each reader's warnings keep their own words.
 
     ``shown`` is the path every message should print: ``~`` expanded and made
     absolute, or the configured string when even that could not be worked out.
@@ -217,23 +239,17 @@ def _read_document(path: str) -> tuple[object, object]:
     try:
         resolved = Path(path).expanduser().resolve()
     except (OSError, RuntimeError, ValueError) as exc:
-        logger.warning(
-            "research signal path %r could not be resolved, so the prompt omits the section: %s",
-            path,
-            exc,
-        )
-        return path, _UNREAD
+        logger.warning("%s path %r could not be resolved, %s: %s", what, path, consequence, exc)
+        return path, UNREAD
     try:
         text = resolved.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
         # FIRST, because ``UnicodeDecodeError`` is a ``ValueError`` and would
         # otherwise land in the clause below under the wrong sentence.
         logger.warning(
-            "research signal document %s is not UTF-8 text, so the prompt omits the section: %s",
-            resolved,
-            exc,
+            "%s document %s is not UTF-8 text, %s: %s", what, resolved, consequence, exc
         )
-        return resolved, _UNREAD
+        return resolved, UNREAD
     except (OSError, ValueError, MemoryError) as exc:
         # Missing is the ordinary case on the day the switch is turned on and
         # the producer has not run yet; unreadable, a directory, and a path
@@ -241,11 +257,9 @@ def _read_document(path: str) -> tuple[object, object]:
         # same: the section is omitted, and the operator is told where it
         # looked.
         logger.warning(
-            "research signal document %s could not be read, so the prompt omits the section: %s",
-            resolved,
-            _why(exc),
+            "%s document %s could not be read, %s: %s", what, resolved, consequence, _why(exc)
         )
-        return resolved, _UNREAD
+        return resolved, UNREAD
     try:
         return resolved, json.loads(text)
     except (ValueError, RecursionError, MemoryError) as exc:
@@ -255,9 +269,10 @@ def _read_document(path: str) -> tuple[object, object]:
         # (``schema.epoch_ms_out_of_range`` already defends the digit limit at
         # the DTO; this is the same bound at the parse.)
         logger.warning(
-            "research signal document %s could not be decoded as JSON, so the prompt omits the "
-            "section: %s",
+            "%s document %s could not be decoded as JSON, %s: %s",
+            what,
             resolved,
+            consequence,
             _why(exc),
         )
-        return resolved, _UNREAD
+        return resolved, UNREAD

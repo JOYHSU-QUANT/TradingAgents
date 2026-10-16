@@ -45,6 +45,7 @@ from .ledger import Experiment, Ledger, Trial
 from .metrics import SegmentMetrics
 from .upstream import (
     MAX_SIGNAL_AGE_INTERVALS,
+    GuardrailSignal,
     ResearchBias,
     ResearchConfidence,
     ResearchDrawdown,
@@ -247,8 +248,12 @@ def build_signal(
     )
 
 
-def write_signal(path: str | Path, signal: ResearchSignal) -> Path:
+def write_signal(path: str | Path, signal: ResearchSignal | GuardrailSignal) -> Path:
     """Write ``signal`` to ``path`` as JSON, atomically; return where it landed.
+
+    Either handoff document: the research signal's and the trend guardrail's
+    share the writer because their readers share the same half-written-file
+    hazard.
 
     Through a temporary file and :func:`os.replace`, which is atomic on both
     platforms this runs on. The reader is a trading daemon on its own

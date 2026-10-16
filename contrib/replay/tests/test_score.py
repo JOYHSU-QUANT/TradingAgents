@@ -1033,9 +1033,22 @@ def test_the_verdict_refuses_to_judge_what_cannot_be_measured():
     stuck = _follow({("long", "long"): 29, ("long", "flat"): 1})
     assert (stuck.kappa, stuck.verdict) == (None, RESEARCH_NEVER_CHANGED)
     # The rule's other side fell only on fail-closed rows: it did change
-    # side, but the readable claims cannot show it.
+    # side, but the readable claims cannot show it. The table still shows
+    # that side, as a row of zeros.
     unread = _follow({("long", "long"): 30}, fail_closed={"flat": 5})
     assert (unread.n, unread.kappa, unread.verdict) == (30, None, RESEARCH_THIN_SIDE)
+    assert unread.describe()[0] == (
+        "research bias (rule#1): 35 answered question(s) carried it; "
+        "rule long 30 -> model long 30, short 0, flat 0; "
+        "rule flat 0 -> model long 0, short 0, flat 0; fail-closed 5 (flat 5)"
+    )
+    # A sparse third side neither blocks the verdict nor is left out of it:
+    # two sides clear the floor, so kappa is judged over all three.
+    third = _follow(
+        {("long", "long"): 20, ("flat", "flat"): 20, ("short", "long"): 1}, fail_closed={"short": 1}
+    )
+    assert third.verdict == RESEARCH_EFFECT
+    assert third.kappa == pytest.approx((41 * 40 - (20 * 21 + 20 * 20)) / (41 * 41 - 820))
     only_fail_closed = _follow({}, fail_closed={"long": 3})
     assert (only_fail_closed.n, only_fail_closed.kappa) == (0, None)
     assert only_fail_closed.verdict == RESEARCH_NO_CLAIM
@@ -1059,7 +1072,7 @@ def test_describe_prints_the_research_table_and_the_verdict():
     verdict = (
         f"research effect ({STRATEGY_ID}): readable claims 8, agreement 8/8 (100.0%), "
         "by chance 40.6%, kappa +1.00 -> not enough readable claims (needs >= 30 readable "
-        "claims, >= 10 on the rule's rarer side, |kappa| >= 0.20)"
+        "claims, >= 10 on each of two sides, |kappa| >= 0.20)"
     )
     count = "research bias: 9 of 10 answered question(s) carried one"
     assert lines.index(count) + 1 == lines.index(table)

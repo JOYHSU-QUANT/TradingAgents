@@ -55,7 +55,7 @@ Replay plan §3-7 fixes the definitions, and they are written here once:
   would produce by chance, so a model that sits long through every bias
   scores 0 and a rule that never takes a side scores nothing. The verdict
   needs :data:`RESEARCH_MIN_QUESTIONS` readable claims, :data:`RESEARCH_MIN_SIDE`
-  of them on the rule's rarer side, and :data:`RESEARCH_MIN_KAPPA` either way
+  of them on each of two sides, and :data:`RESEARCH_MIN_KAPPA` either way
   (against the rule is a finding of its own). The rows are the card's, so the
   holdout lock applies here as everywhere else.
   Hits and prices play no part: this asks what the model did, not whether
@@ -133,8 +133,9 @@ BASELINES: Final = ("buy_hold", "flat", "research_bias")
 # the model's side agrees with the rule's beyond chance by at least this much
 # kappa either way (0.2 is the conventional floor of "fair" agreement), over
 # at least this many answered questions that carried a bias and a readable
-# claim (the paper-review sample floor), of which at least this many fell on
-# the rule's rarer side (so a handful of sided bars cannot carry the verdict).
+# claim (the paper-review sample floor), with at least two of the rule's
+# sides each holding this many of them (so a handful of sided bars cannot
+# carry the verdict; a sparse third side neither blocks nor is left out).
 # Plan section 7.3, question 2; decided 2026-10-16. No run was kept without
 # the section, so the chance level is the only control there is.
 RESEARCH_MIN_QUESTIONS: Final = 30
@@ -145,7 +146,7 @@ RESEARCH_EFFECT: Final = "the section has an effect"
 RESEARCH_AGAINST: Final = "the model trades against the rule"
 RESEARCH_NO_EFFECT: Final = "no measurable effect"
 RESEARCH_TOO_FEW: Final = "not enough readable claims"
-RESEARCH_THIN_SIDE: Final = "too few readable claims on the rule's rarer side"
+RESEARCH_THIN_SIDE: Final = "fewer than two of the rule's sides have enough readable claims"
 RESEARCH_NO_CLAIM: Final = "no readable claim"
 RESEARCH_NEVER_SIDED: Final = "the rule never took a side"
 RESEARCH_NEVER_CHANGED: Final = "the rule never changed side"
@@ -912,10 +913,11 @@ class ResearchFollow:
             )
         if self.n < RESEARCH_MIN_QUESTIONS:
             return RESEARCH_TOO_FEW
-        if min(self.by_bias(side) for side in self.sides_seen) < RESEARCH_MIN_SIDE:
+        second = sorted((self.by_bias(side) for side in TargetSide), reverse=True)[1]
+        if second < RESEARCH_MIN_SIDE:
             return RESEARCH_THIN_SIDE
         kappa = self.kappa
-        assert kappa is not None  # both sides clear the side floor
+        assert kappa is not None  # two sides clear the side floor
         if kappa >= RESEARCH_MIN_KAPPA:
             return RESEARCH_EFFECT
         if kappa <= -RESEARCH_MIN_KAPPA:
@@ -924,21 +926,25 @@ class ResearchFollow:
 
     def describe(self) -> list[str]:
         """Two lines: the table, then the verdict."""
+        # One row per side the rule held, fail-closed-only sides included, so
+        # a side short of the floor is visible as a row of zeros.
         rows = [
             f"rule {bias.value} {self.by_bias(bias)} -> model "
             + ", ".join(f"{side.value} {self.cells.get((bias, side), 0)}" for side in TargetSide)
-            for bias in self.readable_sides
+            for bias in self.sides_seen
         ]
-        table = "; ".join(rows) if rows else "no readable claim"
+        table = "; ".join(rows) if self.n else "no readable claim"
         failed = sum(self.fail_closed.values())
-        by_rule = ", ".join(f"{s.value} {n}" for s, n in self.fail_closed.items() if n)
+        by_rule = ", ".join(
+            f"{side.value} {self.fail_closed[side]}" for side in TargetSide if self.fail_closed.get(side)
+        )
         verdict = self.verdict
         needs = (
             ""
             if verdict in RESEARCH_STRUCTURAL
             else (
                 f" (needs >= {RESEARCH_MIN_QUESTIONS} readable claims, >= {RESEARCH_MIN_SIDE} on "
-                f"the rule's rarer side, |kappa| >= {RESEARCH_MIN_KAPPA:.2f})"
+                f"each of two sides, |kappa| >= {RESEARCH_MIN_KAPPA:.2f})"
             )
         )
         return [

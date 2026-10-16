@@ -86,7 +86,8 @@ carry 計畫 PR 2）整個 run 具名拒絕——沒有題目，成績單與考�
   （超出偶然的一致；模型整段抱同一邊＝0）與判定。
   判定依序：結構性情況先（`no readable claim`、`the rule never took a side`、`the rule never changed side`——
   規則整段同一邊時 kappa 恆為 0，不是模型的事，所以不印 kappa 也不判）；再門檻（`not enough readable claims`
-  ＝可讀主張 < 30、`too few readable claims on the rule's rarer side`＝規則較少那一邊 < 10）；過了才看 kappa：
+  ＝可讀主張 < 30、`fewer than two of the rule's sides have enough readable claims`＝規則至少要有兩邊各 ≥ 10 可讀主張，
+  只在 fail-closed 列出現的邊算 0、稀疏的第三邊不擋也不排除；表格把規則出現過的每一邊都印一列，0 可讀的也印）；過了才看 kappa：
   ≥ 0.20「有作用」、≤ −0.20「模型反著規則做」、其他「量不出作用」。三個門檻是程式常數
   （`RESEARCH_MIN_QUESTIONS`／`RESEARCH_MIN_SIDE`／`RESEARCH_MIN_KAPPA`，2026-10-16 拍板），判定字串也是
   （`RESEARCH_*`，paper-review skill 比對它們）。kappa 不加權：三個 run 至今只出現多／空手兩類，加權與否

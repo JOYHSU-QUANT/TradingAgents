@@ -10,6 +10,20 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **Before the trend guardrail is switched on (issue #372).** The paper
+  engine escalates to an ERROR per round once the guardrail has read
+  `unknown` on 6 gated rounds in a row
+  (`runtime.no_decision.note_guardrail_reading`, the shape of the no-decision
+  escalation; `GUARDRAIL_UNKNOWN_STREAK_THRESHOLD` now lives there); the
+  dashboard raises `<hl line>:guardrail_unknown` from the same count over the
+  status document's recent cycles (threshold `guardrail_unknown_cycles`, 6);
+  `contrib.replay replay` re-gates every question under the trend guardrail
+  reading its row recorded (`ai_outputs.guardrail_side`), so a segment with
+  the guardrail on replays under the daemon's own gate; `GuardrailSignal`
+  accepts only the rule's `4h` interval (`GUARDRAIL_INTERVAL`, which the
+  producer's `RULE_INTERVAL` borrows); a `decision_source.provider:
+  file_target` run that names `risk.trend_guardrail` is refused at config
+  load.
 - **`contrib/hyperliquid_perp`: the trend guardrail gate, off by default
   (`risk.trend_guardrail`).** The design of 2026-10-02 (shadow mode shipped
   as PR #321's offline report) now sits in the trading path: the research

@@ -259,6 +259,12 @@ _RESEARCH_SIGNAL_KEYS: Final = frozenset(
 # research signal, for the same reasons, with its own version: the two
 # documents change for different reasons and are read by different code.
 GUARDRAIL_SIGNAL_DOCUMENT_VERSION: Final = 1
+# The bar the guardrail's rule is defined on. The producer replays the rule
+# on these candles and nothing else, so a document declaring another interval
+# is a producer bug, not a cadence — and the reader's freshness bound is
+# ``MAX_SIGNAL_AGE_INTERVALS`` of THIS interval, so a longer one would widen
+# what "fresh" means for the one document that can close a position.
+GUARDRAIL_INTERVAL: Final = "4h"
 
 _GUARDRAIL_SIGNAL_KEYS: Final = frozenset(
     {
@@ -1595,6 +1601,11 @@ class GuardrailSignal:
             raise ValueError("GuardrailSignal.coin must be a non-empty string")
         object.__setattr__(self, "coin", self.coin.strip().upper())
         object.__setattr__(self, "interval", parse_interval(self.interval).value)
+        if self.interval != GUARDRAIL_INTERVAL:
+            raise ValueError(
+                f"GuardrailSignal.interval must be {GUARDRAIL_INTERVAL!r} (the bar the rule is "
+                f"defined on), got {self.interval!r}"
+            )
         _require_venue_stamp(self.as_of_ms, what="GuardrailSignal.as_of_ms")
         object.__setattr__(self, "rule_id", _identifier(self.rule_id, what="GuardrailSignal.rule_id"))
 

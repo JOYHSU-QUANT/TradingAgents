@@ -735,3 +735,23 @@ def test_a_dry_run_with_retry_failed_counts_the_refusals_as_to_ask(
         f"dry run: {len(TRAIN) - 1} answer(s) already stored, 1 to ask; this command would "
         "ask for 1 of them"
     ) in dry
+
+
+def test_a_replayed_answer_is_gated_under_the_guardrail_reading_its_row_recorded(store):
+    """Issue #372: the recorded ``guardrail_side`` is the gate input, so the replay meets the same gate."""
+    from dataclasses import replace
+
+    from contrib.replay.upstream import GuardrailSide
+
+    decisions, chosen, risk, decision = _papers(store, *SegmentName)
+    prepared = prepare(chosen, payload_root=payload_dir(store, RUN_ID), risk=risk)
+    item = prepared[0]
+    # The fixture rows were written with the guardrail off: no reading, the plain gate.
+    assert item.paper.facts.guardrail_side is None
+    plain = judge(Completion(text=PAPERS[0].text), item, risk=risk, decision=decision)[2]
+    assert plain.guardrail is None
+    # A row that recorded a reading is re-gated under it.
+    facts = replace(item.paper.facts, guardrail_side=GuardrailSide.SHORT)
+    gated = replace(item, paper=replace(item.paper, facts=facts))
+    gate = judge(Completion(text=PAPERS[0].text), gated, risk=risk, decision=decision)[2]
+    assert gate.guardrail is GuardrailSide.SHORT

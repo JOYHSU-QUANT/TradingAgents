@@ -60,6 +60,7 @@ from contrib.hyperliquid_perp.domains.perp.research_signal import (
     max_signal_age_ms,
 )
 from contrib.hyperliquid_perp.domains.perp.schema import (
+    GUARDRAIL_INTERVAL,
     Candle,
     CandleInterval,
     FundingPoint,
@@ -86,6 +87,7 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, and it must stay that 
 
 __all__ = [
     "BORROWED",
+    "GUARDRAIL_INTERVAL",
     "MAX_SIGNAL_AGE_INTERVALS",
     "UPSTREAM_PACKAGES",
     "REGIME_INDICATORS",
@@ -149,6 +151,7 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.hyperliquid_perp.domains.perp.schema", "FundingPoint"),
     # The trend guardrail's handoff document (decided 2026-10-02, wired
     # 2026-10-16): same seam, same reason as the research signal below.
+    ("contrib.hyperliquid_perp.domains.perp.schema", "GUARDRAIL_INTERVAL"),
     ("contrib.hyperliquid_perp.domains.perp.schema", "GuardrailSide"),
     ("contrib.hyperliquid_perp.domains.perp.schema", "GuardrailSignal"),
     ("contrib.hyperliquid_perp.domains.perp.schema", "MarketRegime"),

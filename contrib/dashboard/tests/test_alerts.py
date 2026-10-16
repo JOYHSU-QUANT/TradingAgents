@@ -613,3 +613,40 @@ def test_a_parked_line_whose_read_fails_drops_what_the_progress_rules_held(tmp_p
     )
     evaluation = evaluate(now=NOW, config=config, reads=reads, host=host, events_seen={}, held=held)
     assert _keys(evaluation) == ["hl-paper:read_failed", "hl-paper:safe_mode"]
+
+
+def test_the_guardrail_read_unknown_on_six_decided_cycles_is_a_condition(tmp_path):
+    docs = quiet_documents()
+    doc = docs[HL_KEY]
+    template = doc["cycles"]["recent"][0]
+
+    def cycle(hours_ago, side, status="completed"):
+        item = json.loads(json.dumps(template))
+        item["scheduled_at"] = item["timestamp"] = hl_instant(NOW - timedelta(hours=hours_ago))
+        item["status"] = status
+        item["verdict"] = (
+            None if status == "api_failed" else dict(template["verdict"], guardrail_side=side)
+        )
+        return item
+
+    # Newest first: five unknown verdicts, an api_failed cycle in between, a
+    # sixth unknown, then a cycle that read a side.
+    doc["cycles"]["recent"] = [
+        *[cycle(4 * i + 1, "unknown") for i in range(5)],
+        cycle(21, None, status="api_failed"),
+        cycle(25, "unknown"),
+        cycle(29, "long"),
+    ]
+    evaluation = _tick(tmp_path, docs)
+    assert _keys(evaluation) == ["hl-paper:guardrail_unknown"]
+    assert evaluation.conditions[0].text.startswith(
+        "the trend guardrail read unknown on the last 6 decided cycles"
+    )
+    # Five is not yet a condition, and a side at the newest cycle clears it.
+    doc["cycles"]["recent"] = doc["cycles"]["recent"][1:]
+    assert _keys(_tick(tmp_path, docs)) == []
+    doc["cycles"]["recent"] = [cycle(1, "short"), *doc["cycles"]["recent"]]
+    assert _keys(_tick(tmp_path, docs)) == []
+    # A run without the guardrail (NULL readings) never raises it.
+    doc["cycles"]["recent"] = [cycle(4 * i + 1, None) for i in range(8)]
+    assert _keys(_tick(tmp_path, docs)) == []

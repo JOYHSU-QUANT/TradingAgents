@@ -35,6 +35,7 @@ from .costs import CostModel
 from .dsl import Side, StrategySpec, describe_spec, load_spec, spec_hash
 from .store import ResearchStore, canonical_coin
 from .upstream import (
+    GUARDRAIL_INTERVAL,
     MAX_SIGNAL_AGE_INTERVALS,
     GuardrailSide,
     GuardrailSignal,
@@ -68,7 +69,9 @@ DEFAULT_RULE: Final = Path(__file__).resolve().parent / "guardrails" / "btc-20d-
 # the rule IS: the same file on daily bars would be a 120-day channel, a
 # different rule under the same name. Kept here, beside the rule, so every
 # reader of a timeline gets the same one.
-RULE_INTERVAL: Final = "4h"
+# The reader refuses any other interval (``schema.GUARDRAIL_INTERVAL``), so
+# the two cannot drift apart.
+RULE_INTERVAL: Final = GUARDRAIL_INTERVAL
 
 # How many leading characters of the spec hash a rule's name carries: enough
 # to tell two versions of a file apart in a report, short enough to read.

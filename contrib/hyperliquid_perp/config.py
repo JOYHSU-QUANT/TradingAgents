@@ -17,7 +17,7 @@ from contrib.core.enum_guard import check_enum
 
 from .common.config_coercion import bool_from_yaml, int_from_yaml
 from .common.constants import LEGAL_NETWORKS
-from .common.decision_source import DecisionSourceConfig
+from .common.decision_source import FILE_TARGET_PROVIDER, DecisionSourceConfig
 from .domains.perp.indicator_vocab import REGIME_INDICATORS, supported_indicators
 from .domains.perp.market_data_config import MarketDataConfig
 
@@ -238,9 +238,25 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     # a typo'd provider must not fall back to the engine with no signal. The
     # parser refuses a scalar block itself, so it is not in the loop above.
     try:
-        DecisionSourceConfig.from_dict(config.get("decision_source"))
+        source = DecisionSourceConfig.from_dict(config.get("decision_source"))
     except ValueError as exc:
         raise ValueError(f"invalid decision_source: config — {exc}") from None
+    # A run that takes its targets from a file (the carry coordinator's
+    # handoff) is not the model the trend guardrail was decided for: the rule
+    # would close positions the coordinator asked for, and the carry report
+    # would count them as refused. Refused at load, by name, the way a live
+    # block refuses the same key.
+    raw_risk = config.get("risk")
+    if (
+        source.provider == FILE_TARGET_PROVIDER
+        and isinstance(raw_risk, dict)
+        and raw_risk.get("trend_guardrail")
+    ):
+        raise ValueError(
+            "risk.trend_guardrail is set on a decision_source.provider 'file_target' run: that "
+            "run's targets come from the handoff file, not a model, and the trend guardrail "
+            "would close what the coordinator asked for — leave the key empty here"
+        )
     # The ``market_data:`` block is parsed on every load — unknown keys, wrong
     # types and out-of-band values all fail here, named. It is the block whose
     # mistakes are otherwise the quietest: a typo'd key fell back to its

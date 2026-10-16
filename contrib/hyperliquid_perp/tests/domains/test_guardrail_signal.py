@@ -18,6 +18,7 @@ import pytest
 from contrib.hyperliquid_perp.domains.perp.guardrail_signal import load_guardrail_signal
 from contrib.hyperliquid_perp.domains.perp.research_signal import MAX_SIGNAL_AGE_INTERVALS
 from contrib.hyperliquid_perp.domains.perp.schema import (
+    GUARDRAIL_INTERVAL,
     GUARDRAIL_SIGNAL_DOCUMENT_VERSION,
     GuardrailSide,
     GuardrailSignal,
@@ -169,3 +170,14 @@ def test_a_document_from_ahead_of_this_clock_is_refused(tmp_path, caplog):
     path = _write(tmp_path, _document())
     assert _load(path, caplog, now_ms=_AS_OF_MS - 1) is None
     assert "AFTER this gate's own clock" in _the_one_warning(caplog)
+
+
+def test_the_interval_is_the_rules_and_no_other_is_read(tmp_path, caplog):
+    # A supported interval that is not the rule's would stretch the freshness
+    # bound (2 x 1d = 48h) on the one document that can close a position.
+    assert GUARDRAIL_INTERVAL == "4h"
+    with pytest.raises(ValueError, match="interval must be '4h'"):
+        _signal(interval="1d")
+    path = _write(tmp_path, _document(interval="1d"))
+    assert _load(path, caplog) is None
+    assert "interval must be '4h'" in _the_one_warning(caplog)

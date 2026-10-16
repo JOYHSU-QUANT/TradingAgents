@@ -298,8 +298,38 @@ def _hyperliquid(
     if safe is not None:
         text = f"safe mode {safe['type']} since {show_text(safe['entered_at'])}"
         conditions.append(_condition(line.name, "safe_mode", text))
+    unknown = _guardrail_unknown_streak(doc["cycles"]["recent"])
+    if unknown >= th.guardrail_unknown_cycles:
+        conditions.append(
+            _condition(
+                line.name,
+                "guardrail_unknown",
+                f"the trend guardrail read unknown on the last {unknown} decided cycles: nothing "
+                "new opens and nothing held is closed by the rule — check the producer "
+                "(guardrail-signal) and its fetch",
+            )
+        )
     events, newest = _new_events(line.name, doc, seen, now)
     return _Outcome(conditions, events, newest, notes)
+
+
+def _guardrail_unknown_streak(recent: Sequence[Mapping[str, Any]]) -> int:
+    """How many of the newest cycles with a verdict, in a row, read the trend guardrail as ``unknown``.
+
+    The exporter's copy of the perp validator's ``guardrail_unknown_streak``,
+    over the cycles the status document carries (newest first): a cycle
+    without a verdict (``api_failed``) neither counts nor breaks it; the first
+    verdict reading a side, or ``None`` (the guardrail off), ends it.
+    """
+    streak = 0
+    for cycle in recent:
+        verdict = cycle.get("verdict")
+        if verdict is None:
+            continue
+        if verdict.get("guardrail_side") != "unknown":
+            break
+        streak += 1
+    return streak
 
 
 def _uniswap(line: UniswapLine, doc: Mapping[str, Any], now: datetime, th: Thresholds) -> _Outcome:

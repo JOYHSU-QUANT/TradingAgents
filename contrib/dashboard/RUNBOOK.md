@@ -132,6 +132,7 @@ systemctl list-timers dashboard-exporter.timer --no-pager
 | `<hl>:lease_stale` | lease 心跳 15 分鐘沒動但 unit 還 active | daemon 吊住：journal；必要時 restart（避開 cycle 中） |
 | `<hl>:export_failed`／`export_stale` | export 失敗或 5 小時沒更新 | hyperliquid RUNBOOK §5（日常監控）；`REPLAY_UNVERIFIED` 看 `/paper-status` |
 | `<hl>:safe_mode` | run 鎖在 safe mode | hyperliquid RUNBOOK §7（`recoverable` 自動解、`manual` 要人） |
+| `<hl>:guardrail_unknown` | 趨勢護欄連續 6 個有判決的 cycle 讀到 `unknown`（不開新倉、規則也平不了倉） | 看伺服器上 producer 的 `guardrail-signal` 與 `fetch` 有沒有在跑；hyperliquid RUNBOOK §7 護欄段 |
 | `<hl>:event:kill_switch_cancel_triggered@...`、`emergency_kill_switch_triggered@...`、`safe_mode_entered@...` 等 | kill switch／safe mode 新事件（refresh 不算） | 看 journal 那個時間點 |
 | `<uni>:behind` | 日界線過了 3.5 小時還沒 decide（三個 visit 時段都過了） | visit log；手動 `paper-visit.sh` 一次 |
 | `<uni>:clock_ahead` | store 的 clock 跑在時鐘前面（不可能狀態） | 主機時鐘或 store 有問題，先 `validate` |

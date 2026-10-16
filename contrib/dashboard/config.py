@@ -92,6 +92,10 @@ class Thresholds:
     export_stale_hours: float = 5.0
     uniswap_behind_hours: float = 3.5
     uniswap_no_decision_hours: float = 48.0
+    # Decided cycles in a row whose verdict read the trend guardrail as
+    # ``unknown`` (the perp validator's own threshold, 2026-10-16); the line's
+    # ``recent`` must carry at least this many cycles for the rule to fire.
+    guardrail_unknown_cycles: int = 6
     handoff_due_utc: time = time(0, 30)
     disk_used_pct: int = 85
     memory_available_mb: int = 200
@@ -365,6 +369,7 @@ THRESHOLD_PARSERS: dict[str, Callable[[Mapping[str, Any], str, str, Any], Any]] 
     "export_stale_hours": _hours,
     "uniswap_behind_hours": _hours,
     "uniswap_no_decision_hours": _hours,
+    "guardrail_unknown_cycles": _int,
     "handoff_due_utc": _clock,
     "disk_used_pct": _pct,
     "memory_available_mb": _int,

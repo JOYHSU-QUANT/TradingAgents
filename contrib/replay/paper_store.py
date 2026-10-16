@@ -52,6 +52,7 @@ from .upstream import (
     DecisionConfig,
     DecisionMode,
     FillRole,
+    GuardrailSide,
     MarketDataConfig,
     PaperTradingConfig,
     ResearchStore,
@@ -93,7 +94,7 @@ SELECT a.decision_attempt_id, a.scheduled_at, a.status, a.attempt_count,
        i.input_payload_hash, i.current_position_size,
        o.output_id, o.decision_mode, o.target_side, o.requested_target_margin_pct,
        o.approved_target_margin_pct, o.risk_action, o.risk_reason, o.confidence,
-       o.order_created, o.no_order_reason
+       o.order_created, o.no_order_reason, o.guardrail_side
   FROM decision_attempts AS a
   LEFT JOIN ai_inputs AS i ON i.input_id = a.input_id
   LEFT JOIN ai_outputs AS o ON o.output_id = a.output_id
@@ -340,6 +341,10 @@ class InputFacts:
     size: Decimal | None
     margin_pct: Decimal | None
     leverage: Decimal
+    # What the gate read from the trend guardrail on this round (schema v14):
+    # ``None`` with the guardrail off. The replay re-gates under the same
+    # reading, so a segment with the guardrail on replays under the same gate.
+    guardrail_side: GuardrailSide | None = None
 
 
 def _payload_name(recorded: object) -> str | None:
@@ -364,6 +369,7 @@ def _input_facts(row: sqlite3.Row) -> InputFacts:
         size=_cell(row, "current_position_size", Decimal),
         margin_pct=_cell(row, "current_margin_pct", Decimal),
         leverage=_need(row, "configured_leverage", Decimal),
+        guardrail_side=_cell(row, "guardrail_side", GuardrailSide),
     )
 
 

@@ -316,7 +316,13 @@ def human_message(prepared: Prepared, extra_context: str | None) -> str:
 def judge(
     completion: Completion, prepared: Prepared, *, risk: RiskConfig, decision: DecisionConfig
 ) -> tuple[str | None, str, RiskGateResult]:
-    """``(invalid_reason, raw_response, gate result)``: the parse seam, then the run's gate."""
+    """``(invalid_reason, raw_response, gate result)``: the parse seam, then the run's gate.
+
+    The gate runs under the trend guardrail reading the row recorded
+    (``ai_outputs.guardrail_side``, ``None`` with the guardrail off), so a
+    segment the guardrail was on for replays under the same gate the daemon
+    ran — the difference left is the model's.
+    """
     parsed = parse_target_decision(completion.text, decision, truncated=completion.truncated)
     gate = evaluate(
         parsed,
@@ -324,6 +330,7 @@ def judge(
         current=prepared.current,
         risk=risk,
         decision_cfg=decision,
+        guardrail=prepared.paper.facts.guardrail_side,
     )
     return parsed.invalid_reason, parsed.raw_response, gate
 

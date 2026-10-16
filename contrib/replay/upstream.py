@@ -97,7 +97,7 @@ from contrib.hyperliquid_perp.domains.perp.risk_gate import (
     RiskGateResult,
     evaluate,
 )
-from contrib.hyperliquid_perp.domains.perp.schema import interval_to_ms
+from contrib.hyperliquid_perp.domains.perp.schema import GuardrailSide, interval_to_ms
 from contrib.hyperliquid_perp.domains.perp.target_decision import (
     DecisionConfig,
     DecisionMode,
@@ -133,6 +133,7 @@ __all__ = [
     "MarketDataConfig",
     "PaperTradingConfig",
     "ResearchStore",
+    "GuardrailSide",
     "RiskAction",
     "RiskConfig",
     "RiskGateResult",
@@ -207,6 +208,9 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.hyperliquid_perp.domains.perp.market_data_config", "MarketDataConfig"),
     ("contrib.hyperliquid_perp.domains.perp.risk_gate", "CurrentPositionState"),
     ("contrib.hyperliquid_perp.domains.perp.risk_gate", "RiskAction"),
+    # What the gate read from the trend guardrail on each recorded round
+    # (schema v14), so the replay re-gates under the same reading.
+    ("contrib.hyperliquid_perp.domains.perp.schema", "GuardrailSide"),
     ("contrib.hyperliquid_perp.domains.perp.risk_gate", "RiskConfig"),
     ("contrib.hyperliquid_perp.domains.perp.risk_gate", "RiskGateResult"),
     ("contrib.hyperliquid_perp.domains.perp.risk_gate", "evaluate"),

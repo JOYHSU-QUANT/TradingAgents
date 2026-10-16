@@ -28,11 +28,13 @@ from contrib.core.instants import parse_instant, whole_hours
 from ..common.constants import CYCLE_INTERVAL, STALE_MARKET_DATA_ERROR
 
 __all__ = [
+    "GUARDRAIL_UNKNOWN_STREAK_THRESHOLD",
     "NO_DECISION_STREAK_THRESHOLD",
     "STREAK_RECENCY_WINDOW",
     "TrailingFailureStreaks",
     "no_decision_shortfall",
     "note_cycle_outcome",
+    "note_guardrail_reading",
     "trailing_failure_streaks",
 ]
 
@@ -57,6 +59,16 @@ logger = logging.getLogger(__name__)
 # ``connection`` / ``malformed_response`` — exactly as silent as the stalled
 # feed was before this mechanism existed.
 NO_DECISION_STREAK_THRESHOLD = 3
+
+# How many gated rounds in a row the trend guardrail may read as ``unknown``
+# before the condition escalates (wired 2026-10-16; decided the same day: the
+# book is kept, the condition made visible): ``validate`` prints a shortfall
+# (exit 4), the paper engine's log turns the per-round WARNINGs into an ERROR
+# (:func:`note_guardrail_reading`), and the dashboard raises its own
+# condition from the same count. About a day of 4h rounds with the producer
+# or its `fetch` down, during which nothing new opens and nothing held can be
+# closed by the rule.
+GUARDRAIL_UNKNOWN_STREAK_THRESHOLD = 6
 
 # How recently the newest terminal cycle must have CHANGED STATE for a streak
 # to still describe the run's current state. Past this the run is stopped or
@@ -304,3 +316,33 @@ def no_decision_shortfall(streaks: TrailingFailureStreaks, *, now: datetime) -> 
         f"Any open position is riding SL/TP alone; the streak clears by itself at the "
         f"next decided cycle (need < {NO_DECISION_STREAK_THRESHOLD}))"
     )
+
+
+def note_guardrail_reading(streak: int, *, unknown: bool, run_id: str) -> int:
+    """Advance or reset the loop's in-process streak of ``unknown`` guardrail readings, and log it.
+
+    The running half of the guardrail's escalation, the way
+    :func:`note_cycle_outcome` is for no-decision cycles: ``validate`` judges
+    by the durable streak over ``ai_outputs.guardrail_side``; this keeps the
+    live one and turns the per-round WARNINGs (the reader's, the gate's) into
+    an ERROR from :data:`GUARDRAIL_UNKNOWN_STREAK_THRESHOLD` on, so a log
+    scraper sees the change without a store query. Called once per gated
+    round the guardrail was configured for (the sweep's gate is not one: it
+    judges a round with no decision); a round that read a side resets the
+    count. In-process only: a restart starts it over, and the store's streak
+    is the one the verdict reads.
+    """
+    if not unknown:
+        return 0
+    streak += 1
+    if streak >= GUARDRAIL_UNKNOWN_STREAK_THRESHOLD:
+        logger.error(
+            "trend guardrail for %s has read unknown on %d gated rounds in a row (~%dh): nothing "
+            "new opens and nothing held can be closed by the rule — check the producer "
+            "(`guardrail-signal`) and its `fetch`; `validate` reports this as a shortfall until a "
+            "round reads a side",
+            run_id,
+            streak,
+            streak * _CYCLE_HOURS,
+        )
+    return streak

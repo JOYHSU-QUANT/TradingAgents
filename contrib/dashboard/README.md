@@ -102,6 +102,7 @@ Thresholds are the YAML's `thresholds:`; the defaults were decided 2026-10-14.
 | `<hl line>:lease_stale` | the lease heartbeat older than `lease_stale_minutes` (15) |
 | `<hl line>:export_failed` / `:export_stale` | the export breadcrumb `failed`, or older than `export_stale_hours` (5) |
 | `<hl line>:safe_mode` | the run is latched in safe mode |
+| `<hl line>:guardrail_unknown` | the newest `guardrail_unknown_cycles` (6) decided cycles all read the trend guardrail as `unknown` (`api_failed` cycles skipped; a run with the guardrail off never raises it; the line's `recent` must be at least the threshold) |
 | `<hl line>:event:<type>@<instant>` | a kill-switch row (but `kill_switch_refreshed`) or a safe-mode row |
 | `<uni line>:behind` | the clock is `behind` and the latest boundary passed more than `uniswap_behind_hours` (3.5) ago |
 | `<uni line>:clock_ahead` | the clock is `ahead` |

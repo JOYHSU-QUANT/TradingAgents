@@ -350,7 +350,8 @@ run 5 跑到一半單獨部署它**：那等於拿現行 run 的「退回上一�
 **v14（2026-10-16，`ai_outputs.guardrail_side`）同一條規則**：帶它的 build 一部署，daemon 重啟就把現行
 run 的 store 升到 v14——護欄開不開都一樣，不是只有開了才升；所以同樣先備份、同樣排在換段。另一個徵兆：
 本機 checkout 比伺服器新時，對快照跑 `validate`／`export`／`status` 會具名拒絕（store 落後、不升級），
-那不是壞掉，是伺服器還沒部署到這一版。
+那不是壞掉，是伺服器還沒部署到這一版（上面那個例外照舊：`safe-mode --status` 開檔就升級——對快照副本無妨，
+對正式 store 就是花掉退路）。
 
 判讀時**主判準是提案率**（`requested_target_margin_pct` 非 null 的佔比）。**但這一欄
 會低估**：fail-closed 的 cycle 一律把它寫成 NULL，模型實際要求了什麼在 parse 接縫就被

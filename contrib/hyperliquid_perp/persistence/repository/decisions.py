@@ -546,7 +546,11 @@ def recent_account_snapshots(
 def count_ai_outputs_with_risk_action(
     conn: sqlite3.Connection, run_id: str, *, risk_action: str
 ) -> int:
-    """How many of the run's verdicts the gate disposed of as ``risk_action`` (vocabulary-checked)."""
+    """How many of the run's verdicts the gate disposed of as ``risk_action``.
+
+    The value is vocabulary-checked, so a misspelt action is a ``ValueError``
+    rather than a count of zero.
+    """
     check_enum(risk_action, _RISK_ACTIONS, name="risk_action")
     return conn.execute(
         "SELECT COUNT(*) FROM ai_outputs WHERE run_id = ? AND risk_action = ?",

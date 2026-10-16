@@ -512,7 +512,8 @@ exit 0；要補洞請跑 `fetch`。**被拒絕的 spec 則相反**：文件本�
 - **`reading_at(時刻)` 讀不到就回 `None`**，三種情況：規則還在暖機（第一根能評估的 K 線之前）；
   store 的最後一根比那個時刻早超過 `MAX_SIGNAL_AGE_INTERVALS` 根；規則在那一根讀不到條件
   （方向是凍住的，不是它選的）。後兩種與交接文件一致：讀端丟掉過期文件，`signal` 在最新一根讀不到
-  條件時不寫文件、`guardrail-signal` 寫 `unknown`。回傳值本身是 `None`＝讀不到；讀到了而 `side` 是 `None`＝規則空手，兩者不同。
+  條件時不寫文件；`guardrail-signal` 則在那一根寫 `unknown`。回傳值本身是 `None`＝讀不到；讀到了而
+  `side` 是 `None`＝規則空手，兩者不同。
 - **重放從空手開始**：store 第一根之前規則抱著什麼看不到，所以規則第一次站到某一邊之前的「空手」
   可能是更早開的倉位。`first_taken_ms` 是那一根的收盤（整段歷史都沒站邊就是 `None`），`describe()` 會印。
 

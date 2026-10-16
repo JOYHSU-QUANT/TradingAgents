@@ -70,7 +70,7 @@ RISK_REASON_NO_EQUITY = "no_account_equity"
 RISK_REASON_GUARDRAIL_RULE_FLAT = "guardrail_rule_flat"
 RISK_REASON_GUARDRAIL_AGAINST_RULE = "guardrail_against_rule"
 RISK_REASON_GUARDRAIL_RULE_UNKNOWN = "guardrail_rule_unknown"
-# The two a blocked_to_flat row may carry; the third only ever rejects.
+
 NO_ORDER_MAINTAIN_CURRENT = "maintain_current"
 NO_ORDER_WITHIN_DEADBAND = "within_deadband"
 NO_ORDER_INVALID_FAIL_CLOSED = "invalid_fail_closed"
@@ -387,7 +387,8 @@ class RiskGateResult:
             # invalid_reason None) would otherwise reach here with a null reason.
             raise ValueError("a rejected/fail-closed result must name why in risk_reason")
         if self.risk_reason == RISK_REASON_GUARDRAIL_RULE_UNKNOWN and (
-            self.risk_action is not RiskAction.REJECTED or self.guardrail is not GuardrailSide.UNKNOWN
+            self.risk_action is not RiskAction.REJECTED
+            or self.guardrail is not GuardrailSide.UNKNOWN
         ):
             raise ValueError("a guardrail_rule_unknown rejection records an unknown rule")
 
@@ -425,7 +426,7 @@ class RiskGateResult:
         if not self.order_created and self.no_order_reason != NO_ORDER_ALREADY_FLAT:
             raise ValueError("a blocked_to_flat result over a flat book says already_flat")
         if self.guardrail not in (GuardrailSide.LONG, GuardrailSide.SHORT, GuardrailSide.FLAT):
-            raise ValueError("a blocked_to_flat result records the rule's side that closed the book")
+            raise ValueError("a blocked_to_flat result records the rule's side that closed it")
         if self.risk_reason != _guardrail_reason(self.guardrail):
             raise ValueError(
                 "a blocked_to_flat result names the rule's state in risk_reason:"

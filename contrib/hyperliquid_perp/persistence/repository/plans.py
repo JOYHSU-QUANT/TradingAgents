@@ -129,7 +129,7 @@ def update_execution_plan(
 
 
 def count_execution_plans_without_output(conn: sqlite3.Connection, run_id: str) -> int:
-    """The run's plans with no ``ai_outputs`` row behind them: the trend guardrail's sweep closes."""
+    """The run's plans with no ``ai_outputs`` row behind them (the trend guardrail's sweep closes)."""
     return conn.execute(
         "SELECT COUNT(*) FROM execution_plans WHERE run_id = ? AND output_id IS NULL",
         (run_id,),

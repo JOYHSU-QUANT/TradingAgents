@@ -48,10 +48,11 @@ _CONSEQUENCE = "so the gate opens nothing new and keeps what is held"
 
 
 def load_guardrail_signal(path: str, *, coin: str, now_ms: int) -> GuardrailSignal | None:
-    """The guardrail's reading at ``path``, or ``None`` with one WARNING saying why not.
+    """The guardrail's reading at ``path``; ``None`` (with one WARNING) when it cannot be trusted.
 
     A reading whose side is ``unknown`` is returned, and also costs the one
     WARNING: it is the producer's own way of not knowing.
+
     ``coin`` is the one this run trades; ``now_ms`` is the gate's own instant
     (the engine's clock, in UTC epoch milliseconds). A document stamped after
     ``now_ms`` is a clock that disagrees with this host, not a closed bar.

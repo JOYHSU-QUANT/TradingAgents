@@ -401,15 +401,15 @@ class PaperExecutionEngine:
         self._clock = clock
         self._provider = provider
         self._risk = risk_config
+        self._decision = decision_config
+        self._paper = paper_config
+        self._stop = stop_config or StopConfig()
+        self._funding = funding_source
         # Off and healthy must not look alike in the log: say once which it is.
         logger.info(
             "trend guardrail: %s",
             f"reading {risk_config.trend_guardrail}" if risk_config.trend_guardrail else "off",
         )
-        self._decision = decision_config
-        self._paper = paper_config
-        self._stop = stop_config or StopConfig()
-        self._funding = funding_source
 
         self._leg: _Leg | None = None
         self._flip: _FlipState | None = None
@@ -732,12 +732,15 @@ class PaperExecutionEngine:
         mark: Decimal,
         now: datetime,
         *,
+        rule: GuardrailSide | None = None,
         announce: bool = True,
     ) -> tuple[RiskGateResult, Decimal]:
         """Run the RiskGate over fresh books at ``mark``; ``(gate, equity)``.
 
         The one site every gate in this engine goes through (plan start, the
         flip's open leg, the guardrail sweep), so a gate input threads once.
+        The guardrail is read here unless the caller already holds this
+        round's reading (``rule``: the sweep judges and logs the one it took).
         A guardrail intervention is said out loud here (``announce``), since
         the audit row alone does not reach the log — the sweep, which has
         its own line, passes ``False``.
@@ -750,20 +753,32 @@ class PaperExecutionEngine:
             current=current,
             risk=self._risk,
             decision_cfg=self._decision,
-            guardrail=self._guardrail_side(now),
+            guardrail=self._guardrail_side(now) if rule is None else rule,
         )
         if announce and gate.guardrail is not None:
-            did = None
+            did: str | None = None
             if gate.risk_action is RiskAction.BLOCKED_TO_FLAT:
-                did = "closes the held position" if gate.order_created else "blocks the ask over a flat book"
+                did = (
+                    "closes the held position"
+                    if gate.order_created
+                    else "blocks the ask over a flat book"
+                )
             elif gate.risk_reason == RISK_REASON_GUARDRAIL_RULE_UNKNOWN:
-                did = "is unreadable, so the ask is refused and what is held is kept"
+                did = "reads unknown, so the ask is refused and what is held is kept"
             if did is not None:
+                # A blocked row over a maintain or a fail-closed round is
+                # recorded as a flat target with no margin: the model asked
+                # for nothing, and the line must not say otherwise.
+                asked = (
+                    "nothing"
+                    if gate.requested_target_margin_pct is None or gate.target_side is None
+                    else gate.target_side.value
+                )
                 logger.warning(
                     "trend guardrail: the rule (%s) %s; the model asked for %s (%s)",
                     gate.guardrail.value,
                     did,
-                    "nothing" if gate.target_side is None else gate.target_side.value,
+                    asked,
                     gate.risk_reason,
                 )
         return gate, equity
@@ -823,8 +838,10 @@ class PaperExecutionEngine:
             invalid_reason=INVALID_NO_DECISION,
             raw_response="",
         )
-        gate, equity = self._gate(no_decision, position, snap.mark_price, now, announce=False)
-        if not gate.order_created:
+        gate, equity = self._gate(
+            no_decision, position, snap.mark_price, now, rule=rule, announce=False
+        )
+        if not gate.order_created:  # pragma: no cover - a held book the rule forbids always closes
             return None
         logger.warning(
             "trend guardrail sweep: closing the held %s position on a round with no decision (%s)",

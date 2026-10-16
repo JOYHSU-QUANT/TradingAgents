@@ -8,9 +8,19 @@ rather than as the number the code happened to print.
 from __future__ import annotations
 
 import statistics
+from decimal import Decimal
 
 import pytest
 
+from contrib.hyperliquid_perp.domains.perp import risk_gate as _gate
+from contrib.hyperliquid_perp.domains.perp.schema import GuardrailSide
+from contrib.hyperliquid_perp.domains.perp.target_decision import (
+    DecisionConfig,
+    DecisionMode,
+    ParsedDecision,
+    TargetDecision,
+    TargetSide as _GateSide,
+)
 from contrib.replay.score import (
     Answer,
     HitStats,
@@ -1016,10 +1026,46 @@ def test_a_blocked_row_is_never_a_maintain():
 
 # -- the gate's own blocked shapes, read back through Answer ------------------------
 # ``Answer.__post_init__`` restates ``RiskGateResult._check_blocked_to_flat``;
-# this pins the two copies to each other through the gate itself.
+# this pins the two copies to each other through the gate itself. The
+# decisions are built here (the perp package's own tests are not reached).
 
-from contrib.hyperliquid_perp.domains.perp.schema import GuardrailSide  # noqa: E402
-from contrib.hyperliquid_perp.tests.domains import test_risk_gate as _gate  # noqa: E402
+
+def _decision(mode: str, side: str | None, margin: int | None, confidence: str) -> ParsedDecision:
+    decision = TargetDecision(
+        decision_mode=DecisionMode(mode),
+        target_side=None if side is None else _GateSide(side),
+        requested_target_margin_pct=margin,
+        confidence=Decimal(confidence),
+        rationale="pin",
+        key_risks=(),
+    )
+    return ParsedDecision(decision=decision, is_valid=True, invalid_reason=None, raw_response="raw")
+
+
+def _fail_closed() -> ParsedDecision:
+    return ParsedDecision(
+        decision=TargetDecision.fail_closed(),
+        is_valid=False,
+        invalid_reason="invalid_output",
+        raw_response="raw",
+    )
+
+
+def _held_long() -> _gate.CurrentPositionState:
+    return _gate.CurrentPositionState(
+        side=_GateSide.LONG, signed_notional=Decimal(300), margin_pct=Decimal(30)
+    )
+
+
+def _gated(parsed: ParsedDecision, current, rule: GuardrailSide) -> _gate.RiskGateResult:
+    return _gate.evaluate(
+        parsed,
+        account_equity=Decimal(1000),
+        current=current or _gate.CurrentPositionState.flat(),
+        risk=_gate.RiskConfig(),
+        decision_cfg=DecisionConfig(),
+        guardrail=rule,
+    )
 
 
 def _recorded(result) -> Answer:
@@ -1040,20 +1086,15 @@ def _recorded(result) -> Answer:
 @pytest.mark.parametrize(
     ("parsed", "current", "rule", "asked"),
     [
-        (_gate._parsed("set_target", "short", 35), None, GuardrailSide.LONG, True),
-        (_gate._maintain(), _gate._long_state("30", "300"), GuardrailSide.SHORT, False),
-        (_gate._invalid_parsed(), _gate._long_state("30", "300"), GuardrailSide.FLAT, False),
-        (
-            _gate._parsed("set_target", "flat", 0, confidence="0.1"),
-            _gate._long_state("30", "300"),
-            GuardrailSide.SHORT,
-            True,
-        ),
+        (_decision("set_target", "short", 35, "0.78"), None, GuardrailSide.LONG, True),
+        (_decision("maintain_current", None, None, "0.78"), _held_long(), GuardrailSide.SHORT, False),
+        (_fail_closed(), _held_long(), GuardrailSide.FLAT, False),
+        (_decision("set_target", "flat", 0, "0.1"), _held_long(), GuardrailSide.SHORT, True),
     ],
     ids=["ask-against-rule", "maintain-over-held", "fail-closed-over-held", "refused-flat-ask"],
 )
 def test_every_blocked_shape_the_gate_writes_is_one_answer_reads(parsed, current, rule, asked):
-    result = _gate._evaluate(parsed, current=current, guardrail=rule)
+    result = _gated(parsed, current, rule)
     assert result.risk_action.value == "blocked_to_flat", result
     answer = _recorded(result)
     assert answer.blocked

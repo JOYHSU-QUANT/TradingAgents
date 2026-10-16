@@ -1675,7 +1675,33 @@ def test_a_flip_under_an_unknown_rule_never_starts(tmp_path, caplog):
     assert start.plan_id is None and start.gate.risk_reason == "guardrail_rule_unknown"
     assert _size(db) == D("0.001")
     assert any(
-        "trend guardrail: the rule (unknown) is unreadable, so the ask is refused" in r.getMessage()
+        "trend guardrail: the rule (unknown) reads unknown, so the ask is refused" in r.getMessage()
+        for r in caplog.records
+    )
+    db.close()
+
+
+def test_a_maintain_closed_by_the_rule_is_logged_as_asking_for_nothing(tmp_path, caplog):
+    db, clock, engine = _held_long_with_rule(tmp_path, "short")
+    maintain = ParsedDecision(
+        decision=TargetDecision(
+            decision_mode=DecisionMode.MAINTAIN_CURRENT,
+            target_side=None,
+            requested_target_margin_pct=None,
+            confidence=D("0.8"),
+            rationale="hold",
+            key_risks=(),
+        ),
+        is_valid=True,
+        invalid_reason=None,
+        raw_response="raw",
+    )
+    with caplog.at_level(logging.WARNING):
+        start = engine.start_plan(maintain)
+    assert start.gate.risk_action is RiskAction.BLOCKED_TO_FLAT and start.plan_id is not None
+    assert any(
+        "closes the held position; the model asked for nothing (guardrail_against_rule)"
+        in r.getMessage()
         for r in caplog.records
     )
     db.close()

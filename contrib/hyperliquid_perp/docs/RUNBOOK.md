@@ -310,6 +310,10 @@ SELECT i.autoresearch_strategy_id, i.autoresearch_bias,
  GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4;
 ```
 
+這句 SQL 的判讀版本住在成績單：`python -m contrib.replay score --db … --run-id <run>` 印
+`research bias`／`research effect` 兩行（規則方向 × 模型方向的表、Cohen's kappa、題數與 kappa 的門檻判定；
+定義在 `contrib/replay/README.md` 成績單那一節）。日常看成績單那兩行；SQL 留給要看 `risk_action` 分佈的時候。
+
 `target_side`／`risk_action` 兩欄的既有語意這裡**不重述**——它們不是本節新增的東西，而重述一次
 就多一份會過期的拷貝（這一段本身在 review 裡連續三輪因為重述而寫錯）。要點只有一句：
 **`target_side` 的 NULL 不代表「模型沒有偏某一邊」。** 契約破損的 cycle 在 parse 接縫就被判掉、

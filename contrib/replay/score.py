@@ -48,6 +48,18 @@ Replay plan §3-7 fixes the definitions, and they are written here once:
   ``autoresearch_bias`` as if it were traded at the cap. Each carries its
   position from row to row and pays the turnover when its position changes
   (decided 2026-09-23).
+- Whether the trader FOLLOWED that bias (autoresearch plan section 7.3,
+  decided 2026-10-16): per rule, the table of the rule's side against the
+  model's side over the answered rows that carried a bias, and Cohen's
+  kappa over it -- agreement beyond what the two sides' own frequencies
+  would produce by chance, so a model that sits long through every bias
+  scores 0 and a rule that never changes side scores nothing. The verdict
+  needs :data:`RESEARCH_MIN_QUESTIONS` readable claims, :data:`RESEARCH_MIN_SIDE`
+  of them on each of two sides, and :data:`RESEARCH_MIN_KAPPA` either way
+  (against the rule is a finding of its own). The rows are the card's, so the
+  holdout lock applies here as everywhere else.
+  Hits and prices play no part: this asks what the model did, not whether
+  it paid.
 
 The split (plan §3-9) is the research package's own, cut over the run's
 span; a row in the holdout is scored only when the caller says so, and a
@@ -67,7 +79,7 @@ from __future__ import annotations
 import math
 import statistics
 from bisect import bisect_left
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
@@ -117,6 +129,31 @@ HORIZONS: Final = (1, 6)
 
 # The baselines, in report order.
 BASELINES: Final = ("buy_hold", "flat", "research_bias")
+# The research section "has an effect" (or the model trades against it) when
+# the model's side agrees with the rule's beyond chance by at least this much
+# kappa either way (0.2 is the conventional floor of "fair" agreement), over
+# at least this many answered questions that carried a bias and a readable
+# claim (the paper-review sample floor), with at least two of the rule's
+# sides each holding this many of them (so a handful of sided bars cannot
+# carry the verdict; a sparse third side neither blocks nor is left out).
+# Plan section 7.3, question 2; decided 2026-10-16. No run was kept without
+# the section, so the chance level is the only control there is.
+RESEARCH_MIN_QUESTIONS: Final = 30
+RESEARCH_MIN_SIDE: Final = 10
+RESEARCH_MIN_KAPPA: Final = 0.20
+# The research verdicts, spelled once; the paper-review skill matches them.
+RESEARCH_EFFECT: Final = "the section has an effect"
+RESEARCH_AGAINST: Final = "the model trades against the rule"
+RESEARCH_NO_EFFECT: Final = "no measurable effect"
+RESEARCH_TOO_FEW: Final = "not enough readable claims"
+RESEARCH_THIN_SIDE: Final = "fewer than two of the rule's sides have enough readable claims"
+RESEARCH_NO_CLAIM: Final = "no readable claim"
+RESEARCH_NEVER_SIDED: Final = "the rule never took a side"
+RESEARCH_NEVER_CHANGED: Final = "the rule never changed side"
+# The verdicts that say nothing about the model: the structural ones (more
+# questions of the same kind would not change them) and the two floors.
+RESEARCH_STRUCTURAL: Final = (RESEARCH_NO_CLAIM, RESEARCH_NEVER_SIDED, RESEARCH_NEVER_CHANGED)
+RESEARCH_UNMEASURED: Final = (*RESEARCH_STRUCTURAL, RESEARCH_TOO_FEW, RESEARCH_THIN_SIDE)
 
 # The buckets a decision is filed under: no call / the model asked / a maintain.
 FAIL_CLOSED: Final = "fail_closed"
@@ -209,6 +246,11 @@ class Question:
         set_(self, "current_side", _enum(self.current_side, TargetSide, f"{me}: current_side"))
         if self.research_bias is not None:
             set_(self, "research_bias", _enum(self.research_bias, TargetSide, f"{me}: bias"))
+        if (self.research_bias is None) != (self.strategy_id is None):
+            raise ScoreError(
+                f"{me}: a research bias comes with its rule's id (got bias "
+                f"{self.research_bias!r}, strategy_id {self.strategy_id!r})"
+            )
         cap = _number(self.max_margin_pct, f"{me}: max_margin_pct")
         if not 0 < cap <= 100:
             raise ScoreError(f"{me}: max_margin_pct is a percent in (0, 100], got {cap!r}")
@@ -780,8 +822,7 @@ class HitStats:
         return None if self.n == 0 else self.hits / self.n
 
     def __str__(self) -> str:
-        rate = "n/a" if self.rate is None else f"{self.rate:.1%}"
-        return f"{rate} ({self.hits}/{self.n})"
+        return f"{_num(self.rate, '{:.1%}')} ({self.hits}/{self.n})"
 
 
 @dataclass(frozen=True)
@@ -826,6 +867,131 @@ class CalibrationBucket:
 
 
 @dataclass(frozen=True)
+class ResearchFollow:
+    """The rule's side against the model's, over the answered rows that carried one rule's bias.
+
+    ``cells`` is keyed by ``(bias, model side)`` and counts the rows where
+    the model made a readable claim; ``fail_closed`` counts, by the rule's
+    side, the rows that carried a bias but no readable claim. An unanswered
+    question is not counted anywhere. The model's side is the scorecard's
+    own reading (a maintained position is the side held, a rejection the
+    side refused).
+    """
+
+    strategy_id: str
+    cells: Mapping[tuple[TargetSide, TargetSide], int]
+    fail_closed: Mapping[TargetSide, int]
+
+    @property
+    def n(self) -> int:
+        """Readable claims."""
+        return sum(self.cells.values())
+
+    def by_bias(self, bias: TargetSide) -> int:
+        return sum(count for (b, _), count in self.cells.items() if b == bias)
+
+    def by_side(self, side: TargetSide) -> int:
+        return sum(count for (_, m), count in self.cells.items() if m == side)
+
+    @property
+    def agreed(self) -> int:
+        return sum(count for (b, m), count in self.cells.items() if b == m)
+
+    @property
+    def readable_sides(self) -> tuple[TargetSide, ...]:
+        """The rule's sides among the readable claims, in enum order."""
+        return tuple(side for side in TargetSide if self.by_bias(side))
+
+    @property
+    def sides_seen(self) -> tuple[TargetSide, ...]:
+        """The rule's sides over every row it carried, fail-closed ones included."""
+        return tuple(
+            side for side in TargetSide if self.by_bias(side) or self.fail_closed.get(side, 0)
+        )
+
+    @property
+    def _chance(self) -> int:
+        """``n * n`` times the agreement the two sides' own frequencies produce by chance."""
+        return sum(self.by_bias(s) * self.by_side(s) for s in TargetSide)
+
+    @property
+    def expected(self) -> float | None:
+        """The agreement the two sides' own frequencies would produce by chance."""
+        return None if self.n == 0 else self._chance / (self.n * self.n)
+
+    @property
+    def kappa(self) -> float | None:
+        """Cohen's kappa; ``None`` while the rule shows one side only among the readable claims.
+
+        A rule stuck on one side leaves nothing to agree with beyond chance:
+        the arithmetic gives 0 whatever the model did, which would read as a
+        finding about the model. Formed as one ratio of integers, so a table
+        that sits exactly on :data:`RESEARCH_MIN_KAPPA` is not pushed under
+        it by rounding.
+        """
+        if len(self.readable_sides) < 2:
+            return None
+        n, chance = self.n, self._chance
+        return (n * self.agreed - chance) / (n * n - chance)
+
+    @property
+    def verdict(self) -> str:
+        """What can be said. The structural refusals come before the floors: more
+        questions of the same kind would not change them."""
+        if self.n == 0:
+            return RESEARCH_NO_CLAIM
+        if len(self.sides_seen) < 2:
+            return (
+                RESEARCH_NEVER_SIDED
+                if self.sides_seen == (TargetSide.FLAT,)
+                else RESEARCH_NEVER_CHANGED
+            )
+        if self.n < RESEARCH_MIN_QUESTIONS:
+            return RESEARCH_TOO_FEW
+        second = sorted((self.by_bias(side) for side in TargetSide), reverse=True)[1]
+        if second < RESEARCH_MIN_SIDE:
+            return RESEARCH_THIN_SIDE
+        kappa = self.kappa
+        assert kappa is not None  # two sides clear the side floor
+        if kappa >= RESEARCH_MIN_KAPPA:
+            return RESEARCH_EFFECT
+        if kappa <= -RESEARCH_MIN_KAPPA:
+            return RESEARCH_AGAINST
+        return RESEARCH_NO_EFFECT
+
+    def describe(self) -> list[str]:
+        """Two lines: the table, then the verdict."""
+        # One row per side the rule held, fail-closed-only sides included, so
+        # a side short of the floor is visible as a row of zeros.
+        rows = [
+            f"rule {bias.value} {self.by_bias(bias)} -> model "
+            + ", ".join(f"{side.value} {self.cells.get((bias, side), 0)}" for side in TargetSide)
+            for bias in self.sides_seen
+        ]
+        table = "; ".join(rows) if self.n else "no readable claim"
+        failed = sum(self.fail_closed.values())
+        by_rule = ", ".join(
+            f"{side.value} {self.fail_closed[side]}" for side in TargetSide if self.fail_closed.get(side)
+        )
+        verdict = self.verdict
+        needs = (
+            ""
+            if verdict not in (RESEARCH_TOO_FEW, RESEARCH_THIN_SIDE)
+            else (
+                f" (needs >= {RESEARCH_MIN_QUESTIONS} readable claims, >= {RESEARCH_MIN_SIDE} on "
+                f"each of two sides, |kappa| >= {RESEARCH_MIN_KAPPA:.2f})"
+            )
+        )
+        return [
+            f"research bias ({self.strategy_id}): {self.n + failed} answered question(s) "
+            f"carried it; {table}; fail-closed {failed}" + (f" ({by_rule})" if by_rule else ""),
+            f"research effect ({self.strategy_id}): readable claims {self.n}, agreement "
+            f"{_rate(self.agreed, self.n)}, by chance {_num(self.expected, '{:.1%}')}, "
+            f"kappa {_num(self.kappa, '{:+.2f}')} -> {verdict}{needs}",
+        ]
+
+
+@dataclass(frozen=True)
 class Baseline:
     name: str
     hits: HitStats
@@ -863,6 +1029,9 @@ class Summary:
     segments: Mapping[str, int]
     regimes: Mapping[str, int]
     reports_present: int | None
+    research_carried: int
+    research_unrecorded: int
+    research: tuple[ResearchFollow, ...]
     horizons: tuple[HorizonSummary, ...]
 
     @property
@@ -905,9 +1074,23 @@ class Summary:
                 f"questions with a .reports.json beside the payload: "
                 f"{self.reports_present}/{self.questions}"
             )
+        # A NULL bias under a shape with the section is a row written before
+        # schema v13, not a cycle without the section (RUNBOOK section 4).
+        unrecorded = (
+            f"; {self.research_unrecorded} had the section but no recorded bias "
+            "(written before schema v13)"
+            if self.research_unrecorded
+            else ""
+        )
+        lines.append(
+            f"research bias: {self.research_carried} of {self.answered} answered question(s) "
+            f"carried one{unrecorded}"
+        )
+        for follow in self.research:
+            lines.extend(follow.describe())
         for horizon in self.horizons:
             lines.append(f"-- {horizon.label} ahead ({horizon.bars} bar(s)) --")
-            band = "n/a" if horizon.flat_band is None else f"+/-{horizon.flat_band:.3%}"
+            band = _num(horizon.flat_band, "+/-{:.3%}")
             lines.append(
                 f"  flat band {band}; answered rows marked from the research store: "
                 f"{horizon.marks_from_research}"
@@ -931,6 +1114,10 @@ class Summary:
 
 def _rate(count: int, of: int) -> str:
     return f"{count}/{of}" + ("" if of == 0 else f" ({count / of:.1%})")
+
+
+def _num(value: float | None, form: str) -> str:
+    return "n/a" if value is None else form.format(value)
 
 
 def _sharpe(values: Sequence[float], periods_per_year: float) -> float:
@@ -993,6 +1180,31 @@ def _cap(row: Scored) -> float:
 def _bias_exposure(row: Scored) -> float | None:
     bias = row.question.research_bias
     return None if bias is None else _SIGN[bias] * _cap(row)
+
+
+def _research_follow(answered: Sequence[Scored]) -> tuple[ResearchFollow, ...]:
+    """One record per rule, in first-seen order, over the answered rows carrying its bias."""
+    cells: defaultdict[str, Counter[tuple[TargetSide, TargetSide]]] = defaultdict(Counter)
+    fail_closed: defaultdict[str, Counter[TargetSide]] = defaultdict(Counter)
+    for row in answered:
+        bias = row.question.research_bias
+        if bias is None:
+            continue
+        key = row.question.strategy_id
+        assert key is not None  # Question refuses a bias without its rule
+        table = cells[key]
+        if row.ai_side is None:
+            fail_closed[key][bias] += 1
+        else:
+            table[(bias, row.ai_side)] += 1
+    return tuple(
+        ResearchFollow(strategy_id=key, cells=dict(table), fail_closed=dict(fail_closed[key]))
+        for key, table in cells.items()
+    )
+
+
+def _has_section(question: Question) -> bool:
+    return "autoresearch" in (question.context_shape or "").split("|")
 
 
 def _two_by_two(outcomes: Iterable[Outcome]) -> dict[str, int]:
@@ -1081,6 +1293,13 @@ def _summarise(card: Scorecard) -> Summary:
         segments=dict(segments),
         regimes=dict(regimes),
         reports_present=reports,
+        research_carried=sum(1 for row in answered_rows if row.question.research_bias is not None),
+        research_unrecorded=sum(
+            1
+            for row in answered_rows
+            if row.question.research_bias is None and _has_section(row.question)
+        ),
+        research=_research_follow(answered_rows),
         horizons=tuple(horizons),
     )
 

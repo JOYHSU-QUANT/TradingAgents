@@ -267,6 +267,11 @@ exit code 告警；(2) 先跑一次、看 `guardrail signal: <side>`
 (5) 閘門自己那行 `trend guardrail: the rule (<side>) …; the model asked for …`——規則平了持倉、擋了空帳上的單、
 或因 `unknown` 拒了開倉／加碼，對應 `ai_outputs` 那列的 `blocked_to_flat`／`guardrail_rule_unknown`（未知那一輪
 若模型有要方向，族 2 與族 5 各一行）。開機另有一行 INFO `trend guardrail: reading <path>`／`off`，用來確認開關真的開了。
+連續 6 個有判決的 cycle 都讀到 `unknown` 時，daemon 自己升到 **ERROR**（`trend guardrail for <run> has read unknown on N
+gated rounds in a row`，之後每輪一行，讀到方向就歸零；重啟會重數）。這行 ERROR 是純 stderr，journal 裡沒有
+priority，`-p err` 篩不到，要用字串找。dashboard 同時亮 `<hl>:guardrail_unknown`（exporter 的
+`guardrail_unknown_cycles`，預設 6；hyperliquid 那條線的 `recent` 低於它會在 exporter 載入時被拒）；ERROR 與 dashboard
+兩者都指向同一件事：producer 的 `guardrail-signal` 或 `fetch` 停了。
 `ai_outputs.risk_action = blocked_to_flat` 是有答案的那一輪護欄擋了單或平了倉；
 `validate` 印 `guardrail_unknown_streak`／`guardrail_blocked`／`guardrail_sweep_plans`，連續未知 ≥ 6 個決策
 cycle 印 `shortfall:` 並 exit 4；`contrib.replay score` 的 `guardrail blocked` 行只數有 `ai_outputs` 列的介入。

@@ -92,6 +92,13 @@ class Thresholds:
     export_stale_hours: float = 5.0
     uniswap_behind_hours: float = 3.5
     uniswap_no_decision_hours: float = 48.0
+    # Decided cycles in a row whose verdict read the trend guardrail as
+    # ``unknown`` (the perp validator's own threshold, 2026-10-16). The rule
+    # reads the ``recent`` cycles the status document carries, so a
+    # hyperliquid line's ``recent`` below this is refused at load (the rule
+    # could never fire); ``api_failed`` cycles inside the window carry no
+    # verdict and do not count, so leave slack above the threshold.
+    guardrail_unknown_cycles: int = 6
     handoff_due_utc: time = time(0, 30)
     disk_used_pct: int = 85
     memory_available_mb: int = 200
@@ -365,6 +372,7 @@ THRESHOLD_PARSERS: dict[str, Callable[[Mapping[str, Any], str, str, Any], Any]] 
     "export_stale_hours": _hours,
     "uniswap_behind_hours": _hours,
     "uniswap_no_decision_hours": _hours,
+    "guardrail_unknown_cycles": _int,
     "handoff_due_utc": _clock,
     "disk_used_pct": _pct,
     "memory_available_mb": _int,
@@ -512,10 +520,20 @@ def load_config(path: Path) -> ExporterConfig:
     prefix = top.get("subject_prefix", ExporterConfig.subject_prefix)
     if not isinstance(prefix, str) or not prefix.strip() or any(c in prefix for c in "\r\n"):
         raise ConfigError(f"{where}.subject_prefix must be one line of text")
+    thresholds = _thresholds(top.get("thresholds", {}), f"{where}.thresholds")
+    for index, line in enumerate(lines):
+        # A window shorter than the streak it is judged by is a rule that can
+        # never fire, with nothing to say so: refused here, by name.
+        if isinstance(line, HyperliquidLine) and line.recent < thresholds.guardrail_unknown_cycles:
+            raise ConfigError(
+                f"{where}.lines[{index}].recent is {line.recent}, below "
+                f"thresholds.guardrail_unknown_cycles ({thresholds.guardrail_unknown_cycles}): the "
+                "guardrail_unknown rule reads the recent cycles and could never fire"
+            )
     return ExporterConfig(
         status_dir=_path(top, "status_dir", where, base),
         lines=lines,
-        thresholds=_thresholds(top.get("thresholds", {}), f"{where}.thresholds"),
+        thresholds=thresholds,
         history=_history(top.get("history", {}), f"{where}.history"),
         digest_utc=_clock(top, "digest_utc", where, ExporterConfig.digest_utc),
         command_timeout_seconds=_int(

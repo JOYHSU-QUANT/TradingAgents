@@ -30,6 +30,7 @@ thresholds:
   export_stale_hours: 5            # hyperliquid: export breadcrumb this old
   uniswap_behind_hours: 3.5        # uniswap: clock behind, latest boundary this far past (the three visit slots done)
   uniswap_no_decision_hours: 48    # uniswap: no bar decided this long after the run was created
+  guardrail_unknown_cycles: 6      # hyperliquid: the newest decided cycles all read the trend guardrail as unknown (needs recent >= this)
   handoff_due_utc: "00:30"         # carry: a handoff for a day before today is stale from this hour
   disk_used_pct: 85
   memory_available_mb: 200

@@ -57,6 +57,7 @@ from ..persistence.db import Database
 from ..persistence.models import DECIMAL_CONTEXT
 from ..runtime import accounting
 from ..runtime.no_decision import (
+    GUARDRAIL_UNKNOWN_STREAK_THRESHOLD,
     STREAK_RECENCY_WINDOW,
     TrailingFailureStreaks,
     no_decision_shortfall,
@@ -77,13 +78,6 @@ __all__ = [
 # (the §20.3 acceptance gate on a LIVE run) — two specs, two gates, one number
 # by coincidence; deliberately not tied together (issue #102).
 MIN_CYCLES_FOR_PHASE3 = 30
-# How many decided cycles in a row the trend guardrail may read as ``unknown``
-# before the report says the run is not yet acceptable (exit 4): about a day
-# of 4h rounds with the producer or its `fetch` down, during which nothing new
-# opens and nothing held can be closed by the rule (decided 2026-10-16: the
-# book is kept, and the condition is made visible here rather than acted on).
-GUARDRAIL_UNKNOWN_STREAK_THRESHOLD = 6
-
 
 # Cycles that actually produced (or fail-closed) a decision. api_failed is
 # deliberately NOT counted toward cycle_count / the ≥30 gate: spec §3.1 grants

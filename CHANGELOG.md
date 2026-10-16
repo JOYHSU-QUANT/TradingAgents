@@ -10,6 +10,22 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **Before the trend guardrail is switched on (issue #372).** The paper
+  engine escalates to an ERROR per round (a text-searchable journal line;
+  the daemon's stderr carries no journald priority) once the guardrail has
+  read `unknown` on 6 decided rounds in a row
+  (`runtime.no_decision.note_guardrail_reading`, the shape of the no-decision
+  escalation; `GUARDRAIL_UNKNOWN_STREAK_THRESHOLD` now lives there); the
+  dashboard raises `<hl line>:guardrail_unknown` from the same count over the
+  status document's recent cycles (threshold `guardrail_unknown_cycles`, 6; a
+  hyperliquid line whose `recent` is below it is refused at load);
+  `contrib.replay replay` re-gates every question under the trend guardrail
+  reading its row recorded (`ai_outputs.guardrail_side`), so a segment with
+  the guardrail on replays under the daemon's own gate; `GuardrailSignal`
+  accepts only the rule's `4h` interval (`GUARDRAIL_INTERVAL`, which the
+  producer's `RULE_INTERVAL` borrows); a `decision_source.provider:
+  file_target` run that names `risk.trend_guardrail` is refused at config
+  load.
 - **`contrib/hyperliquid_perp`: the trend guardrail gate, off by default
   (`risk.trend_guardrail`).** The design of 2026-10-02 (shadow mode shipped
   as PR #321's offline report) now sits in the trading path: the research
@@ -43,7 +59,7 @@ Breaking changes within the 0.x line are called out explicitly.
   reading the paper engine does. `guardrail-signal` refuses to write when
   the store's newest bar is already past the gate's bound (fetch first).
   The replay scorecard reads the new action (`guardrail blocked: N`); the
-  `replay` command re-gates without the guardrail, a documented limitation.
+  `replay` command's re-gate under the recorded reading is in the entry above.
 - **`contrib/replay score`: did the trader follow the research bias.** One
   summary line counts the answered questions that carried a bias (telling
   pre-v13 rows, which had the section but no recorded bias, from cycles

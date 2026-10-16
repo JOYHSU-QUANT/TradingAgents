@@ -1486,6 +1486,9 @@ import logging  # noqa: E402
 
 from contrib.hyperliquid_perp.domains.perp.risk_gate import RiskAction  # noqa: E402
 from contrib.hyperliquid_perp.domains.perp.schema import GuardrailSignal  # noqa: E402
+from contrib.hyperliquid_perp.runtime.no_decision import (  # noqa: E402
+    GUARDRAIL_UNKNOWN_STREAK_THRESHOLD,
+)
 
 
 def _guardrail_document(tmp_path, side: str) -> str:
@@ -1704,4 +1707,27 @@ def test_a_maintain_closed_by_the_rule_is_logged_as_asking_for_nothing(tmp_path,
         in r.getMessage()
         for r in caplog.records
     )
+    db.close()
+
+
+def test_unknown_readings_escalate_to_an_error_at_the_threshold_and_a_side_resets_them(
+    tmp_path, caplog
+):
+    db, clock, engine = _held_long_with_rule(tmp_path, "unknown")
+    _provider(engine, [snap()] * 20)
+    with caplog.at_level(logging.WARNING):
+        for _ in range(GUARDRAIL_UNKNOWN_STREAK_THRESHOLD - 1):
+            engine.start_plan(set_target("short", 5))
+        assert not [r for r in caplog.records if r.levelno == logging.ERROR]
+        engine.start_plan(set_target("short", 5))
+        engine.start_plan(set_target("short", 5))  # and every round after
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 2
+    assert "has read unknown on 6 gated rounds in a row (~24h)" in errors[0]
+    assert "has read unknown on 7 gated rounds in a row (~28h)" in errors[1]
+    assert engine._guardrail_unknown_streak == GUARDRAIL_UNKNOWN_STREAK_THRESHOLD + 1
+    # A round that reads a side starts the count over.
+    _with_guardrail(engine, _guardrail_document(tmp_path, "long"))
+    engine.start_plan(set_target("long", 5))
+    assert engine._guardrail_unknown_streak == 0
     db.close()

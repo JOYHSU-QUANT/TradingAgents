@@ -533,6 +533,7 @@ python -m contrib.autoresearch guardrail-signal --coin BTC --out /srv/guardrail-
 - `side` 四種：`long`／`short`／`flat`／`unknown`。`unknown`＝最新一根規則讀不到條件，或整段歷史規則從未站邊
   （重放從 store 第一根空手起算，那個「空手」可能是 store 之前就開的倉，閘門不該憑它平倉）。文件照寫、指令 exit 0，
   讀端對 `unknown` 留一行 WARNING（與文件缺／過期是不同的 WARNING，效果相同），閘門對兩者做同一件事：不開新倉、既有倉位照舊。
+- `interval` 永遠是規則的 `4h`（讀端拒絕其他值，當 `unknown` 處理）。
 - 跟 `signal` 同一個寫法（暫存檔＋rename）、同一條過期上限（丟掉舊超過 `MAX_SIGNAL_AGE_INTERVALS` 根文件
   bar 的文件；但護欄的讀端以**閘門主機的時鐘**為準，研究訊號的讀端以 context 那根 bar 為準），指令會印出要多常跑。`--rule` 可換 spec 檔，
   `rule_id` 會跟著 hash 變，指令的輸出與讀端的 `unknown` WARNING 都印它（閘門本身不比對）。

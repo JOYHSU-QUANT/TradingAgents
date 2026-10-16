@@ -395,6 +395,26 @@ def test_load_config_rejects_a_bad_decision_source_by_name(tmp_path, text, match
     assert match in str(excinfo.value)
 
 
+def test_load_config_refuses_the_trend_guardrail_on_a_file_target_run(tmp_path):
+    # The carry sleeve's perp leg takes its side from the coordinator; the
+    # guardrail would close positions it asked for (issue #372).
+    cfg = tmp_path / "carry.yaml"
+    cfg.write_text(
+        "decision_source:\n  provider: file_target\n  target_path: /srv/carry/handoff-ETH.json\n"
+        "risk:\n  trend_guardrail: /srv/guardrail.json\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="trend_guardrail is set on a decision_source.provider"):
+        load_config(cfg)
+    # The key left empty is the ordinary carry config.
+    cfg.write_text(
+        "decision_source:\n  provider: file_target\n  target_path: /srv/carry/handoff-ETH.json\n"
+        'risk:\n  trend_guardrail: ""\n',
+        encoding="utf-8",
+    )
+    assert load_config(cfg)["decision_source"]["provider"] == "file_target"
+
+
 def test_the_example_yaml_ships_the_engine_provider():
     # The block is commented out in the example: every run before it existed
     # was an engine run, and the paper-BTC run must not change provider on a

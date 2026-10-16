@@ -85,6 +85,7 @@ from ..ports import Clock, FundingSource, SnapshotProvider
 from ..runtime import accounting
 from ..runtime.asset_spec import AssetSpec
 from ..runtime.market_feed import SnapshotOutcome, SnapshotResult
+from ..runtime.no_decision import note_guardrail_reading
 from . import accounting as paper_accounting
 from .config import PaperTradingConfig
 from .fill_model import fill_price, maker_post_price, maker_would_fill
@@ -405,6 +406,10 @@ class PaperExecutionEngine:
         self._paper = paper_config
         self._stop = stop_config or StopConfig()
         self._funding = funding_source
+        # The in-process count behind the ERROR escalation
+        # (``runtime.no_decision.note_guardrail_reading``): decided rounds in
+        # a row that read the guardrail as unknown.
+        self._guardrail_unknown_streak = 0
         # Off and healthy must not look alike in the log: say once which it is.
         logger.info(
             "trend guardrail: %s",
@@ -690,6 +695,15 @@ class PaperExecutionEngine:
         assert snap is not None  # is_valid guarantees a snapshot (SnapshotResult invariant)
         position = self._read_position()
         gate, equity = self._gate(parsed, position, snap.mark_price, now)
+        if gate.guardrail is not None:
+            # Once per decided round (a flip's open leg gates again but is
+            # the same round): the in-process half of the unknown-streak
+            # escalation, beside the durable count ``validate`` reads.
+            self._guardrail_unknown_streak = note_guardrail_reading(
+                self._guardrail_unknown_streak,
+                unknown=gate.guardrail is GuardrailSide.UNKNOWN,
+                run_id=self._run_id,
+            )
         if not gate.order_created:
             return PlanStartResult(
                 gate,

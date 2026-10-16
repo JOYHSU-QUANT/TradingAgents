@@ -10,15 +10,18 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
-- **`contrib/replay score`: did the trader follow the research bias.** Two
-  new summary lines per rule, `research bias` and `research effect`: the
-  table of the rule's side against the model's over the answered questions
-  that carried a bias, Cohen's kappa over it, and a verdict against
-  `RESEARCH_MIN_QUESTIONS` (30) and `RESEARCH_MIN_KAPPA` (0.20). A model
-  that sits on one side through every bias scores 0; a rule that never
-  took a side prints no kappa; a model that trades against the rule is
-  named as such; a run whose questions carried no bias says
-  so in one line. Answers the two questions autoresearch plan section 7.3
+- **`contrib/replay score`: did the trader follow the research bias.** One
+  summary line counts the answered questions that carried a bias (telling
+  pre-v13 rows, which had the section but no recorded bias, from cycles
+  without it), then two lines per rule, `research bias` and `research
+  effect`: the table of the rule's side against the model's over the
+  readable claims, Cohen's kappa over it, and a verdict against
+  `RESEARCH_MIN_QUESTIONS` (30), `RESEARCH_MIN_SIDE` (10 on the rule's
+  rarer side) and `RESEARCH_MIN_KAPPA` (0.20 either way). A model that sits
+  on one side through every bias scores 0; a rule that never changed side
+  prints no kappa and no verdict about the model; a model that trades
+  against the rule is named as such. The verdicts are module constants
+  (`RESEARCH_*`). Answers the two questions autoresearch plan section 7.3
   left open (where the measure lives, and what counts as "an effect").
 
 ### Fixed

@@ -78,15 +78,21 @@ carry 計畫 PR 2）整個 run 具名拒絕——沒有題目，成績單與考�
 - **對照組**：買進持有（該列的 `max_target_margin_pct` 上限）、永遠 flat、`autoresearch_bias`
   照上限交易；跨列帶倉位、部位改變時付周轉成本，**只跑在有答案的題上**（2026-09-23 拍板）。
   buy-hold 與 flat 的 n 與交易員相同；research_bias 跳過沒有 bias 的列，n 較小。
-- **模型有沒有跟著 bias 走**（autoresearch plan §7.3，2026-10-16 定案）：每條規則印兩行——
-  `research bias`＝「規則方向 × 模型方向」的表（只算有 bias 且模型有主張的題；模型方向照上面的讀法，
-  maintain＝持有的那邊、被拒＝被拒的那邊；fail-closed 另計）；`research effect`＝一致率、偶然一致率、
-  Cohen's kappa（超出偶然的一致：模型整段抱同一邊＝0、規則從未站邊＝不量）與判定。
-  判定「這一段有作用」要題數 ≥ 30 且 kappa ≥ 0.20；kappa ≤ −0.20 另印「模型反著規則做」（也是一種作用）；
-  兩個門檻是程式常數（`RESEARCH_MIN_QUESTIONS`／`RESEARCH_MIN_KAPPA`）。規則從未站邊、兩邊都恆定、
-  全部 fail-closed 這三種結構性情況先於題數門檻判，再多題也不會變。題數是成績單那些列的（train＋validation；
-  holdout 題要 `--holdout` 才算進來）——這一表不讀價格，但刻意沿用同一道鎖，省得一份成績單有兩套列集。
-  它與 `research_bias` 對照組是兩件事：對照組問「照規則交易賺不賺」，這兩行問「模型做了什麼」；
+- **模型有沒有跟著 bias 走**（autoresearch plan §7.3，2026-10-16 定案）：先一行「幾題有 bias」
+  （`research bias: N of M answered question(s) carried one`；shape 有 `autoresearch` 卻沒 bias 的列是 v13
+  之前寫的，另外報數、不算「沒有這一段」），然後每條規則兩行——`research bias (<rule>)`＝「規則方向 ×
+  模型方向」的表（只算模型有可讀主張的題；模型方向照上面的讀法，maintain＝持有的那邊、被拒＝被拒的那邊；
+  fail-closed 另計、附規則方向）；`research effect (<rule>)`＝可讀主張數、一致率、偶然一致率、Cohen's kappa
+  （超出偶然的一致；模型整段抱同一邊＝0）與判定。
+  判定依序：結構性情況先（`no readable claim`、`the rule never took a side`、`the rule never changed side`——
+  規則整段同一邊時 kappa 恆為 0，不是模型的事，所以不印 kappa 也不判）；再門檻（`not enough readable claims`
+  ＝可讀主張 < 30、`too few readable claims on the rule's rarer side`＝規則較少那一邊 < 10）；過了才看 kappa：
+  ≥ 0.20「有作用」、≤ −0.20「模型反著規則做」、其他「量不出作用」。三個門檻是程式常數
+  （`RESEARCH_MIN_QUESTIONS`／`RESEARCH_MIN_SIDE`／`RESEARCH_MIN_KAPPA`，2026-10-16 拍板），判定字串也是
+  （`RESEARCH_*`，paper-review skill 比對它們）。kappa 不加權：三個 run 至今只出現多／空手兩類，加權與否
+  相同；規則出現「空」之後再決定要不要加權。題數是成績單那些列的（train＋validation；holdout 題要 `--holdout`
+  才算進來）——這一表不讀價格，但刻意沿用同一道鎖，省得一份成績單有兩套列集。
+  它與 `research_bias` 對照組是兩件事：對照組問「照規則交易賺不賺」，這幾行問「模型做了什麼」；
   沒有不帶這一段的 run，偶然一致率就是唯一的對照。
 - **fail-closed 率**＝`risk_action = invalid_fail_closed`，依 `risk_reason` 分組（通常是
   `invalid_output`／`truncated_output`），分母是最終答案；同一個 cycle 內的重試另印一行

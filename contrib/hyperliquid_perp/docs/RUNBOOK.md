@@ -260,10 +260,13 @@ maker 成本下重跑通過才可以翻這個開關。這條有程式擋著：`s
 設計上的拒絕會 exit 1，腳本若 `set -e` 或把它串在後面，文件就斷供、8 小時後全 `unknown`），cron 對它自己的
 exit code 告警；(2) 先跑一次、看 `guardrail signal: <side>`
 那行與文件存在；(3) 再把路徑填進 `local.yaml` 的 `risk.trend_guardrail`、開新 run。日常看 log，
-`trend guardrail` 開頭的 WARNING 有四族：(1) 文件讀不到、不合契約、過期、幣不對或時戳在未來；(2) 文件說
+`trend guardrail` 開頭的 WARNING 有五族：(1) 文件讀不到、不合契約、過期、幣不對或時戳在未來；(2) 文件說
 `unknown`——族 1、2 那一輪不開新倉、既有倉位照舊；(3) `trend guardrail sweep: closing …` 是 API 失敗那一輪
 **下了平倉 plan**（plan 沒有 `ai_outputs` 列；plan 仍可能被拒，例如倉位小於最小單額，看 `execution_plans.status`）；
-(4) `trend guardrail sweep: … no market snapshot could be read` 是規則要平、那輪卻讀不到行情，倉位留到下一輪。
+(4) `trend guardrail sweep: … no market snapshot could be read` 是規則要平、那輪卻讀不到行情，倉位留到下一輪；
+(5) 閘門自己那行 `trend guardrail: the rule (<side>) …; the model asked for …`——規則平了持倉、擋了空帳上的單、
+或因 `unknown` 拒了開倉／加碼，對應 `ai_outputs` 那列的 `blocked_to_flat`／`guardrail_rule_unknown`（未知那一輪
+若模型有要方向，族 2 與族 5 各一行）。開機另有一行 INFO `trend guardrail: reading <path>`／`off`，用來確認開關真的開了。
 `ai_outputs.risk_action = blocked_to_flat` 是有答案的那一輪護欄擋了單或平了倉；
 `validate` 印 `guardrail_unknown_streak`／`guardrail_blocked`／`guardrail_sweep_plans`，連續未知 ≥ 6 個決策
 cycle 印 `shortfall:` 並 exit 4；`contrib.replay score` 的 `guardrail blocked` 行只數有 `ai_outputs` 列的介入。

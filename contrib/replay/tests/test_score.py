@@ -19,7 +19,6 @@ from contrib.hyperliquid_perp.domains.perp.target_decision import (
     DecisionMode,
     ParsedDecision,
     TargetDecision,
-    TargetSide as _GateSide,
 )
 from contrib.replay.score import (
     Answer,
@@ -1033,7 +1032,7 @@ def test_a_blocked_row_is_never_a_maintain():
 def _decision(mode: str, side: str | None, margin: int | None, confidence: str) -> ParsedDecision:
     decision = TargetDecision(
         decision_mode=DecisionMode(mode),
-        target_side=None if side is None else _GateSide(side),
+        target_side=None if side is None else TargetSide(side),
         requested_target_margin_pct=margin,
         confidence=Decimal(confidence),
         rationale="pin",
@@ -1053,7 +1052,7 @@ def _fail_closed() -> ParsedDecision:
 
 def _held_long() -> _gate.CurrentPositionState:
     return _gate.CurrentPositionState(
-        side=_GateSide.LONG, signed_notional=Decimal(300), margin_pct=Decimal(30)
+        side=TargetSide.LONG, signed_notional=Decimal(300), margin_pct=Decimal(30)
     )
 
 

@@ -506,6 +506,7 @@ def _facts(**overrides) -> InputFacts:
         "size": Decimal("3"),
         "margin_pct": Decimal("30"),
         "leverage": Decimal("1"),
+        "guardrail_side": None,
     }
     base.update(overrides)
     return InputFacts(**base)

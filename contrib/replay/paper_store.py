@@ -343,8 +343,10 @@ class InputFacts:
     leverage: Decimal
     # What the gate read from the trend guardrail on this round (schema v14):
     # ``None`` with the guardrail off. The replay re-gates under the same
-    # reading, so a segment with the guardrail on replays under the same gate.
-    guardrail_side: GuardrailSide | None = None
+    # reading, so a segment with the guardrail on replays under the same
+    # gate. Required, not defaulted: a caller that forgets it must not
+    # replay without the guardrail and look like a run that had it off.
+    guardrail_side: GuardrailSide | None
 
 
 def _payload_name(recorded: object) -> str | None:

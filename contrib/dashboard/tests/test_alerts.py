@@ -650,3 +650,6 @@ def test_the_guardrail_read_unknown_on_six_decided_cycles_is_a_condition(tmp_pat
     # A run without the guardrail (NULL readings) never raises it.
     doc["cycles"]["recent"] = [cycle(4 * i + 1, None) for i in range(8)]
     assert _keys(_tick(tmp_path, docs)) == []
+    # A verdict that lost the key is a document of another shape, said so.
+    del doc["cycles"]["recent"][0]["verdict"]["guardrail_side"]
+    assert _keys(_tick(tmp_path, docs)) == ["hl-paper:rules_failed"]

@@ -130,10 +130,10 @@ __all__ = [
     "Engine",
     "FillRole",
     "GuardrailError",
+    "GuardrailSide",
     "MarketDataConfig",
     "PaperTradingConfig",
     "ResearchStore",
-    "GuardrailSide",
     "RiskAction",
     "RiskConfig",
     "RiskGateResult",
@@ -208,12 +208,12 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.hyperliquid_perp.domains.perp.market_data_config", "MarketDataConfig"),
     ("contrib.hyperliquid_perp.domains.perp.risk_gate", "CurrentPositionState"),
     ("contrib.hyperliquid_perp.domains.perp.risk_gate", "RiskAction"),
-    # What the gate read from the trend guardrail on each recorded round
-    # (schema v14), so the replay re-gates under the same reading.
-    ("contrib.hyperliquid_perp.domains.perp.schema", "GuardrailSide"),
     ("contrib.hyperliquid_perp.domains.perp.risk_gate", "RiskConfig"),
     ("contrib.hyperliquid_perp.domains.perp.risk_gate", "RiskGateResult"),
     ("contrib.hyperliquid_perp.domains.perp.risk_gate", "evaluate"),
+    # What the gate read from the trend guardrail on each recorded round
+    # (schema v14), so the replay re-gates under the same reading.
+    ("contrib.hyperliquid_perp.domains.perp.schema", "GuardrailSide"),
     ("contrib.hyperliquid_perp.domains.perp.schema", "interval_to_ms"),
     ("contrib.hyperliquid_perp.domains.perp.target_decision", "DecisionConfig"),
     ("contrib.hyperliquid_perp.domains.perp.target_decision", "DecisionMode"),

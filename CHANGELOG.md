@@ -11,12 +11,14 @@ Breaking changes within the 0.x line are called out explicitly.
 ### Added
 
 - **Before the trend guardrail is switched on (issue #372).** The paper
-  engine escalates to an ERROR per round once the guardrail has read
-  `unknown` on 6 gated rounds in a row
+  engine escalates to an ERROR per round (a text-searchable journal line;
+  the daemon's stderr carries no journald priority) once the guardrail has
+  read `unknown` on 6 decided rounds in a row
   (`runtime.no_decision.note_guardrail_reading`, the shape of the no-decision
   escalation; `GUARDRAIL_UNKNOWN_STREAK_THRESHOLD` now lives there); the
   dashboard raises `<hl line>:guardrail_unknown` from the same count over the
-  status document's recent cycles (threshold `guardrail_unknown_cycles`, 6);
+  status document's recent cycles (threshold `guardrail_unknown_cycles`, 6; a
+  hyperliquid line whose `recent` is below it is refused at load);
   `contrib.replay replay` re-gates every question under the trend guardrail
   reading its row recorded (`ai_outputs.guardrail_side`), so a segment with
   the guardrail on replays under the daemon's own gate; `GuardrailSignal`

@@ -225,7 +225,7 @@ gate 區塊（mode / allow_real_orders / safety 等，見 phase3-spec §24）—
 | `runtime/run_identity.py` | ✅ | `open_run(db_path, run_id, *, create)`：`paper` 與 `live --run-id` 開 run 所屬的 store、判定新 run 還是重啟；拒絕是 `RunIdentityRefusal`，措辭在 cli（`_open_run_or_exit`）；run-mode 檢查是 `OpenedRun.foreign_mode`，由各 lane 自己呼叫。 |
 | `runtime/genesis.py` | ✅ | `write_genesis(...)`：把 lane 的 `--create` 輸入（開帳餘額、seed 倉位、config subset）轉成那一次 `accounting.initialize_run` 呼叫。 |
 | `runtime/run_lock.py` | ✅ | 單實例 lease（`scheduler_state` 的 pid + heartbeat）：同一 run 同時只允許一個 process（paper daemon 或 live loop），防重複啟動互相取消活單、雙倍 AI 花費。 |
-| `runtime/no_decision.py` | ✅ | no-decision 升級政策（issue #50／#122）：streak 門檻、`decision_attempts` 查詢、shortfall 措辭、每 cycle 的 log 升級；兩個 validator 與兩個 running loop 共用。從 `common/` 搬來——它認得 store 的表形狀，不該住在 import 圖最底層。 |
+| `runtime/no_decision.py` | ✅ | no-decision 升級政策（issue #50／#122）：streak 門檻、`decision_attempts` 查詢、shortfall 措辭、每 cycle 的 log 升級；2026-10-16 起也放趨勢護欄的 `unknown` 連讀門檻與 ERROR 升級（`note_guardrail_reading`）；兩個 validator 與兩個 running loop 共用。從 `common/` 搬來——它認得 store 的表形狀，不該住在 import 圖最底層。 |
 | `cli/` + `__main__.py` | ✅ | `python -m contrib.hyperliquid_perp paper / export / validate / status / live / live-smoke / safe-mode`；空 argv／旗標式呼叫原樣委派 legacy `main.py`（`--context-only` 不變），未知裸字具名報錯 exit 1；迴圈運行中 SIGTERM 與 Ctrl-C 同樣走收尾 export（啟動／reconciliation 階段收到則 exit 130、無收尾 export）。 |
 
 ### Phase 3 — live execution

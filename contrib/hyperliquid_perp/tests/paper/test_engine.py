@@ -1720,10 +1720,12 @@ def test_unknown_readings_escalate_to_an_error_at_the_threshold_and_a_side_reset
             engine.start_plan(set_target("short", 5))
         assert not [r for r in caplog.records if r.levelno == logging.ERROR]
         engine.start_plan(set_target("short", 5))
+        engine.start_plan(set_target("short", 5))  # and every round after
     errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
-    assert len(errors) == 1
+    assert len(errors) == 2
     assert "has read unknown on 6 gated rounds in a row (~24h)" in errors[0]
-    assert engine._guardrail_unknown_streak == GUARDRAIL_UNKNOWN_STREAK_THRESHOLD
+    assert "has read unknown on 7 gated rounds in a row (~28h)" in errors[1]
+    assert engine._guardrail_unknown_streak == GUARDRAIL_UNKNOWN_STREAK_THRESHOLD + 1
     # A round that reads a side starts the count over.
     _with_guardrail(engine, _guardrail_document(tmp_path, "long"))
     engine.start_plan(set_target("long", 5))

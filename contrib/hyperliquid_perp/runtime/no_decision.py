@@ -325,12 +325,15 @@ def note_guardrail_reading(streak: int, *, unknown: bool, run_id: str) -> int:
     :func:`note_cycle_outcome` is for no-decision cycles: ``validate`` judges
     by the durable streak over ``ai_outputs.guardrail_side``; this keeps the
     live one and turns the per-round WARNINGs (the reader's, the gate's) into
-    an ERROR from :data:`GUARDRAIL_UNKNOWN_STREAK_THRESHOLD` on, so a log
-    scraper sees the change without a store query. Called once per gated
-    round the guardrail was configured for (the sweep's gate is not one: it
-    judges a round with no decision); a round that read a side resets the
-    count. In-process only: a restart starts it over, and the store's streak
-    is the one the verdict reads.
+    an ERROR from :data:`GUARDRAIL_UNKNOWN_STREAK_THRESHOLD` on, so a text
+    search of the journal sees the change without a store query (the daemon
+    writes plain stderr, so the line carries no journald priority — it is
+    found by its words, not by ``-p err``). Called once per decided round the
+    guardrail was configured for, from ``start_plan`` (a flip's open leg
+    gates again but is the same round; the sweep's gate judges a round with
+    no decision and is not one); a round that read a side resets the count.
+    In-process only: a restart starts it over, and the store's streak is the
+    one the verdict and the dashboard read.
     """
     if not unknown:
         return 0

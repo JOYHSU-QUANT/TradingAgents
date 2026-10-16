@@ -319,14 +319,16 @@ def _guardrail_unknown_streak(recent: Sequence[Mapping[str, Any]]) -> int:
     The exporter's copy of the perp validator's ``guardrail_unknown_streak``,
     over the cycles the status document carries (newest first): a cycle
     without a verdict (``api_failed``) neither counts nor breaks it; the first
-    verdict reading a side, or ``None`` (the guardrail off), ends it.
+    verdict reading a side, or ``None`` (the guardrail off), ends it. The
+    keys are subscripted, not ``.get``: a document that lost either is
+    ``rules_failed`` by name, not a rule that quietly never fires.
     """
     streak = 0
     for cycle in recent:
-        verdict = cycle.get("verdict")
+        verdict = cycle["verdict"]
         if verdict is None:
             continue
-        if verdict.get("guardrail_side") != "unknown":
+        if verdict["guardrail_side"] != "unknown":
             break
         streak += 1
     return streak

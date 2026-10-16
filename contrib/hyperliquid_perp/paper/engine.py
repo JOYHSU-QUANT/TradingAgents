@@ -695,6 +695,15 @@ class PaperExecutionEngine:
         assert snap is not None  # is_valid guarantees a snapshot (SnapshotResult invariant)
         position = self._read_position()
         gate, equity = self._gate(parsed, position, snap.mark_price, now)
+        if gate.guardrail is not None:
+            # Once per decided round (a flip's open leg gates again but is
+            # the same round): the in-process half of the unknown-streak
+            # escalation, beside the durable count ``validate`` reads.
+            self._guardrail_unknown_streak = note_guardrail_reading(
+                self._guardrail_unknown_streak,
+                unknown=gate.guardrail is GuardrailSide.UNKNOWN,
+                run_id=self._run_id,
+            )
         if not gate.order_created:
             return PlanStartResult(
                 gate,
@@ -786,11 +795,6 @@ class PaperExecutionEngine:
                     asked,
                     gate.risk_reason,
                 )
-            self._guardrail_unknown_streak = note_guardrail_reading(
-                self._guardrail_unknown_streak,
-                unknown=gate.guardrail is GuardrailSide.UNKNOWN,
-                run_id=self._run_id,
-            )
         return gate, equity
 
     def guardrail_sweep(self) -> PlanStartResult | None:

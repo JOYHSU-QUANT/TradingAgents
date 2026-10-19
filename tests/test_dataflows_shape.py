@@ -416,12 +416,12 @@ def _mypy_dataflows_files() -> list[str]:
 
     Read as text, tomllib being 3.11+ while the suite runs on 3.10: the
     ``files = [`` array alone, a line at a time, comment lines dropped, so
-    an entry commented out (or quoted elsewhere in the file) does not count.
+    an entry commented out (or quoted elsewhere in the file) does not count; a trailing comment on an entry is fine.
     """
     text = repo_text("pyproject.toml")
     start = text.index("\nfiles = [")
     block = text[start : text.index("\n]", start)]
-    entry = re.compile(r'"tradingagents/dataflows/(\w+)\.py",?')
+    entry = re.compile(r'"tradingagents/dataflows/(\w+)\.py",?(\s+#.*)?')
     found = []
     for line in block.splitlines():
         line = line.strip()
@@ -445,8 +445,8 @@ def test_the_package_has_no_subpackage():
     # a subpackage under dataflows would be seen by nothing here, nor by the
     # mypy file list. The neutral kernel D1 creates is a module, not a package.
     package = next(path for path, _tree in dataflows_module_trees(containing="")).parent
-    dirs = sorted(p.name for p in package.iterdir() if p.is_dir())
-    assert dirs == ["__pycache__"], dirs
+    dirs = sorted(p.name for p in package.iterdir() if p.is_dir() and p.name != "__pycache__")
+    assert dirs == [], dirs
 
 
 def test_the_clock_seams_are_exactly_the_modules_frozen_on_2026_10_19():

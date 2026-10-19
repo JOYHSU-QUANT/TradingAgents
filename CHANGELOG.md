@@ -130,8 +130,8 @@ Breaking changes within the 0.x line are called out explicitly.
   re-raises `VendorNotConfiguredError`, the base of the
   `SoSoValueNotConfiguredError` it used to name, so the kernel names no
   vendor's type (no caller raises another subclass through it). No
-  behaviour change and no re-exports left behind: nothing outside the tests
-  read the old paths, and the tests moved. The shape ratchets' private-import
+  behaviour change and no re-exports left behind: nothing outside the
+  package's vendors and the tests read the old paths, and both moved. The shape ratchets' private-import
   table shrinks from 58 edges to 4 and the clock-seam table swaps
   `sosovalue_common` for `vendor_common`, and a new one holds the kernel to
   importing nothing from the package but `config`, `errors` and `utils`, so

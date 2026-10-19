@@ -1,19 +1,15 @@
 """The kernel the rolling-snapshot vendors share, under no vendor's name.
 
-Six of the data-source modules the fork wrote (the three SoSoValue feeds,
-Farside, CFTC and the whale-positioning vendor) cache one rolling JSON
-snapshot per feed and render it with the same disciplines: a value/date/ticker trust
-boundary on what the provider sent, one UTC clock for the TTL, the stale cap
-and the displayed age, one read preamble and one rejection log line per
-cache file, one US$m rendering for notionals, and the cache/TTL/stale-fallback
-skeleton (``load_rolling_snapshot``) that decides whether to serve, refresh
-or fall back. They grew inside ``sosovalue_common`` because the SoSoValue
-modules were the first three to need them, and the Farside, CFTC and
-whale-positioning vendors then imported them from there under underscore
-names. This module is that kernel moved out and made public (dataflows
-refactor plan 2026-10-16, D1); what is SoSoValue's — the error taxonomy, the
-API key, the request helper and budget, and the per-item sweep that catches
-and raises those types — stays in ``sosovalue_common``.
+This module holds what the fork's rolling-snapshot vendors import, each
+taking what it needs: the trust-boundary predicates, the clock and cache-age
+helpers, the cache read preamble and rejecter, the STALE template, the US$m
+formatters and the cache/TTL/stale-fallback skeleton
+(``load_rolling_snapshot``). They grew
+inside ``sosovalue_common``, the first family to need them, and moved out
+under public names (dataflows refactor plan 2026-10-16, D1); what is
+SoSoValue's — the error taxonomy, the API key, the request helper and
+budget, and the per-item sweep that catches and raises those types — stays
+in ``sosovalue_common``.
 
 ``_utc_now`` is the one clock every helper here reads, and it stays a
 module-level underscore name on purpose: it is the seam the tests patch to

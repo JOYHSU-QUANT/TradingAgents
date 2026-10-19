@@ -341,7 +341,7 @@ def _parse_rows(payload: list) -> tuple[list[dict], list[str]]:
             if long is None or short is None or (spreading is None) != (name == "Non-reportable"):
                 cats = None
                 break
-            cats[name] = [long, short, spreading]
+            cats[name] = [long, short, spreading]  # type: ignore[index]
         if report_date is None or open_interest is None or cats is None:
             dropped.append(report_date or "?")
             continue
@@ -453,7 +453,7 @@ def _to_report(row: dict) -> Report:
         published=publication_date(report_date),
         open_interest=row["oi"],
         categories=tuple(
-            Category(name, *row["cats"][name][:2], row["cats"][name][2])
+            Category(name, *row["cats"][name][:2], row["cats"][name][2])  # type: ignore[call-arg]
             for name, _, _ in CATEGORIES
         ),
     )

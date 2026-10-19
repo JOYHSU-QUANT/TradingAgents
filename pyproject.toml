@@ -89,6 +89,14 @@ filterwarnings = [
 # excluded for the same reason.
 # ``contrib/dashboard`` (the status exporter, dashboard plan PR 3) joined clean
 # on 2026-10-14; its tests are excluded for the same reason.
+# The fork's own data-source modules under ``tradingagents/dataflows`` (the
+# nine vendors, ``fear_greed`` and ``throttle``) and ``interface.py``, the
+# upstream router the fork rebuilt, joined on 2026-10-19 (dataflows refactor
+# plan, D0) with their 50 errors pinned where they sit, as the perp layers'
+# were (one line in ``cftc_cot`` already carried a pin); the two in
+# ``interface.py`` the plan lists as behaviour candidates (§5) are pinned,
+# not fixed, here. ``tests/test_dataflows_shape.py`` scopes its shape
+# ratchets to the same twelve modules and holds the two lists equal.
 files = [
     "contrib/core",
     "contrib/hyperliquid_perp/common",
@@ -101,6 +109,18 @@ files = [
     "contrib/replay",
     "contrib/uniswap_v3/domain",
     "contrib/uniswap_v3/ports.py",
+    "tradingagents/dataflows/cftc_cot.py",
+    "tradingagents/dataflows/cme_basis.py",
+    "tradingagents/dataflows/deribit.py",
+    "tradingagents/dataflows/farside.py",
+    "tradingagents/dataflows/fear_greed.py",
+    "tradingagents/dataflows/hyperliquid_whales.py",
+    "tradingagents/dataflows/interface.py",
+    "tradingagents/dataflows/sosovalue.py",
+    "tradingagents/dataflows/sosovalue_common.py",
+    "tradingagents/dataflows/sosovalue_macro.py",
+    "tradingagents/dataflows/sosovalue_treasuries.py",
+    "tradingagents/dataflows/throttle.py",
 ]
 exclude = [
     "^contrib/carry/tests/",
@@ -133,6 +153,17 @@ ignore_missing_imports = true
 # installed (a dev machine) their own types are checked.
 [[tool.mypy.overrides]]
 module = ["fastapi", "fastapi.*", "starlette", "starlette.*", "jinja2", "jinja2.*", "uvicorn", "uvicorn.*"]
+ignore_missing_imports = true
+
+# The dataflows fetch with requests, read Farside's HTML with parsel and CME
+# futures with yfinance. ``follow_imports = "skip"`` reads all three as ``Any``
+# whether or not they are installed, so the CI job (mypy alone) and a dev
+# venv (which has them, two of them typed) reach the same verdict by
+# construction; the cost is that requests' and parsel's own types go
+# unchecked here, which this floor accepts as it does pandas'.
+[[tool.mypy.overrides]]
+module = ["requests", "requests.*", "parsel", "parsel.*", "yfinance", "yfinance.*"]
+follow_imports = "skip"
 ignore_missing_imports = true
 
 [tool.ruff]

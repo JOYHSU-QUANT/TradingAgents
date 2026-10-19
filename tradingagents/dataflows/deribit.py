@@ -732,7 +732,7 @@ def _request(endpoint: str, params: dict) -> object:
     # (#203).
     raise DeribitUnavailableError(
         f"Deribit {endpoint} did not return a usable response after {_RETRY_ATTEMPTS} "
-        f"attempts: {failure_account(last_error, limit=None)}"
+        f"attempts: {failure_account(last_error, limit=None)}"  # type: ignore[arg-type]
     ) from last_error
 
 
@@ -911,14 +911,14 @@ def parse_chain(rows: object, now: datetime, currency: str) -> list[Contract]:
         mark_iv = row.get("mark_iv")
         underlying = row.get("underlying_price")
         open_interest = row.get("open_interest")
-        if not _is_finite_number(mark_iv) or mark_iv <= 0:
+        if not _is_finite_number(mark_iv) or mark_iv <= 0:  # type: ignore[operator]
             continue
-        if not _is_finite_number(underlying) or underlying <= 0:
+        if not _is_finite_number(underlying) or underlying <= 0:  # type: ignore[operator]
             continue
-        if not _is_finite_number(open_interest) or open_interest <= 0:
+        if not _is_finite_number(open_interest) or open_interest <= 0:  # type: ignore[operator]
             continue
         contracts.append(
-            Contract(expiry_token, expiry_dt, strike, is_call, float(mark_iv), float(underlying))
+            Contract(expiry_token, expiry_dt, strike, is_call, float(mark_iv), float(underlying))  # type: ignore[arg-type]
         )
     return contracts
 
@@ -1288,7 +1288,7 @@ def _fetch_chain(currency: str, now: datetime) -> SkewSnapshot:
     # parse_chain so that function keeps its single job and its signature.
     wanted = _canonical_currency(currency)
     listed = 0
-    for row in result:
+    for row in result:  # type: ignore[attr-defined]
         if not isinstance(row, dict):
             continue
         parsed = parse_instrument_name(row.get("instrument_name"))
@@ -2815,7 +2815,7 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
         # (_try_fetch never reports None without an error, so this list is never
         # empty on the path that reaches here.)
         attempted = [e for e in (dvol_error, skew_error) if e is not None]
-        failure_cls = _aggregate_failure_cls(attempted)
+        failure_cls = _aggregate_failure_cls(attempted)  # type: ignore[arg-type]
         if failure_cls is VendorRateLimitError:
             raise VendorRateLimitError(f"Deribit rate-limited every request made for {currency}")
         # An outage verdict keeps the outage type through the branches below,

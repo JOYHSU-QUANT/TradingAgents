@@ -136,11 +136,11 @@ def _request(limit: int) -> dict:
         # The cause is quoted through ``failure_account``: an outage type's
         # own text, a requests exception's status or class only — its
         # message carries the request URL (#203).
-        down = isinstance(last_error, VendorUnavailableError) or is_unreached(last_error)
+        down = isinstance(last_error, VendorUnavailableError) or is_unreached(last_error)  # type: ignore[arg-type]
         failure_cls = FearGreedUnavailableError if down else FearGreedError
         raise failure_cls(
             f"alternative.me did not answer with data after {_RETRY_ATTEMPTS} attempts "
-            f"({failure_account(last_error)})"
+            f"({failure_account(last_error)})"  # type: ignore[arg-type]
         ) from last_error
 
     # A CDN/WAF error page can decode as valid JSON that is not an object; guard
@@ -274,8 +274,8 @@ def get_fear_greed_data(
         )
 
     # Lookahead-safe: keep only readings on or before curr_date, ascending.
-    points = [p for p in points if p["date"] <= curr_date]
-    points.sort(key=lambda p: p["date"])
+    points = [p for p in points if p["date"] <= curr_date]  # type: ignore[operator]
+    points.sort(key=lambda p: p["date"])  # type: ignore[arg-type, return-value]
 
     header = (
         "## Crypto Fear & Greed Index (alternative.me)\n"
@@ -290,7 +290,7 @@ def get_fear_greed_data(
         )
 
     latest = points[-1]
-    latest_dt = datetime.strptime(latest["date"], "%Y-%m-%d")
+    latest_dt = datetime.strptime(latest["date"], "%Y-%m-%d")  # type: ignore[arg-type]
 
     # Data-recency caveat. A successful fetch says nothing about whether
     # alternative.me actually published a new reading: the API can be up and
@@ -309,10 +309,10 @@ def get_fear_greed_data(
     # look_back_days bounds the displayed table; the 7d/30d deltas keep their fixed
     # horizons and read from the full `points` above (which reaches past the window).
     window_start = (curr_dt - timedelta(days=look_back_days)).strftime("%Y-%m-%d")
-    window_points = [p for p in points if p["date"] >= window_start]
+    window_points = [p for p in points if p["date"] >= window_start]  # type: ignore[operator]
 
     def _value_at_or_before(target: str) -> dict | None:
-        prior = [p for p in points if p["date"] <= target]
+        prior = [p for p in points if p["date"] <= target]  # type: ignore[operator]
         return prior[-1] if prior else None
 
     def _delta_line(days: int) -> str:

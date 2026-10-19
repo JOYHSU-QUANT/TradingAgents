@@ -421,7 +421,7 @@ def get_category_for_method(method: str) -> str:
     raise ValueError(f"Method '{method}' not found in any category")
 
 
-def get_vendor(category: str, method: str = None) -> str:
+def get_vendor(category: str, method: str = None) -> str:  # type: ignore[assignment]
     """Get the configured vendor for a data category or specific tool method.
     Tool-level configuration takes precedence over category-level.
     """
@@ -437,7 +437,7 @@ def get_vendor(category: str, method: str = None) -> str:
     return config.get("data_vendors", {}).get(category, "default")
 
 
-def is_category_disabled(category: str, method: str = None) -> bool:
+def is_category_disabled(category: str, method: str = None) -> bool:  # type: ignore[assignment]
     """True when a category (or tool) is configured to the "none" sentinel.
 
     Lets a caller skip binding a tool altogether rather than binding one that
@@ -581,7 +581,7 @@ def route_to_vendor(method: str, *args, **kwargs):
     if method not in VENDOR_METHODS:
         raise ValueError(f"Method '{method}' not supported")
 
-    all_available_vendors = list(VENDOR_METHODS[method].keys())
+    all_available_vendors = list(VENDOR_METHODS[method].keys())  # type: ignore[attr-defined]
 
     # The configured vendor list IS the chain: we do NOT silently fall back to
     # vendors the user did not choose (#988/#289) — that returned data from an
@@ -605,7 +605,7 @@ def route_to_vendor(method: str, *args, **kwargs):
             f"disabled with '{DISABLED_VENDOR}'."
         )
     if explicit:
-        vendor_chain = [v for v in explicit if v in VENDOR_METHODS[method]]
+        vendor_chain = [v for v in explicit if v in VENDOR_METHODS[method]]  # type: ignore[operator]
         if not vendor_chain:
             raise ValueError(
                 f"Configured vendor(s) {explicit} not available for '{method}'. "
@@ -613,7 +613,7 @@ def route_to_vendor(method: str, *args, **kwargs):
             )
         # A mis-typed name in a comma chain must not silently shrink it — the
         # all-unknown raise above cannot fire once any sibling survives.
-        unknown = [v for v in explicit if v not in VENDOR_METHODS[method]]
+        unknown = [v for v in explicit if v not in VENDOR_METHODS[method]]  # type: ignore[operator]
         if unknown:
             logger.warning(
                 "Configured vendor(s) %s not available for '%s'; using %s. Available: %s.",
@@ -664,7 +664,7 @@ def route_to_vendor(method: str, *args, **kwargs):
     # the analyst to read as an answer (#219).
     first_wiring: _VendorFailure | None = None
     for vendor in vendor_chain:
-        vendor_impl = VENDOR_METHODS[method][vendor]
+        vendor_impl = VENDOR_METHODS[method][vendor]  # type: ignore[index]
         impl_func = vendor_impl[0] if isinstance(vendor_impl, list) else vendor_impl
 
         # A vendor that refused this client with a rate limit recently is
@@ -927,10 +927,10 @@ def route_to_vendor(method: str, *args, **kwargs):
         logger.warning(
             "No vendor served %s; reporting the library failure retrieving %s as text%s",
             method,
-            first_library.error.what,
+            first_library.error.what,  # type: ignore[attr-defined]
             "" if last_no_data is None else f" (a vendor also reported no data: {last_no_data})",
         )
-        return _library_failure_prose(first_library.error)
+        return _library_failure_prose(first_library.error)  # type: ignore[arg-type]
 
     if last_no_data is not None:
         if first_error is not None:
@@ -1018,7 +1018,7 @@ def route_to_vendor(method: str, *args, **kwargs):
             "down, so the name may be one it computes",
             method,
             first_caller_error.error,
-            unconfirmed.vendor,
+            unconfirmed.vendor,  # type: ignore[union-attr]
         )
         first_caller_error = None
     elif first_caller_error is not None and first_error is not None:

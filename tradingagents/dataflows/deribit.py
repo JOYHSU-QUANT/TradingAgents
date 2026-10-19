@@ -80,13 +80,55 @@ from .utils import (
     date_refusal,
     echo_argument,
     failure_account,
-    finite_float,
     json_body_or_outage,
     quote_argument,
     raise_for_http_status,
-    sanitize_untrusted,
+    sanitize_untrusted as _sanitize,
     wiring_gap,
 )
+from .vendor_common import is_finite_real as _is_finite_real
+
+# The flattening itself (which characters, why a space and not deletion, why
+# "<"/">" and intraword "_" survive) is the one shared definition in
+# ``utils.sanitize_untrusted``; this module keeps the reasoning for WHICH of its
+# fragments go through it. The deletion-fuses-tokens hazard was found here:
+# "BTC|USD" collapsed to "BTCUSD", which normalize_symbol resolves to BTC, so a
+# symbol this vendor had always refused started producing a confident BTC report.
+# The cap is read as ``utils.MAX_UNTRUSTED_CHARS`` directly (#140): this module
+# used to alias the cap constant under a private name, which was one more site
+# a cap change had to find.
+#
+# ``_sanitize`` (that shared definition, under this module's name) flattens a
+# fragment this module did not author so it cannot forge structure.
+#
+# ``limit`` caps the result, and is passed ONLY where the untrusted fragment is
+# ISOLATED: Deribit's ``error.message``, and a raw candle row echoed into the
+# malformed-shape error. It is not passed when flattening a whole exception
+# message, because most of that string is
+# this module's own carefully-worded diagnostic: capping there truncated
+# "...points at a response-shape change rather than an empty market" one
+# clause from the end, cutting off the very distinction the sentence exists to
+# draw. (The router caps a whole raised message where it enters a sentinel
+# the model reads — see ``utils.sanitize_untrusted``; that is its slot to
+# bound, and the log keeps the whole message.)
+#
+# Two inputs reach the report without this module choosing their contents:
+# Deribit's JSON-RPC ``error.message`` and a raw candle row. The caller's
+# ``asset`` is NOT one of them any more — it is the model's own argument
+# rather than the vendor's prose, so it takes ``utils.echo_argument`` and
+# ``utils.quote_argument``, which keep its edge markers instead of stripping
+# them (#233); ``curr_date`` is judged and echoed by the shared date refusal
+# before it gets this far. Interpolated raw, either can close the sentence it
+# sits in and open new blocks — a second ``_Reading:_`` line, a fresh ``##``
+# heading, a fabricated DVOL level — and the forged copy renders ABOVE the
+# real one, so a downstream summariser keeping "the Reading line" quotes the
+# forgery.
+#
+# Applied where the fragment enters the message, not only where the report
+# renders it: an optional category's failure is handed to the model by
+# ``route_to_vendor`` as ``DATA_UNAVAILABLE: ... ({error})``, so a vendor string
+# embedded in a RAISED error reaches the prompt just as surely as a rendered
+# one, and sanitising only the renderers would leave that path open.
 
 logger = logging.getLogger(__name__)
 
@@ -596,51 +638,6 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-# The flattening itself (which characters, why a space and not deletion, why
-# "<"/">" and intraword "_" survive) is the one shared definition in
-# ``utils.sanitize_untrusted``; this module keeps the reasoning for WHICH of its
-# fragments go through it. The deletion-fuses-tokens hazard was found here:
-# "BTC|USD" collapsed to "BTCUSD", which normalize_symbol resolves to BTC, so a
-# symbol this vendor had always refused started producing a confident BTC report.
-# The cap is ``utils.MAX_UNTRUSTED_CHARS`` directly (#140): this module aliased
-# it under a private name, which was one more site a cap change had to find.
-
-
-def _sanitize(text: object, *, limit: int | None = None) -> str:
-    """Flatten a fragment this module did not author so it cannot forge structure.
-
-    ``limit`` caps the result, and is passed ONLY where the untrusted fragment is
-    ISOLATED: Deribit's ``error.message``, and a raw candle row echoed into the
-    malformed-shape error. It is not passed
-    when flattening a whole exception message, because most of that string is
-    this module's own carefully-worded diagnostic: capping there truncated
-    "...points at a response-shape change rather than an empty market" one
-    clause from the end, cutting off the very distinction the sentence exists to
-    draw. (The router caps a whole raised message where it enters a sentinel
-    the model reads — see ``utils.sanitize_untrusted``; that is its slot to
-    bound, and the log keeps the whole message.)
-
-    Two inputs reach the report without this module choosing their contents:
-    Deribit's JSON-RPC ``error.message`` and a raw candle row. The caller's
-    ``asset`` is NOT one of them any more — it is the model's own argument
-    rather than the vendor's prose, so it takes ``utils.echo_argument`` and
-    ``utils.quote_argument``, which keep its edge markers instead of stripping
-    them (#233); ``curr_date`` is judged and echoed by the shared date refusal
-    before it gets this far. Interpolated raw, either can close the sentence it
-    sits in and open new blocks — a second ``_Reading:_`` line, a fresh ``##``
-    heading, a fabricated DVOL level — and the forged copy renders ABOVE the
-    real one, so a downstream summariser keeping "the Reading line" quotes the
-    forgery.
-
-    Applied where the fragment enters the message, not only where the report
-    renders it: an optional category's failure is handed to the model by
-    ``route_to_vendor`` as ``DATA_UNAVAILABLE: ... ({error})``, so a vendor string
-    embedded in a RAISED error reaches the prompt just as surely as a rendered
-    one, and sanitising only the renderers would leave that path open.
-    """
-    return sanitize_untrusted(text, limit=limit)
-
-
 def _request(endpoint: str, params: dict) -> object:
     """GET a Deribit public endpoint and return its ``result`` payload.
 
@@ -734,31 +731,6 @@ def _request(endpoint: str, params: dict) -> object:
         f"Deribit {endpoint} did not return a usable response after {_RETRY_ATTEMPTS} "
         f"attempts: {failure_account(last_error, limit=None)}"  # type: ignore[arg-type]
     ) from last_error
-
-
-def _is_finite_number(x: object) -> bool:
-    """True only for a real, finite number (not a bool, NaN, Infinity, or a huge int).
-
-    bool is an int subclass, so a JSON ``true``/``false`` must not pass as a price
-    or a vol. ``json`` decodes ``NaN``/``Infinity`` to non-finite floats, which
-    would poison every comparison downstream (every comparison with NaN is False)
-    and render as a literal "nan" figure.
-
-    ``math.isfinite`` RAISES on an int too large to convert to a float, and a JSON
-    integer literal has no bound, so ``json.loads`` can hand back an
-    arbitrary-precision int that makes a naive predicate throw rather than answer.
-    That inverts its contract at one of the input classes it exists to turn away,
-    and it does so at every call site: ``parse_chain`` documents "rows that cannot
-    be used are skipped, not fatal" and would instead lose all six chain figures to
-    a single row, while ``_fetch_dvol``'s own malformed-candle diagnostic would be
-    replaced by a bare "int too large to convert to float" — a message that reaches
-    the model through route_to_vendor's sentinel and sends an operator to
-    ``math.isfinite`` as though the bug were here.
-
-    All of that is ``utils.finite_float`` now, shared with the other vendors
-    that ask the same question.
-    """
-    return finite_float(x) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -911,14 +883,14 @@ def parse_chain(rows: object, now: datetime, currency: str) -> list[Contract]:
         mark_iv = row.get("mark_iv")
         underlying = row.get("underlying_price")
         open_interest = row.get("open_interest")
-        if not _is_finite_number(mark_iv) or mark_iv <= 0:  # type: ignore[operator]
+        if not _is_finite_real(mark_iv) or mark_iv <= 0:
             continue
-        if not _is_finite_number(underlying) or underlying <= 0:  # type: ignore[operator]
+        if not _is_finite_real(underlying) or underlying <= 0:
             continue
-        if not _is_finite_number(open_interest) or open_interest <= 0:  # type: ignore[operator]
+        if not _is_finite_real(open_interest) or open_interest <= 0:
             continue
         contracts.append(
-            Contract(expiry_token, expiry_dt, strike, is_call, float(mark_iv), float(underlying))  # type: ignore[arg-type]
+            Contract(expiry_token, expiry_dt, strike, is_call, float(mark_iv), float(underlying))
         )
     return contracts
 
@@ -945,7 +917,7 @@ def black_scholes_delta(
     Call delta is ``N(d1)`` and put delta ``N(d1) - 1``, so a call delta lands in
     (0, 1) and a put delta in (-1, 0).
     """
-    if not all(_is_finite_number(v) for v in (forward, strike, iv_pct, years_to_expiry)):
+    if not all(_is_finite_real(v) for v in (forward, strike, iv_pct, years_to_expiry)):
         return None
     if forward <= 0 or strike <= 0 or iv_pct <= 0 or years_to_expiry <= 0:
         return None
@@ -1381,7 +1353,7 @@ def _fetch_dvol(currency: str, curr_dt: datetime, today: str) -> DvolSeries:
         # what this test can and cannot see: it catches a row of the wrong LENGTH
         # or carrying a non-number, but a permutation of the five values passes it
         # untouched. The consistency check below is what covers that case.
-        if not isinstance(row, list) or len(row) != 5 or not all(_is_finite_number(v) for v in row):
+        if not isinstance(row, list) or len(row) != 5 or not all(_is_finite_real(v) for v in row):
             raise DeribitError(
                 # Capped here rather than where this is rendered: the render sites
                 # flatten a whole exception message without a length limit (so this

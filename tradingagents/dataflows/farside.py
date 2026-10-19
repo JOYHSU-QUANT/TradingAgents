@@ -52,15 +52,18 @@ from .utils import (
     date_refusal,
     echo_argument,
     failure_account,
-    finite_float,
     is_unreached,
+    plural_days as _plural_days,
     quote_argument,
     raise_for_http_status,
 )
 from .vendor_common import (
     cache_dir as _cache_dir,
     cache_rejecter as _cache_rejecter,
+    is_finite_real as _is_finite_real,
+    is_iso_date as _is_iso_date,
     read_cache_preamble as _read_cache_preamble,
+    sign as _sign,
     stale_caveat as _stale_caveat,
 )
 
@@ -546,42 +549,6 @@ def _cache_path(asset: str) -> str:
     return os.path.join(_cache_dir(), f"farside_{asset.lower()}.json")
 
 
-def _is_finite_number(x: object) -> bool:
-    """True only for a real, finite number (not a bool, NaN, or Infinity).
-
-    bool is an int subclass, so a JSON ``true``/``false`` must not pass as a flow
-    figure. ``json.load`` parses ``NaN``/``Infinity`` to non-finite floats by
-    default, which would defeat the Total cross-check (every comparison with NaN
-    is False) and render as a literal "nan"/"inf" figure, so those are rejected
-    at the cache boundary too.
-
-    The rule is ``utils.finite_float``, shared with the other vendors that ask
-    it. Adopting it also brought the huge-int guard this copy lacked: a JSON
-    integer literal has no bound, and ``math.isfinite`` RAISES rather than
-    answering on one too large to convert to a float.
-    """
-    return finite_float(x) is not None
-
-
-def _is_iso_date(x: object) -> bool:
-    """True only for a canonical zero-padded ``YYYY-MM-DD`` date string.
-
-    The parser (`_parse_flow_date`) only ever writes canonical ISO dates, so a
-    cached row whose ``date`` does not round-trip through ``strptime`` is a
-    corrupt/tampered file, not something this module produced. Rejecting it at
-    the cache boundary — like the finite-number checks — keeps a bad date from
-    (a) mis-ordering the lexical ``r["date"] <= curr_date`` window filter (e.g. a
-    non-zero-padded "2026-6-5" sorts after "2026-07-20") and (b) crashing the
-    data-lag ``strptime(latest["date"])`` deep inside the report render.
-    """
-    if not isinstance(x, str):
-        return False
-    try:
-        return datetime.strptime(x, "%Y-%m-%d").strftime("%Y-%m-%d") == x
-    except ValueError:
-        return False
-
-
 def _read_cache(path: str, asset: str) -> dict | None:
     """Return a fully-validated cached payload for asset, or None if untrusted.
 
@@ -617,13 +584,13 @@ def _read_cache(path: str, asset: str) -> dict | None:
     # or render a "nan"/"inf" figure via ``latest["issuers"]``. Treat as a miss so
     # a poisoned file is never served. ``date`` must be a canonical ISO string
     # (see _is_iso_date), and both ``total`` and every ``issuers`` value must be a
-    # finite number (see _is_finite_number: no bool, NaN, or Infinity).
+    # finite number (see _is_finite_real: no bool, NaN, or Infinity).
     if not all(
         isinstance(r, dict)
         and _is_iso_date(r.get("date"))
-        and _is_finite_number(r.get("total"))
+        and _is_finite_real(r.get("total"))
         and isinstance(r.get("issuers"), dict)
-        and all(_is_finite_number(v) for v in r["issuers"].values())
+        and all(_is_finite_real(v) for v in r["issuers"].values())
         for r in rows
     ):
         return _reject("'rows' contains a malformed record")
@@ -804,14 +771,6 @@ def _classify_asset(asset: str) -> tuple[str | None, bool]:
     converted to the dash form first (``normalize_symbol`` only strips dashes).
     """
     return classify_crypto_asset(asset, ASSET_PATHS)
-
-
-def _sign(value: float) -> int:
-    return (value > 0) - (value < 0)
-
-
-def _plural_days(count: int) -> str:
-    return "day" if count == 1 else "days"
 
 
 def _is_unposted_row(record: dict) -> bool:

@@ -88,28 +88,34 @@ from urllib.parse import quote
 # shared load skeleton now runs the key check (as its ``precheck``) and lets the
 # error through.
 from .sosovalue_common import (
+    VENDOR,
     SoSoValueError,
     SoSoValueNotConfiguredError as SoSoValueNotConfiguredError,
     SoSoValueRateLimitError,
     SoSoValueUnavailableError,
-    _sanitize,
     get_api_key as get_api_key,
+    is_valid_ticker as _is_valid_ticker,
     request as _request,
 )
 from .symbol_utils import classify_crypto_asset
-from .utils import MAX_UNTRUSTED_CHARS, date_refusal, echo_argument, quote_argument
+from .utils import (
+    MAX_UNTRUSTED_CHARS,
+    date_refusal,
+    echo_argument,
+    plural_days as _plural_days,
+    quote_argument,
+    sanitize_untrusted as _sanitize,
+)
 from .vendor_common import (
     USD_PER_MILLION as _USD_PER_MILLION,
     cache_dir as _cache_dir,
     cache_rejecter as _cache_rejecter,
     concentration_share_str as _concentration_share_str,
-    is_finite_real as _is_finite_number,
+    is_finite_real as _is_finite_real,
     is_iso_date as _is_iso_date,
     is_non_negative_int as _is_non_negative_int,
-    is_valid_ticker as _is_valid_ticker,
     load_rolling_snapshot,
     plural as _plural,
-    plural_days as _plural_days,
     read_cache_preamble as _read_cache_preamble,
     sign as _sign,
     stale_caveat as _stale_caveat,
@@ -215,8 +221,8 @@ def _valid_summary_row(row: object) -> bool:
     return (
         isinstance(row, dict)
         and _is_iso_date(row.get("date"))
-        and _is_finite_number(row.get("total_net_inflow"))
-        and _is_finite_number(row.get("cum_net_inflow"))
+        and _is_finite_real(row.get("total_net_inflow"))
+        and _is_finite_real(row.get("cum_net_inflow"))
     )
 
 
@@ -229,7 +235,7 @@ def _valid_fund_row(row: object) -> bool:
     return (
         isinstance(row, dict)
         and _is_iso_date(row.get("date"))
-        and (row.get("net_inflow") is None or _is_finite_number(row.get("net_inflow")))
+        and (row.get("net_inflow") is None or _is_finite_real(row.get("net_inflow")))
     )
 
 
@@ -300,11 +306,11 @@ def _parse_etf_list(data: list, asset: str) -> tuple[list[tuple[str, str]], int]
             continue
         if ticker in seen:
             continue
-        seen.add(ticker)  # type: ignore[arg-type]
+        seen.add(ticker)
         name = raw.get("name")
         # Bounded here at the trust boundary so an oversized server value can
         # never ride into the cache file — MAX_FUND_NAME_CHARS explains.
-        funds.append((ticker, name[:MAX_FUND_NAME_CHARS] if isinstance(name, str) else ""))  # type: ignore[arg-type]
+        funds.append((ticker, name[:MAX_FUND_NAME_CHARS] if isinstance(name, str) else ""))
     return funds, unusable
 
 
@@ -430,7 +436,7 @@ def _valid_revisions(revisions: object) -> bool:
         _is_iso_date(d)
         and isinstance(pair, list)
         and len(pair) == 2
-        and all(_is_finite_number(v) for v in pair)
+        and all(_is_finite_real(v) for v in pair)
         for d, pair in revisions.items()
     )
 
@@ -526,8 +532,8 @@ def _read_cache(path: str, asset: str) -> dict | None:
         )
         if not (
             row is not None
-            and _is_finite_number(cr.get("old"))
-            and _is_finite_number(cr.get("new"))
+            and _is_finite_real(cr.get("old"))
+            and _is_finite_real(cr.get("new"))
             and cr["old"] != cr["new"]
             and _usd_m(row["cum_net_inflow"]) == cr["new"]
         ):
@@ -867,6 +873,7 @@ def _load_snapshot(asset: str) -> _FlowSnapshot:
         cache_name="SoSoValue cache",
         max_stale_hours=MAX_STALE_DAYS * 24,
         log=logger,
+        vendor=VENDOR,
         precheck=get_api_key,
     )
     return _snapshot_from(payload, fetched_at, stale, refetched)

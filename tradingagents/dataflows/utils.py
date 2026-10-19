@@ -308,9 +308,9 @@ DateKind = Literal["point", "window", "disclosure"]
 # ``DATA_UNAVAILABLE: ... ({error})`` — is assembled into an LLM prompt, so a
 # fragment that survives verbatim from outside the module can forge report
 # structure rather than merely read oddly. The one definition of that
-# flattening (it used to be copied into deribit and sosovalue_common, whose
-# ``_sanitize`` now delegate here); the vendor modules keep the reasoning for
-# WHICH fragments they flatten.
+# flattening (it used to be copied into deribit and sosovalue_common, and
+# those modules now import it under their old ``_sanitize`` name); the vendor
+# modules keep the reasoning for WHICH fragments they flatten.
 #
 # ``sanitize_untrusted`` and the three names it reads (``MARKDOWN_CONTROL``,
 # ``EMPHASIS_UNDERSCORE``, ``MAX_UNTRUSTED_CHARS``) are SUPPORTED API for
@@ -811,7 +811,7 @@ def statement_lag_bound(freq) -> int:
     return MAX_STATEMENT_LAG_DAYS.get(key, MAX_STATEMENT_LAG_DAYS["annual"])
 
 
-def _plural_days(n: int) -> str:
+def plural_days(n: int) -> str:
     return "day" if n == 1 else "days"
 
 
@@ -864,7 +864,7 @@ def data_lag_note(
         return ""
     return (
         f"_Data lag: the newest {source_phrase} is {latest_dt.strftime('%Y-%m-%d')}, "
-        f"{lag_days} {_plural_days(lag_days)} before {str(curr_date)[:10]}; "
+        f"{lag_days} {plural_days(lag_days)} before {str(curr_date)[:10]}; "
         f"treat the latest value as stale._"
     )
 
@@ -903,7 +903,7 @@ def live_snapshot_note(
         return ""
     return (
         f"_Note: {source_phrase} live values as of the fetch ({today_str}), not a "
-        f"snapshot as of {str(curr_date)[:10]} ({behind_days} {_plural_days(behind_days)} "
+        f"snapshot as of {str(curr_date)[:10]} ({behind_days} {plural_days(behind_days)} "
         f"earlier); do not read them as that date's state._"
     )
 

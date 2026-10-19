@@ -77,16 +77,24 @@ from typing import NamedTuple
 from urllib.parse import quote
 
 from .sosovalue_common import (
+    VENDOR,
     SoSoValueError,
     SoSoValueUnavailableError,
-    _sanitize,
     fetch_each,
     get_api_key,
+    is_valid_ticker as _is_valid_ticker,
     raise_all_failed,
     request as _request,
 )
 from .symbol_utils import classify_crypto_asset
-from .utils import MAX_UNTRUSTED_CHARS, date_refusal, echo_argument, quote_argument
+from .utils import (
+    MAX_UNTRUSTED_CHARS,
+    date_refusal,
+    echo_argument,
+    plural_days as _plural_days,
+    quote_argument,
+    sanitize_untrusted as _sanitize,
+)
 from .vendor_common import (
     cache_dir as _cache_dir,
     cache_rejecter as _cache_rejecter,
@@ -94,14 +102,12 @@ from .vendor_common import (
     coverage_gap_note as _coverage_gap_note,
     days_unobserved as _days_unobserved,
     fmt_signed_usd_m as _fmt_signed_usd_m,
-    is_finite_real as _is_finite_number,
+    is_finite_real as _is_finite_real,
     is_iso_date as _is_iso_date,
     is_non_negative_int as _is_non_negative_int,
     is_safe_text as _is_safe_text,
-    is_valid_ticker as _is_valid_ticker,
     load_rolling_snapshot,
     plural as _plural,
-    plural_days as _plural_days,
     read_cache_preamble as _read_cache_preamble,
     stale_caveat as _stale_caveat,
     valid_dated_rows as _valid_dated_rows,
@@ -191,8 +197,8 @@ def _parse_amount(x: object) -> float | None:
     strings with grouping or units — so the caller decides whether a field
     is required (raise) or optional (absent).
     """
-    if _is_finite_number(x):
-        return float(x)  # type: ignore[arg-type]
+    if _is_finite_real(x):
+        return float(x)
     if isinstance(x, str) and _AMOUNT_RE.match(x):
         return float(x.replace(",", ""))
     return None
@@ -232,8 +238,8 @@ def _parse_company_list(data: list) -> tuple[list[tuple[str, str]], int]:
             continue
         if ticker in seen:
             continue
-        seen.add(ticker)  # type: ignore[arg-type]
-        companies.append((ticker, _clean_name(raw.get("name"))))  # type: ignore[arg-type]
+        seen.add(ticker)
+        companies.append((ticker, _clean_name(raw.get("name"))))
     return companies, unusable
 
 
@@ -362,7 +368,7 @@ def _row_fields_ok(r: dict) -> bool:
     # The per-field rules behind the family's shared _valid_dated_rows
     # skeleton (which already checked the dict shape and the date).
     return (
-        _is_finite_number(r.get("btc_holding"))
+        _is_finite_real(r.get("btc_holding"))
         # Non-negative, mirroring the parse boundary exactly. The cache is the
         # lower trust tier of the two, so an invariant the parser enforces must
         # not be reachable by hand-editing the snapshot or by a file an older
@@ -377,9 +383,9 @@ def _row_fields_ok(r: dict) -> bool:
         # renderer's row["btc_acq"] subscript raise a raw KeyError outside
         # the vendor taxonomy instead of this validator rejecting the file.
         and "btc_acq" in r
-        and (r["btc_acq"] is None or _is_finite_number(r["btc_acq"]))
+        and (r["btc_acq"] is None or _is_finite_real(r["btc_acq"]))
         and "acq_cost" in r
-        and (r["acq_cost"] is None or _is_finite_number(r["acq_cost"]))
+        and (r["acq_cost"] is None or _is_finite_real(r["acq_cost"]))
     )
 
 
@@ -738,6 +744,7 @@ def _load_snapshot() -> _TreasurySnapshot:
         cache_name="SoSoValue treasuries cache",
         max_stale_hours=MAX_STALE_DAYS * 24,
         log=logger,
+        vendor=VENDOR,
         precheck=get_api_key,
     )
     return _snapshot_from(payload, fetched_at, stale)

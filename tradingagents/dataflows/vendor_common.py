@@ -7,26 +7,26 @@ formatters and the cache/TTL/stale-fallback skeleton
 (``load_rolling_snapshot``). They grew
 inside ``sosovalue_common``, the first family to need them, and moved out
 under public names (dataflows refactor plan 2026-10-16, D1); what is
-SoSoValue's — the error taxonomy, the API key, the request helper and
-budget, and the per-item sweep that catches and raises those types — stays
-in ``sosovalue_common``.
+SoSoValue's — the error taxonomy and the vendor name, the API key, the
+request helper and budget, the listing ticker predicate, and the per-item
+sweep that catches and raises those types — stays in ``sosovalue_common``.
 
 ``_utc_now`` is the one clock every helper here reads, and it stays a
 module-level underscore name on purpose: it is the seam the tests patch to
 freeze time (``monkeypatch.setattr(vendor_common, "_utc_now", ...)``).
 
 Nothing here knows a vendor's payload shape, TTL policy or report wording;
-``load_rolling_snapshot`` takes those as callables and names, and the
-``vendor`` it prints defaults to the family it was written for.
+``load_rolling_snapshot`` takes those as callables and names, the
+``vendor`` it prints among them.
 """
 
 import json
 import logging
 import math
 import os
-import re
 from collections.abc import Callable
 from datetime import datetime, timezone
+from typing import TypeGuard
 
 from .config import get_config
 from .errors import (
@@ -35,23 +35,10 @@ from .errors import (
     VendorRateLimitError,
     VendorUnavailableError,
 )
-from .utils import failure_account, finite_float, wiring_gap
-
-# A plausible exchange ticker, safe to interpolate into a URL path: the US
-# ETF forms like "IBIT" and the international listing forms like "0434.HK",
-# "ADE.DE" or Tokyo's numeric "3350" (the SoSoValue listings supplied the
-# examples; the grammar is any provider's). Anything not matching is dropped
-# — and disclosed via an unusable-entry count — rather than requested. The first
-# character must be alphanumeric: URL-quoting leaves "." unescaped (it sits
-# in urllib's always-safe set regardless of ``safe=``), so a dot-led token
-# like ".." would otherwise survive quoting as a path-traversal-shaped
-# segment. Anchored with ``\Z``, not ``$``: ``$`` also matches before a
-# trailing newline, so "IBIT\n" would pass and land its raw newline mid-line
-# in the report text.
-_TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}\Z")
+from .utils import failure_account, finite_float, plural_days, wiring_gap
 
 
-def is_finite_real(x: object) -> bool:
+def is_finite_real(x: object) -> TypeGuard[float]:
     """True only for a real, finite number (not a bool, NaN, or Infinity).
 
     bool is an int subclass, so a JSON ``true`` must not pass as a figure;
@@ -62,7 +49,8 @@ def is_finite_real(x: object) -> bool:
     vendor taxonomy.
 
     All of that is ``utils.finite_float`` now, shared with the other vendors
-    that ask the same question.
+    that ask the same question. A ``TypeGuard`` so a value that passed reads
+    as a number to the type checker at the comparison that follows.
     """
     return finite_float(x) is not None
 
@@ -71,8 +59,10 @@ def is_iso_date(x: object) -> bool:
     """True only for a canonical zero-padded ``YYYY-MM-DD`` date string.
 
     A non-canonical date would silently mis-order the lexical
-    ``date <= curr_date`` lookahead filter, so it is rejected wherever a date
-    crosses a trust boundary (API response or cache file).
+    ``date <= curr_date`` lookahead filter (a non-zero-padded "2026-6-5" sorts
+    after "2026-07-20"), and a non-date would crash a later ``strptime`` deep
+    inside a render, so it is rejected wherever a date crosses a trust
+    boundary (API response or cache file).
     """
     if not isinstance(x, str):
         return False
@@ -80,17 +70,6 @@ def is_iso_date(x: object) -> bool:
         return datetime.strptime(x, "%Y-%m-%d").strftime("%Y-%m-%d") == x
     except ValueError:
         return False
-
-
-def is_valid_ticker(x: object) -> bool:
-    """True only for a string passing the plausible-ticker filter.
-
-    The one ticker predicate the listing consumers (the SoSoValue ETF and
-    treasuries modules) share — each applies it live-parse-side and
-    cache-read-side, so the two trust boundaries cannot drift apart on what
-    may be interpolated into a URL path or report text.
-    """
-    return isinstance(x, str) and bool(_TICKER_RE.match(x))
 
 
 def is_safe_text(x: object, max_len: int, *, min_len: int = 1, stripped: bool = True) -> bool:
@@ -184,24 +163,12 @@ def _cache_age_hours(fetched_at: str) -> float | None:
     return (_utc_now() - fetched).total_seconds() / 3600.0
 
 
-def _days_stale(fetched_at: str) -> int | None:
-    """Whole elapsed days since fetched_at; None for unparseable or future stamps.
-
-    A future-dated stamp (clock skew / tampered file) must read as unknown so
-    the stale cap refuses it rather than serving it forever.
-    """
-    hours = _cache_age_hours(fetched_at)
-    if hours is None or hours < 0:
-        return None
-    return int(hours // 24)
-
-
 def days_unobserved(fetched_at: str, curr_dt: datetime) -> int | None:
     """Days of a report's window that postdate the snapshot, or None.
 
-    Not ``_days_stale``: that measures the snapshot against wall-clock now for
-    the TTL and the stale cap, while this measures it against the report's
-    ``curr_date``, which on a backtest can sit far from now (and before the
+    Not ``_cache_age_hours``: that measures the snapshot against wall-clock
+    now for the TTL and the stale cap, while this measures it against the
+    report's ``curr_date``, which on a backtest can sit far from now (and before the
     fetch, giving a non-positive result callers are expected to ignore). It is
     what a stale serve's trailing window cannot have seen — no snapshot carries
     what the provider published after it was fetched — so both vendor modules
@@ -394,10 +361,6 @@ def plural(count: int, singular: str, plural_form: str) -> str:
     return singular if count == 1 else plural_form
 
 
-def plural_days(count: int) -> str:
-    return plural(count, "day", "days")
-
-
 def coverage_gap_note(missing: set[str] | list[str], did_what: str, otherwise: str) -> str:
     """A sentence naming what an empty section might really be, or "".
 
@@ -427,7 +390,7 @@ def load_rolling_snapshot(
     cache_name: str,
     max_stale_hours: float,
     log: logging.Logger,
-    vendor: str = "SoSoValue",
+    vendor: str,
     precheck: Callable[[], object] | None = None,
 ) -> tuple[dict, str, bool, bool]:
     """The family's cache/TTL/stale discipline; returns (payload, fetched_at, stale, refetched).
@@ -445,11 +408,12 @@ def load_rolling_snapshot(
 
     ``vendor`` and ``precheck`` are what make this the FAMILY's skeleton
     rather than SoSoValue's. ``vendor`` names the vendor in every message and
-    log line; ``precheck``, when given, runs before anything else and may
-    raise. For the SoSoValue modules it is ``get_api_key``: an unset key must
-    raise even when a fresh cache could serve the call, or the
-    emergency-disable flip (unset the key on the server) would be delayed by
-    up to the cache TTL. A keyless vendor passes none.
+    log line, and has no default: a default would file a caller that forgot
+    it under another vendor's name. ``precheck``, when given, runs before
+    anything else and may raise. For the SoSoValue modules it is
+    ``get_api_key``: an unset key must raise even when a fresh cache could
+    serve the call, or the emergency-disable flip (unset the key on the
+    server) would be delayed by up to the cache TTL. A keyless vendor passes none.
 
     ``max_stale_hours``, not days. The bound used to be a whole number of days
     because the three SoSoValue feeds publish daily, which made a vendor whose
@@ -468,19 +432,19 @@ def load_rolling_snapshot(
       two seams where the vendor had one, which is the split its own STALE
       caveat takes a ``humanize`` hook to avoid. A clock hook here would close
       it, at the cost of threading one through this module's three time
-      helpers - and so through the three feeds already using them.
+      helpers - and so through every feed already using them.
     * ``hyperliquid_whales._load_snapshot`` keeps ``fetched_at`` inside its
       ``current`` block, while this function stamps and reads it at the top
       level. Adopting means either a cache-schema change for a vendor that
       ships disabled, or a second pair of hooks to read and write the stamp -
-      on a function that already takes eight arguments.
+      on a function whose argument list is already long.
 
-    Then the Farside pattern: a
+    The discipline itself is the one Farside's loader set: a
     cache younger than its TTL is served as-is — the TTL is the module's
     policy call (``ttl_hours(cached)``), where each degradation bucket's
     shortened-or-not argument lives — otherwise ``fetch_all(cached)`` runs
     and overwrites the rolling file; on a fetch failure the call falls back
-    to the cached snapshot (``stale=True``) up to ``max_stale_days``. A
+    to the cached snapshot (``stale=True``) up to ``max_stale_hours``. A
     failed fetch is never written to cache. ``VendorNotConfiguredError`` (the
     SoSoValue modules' unset or rejected key) is deliberately NOT absorbed by
     the stale fallback: config breakage should surface to the router
@@ -488,15 +452,15 @@ def load_rolling_snapshot(
 
     A vendor-taxonomy error keeps its exact type through the context-adding
     wraps: the router classifies by type (a rate limit is a routine quiet
-    fall-through; a plain ``SoSoValueError`` is unexpected breakage, logged
+    fall-through; a plain ``VendorError`` is unexpected breakage, logged
     with a traceback and surfaced as the chain's first error), so the wrap
     must add context without re-classifying. Nothing below the taxonomy
     reaches here: ``fetch_all`` types its own transport failures at the boundary (#217).
 
     A stale serve on an outage is a WARNING — a brownout of minutes must
-    not read as an incident — until the snapshot's whole-day age (the
-    cap's own measure, ``_days_stale``) exceeds half of ``max_stale_days``
-    — the 8th day of a 14-day cap — when each refresh logs one ERROR line
+    not read as an incident — until the snapshot's age (the cap's own
+    measure, ``_cache_age_hours``) exceeds half of ``max_stale_hours``
+    — past the seventh day of a 14-day cap — when each refresh logs one ERROR line
     instead (no traceback: the type says it is not a bug). An endpoint that has moved
     behind a gateway's error page thereby shows in the ERROR log a week
     before the cap expires the cache, rather than only when it does.
@@ -528,9 +492,8 @@ def load_rolling_snapshot(
             # Unknown age (unparseable stamp) or a future-dated one is treated
             # as beyond the cap — the case where an unbounded-age serve is most
             # likely — rather than served with a nonsense age caveat. Hours
-            # rather than whole days now, so a cap under a day is expressible;
-            # ``_days_stale`` folded the future-dated case into None, which the
-            # sign test below now does explicitly.
+            # rather than whole days, so a cap under a day is expressible; the
+            # future-dated case is the explicit sign test below.
             if age is None or age < 0 or age > max_stale_hours:
                 stale_desc = (
                     "has an unparseable or future-dated fetch date"
@@ -542,7 +505,7 @@ def load_rolling_snapshot(
                     f"(> {_humanize_span(max_stale_hours)} cap): "
                     f"{failure_account(e, limit=None)}"
                 ) from e
-            # A SoSoValueError here is a contract/parse break (a code fix is
+            # A structural failure here is a contract/parse break (a code fix is
             # likely needed) and must not hide among network-blip warnings for
             # up to the stale cap; a rate limit stays a warning, and so does
             # an outage until the snapshot has aged past half the cap.

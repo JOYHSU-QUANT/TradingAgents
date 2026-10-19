@@ -27,6 +27,8 @@ from tradingagents.dataflows import (
     interface,
     sosovalue,
     sosovalue_common,
+    sosovalue_macro,
+    sosovalue_treasuries,
     vendor_common,
 )
 from tradingagents.dataflows.config import set_config
@@ -3051,6 +3053,7 @@ class TestRollingSnapshotIsTheFamilysNotSoSoValues:
             "cache_name": "Test cache",
             "max_stale_hours": 6,
             "log": logging.getLogger("test"),
+            "vendor": "SoSoValue",
         }
         return vendor_common.load_rolling_snapshot(**(defaults | kwargs))
 
@@ -3144,3 +3147,26 @@ class TestRollingSnapshotIsTheFamilysNotSoSoValues:
             )
         assert stale
         assert [r.levelname for r in caplog.records if "structurally" in r.message] == ["ERROR"]
+
+    @pytest.mark.parametrize(
+        ("module", "args"),
+        [(sosovalue, ("BTC",)), (sosovalue_macro, ()), (sosovalue_treasuries, ())],
+        ids=["etf", "macro", "treasuries"],
+    )
+    def test_each_feed_names_its_vendor_to_the_skeleton(self, module, args, monkeypatch):
+        # ``vendor`` has no default, so each caller names the family itself. A
+        # wrong name would only mislabel the stale and failure messages and log
+        # lines, which no rendering test reads back, so it is pinned here.
+        seen = {}
+
+        class _Stop(Exception):
+            pass
+
+        def _capture(**kwargs):
+            seen.update(kwargs)
+            raise _Stop
+
+        monkeypatch.setattr(module, "load_rolling_snapshot", _capture)
+        with pytest.raises(_Stop):
+            module._load_snapshot(*args)
+        assert seen["vendor"] == "SoSoValue"

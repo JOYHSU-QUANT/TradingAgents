@@ -301,29 +301,33 @@ def _sibling_imports(tree: ast.Module, package_name: str = "tradingagents.datafl
     """Every package sibling ``tree`` imports, by any spelling and at any depth.
 
     Unlike :func:`_private_cross_imports` this reads which MODULES are
-    imported, not which names: ``from .x import y``, ``from .x.deep import
-    y`` and ``from <package_name>.x import y`` all import ``x``; ``from .
-    import x`` and ``from <package_name> import x`` import ``x`` itself;
-    ``import <package_name>.x`` with or without ``as`` imports ``x``. A lazy
-    import inside a function is the same dependency.
+    imported, not which names. A relative import is resolved to its absolute
+    module first, at any level, so ``from .x import y``, ``from ..<last
+    part>.x import y`` and ``from <package_name>.x.deep import y`` all import
+    ``x``; ``from . import x`` and ``from <package_name> import x`` import
+    ``x`` itself; ``import <package_name>.x`` with or without ``as`` imports
+    ``x``. A lazy import inside a function is the same dependency. Dynamic
+    imports (``importlib``, ``__import__``) and attribute reads off the
+    package object are not read.
     """
     found: set[str] = set()
+    parts = package_name.split(".")
     prefix = package_name + "."
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             module = node.module or ""
-            if node.level == 1:
-                rest = module
-            elif node.level == 0 and module == package_name:
-                rest = ""
-            elif node.level == 0 and module.startswith(prefix):
-                rest = module[len(prefix) :]
+            if node.level:
+                climb = node.level - 1
+                if climb >= len(parts):
+                    continue
+                base = parts[: len(parts) - climb]
+                absolute = ".".join([*base, module] if module else base)
             else:
-                continue
-            if rest:
-                found.add(rest.split(".")[0])
-            else:
+                absolute = module
+            if absolute == package_name:
                 found.update(alias.name for alias in node.names)
+            elif absolute.startswith(prefix):
+                found.add(absolute[len(prefix) :].split(".")[0])
         elif isinstance(node, ast.Import):
             found.update(
                 alias.name[len(prefix) :].split(".")[0]
@@ -605,11 +609,15 @@ def test_the_sibling_import_scan_reads_every_spelling_at_any_depth(tmp_path):
         "from pkg.flowsb import prefix_only\n"
         "from pkg.other import elsewhere\n"
         "from ..up import parent\n"
+        "from ..flows.j import climbed_back\n"
+        "from ..flows import l\n"
+        "from .....too_far import gone\n"
         "import other\n"
         "def lazy():\n"
         "    from .i import w\n",
     )
     found = _sibling_imports(dict(_modules(tmp_path))["k"], "pkg.flows")
-    # Every spelling of a sibling counts, deeper paths by their sibling; the
-    # prefix-only, foreign and parent imports are not siblings.
-    assert found == {"a", "b", "c", "d", "e", "f", "g", "h", "i"}
+    # Every spelling of a sibling counts, deeper paths by their sibling, and a
+    # relative import that climbs out and back in names one too; the
+    # prefix-only, foreign, parent and past-the-root imports are not siblings.
+    assert found == {"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "l"}

@@ -18,17 +18,21 @@ Breaking changes within the 0.x line are called out explicitly.
   (`sosovalue_macro.get_economic_calendar_data` 1,053,
   `deribit.get_options_market_data` 674, `sosovalue.get_etf_flow_data` and
   `sosovalue_treasuries.get_btc_treasury_data` 582 each, `route_to_vendor`
-  486, down to `farside._parse_flow_table` 153); the 57 underscore names
-  those modules import from another dataflows module (all of them the cache
-  kernel the six vendors take from `sosovalue_common`, which D1 moves out and
-  makes public; the upstream families' own private imports are not
-  measured); and the six modules whose module-level `_utc_now` the tests
-  monkeypatch to freeze time (`cftc_cot`, `cme_basis`, `deribit`, `farside`,
-  `hyperliquid_whales`, `sosovalue_common`). The `typecheck` CI job now also
+  486, down to `farside._parse_flow_table` 153); the 58 underscore names
+  those modules reach in another dataflows module, by import or through a
+  module bound as a name (all of them the cache kernel the six vendors take
+  from `sosovalue_common`, which D1 moves out and makes public; the upstream
+  families' own private imports are not measured); and the six modules whose
+  module-level `_utc_now` the tests monkeypatch to freeze time (`cftc_cot`,
+  `cme_basis`, `deribit`, `farside`, `hyperliquid_whales`,
+  `sosovalue_common`). Every module on disk must sit in the scope list or the
+  upstream list, and the scope list must equal the mypy file list, so a new
+  module is placed before the suite passes. The `typecheck` CI job now also
   runs mypy over the twelve modules in scope (the nine vendors, `fear_greed`,
   `throttle` and `interface.py`); their 50 errors on 45 lines are pinned
-  where they sit with `# type: ignore[code]` under `warn_unused_ignores`, so
-  a fixed one fails the job until its pin is removed. The two in
+  where they sit with `# type: ignore[code]` under `warn_unused_ignores` (one
+  line in `cftc_cot.py` already carried a pin), so a fixed one fails the job
+  until its pin is removed. The two in
   `interface.py` the plan lists as behaviour candidates (§5:
   `_library_failure_prose` handed an `Exception`, `unconfirmed.vendor` read
   on an optional) are pinned, not fixed. `requests`, parsel and yfinance are

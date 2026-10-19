@@ -3,38 +3,42 @@
 The data-source modules the fork wrote (nine vendors, ``fear_greed`` and
 ``throttle``; none exists upstream) grew without any guard on their shape:
 nothing in the repo watched function length, cross-module private imports
-or the clock seams the tests patch. ``contrib/`` has had these guards since
-refactor plan v2's T0; this file gives the dataflows the same floor
-(dataflows refactor plan 2026-10-16, D0), freezing what was measured on
-2026-10-19 so it can only improve:
+or the clock seams the tests patch. ``contrib/`` has had import-graph guards
+of this kind since refactor plan v2's T0 (the length table is new to the
+repo); this file gives the dataflows the same floor (dataflows refactor plan
+2026-10-16, D0), freezing what was measured on 2026-10-19 so it can only
+improve:
 
 - :data:`_LONG_FUNCTIONS` — every function over :data:`LONG_FUNCTION_LINES`
   in the modules in scope, with its length as an upper bound;
 - :data:`_PRIVATE_CROSS_IMPORTS` — every underscore name a module in scope
-  imports from another dataflows module, compared by equality;
+  reaches in another dataflows module, by import or through a module bound
+  as a name, compared by equality;
 - :data:`_CLOCK_SEAMS` — the modules in scope whose module-level ``_utc_now``
   the tests ``monkeypatch.setattr`` to freeze time, compared by equality.
 
 Scope is :data:`_IN_SCOPE`: the fork's modules plus ``interface.py``, the
-one upstream file the fork rebuilt (``route_to_vendor``). The other upstream
-modules (``fred``, ``polymarket``, ``stocktwits``, the Alpha Vantage and
-yfinance families) are the upstream project's to shape; measuring them here
-would turn the next sync into table edits for code that is not ours.
+one upstream file the fork rebuilt (``route_to_vendor``). The other modules
+(:data:`_UPSTREAM`) are the upstream project's to shape; measuring them here
+would turn the next sync into table edits for code that is not ours. Every
+module on disk is in one list or the other, so a new module has to be placed
+before the suite passes.
 """
 
 from __future__ import annotations
 
 import ast
 import functools
+import re
 from collections.abc import Iterable
 from pathlib import Path
 
-from .conftest import dataflows_module_trees, package_module_trees
+from .conftest import dataflows_module_trees, package_module_trees, repo_text
 
 # The modules the fork wrote (first commit by the fork, absent from upstream
 # ``main``) plus ``interface.py``. The same twelve ``pyproject.toml``
-# ``[tool.mypy] files`` lists under ``tradingagents/dataflows/``; a module
-# added to one is added to the other.
+# ``[tool.mypy] files`` lists under ``tradingagents/dataflows/``, and a test
+# below holds the two lists equal.
 _IN_SCOPE = frozenset(
     {
         "cftc_cot",
@@ -49,6 +53,34 @@ _IN_SCOPE = frozenset(
         "sosovalue_macro",
         "sosovalue_treasuries",
         "throttle",
+    }
+)
+
+# Upstream's modules (and ``__init__``), named so a module on disk that is in
+# neither list fails: the neutral kernel D1 creates, or a new vendor, has to
+# be placed in scope (or declared upstream) before anything else passes.
+_UPSTREAM = frozenset(
+    {
+        "__init__",
+        "alpha_vantage",
+        "alpha_vantage_common",
+        "alpha_vantage_fundamentals",
+        "alpha_vantage_indicator",
+        "alpha_vantage_news",
+        "alpha_vantage_stock",
+        "config",
+        "date_window",
+        "errors",
+        "fred",
+        "market_data_validator",
+        "polymarket",
+        "reddit",
+        "stocktwits",
+        "symbol_utils",
+        "utils",
+        "y_finance",
+        "yfinance_common",
+        "yfinance_news",
     }
 )
 
@@ -83,15 +115,18 @@ _LONG_FUNCTIONS: dict[tuple[str, str], int] = {
 }
 
 # ``(importer, source, name)`` for every underscore name a module in scope
-# imports from another dataflows module. All of it is the cache kernel the
-# six vendors take from ``sosovalue_common``; D1 moves that kernel into a
-# neutral module under public names, and this set shrinks there.
+# reaches in another dataflows module. All of it is the cache kernel the six
+# vendors take from ``sosovalue_common`` (``cftc_cot``'s own ``_utc_now``
+# delegates to the family's, through the module bound as ``family``); D1
+# moves that kernel into a neutral module under public names, and this set
+# shrinks there.
 _PRIVATE_CROSS_IMPORTS: frozenset[tuple[str, str, str]] = frozenset(
     {
         ("cftc_cot", "sosovalue_common", "_cache_dir"),
         ("cftc_cot", "sosovalue_common", "_cache_rejecter"),
         ("cftc_cot", "sosovalue_common", "_read_cache_preamble"),
         ("cftc_cot", "sosovalue_common", "_stale_caveat"),
+        ("cftc_cot", "sosovalue_common", "_utc_now"),
         ("farside", "sosovalue_common", "_cache_dir"),
         ("farside", "sosovalue_common", "_cache_rejecter"),
         ("farside", "sosovalue_common", "_read_cache_preamble"),
@@ -224,11 +259,12 @@ def _long_functions(
 
 
 def _sibling_module(node: ast.ImportFrom, package_name: str) -> str | None:
-    """The package sibling ``node`` imports from, or ``None`` if it is not one.
+    """The package sibling ``node`` imports NAMES from, or ``None`` if it is not one.
 
     ``from .x import ...`` and ``from <package_name>.x import ...`` both name
-    the sibling ``x``; ``from . import x`` (a module bound as a name), a
-    deeper path and anything outside the package are not read here.
+    the sibling ``x``; a deeper path and anything outside the package are not
+    read here, and ``from . import x`` binds a module rather than names,
+    which :func:`_sibling_bindings` reads.
     """
     module = node.module or ""
     prefix = package_name + "."
@@ -241,45 +277,82 @@ def _sibling_module(node: ast.ImportFrom, package_name: str) -> str | None:
     return rest if rest and "." not in rest else None
 
 
+def _sibling_bindings(tree: ast.Module, package_name: str) -> dict[str, str]:
+    """``bound name: sibling module`` for every sibling MODULE ``tree`` binds as a name.
+
+    ``from . import x [as y]``, ``from <package_name> import x [as y]`` and
+    ``import <package_name>.x as y``. A plain ``import <package_name>.x``
+    binds the top package and is not read: no dataflows module spells it.
+    """
+    found: dict[str, str] = {}
+    prefix = package_name + "."
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and (
+            (node.level == 1 and node.module is None)
+            or (node.level == 0 and node.module == package_name)
+        ):
+            found.update((alias.asname or alias.name, alias.name) for alias in node.names)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                tail = alias.name[len(prefix) :]
+                if alias.asname and alias.name.startswith(prefix) and "." not in tail:
+                    found[alias.asname] = tail
+    return found
+
+
 def _private_cross_imports(
     package: Path | None = None,
     package_name: str = "tradingagents.dataflows",
     scope: frozenset[str] = _IN_SCOPE,
 ) -> frozenset[tuple[str, str, str]]:
-    """``(importer, source, name)`` per underscore name a module in scope imports from a sibling.
+    """``(importer, source, name)`` per underscore name a module in scope reaches in a sibling.
 
-    At any depth: a lazy import inside a function is the same dependency.
-    The IMPORTED name is what is read, not the binding: ``from .x import _y
-    as z`` still reaches into ``x`` for ``_y``, and that reach is the debt.
+    Two spellings of one reach: ``from .x import _y`` and ``x._y`` read off a
+    module bound as a name (:func:`_sibling_bindings`). At any depth: a lazy
+    import inside a function is the same dependency. The name IN THE SIBLING
+    is what is recorded, not the local binding: ``from .x import _y as z``
+    still reaches into ``x`` for ``_y``, and that reach is the debt.
     """
     found: set[tuple[str, str, str]] = set()
     for importer, tree in _modules(package):
         if importer not in scope:
             continue
+        modules = _sibling_bindings(tree, package_name)
         for node in ast.walk(tree):
-            if not isinstance(node, ast.ImportFrom):
-                continue
-            source = _sibling_module(node, package_name)
-            if source is None:
-                continue
-            found.update(
-                (importer, source, alias.name) for alias in node.names if alias.name.startswith("_")
-            )
+            if isinstance(node, ast.ImportFrom):
+                source = _sibling_module(node, package_name)
+                if source is not None:
+                    found.update(
+                        (importer, source, alias.name)
+                        for alias in node.names
+                        if alias.name.startswith("_")
+                    )
+            elif (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id in modules
+                and node.attr.startswith("_")
+            ):
+                found.add((importer, modules[node.value.id], node.attr))
     return frozenset(found)
 
 
 def _module_level_bindings(tree: ast.Module) -> set[str]:
-    """The names a module binds at its top level: defs, classes, assignments, imports.
+    """The names a module binds by a direct top-level statement: defs, classes, assignments, imports.
 
-    Only direct children of the module: a name bound inside a function or an
-    ``if`` block is not a seam a test can patch before the module is used.
+    Direct children only, on purpose: the seams the tests patch are plain
+    top-level bindings, and the table is equality, so a seam that moved
+    under an ``if`` or ``try`` reads as retired here (loudly, for review)
+    rather than as kept.
     """
     found: set[str] = set()
     for node in tree.body:
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
             found.add(node.name)
         elif isinstance(node, ast.Assign):
-            found.update(t.id for t in node.targets if isinstance(t, ast.Name))
+            for target in node.targets:
+                elts = target.elts if isinstance(target, ast.Tuple) else [target]
+                found.update(e.id for e in elts if isinstance(e, ast.Name))
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             found.add(node.target.id)
         elif isinstance(node, ast.ImportFrom):
@@ -325,11 +398,23 @@ def test_private_cross_imports_are_exactly_those_frozen_on_2026_10_19():
     )
 
 
-def test_every_module_in_scope_is_on_disk():
-    # A typo in ``_IN_SCOPE`` for a module with no long functions and no
-    # seam (``throttle``) would otherwise drop it from every scan unnoticed.
+def test_every_module_on_disk_is_in_scope_or_declared_upstream():
+    # Equality both ways: a typo in ``_IN_SCOPE`` for a module with no long
+    # functions and no seam (``throttle``) would otherwise drop it from every
+    # scan unnoticed, and a new module would be measured by nothing.
     on_disk = {module for module, _tree in _modules(None)}
-    assert on_disk >= _IN_SCOPE, f"not on disk: {sorted(_IN_SCOPE - on_disk)}"
+    assert on_disk == _IN_SCOPE | _UPSTREAM, _ratchet_message(
+        "dataflows modules", on_disk, _IN_SCOPE | _UPSTREAM
+    )
+    assert not (_IN_SCOPE & _UPSTREAM), sorted(_IN_SCOPE & _UPSTREAM)
+
+
+def test_the_scope_is_the_mypy_file_list():
+    # ``pyproject.toml`` ``[tool.mypy] files`` names the same modules, so the
+    # type floor and the shape tables cover one set. Read as text: tomllib
+    # is 3.11+ and the suite runs on 3.10.
+    files = re.findall(r'"tradingagents/dataflows/(\w+)\.py"', repo_text("pyproject.toml"))
+    assert set(files) == _IN_SCOPE, _ratchet_message("[tool.mypy] files", files, _IN_SCOPE)
 
 
 def test_the_clock_seams_are_exactly_the_modules_frozen_on_2026_10_19():
@@ -381,12 +466,13 @@ def test_the_length_scan_counts_def_to_end_under_qualified_names(tmp_path):
 def test_the_length_scan_tells_two_closures_of_one_name_apart(tmp_path):
     # Keyed by bare name, the longer closure would hide the shorter one's
     # growth; keyed by qualified name, each is its own row. A plain
-    # redefinition at one level keeps the longer figure.
+    # redefinition at one level keeps the longer figure whichever comes
+    # first (last-wins would let a short redefinition retire a long one).
     _write(
         tmp_path,
         "m",
-        "def f():\n    pass\n\n"
         "def f():\n    pass\n    pass\n\n"
+        "def f():\n    pass\n\n"
         "def g():\n    def f():\n        pass\n        pass\n        pass\n\n"
         "def h():\n    def f():\n        pass\n",
     )
@@ -395,9 +481,11 @@ def test_the_length_scan_tells_two_closures_of_one_name_apart(tmp_path):
 
 
 def test_the_long_function_scan_reads_only_the_scope_and_only_over_the_line(tmp_path):
-    body = "def f():\n" + "    pass\n" * LONG_FUNCTION_LINES
-    _write(tmp_path, "ours", body + "\n\ndef g():\n    pass\n")
-    _write(tmp_path, "theirs", body)
+    over = "def f():\n" + "    pass\n" * LONG_FUNCTION_LINES
+    at = "def exactly():\n" + "    pass\n" * (LONG_FUNCTION_LINES - 1)
+    _write(tmp_path, "ours", over + "\n\n" + at + "\n\ndef g():\n    pass\n")
+    _write(tmp_path, "theirs", over)
+    # ``exactly`` is AT the line, not over it, and ``theirs`` is out of scope.
     assert _long_functions(tmp_path, frozenset({"ours"})) == {
         ("ours", "f"): LONG_FUNCTION_LINES + 1
     }
@@ -413,21 +501,31 @@ def test_the_import_scan_resolves_every_shape_of_a_sibling_import(tmp_path):
         "from pkg.flows.c.deep import _abs_deep\n"
         "from pkg.flowsb import _prefix_only\n"
         "from pkg.other import _elsewhere\n"
-        "from . import _module_bound\n"
         "from ..up import _parent\n"
-        "import pkg.flows.d\n"
+        "from . import b as fam, _module_bound\n"
+        "from pkg.flows import c as cc\n"
+        "import pkg.flows.d as dd\n"
+        "import pkg.flows.g\n"
+        "import other as oo\n"
         "def f():\n"
-        "    from .e import _lazy\n",
+        "    from .e import _lazy\n"
+        "    return fam._via_alias(), fam.public, cc._abs_alias, dd._plain_alias\n"
+        "x = pkg.flows.g._unresolved + oo._foreign + _module_bound.public\n",
     )
     _write(tmp_path, "z", "from .b import _out_of_scope\n")
     found = _private_cross_imports(tmp_path, "pkg.flows", frozenset({"a"}))
-    # ``_z`` is read for the imported name, not its binding ``w``; the
-    # module-bound, parent, deeper, prefix-only and foreign imports are not
-    # sibling edges, and ``z`` is outside the scope.
+    # ``_z`` is read for the name in ``b``, not its binding ``w``; a private
+    # attribute read off a module bound by any of the three spellings is an
+    # edge, a public one is not; the parent, deeper, prefix-only and foreign
+    # imports are not sibling edges, a module bound as ``_module_bound`` is
+    # not itself a reached name, and ``z`` is outside the scope.
     assert found == {
         ("a", "b", "_x"),
         ("a", "b", "_z"),
+        ("a", "b", "_via_alias"),
         ("a", "c", "_abs"),
+        ("a", "c", "_abs_alias"),
+        ("a", "d", "_plain_alias"),
         ("a", "e", "_lazy"),
     }
 
@@ -436,6 +534,7 @@ def test_the_seam_scan_reads_module_level_bindings_of_every_kind(tmp_path):
     _write(tmp_path, "by_def", "def _utc_now():\n    pass\n")
     _write(tmp_path, "by_assign", "import x\n_utc_now = x.now\n")
     _write(tmp_path, "by_annotated", "_utc_now: object = None\n")
+    _write(tmp_path, "by_tuple", "_a, _utc_now = 1, 2\n")
     _write(tmp_path, "by_import", "from .by_def import _utc_now\n")
     _write(tmp_path, "by_alias", "from .by_def import now as _utc_now\n")
     _write(tmp_path, "by_plain_import", "import _utc_now\n")
@@ -444,10 +543,13 @@ def test_the_seam_scan_reads_module_level_bindings_of_every_kind(tmp_path):
     _write(tmp_path, "other_name", "def utc_now():\n    pass\n")
     _write(tmp_path, "out_of_scope", "def _utc_now():\n    pass\n")
     everything = frozenset(p.stem for p in tmp_path.glob("*.py")) - {"out_of_scope"}
+    # ``guarded`` binds the name under an ``if``: read as absent on purpose
+    # (see ``_module_level_bindings``).
     assert _clock_seams(tmp_path, everything) == {
         "by_def",
         "by_assign",
         "by_annotated",
+        "by_tuple",
         "by_import",
         "by_alias",
         "by_plain_import",

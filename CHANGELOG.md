@@ -178,7 +178,7 @@ Breaking changes within the 0.x line are called out explicitly.
   indentation, `header_lines.append` becoming each helper's `notes.append`,
   two statements the formatter now fits on one line, the dropped `# ----`
   section banners, and a few comments that pointed at code positions inside
-  the old function (they now name the helper). The old function and the new
+  the old function or named their readers (they now name the helpers). The old function and the new
   one, run over 40,000 generated snapshots, rendered byte-identical reports.
   Splitting the body leaves the three mypy pins on its reused `shown`
   variable unused, so they go, and the length ratchet loses its largest row.

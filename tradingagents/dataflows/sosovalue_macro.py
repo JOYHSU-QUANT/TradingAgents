@@ -1069,7 +1069,8 @@ def _event_coverage(snapshot: _MacroSnapshot, window: _Window) -> tuple[list[str
     """``(no_disclosure, shallow)`` for the fetched events, measured against ``window``.
 
     ``no_disclosure``: events with no print on or before ``curr_date``;
-    ``shallow``: events whose served history starts inside the released window.
+    ``shallow``: events whose history the per-request cap truncated (``HISTORY_LIMIT``
+    rows) and whose first visible print still falls after ``window_start``.
     """
     curr_date, window_start = window.curr_date, window.window_start
     # Per-event view of what this curr_date can actually see, mirroring the
@@ -1659,7 +1660,7 @@ def _calendar_quality_notes(
     scheduled: list[_ScheduledRow],
     released: list[_ReleasedRow],
 ) -> list[str]:
-    """The calendar-loss caveats, in order: unusable names, unreadable rows, truncation, merges."""
+    """The calendar-quality caveats, in order: unusable names, unreadable rows, cuts, merges."""
     cal_dated = facts.cal_dated
     notes: list[str] = []
     if snapshot.calendar_unusable:
@@ -1808,7 +1809,7 @@ def _malformed_notes(
 def _standing_caveats(
     snapshot: _MacroSnapshot, window: _Window, released: list[_ReleasedRow]
 ) -> list[str]:
-    """The caveats every report carries (plus the intraday one for a row dated ``curr_date``)."""
+    """Every report's standing caveats, plus the intraday one if anything is dated ``curr_date``."""
     curr_date = window.curr_date
     # The intraday caveat exists for anything dated today, published or not:
     # the "not yet released" case is exactly when a reader most needs telling

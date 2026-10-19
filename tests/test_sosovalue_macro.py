@@ -1660,8 +1660,9 @@ class TestTodaysScheduleIsVisible:
 @pytest.mark.unit
 class TestServedDepthAndStaleReach:
     def _capped_history(self, end="2026-08-11"):
-        # A history the per-request cap actually truncated: HISTORY_LIMIT rows,
-        # the oldest still inside the window.
+        # A history the per-request cap actually truncated: HISTORY_LIMIT daily
+        # rows ending at ``end``, the oldest HISTORY_LIMIT - 1 days back. Where
+        # that sits against the window is each test's look_back_days.
         base = datetime.strptime(end, "%Y-%m-%d")
         return [
             _row((base - timedelta(days=i)).strftime("%Y-%m-%d"), "1%", "1%", "1%")

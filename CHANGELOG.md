@@ -157,6 +157,39 @@ Breaking changes within the 0.x line are called out explicitly.
   rendered string changes; the private-import ratchet shrinks from 4 edges to
   the one clock seam.
 
+- **The economic-calendar renderer is split into its sections** (dataflows
+  refactor plan 2026-10-16, D2-a). `sosovalue_macro.get_economic_calendar_data`
+  drops from 1,053 lines to 121: it checks its arguments, loads the snapshot,
+  prints the stale caveat and assembles the rest of the report from nineteen
+  module-level helpers, each taking only what it reads — the snapshot, the
+  normalised dates (`_Window`), the measured calendar, the rows — and
+  returning its lines: the scheduled and released rows, the per-event
+  coverage, the calendar's measured extent (`_CalendarFacts`, built once for
+  every note that reads the span, its client-side losses or the fetch-date
+  skew), the header notes family by family in the order the header prints
+  them, the source line, and the two tables with their empty-window
+  narrations. A header-note helper that can stay silent checks its own
+  condition and returns no lines when it fails (the old `if`/`elif` between
+  the two window notes became their two guards), the table-or-narration
+  choice is a conditional expression in the entry point, and the rows are
+  typed (`_ScheduledRow`, `_ReleasedRow`). The `_is_priority` closure is
+  module-level and takes `curr_date`. The moved bodies keep every rendered
+  string and every comment; besides that glue, they differ only in
+  indentation, `header_lines.append` becoming each helper's `notes.append`,
+  two statements the formatter now fits on one line, the dropped `# ----`
+  section banners, and a few comments that pointed at code positions inside
+  the old function or named their readers (they now name the helpers). The old function and the new
+  one, run over 40,000 generated snapshots, rendered byte-identical reports.
+  Splitting the body leaves the three mypy pins on its reused `shown`
+  variable unused, so they go, and the length ratchet loses its largest row.
+  Five tests pin what a mutation probe found unguarded: the served-depth
+  note stays silent for a capped history that reaches past the window or
+  starts exactly on its first day; a name-only calendar entry dated today
+  keeps its row when figure rows already fill the scheduled table's cap; a
+  calendar ending on `curr_date` is read as ending on or before it; and a
+  released window of exactly `MAX_ROWS` rows carries no cap note. No
+  behaviour change.
+
 ### Fixed
 
 - **`contrib/dashboard`: the `history/` directory keeps its setgid bit.** The

@@ -188,6 +188,18 @@ class TestSixthLoopDisclosures:
         assert "carries no dated entry beyond it" in report
         assert "genuinely carries no scheduled entries" not in report
 
+    def test_a_calendar_ending_on_curr_date_is_read_as_ending_on_or_before_it(self):
+        # Inclusive at curr_date: the calendar's only entry is today's, and it
+        # echoes a print already released, so nothing is scheduled and the
+        # calendar reaches no further forward than one that ended yesterday.
+        snapshot = _snapshot(
+            histories=_histories(
+                overrides={"CPI (YoY)": [_row("2026-08-11", "3.5%", "3.0%", "2.9%")]}
+            ),
+        )
+        report = _render(snapshot, curr_date="2026-08-11")
+        assert "ends 2026-08-11, on or before this date" in report
+
     def test_a_merged_duplicate_date_earns_its_own_empty_schedule_reading(self):
         # calendar_duplicated must still block the benign "genuinely carries no
         # scheduled entries" — its caveat says dates may be mislabelled — but
@@ -1356,6 +1368,19 @@ class TestRender:
         assert table_dates == in_window[-sosovalue_macro.MAX_ROWS :]
         assert f"{len(in_window)} published" in report
 
+    def test_a_released_window_of_exactly_the_cap_has_no_cap_note(self):
+        # Strict: MAX_ROWS rows all fit, so a cap note would claim a cut that
+        # never happened.
+        first = datetime(2026, 8, 1) - timedelta(days=sosovalue_macro.MAX_ROWS - 1)
+        rows = [
+            _row((first + timedelta(days=i)).strftime("%Y-%m-%d"), "1%", "2%", "3%")
+            for i in range(sosovalue_macro.MAX_ROWS)
+        ]
+        snapshot = _snapshot(histories=_histories(overrides={"CPI (YoY)": rows}))
+        report = _render(snapshot, curr_date="2026-08-01", look_back_days=90)
+        assert f"{sosovalue_macro.MAX_ROWS} published" in report
+        assert "showing the most recent" not in report
+
     def test_empty_sections_state_their_reach_honestly(self):
         snapshot = _snapshot(
             calendar=[{"date": "2026-08-11", "events": ["CPI (YoY)"]}],
@@ -1635,8 +1660,9 @@ class TestTodaysScheduleIsVisible:
 @pytest.mark.unit
 class TestServedDepthAndStaleReach:
     def _capped_history(self, end="2026-08-11"):
-        # A history the per-request cap actually truncated: HISTORY_LIMIT rows,
-        # the oldest still inside the window.
+        # A history the per-request cap actually truncated: HISTORY_LIMIT daily
+        # rows ending at ``end``, the oldest HISTORY_LIMIT - 1 days back. Where
+        # that sits against the window is each test's look_back_days.
         base = datetime.strptime(end, "%Y-%m-%d")
         return [
             _row((base - timedelta(days=i)).strftime("%Y-%m-%d"), "1%", "1%", "1%")
@@ -1662,6 +1688,26 @@ class TestServedDepthAndStaleReach:
             events_unknown=[n for n in TRACKED if n != "CPI (YoY)"],
         )
         report = _render(snapshot, curr_date="2026-08-11", look_back_days=365)
+        assert "starts inside this window" not in report
+
+    def test_a_capped_history_reaching_past_the_window_is_not_called_short(self):
+        # The cap is necessary, not sufficient: 100 daily rows reach 99 days
+        # back, past a 30-day window's start, so nothing in it is hidden.
+        snapshot = _snapshot(
+            histories={"CPI (YoY)": self._capped_history()},
+            events_unknown=[n for n in TRACKED if n != "CPI (YoY)"],
+        )
+        report = _render(snapshot, curr_date="2026-08-11", look_back_days=30)
+        assert "starts inside this window" not in report
+
+    def test_a_capped_history_starting_on_the_window_start_is_not_called_short(self):
+        # The comparison is strict: 99 days back from 2026-08-11 is the
+        # history's oldest row, so the window opens on a row it can show.
+        snapshot = _snapshot(
+            histories={"CPI (YoY)": self._capped_history()},
+            events_unknown=[n for n in TRACKED if n != "CPI (YoY)"],
+        )
+        report = _render(snapshot, curr_date="2026-08-11", look_back_days=99)
         assert "starts inside this window" not in report
 
     def test_a_stale_snapshot_states_how_much_forward_reach_is_left(self):
@@ -1832,6 +1878,21 @@ class TestScheduledTablePriority:
     def test_the_cap_note_describes_the_priority_it_applies(self):
         report = _render(self._crowded())
         assert "rows carrying figures take priority" in report
+
+    def test_a_name_only_row_dated_today_outranks_figure_rows_further_out(self):
+        # 52 forecast rows already fill the cap, so only the today rule keeps
+        # today's calendar-only entry: it reaches the reader through no other
+        # path, and the intraday caveat promises a row for it.
+        days = [f"2026-08-{day:02d}" for day in range(12, 25)]
+        overrides = {name: [_row(d, "", "3.0%", "2.9%") for d in days] for name in TRACKED[:4]}
+        snapshot = _snapshot(
+            calendar=[{"date": "2026-08-11", "events": ["Foreign Event Today"]}],
+            histories=_histories(overrides=overrides),
+        )
+        report = _render(snapshot)
+        assert "| 2026-08-11 | today | Foreign Event Today | — | — |" in report
+        # The cap has to bite, or the row survives without the rule.
+        assert f"showing {sosovalue_macro.MAX_ROWS} of 53 scheduled rows" in report
 
 
 @pytest.mark.unit

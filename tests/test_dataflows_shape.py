@@ -113,7 +113,6 @@ _LONG_FUNCTIONS: dict[tuple[str, str], int] = {
     ("fear_greed", "get_fear_greed_data"): 203,
     ("interface", "route_to_vendor"): 486,
     ("sosovalue", "get_etf_flow_data"): 582,
-    ("sosovalue_macro", "get_economic_calendar_data"): 1053,
     ("sosovalue_treasuries", "get_btc_treasury_data"): 582,
     ("vendor_common", "load_rolling_snapshot"): 194,
 }

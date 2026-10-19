@@ -115,11 +115,12 @@ _LONG_FUNCTIONS: dict[tuple[str, str], int] = {
 }
 
 # ``(importer, source, name)`` for every underscore name a module in scope
-# reaches in another dataflows module. All of it is the cache kernel the six
-# vendors take from ``sosovalue_common`` (``cftc_cot``'s own ``_utc_now``
-# delegates to the family's, through the module bound as ``family``); D1
-# moves that kernel into a neutral module under public names, and this set
-# shrinks there.
+# reaches in another dataflows module. All of it is what the six vendors take
+# from ``sosovalue_common``: the vendor-neutral cache, clock, validator and
+# format helpers (``cftc_cot``'s own ``_utc_now`` delegates to the family's,
+# through the module bound as ``family``) plus the SoSoValue-side ``_request``
+# and ``_sanitize``. D1 moves the neutral part into a module under public
+# names, and this set shrinks there.
 _PRIVATE_CROSS_IMPORTS: frozenset[tuple[str, str, str]] = frozenset(
     {
         ("cftc_cot", "sosovalue_common", "_cache_dir"),
@@ -183,10 +184,11 @@ _PRIVATE_CROSS_IMPORTS: frozenset[tuple[str, str, str]] = frozenset(
     }
 )
 
-# The modules whose ``_utc_now`` a test freezes with ``monkeypatch.setattr``.
-# The binding is a test contract: it must stay a module-level name (a
-# ``def``, an assignment or an import binding all count) so a patch on the
-# module reaches every call in it. Frozen by hand rather than derived from
+# The modules whose ``_utc_now`` a test freezes with ``monkeypatch.setattr``
+# (``cftc_cot``'s is read by its tests and delegates to the family's, which
+# they patch). The binding is a test contract: it must stay a module-level
+# name (a ``def``, an assignment or an import binding all count) so a patch
+# on the module reaches every call in it. Frozen by hand rather than derived from
 # the tests on purpose: a PR that moves a seam and repoints its tests has to
 # edit this row too, which is the review the plan's §2.6 asks for. The three
 # SoSoValue vendors read the clock through ``sosovalue_common`` and have none
@@ -375,7 +377,7 @@ def _ratchet_message(what: str, found: Iterable, frozen: Iterable) -> str:
     return f"{what}: new {sorted(found - frozen)}, retired {sorted(frozen - found)}"
 
 
-# -- the tables --------------------------------------------------------------------
+# -- the tables ---------------------------------------------------------------------
 
 
 def test_no_function_in_scope_is_longer_than_it_was_on_2026_10_19():
@@ -409,12 +411,42 @@ def test_every_module_on_disk_is_in_scope_or_declared_upstream():
     assert not (_IN_SCOPE & _UPSTREAM), sorted(_IN_SCOPE & _UPSTREAM)
 
 
+def _mypy_dataflows_files() -> list[str]:
+    """The dataflows modules ``pyproject.toml`` ``[tool.mypy] files`` lists, in order.
+
+    Read as text, tomllib being 3.11+ while the suite runs on 3.10: the
+    ``files = [`` array alone, a line at a time, comment lines dropped, so
+    an entry commented out (or quoted elsewhere in the file) does not count.
+    """
+    text = repo_text("pyproject.toml")
+    start = text.index("\nfiles = [")
+    block = text[start : text.index("\n]", start)]
+    entry = re.compile(r'"tradingagents/dataflows/(\w+)\.py",?')
+    found = []
+    for line in block.splitlines():
+        line = line.strip()
+        if not line.startswith("#") and (match := entry.fullmatch(line)):
+            found.append(match.group(1))
+    return found
+
+
 def test_the_scope_is_the_mypy_file_list():
     # ``pyproject.toml`` ``[tool.mypy] files`` names the same modules, so the
-    # type floor and the shape tables cover one set. Read as text: tomllib
-    # is 3.11+ and the suite runs on 3.10.
-    files = re.findall(r'"tradingagents/dataflows/(\w+)\.py"', repo_text("pyproject.toml"))
-    assert set(files) == _IN_SCOPE, _ratchet_message("[tool.mypy] files", files, _IN_SCOPE)
+    # type floor and the shape tables cover one set. Sorted lists, not sets:
+    # a duplicate entry fails too.
+    files = _mypy_dataflows_files()
+    assert sorted(files) == sorted(_IN_SCOPE), _ratchet_message(
+        "[tool.mypy] files", files, _IN_SCOPE
+    )
+
+
+def test_the_package_has_no_subpackage():
+    # Every scan globs one level (``*.py``), as ``package_module_trees`` does;
+    # a subpackage under dataflows would be seen by nothing here, nor by the
+    # mypy file list. The neutral kernel D1 creates is a module, not a package.
+    package = next(path for path, _tree in dataflows_module_trees(containing="")).parent
+    dirs = sorted(p.name for p in package.iterdir() if p.is_dir())
+    assert dirs == ["__pycache__"], dirs
 
 
 def test_the_clock_seams_are_exactly_the_modules_frozen_on_2026_10_19():
@@ -424,7 +456,7 @@ def test_the_clock_seams_are_exactly_the_modules_frozen_on_2026_10_19():
     )
 
 
-# -- the scanners themselves -----------------------------------------------------------
+# -- the scanners themselves --------------------------------------------------------
 
 
 def _write(root: Path, name: str, text: str) -> None:

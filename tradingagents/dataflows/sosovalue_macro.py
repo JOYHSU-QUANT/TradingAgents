@@ -1004,7 +1004,7 @@ def _scheduled_rows(snapshot: _MacroSnapshot, window: _Window) -> list[_Schedule
     # Tracked figures come from the deep histories (they reach any backtest
     # date), never from the present-anchored calendar; a scheduled row NEVER
     # renders an actual, even when the provider has since filled it in.
-    scheduled = []
+    scheduled: list[_ScheduledRow] = []
     covered: dict[str, list[datetime]] = {}
     # Rows on (or one day before) curr_date also count as covered without
     # being scheduled: a print released today renders in the released table,
@@ -1056,7 +1056,7 @@ def _scheduled_rows(snapshot: _MacroSnapshot, window: _Window) -> list[_Schedule
 def _released_rows(snapshot: _MacroSnapshot, window: _Window) -> list[_ReleasedRow]:
     """``(date, name, history row)`` for the released window, sorted on (date, name)."""
     curr_date, window_start = window.curr_date, window.window_start
-    released = []
+    released: list[_ReleasedRow] = []
     for name in TRACKED_EVENTS:
         for row in snapshot.histories.get(name, ()):
             if window_start <= row["date"] <= curr_date:
@@ -1213,7 +1213,7 @@ def _calendar_facts(snapshot: _MacroSnapshot, window: _Window) -> _CalendarFacts
         )
     )
     # Does the calendar contribute anything at all to THIS window? Only its
-    # emptiness is read (the guards of ``_empty_window_notes``, the
+    # emptiness is read, by two guards (``_empty_window_notes``, which is the
     # zero-coverage note, and ``_front_gap_notes``) — the two
     # PARTIAL-coverage notes are bounded by the calendar's own endpoints
     # instead (`cal_dated[0]` for the front gap,
@@ -1245,7 +1245,8 @@ def _calendar_facts(snapshot: _MacroSnapshot, window: _Window) -> _CalendarFacts
     # Measured here rather than in either note because BOTH halves of the
     # arithmetic need it: the backward note prints the blind tail, and the
     # forward note has to know the calendar was anchored to an earlier day
-    # before it can claim the shortfall's cause is unknowable.
+    # before it can claim the shortfall's cause is unknowable. (The
+    # covered-and-quiet note reads ``blind`` too, as its currency term.)
     fetched_day = snapshot.fetched_at[:10]
     blind = _days_unobserved(snapshot.fetched_at, curr_dt)
     return _CalendarFacts(

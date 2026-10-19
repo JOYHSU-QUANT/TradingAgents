@@ -98,6 +98,7 @@ from .sosovalue_common import (
 from .symbol_utils import classify_crypto_asset
 from .utils import MAX_UNTRUSTED_CHARS, date_refusal, echo_argument, quote_argument
 from .vendor_common import (
+    USD_PER_MILLION as _USD_PER_MILLION,
     cache_dir as _cache_dir,
     cache_rejecter as _cache_rejecter,
     concentration_share_str as _concentration_share_str,
@@ -194,10 +195,6 @@ MAX_DATA_LAG_DAYS = 4
 # wrong aggregate cannot widen its own tolerance.
 RECONCILE_ABS_TOL_USD_M = 2.0
 RECONCILE_REL_TOL = 0.02
-
-# The API reports flows in USD; the report renders US$m to stay unit-identical
-# with the Farside vendor.
-_USD_PER_MILLION = 1e6
 
 # Bound on the listing's free-text fund name, the one server-controlled string
 # stored verbatim (for diagnosability — it is never rendered or interpolated).

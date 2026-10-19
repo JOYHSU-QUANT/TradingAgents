@@ -3056,7 +3056,10 @@ class TestRollingSnapshotIsTheFamilysNotSoSoValues:
 
     def test_no_precheck_means_no_key_is_required(self, tmp_path, monkeypatch):
         # A keyless vendor must not be made to have an API key by the skeleton
-        # it borrows. Without the hook this raised before the fetch.
+        # it borrows. Without the hook this raised before the fetch. The key is
+        # removed from the environment too (the repo .env loads one at import),
+        # so a kernel that asked for it however it bound the name would fail.
+        monkeypatch.delenv("SOSOVALUE_API_KEY", raising=False)
         monkeypatch.setattr(
             sosovalue_common, "get_api_key", mock.Mock(side_effect=AssertionError("asked"))
         )

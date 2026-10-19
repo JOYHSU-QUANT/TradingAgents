@@ -1,7 +1,7 @@
 """Shape ratchets for ``tradingagents/dataflows``, read off the sources.
 
-The data-source modules the fork wrote (nine vendors, ``fear_greed`` and
-``throttle``; none exists upstream) grew without any guard on their shape:
+The data-source modules the fork wrote (nine vendors, the ``vendor_common``
+kernel they share, ``fear_greed`` and ``throttle``; none exists upstream) grew without any guard on their shape:
 nothing in the repo watched function length, cross-module private imports
 or the clock seams the tests patch. ``contrib/`` has had import-graph guards
 of this kind since refactor plan v2's T0 (the length table is new to the
@@ -58,8 +58,8 @@ _IN_SCOPE = frozenset(
 )
 
 # Upstream's modules (and ``__init__``), named so a module on disk that is in
-# neither list fails: the neutral kernel D1 creates, or a new vendor, has to
-# be placed in scope (or declared upstream) before anything else passes.
+# neither list fails: a new module has to be placed in scope (or declared
+# upstream) before anything else passes.
 _UPSTREAM = frozenset(
     {
         "__init__",
@@ -138,8 +138,9 @@ _PRIVATE_CROSS_IMPORTS: frozenset[tuple[str, str, str]] = frozenset(
 # on the module reaches every call in it. Frozen by hand rather than derived from
 # the tests on purpose: a PR that moves a seam and repoints its tests has to
 # edit this row too, which is the review the plan's §2.6 asks for. The three
-# SoSoValue vendors and ``sosovalue_common`` read the clock through
-# ``vendor_common`` and have none of their own.
+# SoSoValue vendors read the clock through ``vendor_common`` and have none of
+# their own; ``sosovalue_common`` reads no wall clock (its request budget runs
+# on ``time.monotonic``, patched as ``_monotonic``).
 _CLOCK_SEAM = "_utc_now"
 _CLOCK_SEAMS = frozenset(
     {

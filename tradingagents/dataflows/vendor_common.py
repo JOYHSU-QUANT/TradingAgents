@@ -1,7 +1,8 @@
-"""The kernel every rolling-snapshot vendor shares, under no vendor's name.
+"""The kernel the rolling-snapshot vendors share, under no vendor's name.
 
-The data-source modules the fork wrote all cache one rolling JSON snapshot per
-feed and render it with the same disciplines: a value/date/ticker trust
+Six of the data-source modules the fork wrote (the three SoSoValue feeds,
+Farside, CFTC and the whale-positioning vendor) cache one rolling JSON
+snapshot per feed and render it with the same disciplines: a value/date/ticker trust
 boundary on what the provider sent, one UTC clock for the TTL, the stale cap
 and the displayed age, one read preamble and one rejection log line per
 cache file, one US$m rendering for notionals, and the cache/TTL/stale-fallback

@@ -114,8 +114,9 @@ Breaking changes within the 0.x line are called out explicitly.
   cache-age helpers, the cache-file read preamble and rejecter, the US$m
   formatters and the cache/TTL/stale-fallback skeleton
   (`load_rolling_snapshot`) that the six vendors took from `sosovalue_common`
-  under underscore names are public names in a module under no vendor's name
-  (`cache_dir`, `stale_caveat`, `is_finite_real`, ...); each vendor
+  now live in a module under no vendor's name, and the ones another module
+  reads are public (`cache_dir`, `stale_caveat`, `is_finite_real`, ...; the
+  clock helpers the kernel alone reads keep their underscore); each vendor
   imports them from there aliased back to its old local names, so no call
   site and no rendered string changes. `sosovalue_common` keeps what is
   SoSoValue's: the errors, the key, the request helper (public as `request`;

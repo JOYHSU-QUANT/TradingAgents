@@ -131,7 +131,9 @@ Breaking changes within the 0.x line are called out explicitly.
   behaviour change and no re-exports left behind: nothing outside the tests
   read the old paths, and the tests moved. The shape ratchets' private-import
   table shrinks from 58 edges to 4 and the clock-seam table swaps
-  `sosovalue_common` for `vendor_common`.
+  `sosovalue_common` for `vendor_common`, and a new one holds the kernel to
+  importing nothing from the package but `config`, `errors` and `utils`, so
+  no vendor's types can creep back into it.
 
 ### Fixed
 

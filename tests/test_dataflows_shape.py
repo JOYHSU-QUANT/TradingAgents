@@ -153,6 +153,16 @@ _CLOCK_SEAMS = frozenset(
     }
 )
 
+# The kernel names no vendor: it may import the package's floor alone (the
+# configuration, the error taxonomy, the shared utilities). A vendor module in
+# its imports would put that vendor's types back into the shared skeleton —
+# the reason the sweep that raises SoSoValue's errors stayed in
+# ``sosovalue_common`` and the stale fallback re-raises the base
+# ``VendorNotConfiguredError`` — and would close an import cycle with that
+# vendor, which imports the kernel.
+_KERNEL = "vendor_common"
+_KERNEL_FLOOR = frozenset({"config", "errors", "utils"})
+
 
 @functools.cache
 def _modules(package: Path | None) -> tuple[tuple[str, ast.Module], ...]:
@@ -287,6 +297,42 @@ def _private_cross_imports(
     return frozenset(found)
 
 
+def _sibling_imports(tree: ast.Module, package_name: str = "tradingagents.dataflows") -> frozenset[str]:
+    """Every package sibling ``tree`` imports, by any spelling and at any depth.
+
+    Unlike :func:`_private_cross_imports` this reads which MODULES are
+    imported, not which names: ``from .x import y``, ``from .x.deep import
+    y`` and ``from <package_name>.x import y`` all import ``x``; ``from .
+    import x`` and ``from <package_name> import x`` import ``x`` itself;
+    ``import <package_name>.x`` with or without ``as`` imports ``x``. A lazy
+    import inside a function is the same dependency.
+    """
+    found: set[str] = set()
+    prefix = package_name + "."
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if node.level == 1:
+                rest = module
+            elif node.level == 0 and module == package_name:
+                rest = ""
+            elif node.level == 0 and module.startswith(prefix):
+                rest = module[len(prefix) :]
+            else:
+                continue
+            if rest:
+                found.add(rest.split(".")[0])
+            else:
+                found.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.Import):
+            found.update(
+                alias.name[len(prefix) :].split(".")[0]
+                for alias in node.names
+                if alias.name.startswith(prefix)
+            )
+    return frozenset(found)
+
+
 def _module_level_bindings(tree: ast.Module) -> set[str]:
     """The names a module binds by a direct top-level statement: def, class, assignment, import.
 
@@ -403,6 +449,11 @@ def test_the_clock_seams_are_exactly_the_modules_frozen_on_2026_10_19():
     assert found == _CLOCK_SEAMS, _ratchet_message(
         f"modules binding {_CLOCK_SEAM} at module level", found, _CLOCK_SEAMS
     )
+
+
+def test_the_kernel_imports_only_the_packages_floor():
+    found = _sibling_imports(dict(_modules(None))[_KERNEL])
+    assert found <= _KERNEL_FLOOR, f"{_KERNEL} imports {sorted(found - _KERNEL_FLOOR)}"
 
 
 # -- the scanners themselves --------------------------------------------------------
@@ -538,3 +589,27 @@ def test_the_seam_scan_reads_module_level_bindings_of_every_kind(tmp_path):
         "by_alias",
         "by_plain_import",
     }
+
+
+def test_the_sibling_import_scan_reads_every_spelling_at_any_depth(tmp_path):
+    _write(
+        tmp_path,
+        "k",
+        "from .a import x\n"
+        "from pkg.flows.b import y\n"
+        "from .c.deep import z\n"
+        "from . import d, e as ee\n"
+        "from pkg.flows import f\n"
+        "import pkg.flows.g\n"
+        "import pkg.flows.h as hh\n"
+        "from pkg.flowsb import prefix_only\n"
+        "from pkg.other import elsewhere\n"
+        "from ..up import parent\n"
+        "import other\n"
+        "def lazy():\n"
+        "    from .i import w\n",
+    )
+    found = _sibling_imports(dict(_modules(tmp_path))["k"], "pkg.flows")
+    # Every spelling of a sibling counts, deeper paths by their sibling; the
+    # prefix-only, foreign and parent imports are not siblings.
+    assert found == {"a", "b", "c", "d", "e", "f", "g", "h", "i"}

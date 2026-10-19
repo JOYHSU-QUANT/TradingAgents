@@ -119,8 +119,9 @@ Breaking changes within the 0.x line are called out explicitly.
   clock helpers no other module reads keep their underscore, and so does
   `_utc_now`, which `cftc_cot` reads through the module because it is the
   seam the tests patch); each vendor
-  imports them from there aliased back to its old local names, so no call
-  site and no rendered string changes. `sosovalue_common` keeps what is
+  imports them from there aliased back to its old local names, so no
+  rendered string changes and the only call site that does is
+  `cftc_cot._utc_now`, which now delegates to `vendor_common._utc_now()`. `sosovalue_common` keeps what is
   SoSoValue's: the errors, the key, the request helper (public as `request`;
   the vendors alias it to `_request`, their tests' patch target) and the
   per-item sweep (`fetch_each`/`raise_all_failed`), which catches and raises

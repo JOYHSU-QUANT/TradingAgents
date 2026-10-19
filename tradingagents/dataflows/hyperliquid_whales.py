@@ -417,7 +417,7 @@ def _stale_age(fetched_at: str) -> str:
     """This module's age formatter for the shared STALE template.
 
     Supplied rather than defaulted because the template's default reads the
-    SoSoValue family's clock, while every freshness decision here reads
+    shared kernel's (``vendor_common``) clock, while every freshness decision here reads
     ``_utc_now`` above - the one the tests patch. An unreadable or future-dated
     stamp is not normally reachable (``_load_snapshot`` degrades rather than
     serving such a snapshot), but a negative age rendered as "-12.0 hours"

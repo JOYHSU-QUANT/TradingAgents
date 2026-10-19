@@ -1,9 +1,10 @@
 """Shape ratchets for ``tradingagents/dataflows``, read off the sources.
 
-The data-source modules the fork wrote (nine vendors, the ``vendor_common``
-kernel they share, ``fear_greed`` and ``throttle``; none exists upstream) grew without any guard on their shape:
-nothing in the repo watched function length, cross-module private imports
-or the clock seams the tests patch. ``contrib/`` has had import-graph guards
+The data-source modules the fork wrote (nine vendors, ``fear_greed`` and
+``throttle``, and since D1-a the ``vendor_common`` kernel the vendors share;
+none exists upstream) grew without any guard on their shape: nothing in the
+repo watched function length, cross-module private imports or the clock
+seams the tests patch. ``contrib/`` has had import-graph guards
 of this kind since refactor plan v2's T0 (the length table is new to the
 repo); this file gives the dataflows the same floor (dataflows refactor plan
 2026-10-16, D0), freezing what was measured on 2026-10-19 so it can only
@@ -15,7 +16,9 @@ improve:
   reaches in another dataflows module, by import or through a module bound
   as a name, compared by equality;
 - :data:`_CLOCK_SEAMS` — the modules in scope whose module-level ``_utc_now``
-  the tests ``monkeypatch.setattr`` to freeze time, compared by equality.
+  the tests ``monkeypatch.setattr`` to freeze time, compared by equality;
+- :data:`_KERNEL_FLOOR` — the only package modules ``vendor_common`` may
+  import, so no vendor's types reach the shared kernel.
 
 Scope is :data:`_IN_SCOPE`: the fork's modules plus ``interface.py``, the
 one upstream file the fork rebuilt (``route_to_vendor``). The other modules
@@ -297,7 +300,9 @@ def _private_cross_imports(
     return frozenset(found)
 
 
-def _sibling_imports(tree: ast.Module, package_name: str = "tradingagents.dataflows") -> frozenset[str]:
+def _sibling_imports(
+    tree: ast.Module, package_name: str = "tradingagents.dataflows"
+) -> frozenset[str]:
     """Every package sibling ``tree`` imports, by any spelling and at any depth.
 
     Unlike :func:`_private_cross_imports` this reads which MODULES are
@@ -442,7 +447,7 @@ def test_the_scope_is_the_mypy_file_list():
 def test_the_package_has_no_subpackage():
     # Every scan globs one level (``*.py``), as ``package_module_trees`` does;
     # a subpackage under dataflows would be seen by nothing here, nor by the
-    # mypy file list. The neutral kernel D1 creates is a module, not a package.
+    # mypy file list. The neutral kernel D1-a created is a module, not a package.
     package = next(path for path, _tree in dataflows_module_trees(containing="")).parent
     dirs = sorted(p.name for p in package.iterdir() if p.is_dir() and p.name != "__pycache__")
     assert dirs == [], dirs

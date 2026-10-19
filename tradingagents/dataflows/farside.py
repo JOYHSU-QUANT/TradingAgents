@@ -955,7 +955,7 @@ def get_etf_flow_data(
                 causes="network error or a parser break",
                 # This vendor's own age formatter: it reads farside's _utc_now
                 # (the clock the TTL and stale cap read, and the one the tests
-                # patch), not the SoSoValue family's.
+                # patch), not ``vendor_common``'s.
                 humanize=_humanize_age,
             )
         )

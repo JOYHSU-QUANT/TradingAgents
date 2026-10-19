@@ -85,7 +85,8 @@ from urllib.parse import quote
 # SoSoValueNotConfiguredError and get_api_key are re-exported (redundant-alias
 # form): this module is the family's public face, and its tests and callers
 # address the key check and the config-breakage type through it even though the
-# shared load skeleton is what raises them now.
+# shared load skeleton now runs the key check (as its ``precheck``) and lets the
+# error through.
 from .sosovalue_common import (
     SoSoValueError,
     SoSoValueNotConfiguredError as SoSoValueNotConfiguredError,

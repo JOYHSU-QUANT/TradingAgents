@@ -116,8 +116,9 @@ Breaking changes within the 0.x line are called out explicitly.
   (`load_rolling_snapshot`) that the six vendors took from `sosovalue_common`
   now live in a module under no vendor's name, and the ones another module
   reads are public (`cache_dir`, `stale_caveat`, `is_finite_real`, ...; the
-  clock helpers keep their underscore, `_utc_now` included: it is the seam
-  the tests patch, which `cftc_cot` reads through the module); each vendor
+  clock helpers no other module reads keep their underscore, and so does
+  `_utc_now`, which `cftc_cot` reads through the module because it is the
+  seam the tests patch); each vendor
   imports them from there aliased back to its old local names, so no call
   site and no rendered string changes. `sosovalue_common` keeps what is
   SoSoValue's: the errors, the key, the request helper (public as `request`;

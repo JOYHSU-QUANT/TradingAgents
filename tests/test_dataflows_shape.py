@@ -474,10 +474,13 @@ def test_the_length_scan_tells_two_closures_of_one_name_apart(tmp_path):
         "def f():\n    pass\n    pass\n\n"
         "def f():\n    pass\n\n"
         "def g():\n    def f():\n        pass\n        pass\n        pass\n\n"
-        "def h():\n    def f():\n        pass\n",
+        "def h():\n    def f():\n        pass\n\n"
+        "def k():\n    pass\n\n"
+        "def k():\n    pass\n    pass\n    pass\n",
     )
     ((_m, tree),) = _modules(tmp_path)
-    assert _function_lengths(tree) == {"f": 3, "g": 5, "g.f": 4, "h": 3, "h.f": 2}
+    # ``f`` is long then short, ``k`` short then long: both keep the longer.
+    assert _function_lengths(tree) == {"f": 3, "g": 5, "g.f": 4, "h": 3, "h.f": 2, "k": 4}
 
 
 def test_the_long_function_scan_reads_only_the_scope_and_only_over_the_line(tmp_path):

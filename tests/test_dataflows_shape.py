@@ -208,7 +208,7 @@ _CLOCK_SEAMS = frozenset(
 
 @functools.cache
 def _modules(package: Path | None) -> tuple[tuple[str, ast.Module], ...]:
-    """``(module name, parsed tree)`` for the dataflows package (``None``) or the sources under ``package``.
+    """``(module name, parsed tree)`` for the dataflows package (``None``) or for ``package``.
 
     Cached per argument, and the argument is never defaulted so every table
     reads one entry: the package is parsed once per run rather than once per
@@ -340,7 +340,7 @@ def _private_cross_imports(
 
 
 def _module_level_bindings(tree: ast.Module) -> set[str]:
-    """The names a module binds by a direct top-level statement: defs, classes, assignments, imports.
+    """The names a module binds by a direct top-level statement: def, class, assignment, import.
 
     Direct children only, on purpose: the seams the tests patch are plain
     top-level bindings, and the table is equality, so a seam that moved
@@ -416,7 +416,8 @@ def _mypy_dataflows_files() -> list[str]:
 
     Read as text, tomllib being 3.11+ while the suite runs on 3.10: the
     ``files = [`` array alone, a line at a time, comment lines dropped, so
-    an entry commented out (or quoted elsewhere in the file) does not count; a trailing comment on an entry is fine.
+    an entry commented out (or quoted elsewhere in the file) does not count;
+    a trailing comment on an entry is fine.
     """
     text = repo_text("pyproject.toml")
     start = text.index("\nfiles = [")

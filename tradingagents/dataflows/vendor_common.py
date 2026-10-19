@@ -7,9 +7,9 @@ formatters and the cache/TTL/stale-fallback skeleton
 (``load_rolling_snapshot``). They grew
 inside ``sosovalue_common``, the first family to need them, and moved out
 under public names (dataflows refactor plan 2026-10-16, D1); what is
-SoSoValue's — the error taxonomy, the API key, the request helper and
-budget, and the per-item sweep that catches and raises those types — stays
-in ``sosovalue_common``.
+SoSoValue's — the error taxonomy and the vendor name, the API key, the
+request helper and budget, the listing ticker predicate, and the per-item
+sweep that catches and raises those types — stays in ``sosovalue_common``.
 
 ``_utc_now`` is the one clock every helper here reads, and it stays a
 module-level underscore name on purpose: it is the seam the tests patch to

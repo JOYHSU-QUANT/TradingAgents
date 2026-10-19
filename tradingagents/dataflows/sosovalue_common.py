@@ -76,7 +76,7 @@ logger = logging.getLogger(__name__)
 
 SOSOVALUE_API_BASE = "https://openapi.sosovalue.com/openapi/v1"
 
-# The family's name in every message, log line and status classification.
+# The family's name as the shared helpers take it (their ``vendor`` argument).
 VENDOR = "SoSoValue"
 
 # Network timeout (seconds), consistent with the other vendors.

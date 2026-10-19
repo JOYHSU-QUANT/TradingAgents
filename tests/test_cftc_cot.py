@@ -933,3 +933,23 @@ class TestProseFollowsTheConstants:
         assert cftc_cot.PUBLICATION_WEEKDAY == 5  # Saturday
         assert cftc_cot.MIN_SCALE_REPORTS < cftc_cot.SCALE_REPORTS
         assert os.path.basename(cftc_cot.DATASET_URL).endswith(".json")
+
+
+@pytest.mark.unit
+class TestTheSkeletonIsToldTheVendor:
+    def test_the_loader_names_cftc(self, monkeypatch):
+        # ``load_rolling_snapshot`` has no default ``vendor``; a wrong name here
+        # would only mislabel the stale and failure messages and log lines.
+        seen = {}
+
+        class _Stop(Exception):
+            pass
+
+        def _capture(**kwargs):
+            seen.update(kwargs)
+            raise _Stop
+
+        monkeypatch.setattr(cftc_cot, "load_rolling_snapshot", _capture)
+        with pytest.raises(_Stop):
+            cftc_cot._load_snapshot(cftc_cot.CONTRACTS["BTC"])
+        assert seen["vendor"] == "CFTC"

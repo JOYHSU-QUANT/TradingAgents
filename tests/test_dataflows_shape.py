@@ -119,18 +119,13 @@ _LONG_FUNCTIONS: dict[tuple[str, str], int] = {
 }
 
 # ``(importer, source, name)`` for every underscore name a module in scope
-# reaches in another dataflows module. Two kinds are left: the SoSoValue-side
-# ``_sanitize`` the three SoSoValue modules take from ``sosovalue_common`` by
-# its private name (the plan's D1-b decides its home), and the kernel's clock
-# seam, which ``cftc_cot``'s own ``_utc_now`` reads through the module bound
-# as ``vendor_common`` — an underscore name on purpose, being the name the
+# reaches in another dataflows module. One is left, on purpose: the kernel's
+# clock seam, which ``cftc_cot``'s own ``_utc_now`` reads through the module
+# bound as ``vendor_common`` — an underscore name because it is the name the
 # tests patch (:data:`_CLOCK_SEAM`).
 _PRIVATE_CROSS_IMPORTS: frozenset[tuple[str, str, str]] = frozenset(
     {
         ("cftc_cot", "vendor_common", "_utc_now"),
-        ("sosovalue", "sosovalue_common", "_sanitize"),
-        ("sosovalue_macro", "sosovalue_common", "_sanitize"),
-        ("sosovalue_treasuries", "sosovalue_common", "_sanitize"),
     }
 )
 

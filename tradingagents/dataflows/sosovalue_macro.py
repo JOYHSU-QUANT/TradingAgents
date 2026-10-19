@@ -95,15 +95,20 @@ from typing import NamedTuple
 from urllib.parse import quote
 
 from .sosovalue_common import (
+    VENDOR,
     SoSoValueError,
     SoSoValueUnavailableError,
-    _sanitize,
     fetch_each,
     get_api_key,
     raise_all_failed,
     request as _request,
 )
-from .utils import MAX_UNTRUSTED_CHARS, date_refusal
+from .utils import (
+    MAX_UNTRUSTED_CHARS,
+    date_refusal,
+    plural_days as _plural_days,
+    sanitize_untrusted as _sanitize,
+)
 from .vendor_common import (
     cache_dir as _cache_dir,
     cache_rejecter as _cache_rejecter,
@@ -114,7 +119,6 @@ from .vendor_common import (
     is_safe_text as _is_safe_text,
     load_rolling_snapshot,
     plural as _plural,
-    plural_days as _plural_days,
     read_cache_preamble as _read_cache_preamble,
     stale_caveat as _stale_caveat,
     valid_dated_rows as _valid_dated_rows,
@@ -931,6 +935,7 @@ def _load_snapshot() -> _MacroSnapshot:
         cache_name="SoSoValue macro cache",
         max_stale_hours=MAX_STALE_DAYS * 24,
         log=logger,
+        vendor=VENDOR,
         precheck=get_api_key,
     )
     return _snapshot_from(payload, fetched_at, stale)

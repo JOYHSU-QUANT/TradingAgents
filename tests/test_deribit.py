@@ -4048,7 +4048,7 @@ class TestGuardsWhoseFiniteHalfWasUnexercised:
     """Two-part guards where only the `<= 0` half was pinned.
 
     A mutation sweep found the same shape four times: a guard reading
-    ``not _is_finite_number(x) or x <= 0`` (or ``not math.isfinite(x) or x <= 0``)
+    ``not _is_finite_real(x) or x <= 0`` (or ``not math.isfinite(x) or x <= 0``)
     whose sign half is well covered while its finiteness half can be deleted with
     the suite still green. Each of these deletes cleanly today.
     """
@@ -4098,7 +4098,7 @@ class TestGuardsWhoseFiniteHalfWasUnexercised:
 
     def test_an_overflowing_forward_is_refused(self):
         # Reachable through the real pipeline: two underlyings that each pass
-        # _is_finite_number can still sum to inf inside _median, so the forward's
+        # _is_finite_real can still sum to inf inside _median, so the forward's
         # OWN finiteness check is what stands between the report and
         # "**Forward:** inf" with every delta collapsed to 1.0/0.0.
         huge = 1.7e308
@@ -4967,15 +4967,15 @@ class TestCandleSelfConsistency:
 
 
 class TestHugeIntegersAreRejectedNotRaised:
-    def test_is_finite_number_answers_false_for_an_out_of_range_int(self):
+    def test_is_finite_real_answers_false_for_an_out_of_range_int(self):
         # math.isfinite RAISES on these, and a JSON integer literal has no bound,
         # so the predicate whose job is to say False was instead throwing.
-        assert deribit._is_finite_number(10**400) is False
-        assert deribit._is_finite_number(-(10**400)) is False
+        assert deribit._is_finite_real(10**400) is False
+        assert deribit._is_finite_real(-(10**400)) is False
         # ... without breaking the ordinary answers.
-        assert deribit._is_finite_number(40.5) is True
-        assert deribit._is_finite_number(True) is False
-        assert deribit._is_finite_number(float("nan")) is False
+        assert deribit._is_finite_real(40.5) is True
+        assert deribit._is_finite_real(True) is False
+        assert deribit._is_finite_real(float("nan")) is False
 
     def test_one_huge_int_row_does_not_cost_the_whole_chain(self):
         # parse_chain documents "rows that cannot be used are skipped, not fatal".

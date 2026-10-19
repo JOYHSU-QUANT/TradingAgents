@@ -3051,6 +3051,7 @@ class TestRollingSnapshotIsTheFamilysNotSoSoValues:
             "cache_name": "Test cache",
             "max_stale_hours": 6,
             "log": logging.getLogger("test"),
+            "vendor": "SoSoValue",
         }
         return vendor_common.load_rolling_snapshot(**(defaults | kwargs))
 

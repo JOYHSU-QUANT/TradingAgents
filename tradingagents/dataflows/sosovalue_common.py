@@ -7,7 +7,8 @@ several product modules off one base URL, one ``x-soso-api-key`` header, one
 at 10, #215). The vendor modules built on it — spot-ETF flows
 (``sosovalue.py``), the macro economic calendar (``sosovalue_macro.py``), and
 BTC corporate treasuries (``sosovalue_treasuries.py``) — share that plumbing
-here: the error taxonomy, API-key retrieval and sanitization, the request
+here: the error taxonomy and vendor name, API-key retrieval, the listing
+ticker predicate (``is_valid_ticker``, ETF and treasuries only), the request
 helper with its redaction discipline and the shared request budget, and the
 per-item sweep with its 429 drain and consecutive-network-failure breaker
 (``fetch_each``/``raise_all_failed``, macro and treasuries only; the ETF fund
@@ -28,11 +29,12 @@ effect on the very next call.
 
 import logging
 import os
+import re
 import threading
 import time
 from collections import deque
 from collections.abc import Callable, Iterable
-from typing import NamedTuple, NoReturn
+from typing import NamedTuple, NoReturn, TypeGuard
 
 import requests
 
@@ -49,12 +51,33 @@ from .utils import (
     is_unreached,
     json_body_or_outage,
     raise_for_http_status,
-    sanitize_untrusted,
+    sanitize_untrusted as _sanitize,
 )
+
+# ``_sanitize`` is ``utils.sanitize_untrusted``, which this module and the
+# family's vendor modules each import under that name: it flattens a fragment
+# the vendor did not author so it cannot forge structure. What is specific to
+# this family is WHERE it is applied. The vendor modules render into
+# markdown tables that reach an LLM verbatim, so a value carrying "|" splits
+# its cell into new columns — a macro event named "Widget Index | 9.9% |
+# 9.9%" lands fabricated figures in the Forecast and Previous positions of
+# its own row. Neutralised where the fragment ENTERS the message rather than
+# at the parse boundary, because a raised error reaches the prompt too
+# (``route_to_vendor`` hands an optional category's failure to the model as
+# ``DATA_UNAVAILABLE: ... ({error})``), while the stored and compared value
+# must stay byte-exact — the macro history path sends event names back to
+# the API, so flattening them at parse time would break the request path.
+# ``limit`` is passed only where the fragment is ISOLATED (an echoed raw row
+# in a raised message), never when flattening a whole exception message here
+# — the router caps a whole raised message where it enters a sentinel the
+# model reads (see ``utils.sanitize_untrusted``), and the log keeps it whole.
 
 logger = logging.getLogger(__name__)
 
 SOSOVALUE_API_BASE = "https://openapi.sosovalue.com/openapi/v1"
+
+# The family's name in every message, log line and status classification.
+VENDOR = "SoSoValue"
 
 # Network timeout (seconds), consistent with the other vendors.
 REQUEST_TIMEOUT = 30
@@ -181,26 +204,29 @@ class _RequestBudget:
 _BUDGET = _RequestBudget()
 
 
-def _sanitize(text: object, *, limit: int | None = None) -> str:
-    """Flatten a fragment this vendor did not author so it cannot forge structure.
+# A plausible exchange ticker, safe to interpolate into a URL path: the US
+# ETF forms like "IBIT" and the international listing forms like "0434.HK",
+# "ADE.DE" or Tokyo's numeric "3350" (the SoSoValue listings supplied the
+# examples; the grammar is any provider's). Anything not matching is dropped
+# — and disclosed via an unusable-entry count — rather than requested. The first
+# character must be alphanumeric: URL-quoting leaves "." unescaped (it sits
+# in urllib's always-safe set regardless of ``safe=``), so a dot-led token
+# like ".." would otherwise survive quoting as a path-traversal-shaped
+# segment. Anchored with ``\Z``, not ``$``: ``$`` also matches before a
+# trailing newline, so "IBIT\n" would pass and land its raw newline mid-line
+# in the report text.
+_TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}\Z")
 
-    The flattening is the shared ``utils.sanitize_untrusted``; what is specific
-    to this family is WHERE it is applied. The vendor modules render into
-    markdown tables that reach an LLM verbatim, so a value carrying "|" splits
-    its cell into new columns — a macro event named "Widget Index | 9.9% |
-    9.9%" lands fabricated figures in the Forecast and Previous positions of
-    its own row. Neutralised where the fragment ENTERS the message rather than
-    at the parse boundary, because a raised error reaches the prompt too
-    (``route_to_vendor`` hands an optional category's failure to the model as
-    ``DATA_UNAVAILABLE: ... ({error})``), while the stored and compared value
-    must stay byte-exact — the macro history path sends event names back to
-    the API, so flattening them at parse time would break the request path.
-    ``limit`` is passed only where the fragment is ISOLATED (an echoed raw row
-    in a raised message), never when flattening a whole exception message here
-    — the router caps a whole raised message where it enters a sentinel the
-    model reads (see ``utils.sanitize_untrusted``), and the log keeps it whole.
+
+def is_valid_ticker(x: object) -> TypeGuard[str]:
+    """True only for a string passing the plausible-ticker filter.
+
+    The one ticker predicate the listing consumers (the ETF and treasuries
+    modules) share — each applies it live-parse-side and
+    cache-read-side, so the two trust boundaries cannot drift apart on what
+    may be interpolated into a URL path or report text.
     """
-    return sanitize_untrusted(text, limit=limit)
+    return isinstance(x, str) and bool(_TICKER_RE.match(x))
 
 
 class SoSoValueError(VendorError):
@@ -414,9 +440,9 @@ def request(path: str, params: dict) -> list:
         # envelope with a non-zero code is the API answering, whatever
         # status it rode in on. Below 400 the status helper is a no-op.
         try:
-            body = json_body_or_outage(response, "SoSoValue")
+            body = json_body_or_outage(response, VENDOR)
             if not (isinstance(body, dict) and "code" in body and body["code"] != 0):
-                raise_for_http_status(response, "SoSoValue")
+                raise_for_http_status(response, VENDOR)
         except VendorUnavailableError as e:
             raise SoSoValueUnavailableError(f"{e} on {path}") from e
     if status == 401:

@@ -617,7 +617,7 @@ def _parse_leaderboard(payload: dict) -> list[dict]:
         value = _finite_float(row.get("accountValue"))
         if value is None:
             continue
-        address = address.lower()
+        address = address.lower()  # type: ignore[union-attr]
         # A duplicated address would otherwise occupy two of the N slots and
         # double-count its positions in the aggregate; keep the larger figure.
         by_address[address] = max(by_address.get(address, value), value)
@@ -756,7 +756,7 @@ def aggregate_positions(positions: list[WhalePosition], coin: str) -> CoinAggreg
         long_notional=sum(p.notional for p in longs),
         short_notional=sum(p.notional for p in shorts),
         avg_leverage=(
-            sum(p.notional * p.leverage for p in levered) / levered_notional
+            sum(p.notional * p.leverage for p in levered) / levered_notional  # type: ignore[operator, misc]
             if levered_notional > 0
             else None
         ),
@@ -1071,7 +1071,7 @@ def _load_leaderboard(cached: dict | None) -> dict:
     age = _age_hours(cached_block["fetched_at"]) if cached_block is not None else None
     # 0 <= age guards a future-dated stamp against being perpetually fresh.
     if age is not None and 0 <= age < LEADERBOARD_TTL_HOURS:
-        return cached_block
+        return cached_block  # type: ignore[return-value]
     try:
         addresses = _parse_leaderboard(_request_leaderboard())
     except HyperliquidWhalesError as e:
@@ -1083,7 +1083,7 @@ def _load_leaderboard(cached: dict | None) -> dict:
                 e,
                 _humanize_hours(age),
             )
-            return cached_block
+            return cached_block  # type: ignore[return-value]
         raise
     return {"fetched_at": _iso_now(), "addresses": addresses}
 

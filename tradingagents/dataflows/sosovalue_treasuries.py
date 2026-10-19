@@ -190,7 +190,7 @@ def _parse_amount(x: object) -> float | None:
     is required (raise) or optional (absent).
     """
     if _is_finite_number(x):
-        return float(x)
+        return float(x)  # type: ignore[arg-type]
     if isinstance(x, str) and _AMOUNT_RE.match(x):
         return float(x.replace(",", ""))
     return None
@@ -203,7 +203,7 @@ def _clean_name(x: object) -> str:
     bounded; anything else is dropped rather than escaped (the ticker is
     always shown anyway).
     """
-    return x if _is_safe_text(x, MAX_COMPANY_NAME_CHARS) else ""
+    return x if _is_safe_text(x, MAX_COMPANY_NAME_CHARS) else ""  # type: ignore[return-value]
 
 
 def _parse_company_list(data: list) -> tuple[list[tuple[str, str]], int]:
@@ -230,8 +230,8 @@ def _parse_company_list(data: list) -> tuple[list[tuple[str, str]], int]:
             continue
         if ticker in seen:
             continue
-        seen.add(ticker)
-        companies.append((ticker, _clean_name(raw.get("name"))))
+        seen.add(ticker)  # type: ignore[arg-type]
+        companies.append((ticker, _clean_name(raw.get("name"))))  # type: ignore[arg-type]
     return companies, unusable
 
 
@@ -609,8 +609,8 @@ def _fetch_all() -> dict:
     sweep = fetch_each(
         selected,
         lambda item: _fetch_one_company(item[0], item[1]),
-        key=lambda item: item[0],
-        describe=lambda item: item[0],
+        key=lambda item: item[0],  # type: ignore[index]
+        describe=lambda item: item[0],  # type: ignore[index]
         label="treasuries",
         failed_bucket="companies_failed",
         noun="company histories",

@@ -300,11 +300,11 @@ def _parse_etf_list(data: list, asset: str) -> tuple[list[tuple[str, str]], int]
             continue
         if ticker in seen:
             continue
-        seen.add(ticker)
+        seen.add(ticker)  # type: ignore[arg-type]
         name = raw.get("name")
         # Bounded here at the trust boundary so an oversized server value can
         # never ride into the cache file — MAX_FUND_NAME_CHARS explains.
-        funds.append((ticker, name[:MAX_FUND_NAME_CHARS] if isinstance(name, str) else ""))
+        funds.append((ticker, name[:MAX_FUND_NAME_CHARS] if isinstance(name, str) else ""))  # type: ignore[arg-type]
     return funds, unusable
 
 

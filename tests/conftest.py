@@ -252,20 +252,22 @@ def grown_registry(request):
     return grown
 
 
-def package_module_trees(subpackage: str, *, containing: str):
+def package_module_trees(subpackage: str, *, containing: str, root: Path | None = None):
     """``(path, tree)`` for each ``tradingagents/<subpackage>/*.py`` whose text has ``containing``.
 
     For the structural pins that read the package's source: the text filter
     keeps each pin parsing only its candidates (the suite's time is
     watched), and the glob, the encoding, the sort and the anchor live here
-    once — no pin re-derives its own path to a package.
+    once — no pin re-derives its own path to a package. ``root`` replaces the
+    ``tradingagents`` anchor for a scanner's self-test, which reads a
+    synthetic tree under ``tmp_path`` through the same glob.
     """
     import ast
-    from pathlib import Path
 
     import tradingagents
 
-    root = Path(tradingagents.__file__).parent
+    if root is None:
+        root = Path(tradingagents.__file__).parent
     for path in sorted((root / subpackage).glob("*.py")):
         text = path.read_text(encoding="utf-8")
         if containing in text:

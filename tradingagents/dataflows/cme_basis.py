@@ -551,7 +551,7 @@ def get_futures_basis(asset: str, curr_date: str) -> str:
     current = reading_at(basis, pd.Timestamp(bound)) if not basis.empty else None
     reference = min(curr_day, today)
     stale_days = None if current is None else (reference - current.last.date()).days
-    if current is None or stale_days > MAX_STALENESS_DAYS:
+    if current is None or stale_days > MAX_STALENESS_DAYS:  # type: ignore[operator]
         # Both series are described, whichever fell short: they are fetched
         # and filtered apart, and only the match between them is one thing.
         legs = "; ".join(

@@ -61,7 +61,7 @@ jobs:
         run: ruff check .
 
   typecheck:
-    name: mypy (perp lower layers + replay + carry + uniswap domain)
+    name: mypy (pyproject [tool.mypy] files)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -69,13 +69,13 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install mypy
-        # Only mypy: the layers pyproject [tool.mypy] checks import stdlib
-        # plus pandas/stockstats and (the replay package) PyYAML and
-        # langchain_core, which its overrides let mypy miss. Pinned
-        # exactly because ``warn_unused_ignores`` turns a newer mypy's better
-        # narrowing into a red job; bump it on purpose, with the pins.
+        # Only mypy: what the checked files import beyond the standard library
+        # is listed as overrides in pyproject [tool.mypy], each read as ``Any``
+        # here. Pinned exactly because ``warn_unused_ignores`` turns a newer
+        # mypy's better narrowing into a red job; bump it on purpose, with the
+        # pins.
         run: pip install "mypy==2.3.1"
-      - name: Type-check the perp module's lower layers and the replay package
+      - name: Type-check the files pyproject [tool.mypy] lists
         run: mypy
 
   autoresearch:

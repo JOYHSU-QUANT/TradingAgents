@@ -440,7 +440,7 @@ def _parse_flow_table(html: str, asset: str) -> _ParsedTable:
             )
         records.append({"date": day, "issuers": issuers, "total": total})
 
-    records.sort(key=lambda rec: rec["date"])
+    records.sort(key=lambda rec: rec["date"])  # type: ignore[arg-type, return-value]
     # One record per date is assumed downstream: `visible[-1]` is "the latest
     # day", `cumulative` is a plain sum, and the streak counts sessions. A table
     # carrying two rows for one date (a revision row, or any HTML anomaly matching

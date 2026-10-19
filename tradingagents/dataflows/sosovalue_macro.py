@@ -502,7 +502,7 @@ def _parse_event_rows(data: list, name: str) -> list[dict]:
         if previous is None:
             lacking_previous.append((row, raw))
         rows.append(row)
-    rows.sort(key=lambda r: r["date"])
+    rows.sort(key=lambda r: r["date"])  # type: ignore[arg-type, return-value]
     # The exemption is one row, by identity — a duplicated oldest date is
     # two prints, and the second has a prior — and only when the page is
     # complete: at the cap the provider dropped the OLDEST rows, so the
@@ -511,7 +511,7 @@ def _parse_event_rows(data: list, name: str) -> list[dict]:
     offending = [(row, raw) for row, raw in lacking_previous if row is not first_print]
     if offending:
         n = len(offending)
-        dates = _listed_dates(sorted({row["date"] for row, _ in offending}))
+        dates = _listed_dates(sorted({row["date"] for row, _ in offending}))  # type: ignore[misc]
         sample = _sanitize(repr(offending[0][1]), limit=MAX_UNTRUSTED_CHARS)
         raise SoSoValueError(
             f"{name!r} history: {n} {_plural(n, 'row', 'rows')} dated {dates} "
@@ -805,7 +805,7 @@ def _fetch_all() -> dict:
     sweep = fetch_each(
         TRACKED_EVENTS,
         _fetch_one_event,
-        key=lambda name: name,
+        key=lambda name: name,  # type: ignore[arg-type, return-value]
         describe=repr,
         label="macro",
         failed_bucket="events_failed",
@@ -1643,7 +1643,7 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         # table-capping logic. Unreachable on the live payload (neither table
         # approaches the cap); a broadened calendar or a large caller-supplied
         # look_back_days can get there.
-        shown = {row[0] for row in scheduled} | {row[0] for row in released}
+        shown = {row[0] for row in scheduled} | {row[0] for row in released}  # type: ignore[assignment]
         dates = [d for d in snapshot.calendar_malformed_dates if d not in shown]
         # Name the days, because a bare count cannot be acted on and a row
         # whose only fault was its ``events`` field still carried a usable
@@ -1964,7 +1964,7 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
 
     # ---- released table -----------------------------------------------------
     if released:
-        shown = released[-MAX_ROWS:]
+        shown = released[-MAX_ROWS:]  # type: ignore[assignment]
         # The rows are heterogeneous: a scheduled date that has passed with no
         # figure sits here too, so calling the total "releases" would overstate
         # what published. Split the count instead of hiding the mix.
@@ -1986,7 +1986,7 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
             "\n| Date | Event | Actual | Forecast | Surprise | Previous |",
             "| --- | --- | --- | --- | --- | --- |",
         ]
-        for date, name, row in shown:
+        for date, name, row in shown:  # type: ignore[misc]
             if row["actual"]:
                 actual = row["actual"]
                 surprise = _surprise_cell(row["actual"], row["forecast"])

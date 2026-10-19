@@ -85,14 +85,6 @@ import requests
 
 from .date_window import is_past_analysis_date
 from .errors import VendorError, VendorRateLimitError, VendorUnavailableError
-from .sosovalue_common import (
-    _cache_dir,
-    _cache_rejecter,
-    _read_cache_preamble,
-    _stale_caveat,
-    fmt_signed_usd_m,
-    fmt_usd_m,
-)
 from .symbol_utils import CRYPTO_BASES, classify_crypto_asset
 from .utils import (
     date_refusal,
@@ -104,6 +96,14 @@ from .utils import (
     json_bytes_or_outage,
     quote_argument,
     raise_for_http_status,
+)
+from .vendor_common import (
+    cache_dir as _cache_dir,
+    cache_rejecter as _cache_rejecter,
+    fmt_signed_usd_m,
+    fmt_usd_m,
+    read_cache_preamble as _read_cache_preamble,
+    stale_caveat as _stale_caveat,
 )
 
 logger = logging.getLogger(__name__)
@@ -417,7 +417,7 @@ def _stale_age(fetched_at: str) -> str:
     """This module's age formatter for the shared STALE template.
 
     Supplied rather than defaulted because the template's default reads the
-    SoSoValue family's clock, while every freshness decision here reads
+    shared kernel's (``vendor_common``) clock, while every freshness decision here reads
     ``_utc_now`` above - the one the tests patch. An unreadable or future-dated
     stamp is not normally reachable (``_load_snapshot`` degrades rather than
     serving such a snapshot), but a negative age rendered as "-12.0 hours"

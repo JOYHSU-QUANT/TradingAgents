@@ -1,9 +1,10 @@
 """Shape ratchets for ``tradingagents/dataflows``, read off the sources.
 
 The data-source modules the fork wrote (nine vendors, ``fear_greed`` and
-``throttle``; none exists upstream) grew without any guard on their shape:
-nothing in the repo watched function length, cross-module private imports
-or the clock seams the tests patch. ``contrib/`` has had import-graph guards
+``throttle``, and since D1-a the ``vendor_common`` kernel the vendors share;
+none exists upstream) grew without any guard on their shape: nothing in the
+repo watched function length, cross-module private imports or the clock
+seams the tests patch. ``contrib/`` has had import-graph guards
 of this kind since refactor plan v2's T0 (the length table is new to the
 repo); this file gives the dataflows the same floor (dataflows refactor plan
 2026-10-16, D0), freezing what was measured on 2026-10-19 so it can only
@@ -15,7 +16,9 @@ improve:
   reaches in another dataflows module, by import or through a module bound
   as a name, compared by equality;
 - :data:`_CLOCK_SEAMS` — the modules in scope whose module-level ``_utc_now``
-  the tests ``monkeypatch.setattr`` to freeze time, compared by equality.
+  the tests ``monkeypatch.setattr`` to freeze time, compared by equality;
+- :data:`_KERNEL_FLOOR` — the only package modules ``vendor_common`` may
+  import, so no vendor's types reach the shared kernel.
 
 Scope is :data:`_IN_SCOPE`: the fork's modules plus ``interface.py``, the
 one upstream file the fork rebuilt (``route_to_vendor``). The other modules
@@ -36,7 +39,7 @@ from pathlib import Path
 from .conftest import dataflows_module_trees, package_module_trees, repo_text
 
 # The modules the fork wrote (first commit by the fork, absent from upstream
-# ``main``) plus ``interface.py``. The same twelve ``pyproject.toml``
+# ``main``) plus ``interface.py``. The same thirteen ``pyproject.toml``
 # ``[tool.mypy] files`` lists under ``tradingagents/dataflows/``, and a test
 # below holds the two lists equal.
 _IN_SCOPE = frozenset(
@@ -53,12 +56,13 @@ _IN_SCOPE = frozenset(
         "sosovalue_macro",
         "sosovalue_treasuries",
         "throttle",
+        "vendor_common",
     }
 )
 
 # Upstream's modules (and ``__init__``), named so a module on disk that is in
-# neither list fails: the neutral kernel D1 creates, or a new vendor, has to
-# be placed in scope (or declared upstream) before anything else passes.
+# neither list fails: a new module has to be placed in scope (or declared
+# upstream) before anything else passes.
 _UPSTREAM = frozenset(
     {
         "__init__",
@@ -109,90 +113,37 @@ _LONG_FUNCTIONS: dict[tuple[str, str], int] = {
     ("fear_greed", "get_fear_greed_data"): 203,
     ("interface", "route_to_vendor"): 486,
     ("sosovalue", "get_etf_flow_data"): 582,
-    ("sosovalue_common", "load_rolling_snapshot"): 194,
     ("sosovalue_macro", "get_economic_calendar_data"): 1053,
     ("sosovalue_treasuries", "get_btc_treasury_data"): 582,
+    ("vendor_common", "load_rolling_snapshot"): 194,
 }
 
 # ``(importer, source, name)`` for every underscore name a module in scope
-# reaches in another dataflows module. All of it is what the six vendors take
-# from ``sosovalue_common``: the vendor-neutral cache, clock, validator and
-# format helpers (``cftc_cot``'s own ``_utc_now`` delegates to the family's,
-# through the module bound as ``family``) plus the SoSoValue-side ``_request``
-# and ``_sanitize``. D1 moves the neutral part into a module under public
-# names, and this set shrinks there.
+# reaches in another dataflows module. Two kinds are left: the SoSoValue-side
+# ``_sanitize`` the three SoSoValue modules take from ``sosovalue_common`` by
+# its private name (the plan's D1-b decides its home), and the kernel's clock
+# seam, which ``cftc_cot``'s own ``_utc_now`` reads through the module bound
+# as ``vendor_common`` — an underscore name on purpose, being the name the
+# tests patch (:data:`_CLOCK_SEAM`).
 _PRIVATE_CROSS_IMPORTS: frozenset[tuple[str, str, str]] = frozenset(
     {
-        ("cftc_cot", "sosovalue_common", "_cache_dir"),
-        ("cftc_cot", "sosovalue_common", "_cache_rejecter"),
-        ("cftc_cot", "sosovalue_common", "_read_cache_preamble"),
-        ("cftc_cot", "sosovalue_common", "_stale_caveat"),
-        ("cftc_cot", "sosovalue_common", "_utc_now"),
-        ("farside", "sosovalue_common", "_cache_dir"),
-        ("farside", "sosovalue_common", "_cache_rejecter"),
-        ("farside", "sosovalue_common", "_read_cache_preamble"),
-        ("farside", "sosovalue_common", "_stale_caveat"),
-        ("hyperliquid_whales", "sosovalue_common", "_cache_dir"),
-        ("hyperliquid_whales", "sosovalue_common", "_cache_rejecter"),
-        ("hyperliquid_whales", "sosovalue_common", "_read_cache_preamble"),
-        ("hyperliquid_whales", "sosovalue_common", "_stale_caveat"),
-        ("sosovalue", "sosovalue_common", "_cache_dir"),
-        ("sosovalue", "sosovalue_common", "_cache_rejecter"),
-        ("sosovalue", "sosovalue_common", "_concentration_share_str"),
-        ("sosovalue", "sosovalue_common", "_is_finite_number"),
-        ("sosovalue", "sosovalue_common", "_is_iso_date"),
-        ("sosovalue", "sosovalue_common", "_is_non_negative_int"),
-        ("sosovalue", "sosovalue_common", "_is_valid_ticker"),
-        ("sosovalue", "sosovalue_common", "_plural"),
-        ("sosovalue", "sosovalue_common", "_plural_days"),
-        ("sosovalue", "sosovalue_common", "_read_cache_preamble"),
-        ("sosovalue", "sosovalue_common", "_request"),
+        ("cftc_cot", "vendor_common", "_utc_now"),
         ("sosovalue", "sosovalue_common", "_sanitize"),
-        ("sosovalue", "sosovalue_common", "_sign"),
-        ("sosovalue", "sosovalue_common", "_stale_caveat"),
-        ("sosovalue_macro", "sosovalue_common", "_cache_dir"),
-        ("sosovalue_macro", "sosovalue_common", "_cache_rejecter"),
-        ("sosovalue_macro", "sosovalue_common", "_coverage_gap_note"),
-        ("sosovalue_macro", "sosovalue_common", "_days_unobserved"),
-        ("sosovalue_macro", "sosovalue_common", "_is_iso_date"),
-        ("sosovalue_macro", "sosovalue_common", "_is_non_negative_int"),
-        ("sosovalue_macro", "sosovalue_common", "_is_safe_text"),
-        ("sosovalue_macro", "sosovalue_common", "_plural"),
-        ("sosovalue_macro", "sosovalue_common", "_plural_days"),
-        ("sosovalue_macro", "sosovalue_common", "_read_cache_preamble"),
-        ("sosovalue_macro", "sosovalue_common", "_request"),
         ("sosovalue_macro", "sosovalue_common", "_sanitize"),
-        ("sosovalue_macro", "sosovalue_common", "_stale_caveat"),
-        ("sosovalue_macro", "sosovalue_common", "_valid_dated_rows"),
-        ("sosovalue_treasuries", "sosovalue_common", "_cache_dir"),
-        ("sosovalue_treasuries", "sosovalue_common", "_cache_rejecter"),
-        ("sosovalue_treasuries", "sosovalue_common", "_concentration_share_str"),
-        ("sosovalue_treasuries", "sosovalue_common", "_coverage_gap_note"),
-        ("sosovalue_treasuries", "sosovalue_common", "_days_unobserved"),
-        ("sosovalue_treasuries", "sosovalue_common", "_is_finite_number"),
-        ("sosovalue_treasuries", "sosovalue_common", "_is_iso_date"),
-        ("sosovalue_treasuries", "sosovalue_common", "_is_non_negative_int"),
-        ("sosovalue_treasuries", "sosovalue_common", "_is_safe_text"),
-        ("sosovalue_treasuries", "sosovalue_common", "_is_valid_ticker"),
-        ("sosovalue_treasuries", "sosovalue_common", "_plural"),
-        ("sosovalue_treasuries", "sosovalue_common", "_plural_days"),
-        ("sosovalue_treasuries", "sosovalue_common", "_read_cache_preamble"),
-        ("sosovalue_treasuries", "sosovalue_common", "_request"),
         ("sosovalue_treasuries", "sosovalue_common", "_sanitize"),
-        ("sosovalue_treasuries", "sosovalue_common", "_stale_caveat"),
-        ("sosovalue_treasuries", "sosovalue_common", "_valid_dated_rows"),
     }
 )
 
 # The modules whose ``_utc_now`` a test freezes with ``monkeypatch.setattr``
-# (``cftc_cot``'s is read by its tests and delegates to the family's, which
-# they patch). The binding is a test contract: it must stay a module-level
+# (``cftc_cot``'s is read by its tests and delegates to ``vendor_common``'s,
+# which they patch). The binding is a test contract: it must stay a module-level
 # name (a ``def``, an assignment or an import binding all count) so a patch
 # on the module reaches every call in it. Frozen by hand rather than derived from
 # the tests on purpose: a PR that moves a seam and repoints its tests has to
 # edit this row too, which is the review the plan's §2.6 asks for. The three
-# SoSoValue vendors read the clock through ``sosovalue_common`` and have none
-# of their own; the neutral kernel D1 creates is added here when it gets one.
+# SoSoValue vendors read the clock through ``vendor_common`` and have none of
+# their own; ``sosovalue_common`` reads no wall clock (its request budget runs
+# on ``time.monotonic``, patched as ``_monotonic``).
 _CLOCK_SEAM = "_utc_now"
 _CLOCK_SEAMS = frozenset(
     {
@@ -201,9 +152,19 @@ _CLOCK_SEAMS = frozenset(
         "deribit",
         "farside",
         "hyperliquid_whales",
-        "sosovalue_common",
+        "vendor_common",
     }
 )
+
+# The kernel names no vendor: it may import the package's floor alone (the
+# configuration, the error taxonomy, the shared utilities). A vendor module in
+# its imports would put that vendor's types back into the shared skeleton —
+# the reason the sweep that raises SoSoValue's errors stayed in
+# ``sosovalue_common`` and the stale fallback re-raises the base
+# ``VendorNotConfiguredError`` — and would close an import cycle with that
+# vendor, which imports the kernel.
+_KERNEL = "vendor_common"
+_KERNEL_FLOOR = frozenset({"config", "errors", "utils"})
 
 
 @functools.cache
@@ -339,6 +300,48 @@ def _private_cross_imports(
     return frozenset(found)
 
 
+def _sibling_imports(
+    tree: ast.Module, package_name: str = "tradingagents.dataflows"
+) -> frozenset[str]:
+    """Every package sibling ``tree`` imports, by any spelling and at any depth.
+
+    Unlike :func:`_private_cross_imports` this reads which MODULES are
+    imported, not which names. A relative import is resolved to its absolute
+    module first, at any level, so ``from .x import y``, ``from ..<last
+    part>.x import y`` and ``from <package_name>.x.deep import y`` all import
+    ``x``; ``from . import x`` and ``from <package_name> import x`` import
+    ``x`` itself; ``import <package_name>.x`` with or without ``as`` imports
+    ``x``. A lazy import inside a function is the same dependency. Dynamic
+    imports (``importlib``, ``__import__``) and attribute reads off the
+    package object are not read.
+    """
+    found: set[str] = set()
+    parts = package_name.split(".")
+    prefix = package_name + "."
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if node.level:
+                climb = node.level - 1
+                if climb >= len(parts):
+                    continue
+                base = parts[: len(parts) - climb]
+                absolute = ".".join([*base, module] if module else base)
+            else:
+                absolute = module
+            if absolute == package_name:
+                found.update(alias.name for alias in node.names)
+            elif absolute.startswith(prefix):
+                found.add(absolute[len(prefix) :].split(".")[0])
+        elif isinstance(node, ast.Import):
+            found.update(
+                alias.name[len(prefix) :].split(".")[0]
+                for alias in node.names
+                if alias.name.startswith(prefix)
+            )
+    return frozenset(found)
+
+
 def _module_level_bindings(tree: ast.Module) -> set[str]:
     """The names a module binds by a direct top-level statement: def, class, assignment, import.
 
@@ -444,7 +447,7 @@ def test_the_scope_is_the_mypy_file_list():
 def test_the_package_has_no_subpackage():
     # Every scan globs one level (``*.py``), as ``package_module_trees`` does;
     # a subpackage under dataflows would be seen by nothing here, nor by the
-    # mypy file list. The neutral kernel D1 creates is a module, not a package.
+    # mypy file list. The neutral kernel D1-a created is a module, not a package.
     package = next(path for path, _tree in dataflows_module_trees(containing="")).parent
     dirs = sorted(p.name for p in package.iterdir() if p.is_dir() and p.name != "__pycache__")
     assert dirs == [], dirs
@@ -455,6 +458,11 @@ def test_the_clock_seams_are_exactly_the_modules_frozen_on_2026_10_19():
     assert found == _CLOCK_SEAMS, _ratchet_message(
         f"modules binding {_CLOCK_SEAM} at module level", found, _CLOCK_SEAMS
     )
+
+
+def test_the_kernel_imports_only_the_packages_floor():
+    found = _sibling_imports(dict(_modules(None))[_KERNEL])
+    assert found <= _KERNEL_FLOOR, f"{_KERNEL} imports {sorted(found - _KERNEL_FLOOR)}"
 
 
 # -- the scanners themselves --------------------------------------------------------
@@ -590,3 +598,31 @@ def test_the_seam_scan_reads_module_level_bindings_of_every_kind(tmp_path):
         "by_alias",
         "by_plain_import",
     }
+
+
+def test_the_sibling_import_scan_reads_every_spelling_at_any_depth(tmp_path):
+    _write(
+        tmp_path,
+        "k",
+        "from .a import x\n"
+        "from pkg.flows.b import y\n"
+        "from .c.deep import z\n"
+        "from . import d, e as ee\n"
+        "from pkg.flows import f\n"
+        "import pkg.flows.g\n"
+        "import pkg.flows.h as hh\n"
+        "from pkg.flowsb import prefix_only\n"
+        "from pkg.other import elsewhere\n"
+        "from ..up import parent\n"
+        "from ..flows.j import climbed_back\n"
+        "from ..flows import l\n"
+        "from .....too_far import gone\n"
+        "import other\n"
+        "def lazy():\n"
+        "    from .i import w\n",
+    )
+    found = _sibling_imports(dict(_modules(tmp_path))["k"], "pkg.flows")
+    # Every spelling of a sibling counts, deeper paths by their sibling, and a
+    # relative import that climbs out and back in names one too; the
+    # prefix-only, foreign, parent and past-the-root imports are not siblings.
+    assert found == {"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "l"}

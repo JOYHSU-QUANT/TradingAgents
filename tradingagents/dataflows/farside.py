@@ -47,7 +47,6 @@ import requests
 from parsel import Selector
 
 from .errors import VendorError, VendorUnavailableError
-from .sosovalue_common import _cache_dir, _cache_rejecter, _read_cache_preamble, _stale_caveat
 from .symbol_utils import classify_crypto_asset
 from .utils import (
     date_refusal,
@@ -57,6 +56,12 @@ from .utils import (
     is_unreached,
     quote_argument,
     raise_for_http_status,
+)
+from .vendor_common import (
+    cache_dir as _cache_dir,
+    cache_rejecter as _cache_rejecter,
+    read_cache_preamble as _read_cache_preamble,
+    stale_caveat as _stale_caveat,
 )
 
 logger = logging.getLogger(__name__)
@@ -950,7 +955,7 @@ def get_etf_flow_data(
                 causes="network error or a parser break",
                 # This vendor's own age formatter: it reads farside's _utc_now
                 # (the clock the TTL and stale cap read, and the one the tests
-                # patch), not the SoSoValue family's.
+                # patch), not ``vendor_common``'s.
                 humanize=_humanize_age,
             )
         )

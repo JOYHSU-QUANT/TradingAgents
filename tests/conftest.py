@@ -203,10 +203,10 @@ def fake_response(status: int = 200, *, json=_NOT_JSON):
 
 
 def sosovalue_unreached(path: str):
-    """What ``sosovalue_common._request`` raises for a vendor it could not reach (#217).
+    """What ``sosovalue_common.request`` raises for a vendor it could not reach (#217).
 
     Authored once for the suites that stub ``_request`` (the sweeps and the
-    cache lane); the tests that drive the real ``_request`` pin the sentence.
+    cache lane); the tests that drive the real ``request`` pin the sentence.
     """
     from tradingagents.dataflows.sosovalue_common import SoSoValueUnreachedError
 

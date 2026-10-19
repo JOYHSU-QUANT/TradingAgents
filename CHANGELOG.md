@@ -106,6 +106,38 @@ Breaking changes within the 0.x line are called out explicitly.
   (`RESEARCH_*`). Answers the two questions autoresearch plan section 7.3
   left open (where the measure lives, and what counts as "an effect").
 
+### Changed
+
+- **The vendor-neutral kernel moves out of `sosovalue_common` into
+  `tradingagents/dataflows/vendor_common.py`** (dataflows refactor plan
+  2026-10-16, D1-a). The value/date/ticker predicates, the clock and
+  cache-age helpers, the cache-file read preamble and rejecter, the US$m
+  formatters and the cache/TTL/stale-fallback skeleton
+  (`load_rolling_snapshot`) that the six vendors took from `sosovalue_common`
+  now live in a module under no vendor's name, and the ones another module
+  reads are public (`cache_dir`, `stale_caveat`, `is_finite_real`, ...; the
+  clock helpers no other module reads keep their underscore, and so does
+  `_utc_now`, which `cftc_cot` reads through the module because it is the
+  seam the tests patch); each vendor
+  imports them from there aliased back to its old local names, so no
+  rendered string changes and the only call site that does is
+  `cftc_cot._utc_now`, which now delegates to `vendor_common._utc_now()`. `sosovalue_common` keeps what is
+  SoSoValue's: the errors, the key, the request helper (public as `request`;
+  the vendors alias it to `_request`, their tests' patch target) and the
+  per-item sweep (`fetch_each`/`raise_all_failed`), which catches and raises
+  SoSoValue's types and so is not neutral. The kernel's clock seam `_utc_now`
+  moves with it, so the tests freeze time on `vendor_common`
+  (`cftc_cot._utc_now` delegates there), and `load_rolling_snapshot`
+  re-raises `VendorNotConfiguredError`, the base of the
+  `SoSoValueNotConfiguredError` it used to name, so the kernel names no
+  vendor's type (no caller raises another subclass through it). No
+  behaviour change and no re-exports left behind: nothing outside the
+  package's vendors and the tests read the old paths, and both moved. The shape ratchets' private-import
+  table shrinks from 58 edges to 4 and the clock-seam table swaps
+  `sosovalue_common` for `vendor_common`, and a new one holds the kernel to
+  importing nothing from the package but `config`, `errors` and `utils`, so
+  no vendor's types can creep back into it.
+
 ### Fixed
 
 - **`contrib/dashboard`: the `history/` directory keeps its setgid bit.** The

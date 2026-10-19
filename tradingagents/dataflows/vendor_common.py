@@ -437,7 +437,7 @@ def load_rolling_snapshot(
       ``current`` block, while this function stamps and reads it at the top
       level. Adopting means either a cache-schema change for a vendor that
       ships disabled, or a second pair of hooks to read and write the stamp -
-      on a function that already takes eight arguments.
+      on a function whose argument list is already long.
 
     The discipline itself is the one Farside's loader set: a
     cache younger than its TTL is served as-is — the TTL is the module's

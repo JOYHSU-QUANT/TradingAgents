@@ -142,13 +142,13 @@ Breaking changes within the 0.x line are called out explicitly.
   2026-10-16, D1-b). Farside's own copies of the date, sign and finite-number
   predicates now come from `vendor_common`, as Deribit's finite-number one
   does; `is_finite_real` is typed `TypeGuard[float]` and every vendor aliases
-  it `_is_finite_real`, which retires nine mypy pins. The three
-  `plural_days` copies are `utils.plural_days` (public now; the kernel imports
-  it rather than the other way round). The two `_sanitize` wrappers were a
-  bare call to `utils.sanitize_untrusted` and are now that function, imported
-  under the old name; the ticker predicate goes back to `sosovalue_common`,
-  the one family that uses it. `load_rolling_snapshot` loses its `"SoSoValue"`
-  default for `vendor` (the three SoSoValue callers pass the new
+  it `_is_finite_real`. The three `plural_days` copies are `utils.plural_days`
+  (public now; the kernel imports it rather than the other way round). The
+  two `_sanitize` wrappers were a bare call to `utils.sanitize_untrusted` and
+  are now that function, imported under the old name; the ticker predicate
+  goes back to `sosovalue_common`, the one family that uses it, typed
+  `TypeGuard[str]`. The two type guards retire nine mypy pins between them.
+  `load_rolling_snapshot` loses its `"SoSoValue"` default for `vendor` (the three SoSoValue callers pass the new
   `sosovalue_common.VENDOR`), so a new caller cannot file its failures under
   another vendor's name, and its unused `_days_stale` and stale docstring go.
   Helpers that only share a name (`_pct`, `_withheld`, `_rate_limited`,

@@ -308,8 +308,8 @@ DateKind = Literal["point", "window", "disclosure"]
 # ``DATA_UNAVAILABLE: ... ({error})`` — is assembled into an LLM prompt, so a
 # fragment that survives verbatim from outside the module can forge report
 # structure rather than merely read oddly. The one definition of that
-# flattening (it used to be copied into deribit and sosovalue_common; the
-# vendor modules now import it under their old ``_sanitize`` name); the vendor
+# flattening (it used to be copied into deribit and sosovalue_common, and
+# those modules now import it under their old ``_sanitize`` name); the vendor
 # modules keep the reasoning for WHICH fragments they flatten.
 #
 # ``sanitize_untrusted`` and the three names it reads (``MARKDOWN_CONTROL``,

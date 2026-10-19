@@ -67,8 +67,8 @@ from .utils import (
 # ``DATA_UNAVAILABLE: ... ({error})``), while the stored and compared value
 # must stay byte-exact — the macro history path sends event names back to
 # the API, so flattening them at parse time would break the request path.
-# ``limit`` is passed only where the fragment is ISOLATED (an echoed raw row
-# in a raised message), never when flattening a whole exception message here
+# ``limit`` is passed only where the untrusted fragment is ISOLATED inside a
+# raised message, never when flattening a whole exception message here
 # — the router caps a whole raised message where it enters a sentinel the
 # model reads (see ``utils.sanitize_untrusted``), and the log keeps it whole.
 

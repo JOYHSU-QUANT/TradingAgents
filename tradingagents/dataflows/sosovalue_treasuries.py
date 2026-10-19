@@ -79,31 +79,33 @@ from urllib.parse import quote
 from .sosovalue_common import (
     SoSoValueError,
     SoSoValueUnavailableError,
-    _cache_dir,
-    _cache_rejecter,
-    _concentration_share_str,
-    _coverage_gap_note,
-    _days_unobserved,
-    _is_finite_number,
-    _is_iso_date,
-    _is_non_negative_int,
-    _is_safe_text,
-    _is_valid_ticker,
-    _plural,
-    _plural_days,
-    _read_cache_preamble,
-    _request,
     _sanitize,
-    _stale_caveat,
-    _valid_dated_rows,
     fetch_each,
-    fmt_signed_usd_m,
     get_api_key,
-    load_rolling_snapshot,
     raise_all_failed,
+    request as _request,
 )
 from .symbol_utils import classify_crypto_asset
 from .utils import MAX_UNTRUSTED_CHARS, date_refusal, echo_argument, quote_argument
+from .vendor_common import (
+    cache_dir as _cache_dir,
+    cache_rejecter as _cache_rejecter,
+    concentration_share_str as _concentration_share_str,
+    coverage_gap_note as _coverage_gap_note,
+    days_unobserved as _days_unobserved,
+    fmt_signed_usd_m as _fmt_signed_usd_m,
+    is_finite_real as _is_finite_number,
+    is_iso_date as _is_iso_date,
+    is_non_negative_int as _is_non_negative_int,
+    is_safe_text as _is_safe_text,
+    is_valid_ticker as _is_valid_ticker,
+    load_rolling_snapshot,
+    plural as _plural,
+    plural_days as _plural_days,
+    read_cache_preamble as _read_cache_preamble,
+    stale_caveat as _stale_caveat,
+    valid_dated_rows as _valid_dated_rows,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -792,15 +794,6 @@ def _fmt_signed_btc(value: float) -> str:
     if rounded == 0 and value != 0:
         return f"{value:+.2f}"
     return f"{rounded + 0.0:+,.0f}"
-
-
-# The Cost column's twin of ``_fmt_signed_btc`` and for the same reason: a
-# filing under $50k rounding to "+0.0" while the Implied US$/BTC cell on the
-# same row prints a price computed from the unrounded figure would be two cells
-# the reader is told cannot both be true. The rule now lives in
-# ``sosovalue_common`` so the whale-positioning module renders notionals by the
-# same one rather than by a second copy of it.
-_fmt_signed_usd_m = fmt_signed_usd_m
 
 
 def _fmt_btc(value: float) -> str:

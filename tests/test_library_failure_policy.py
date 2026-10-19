@@ -335,19 +335,19 @@ def test_the_cache_directory_readers_name_the_gap_rather_than_the_vendor(monkeyp
     import tradingagents.dataflows.cftc_cot as cftc
     import tradingagents.dataflows.farside as farside
     import tradingagents.dataflows.hyperliquid_whales as whales
-    import tradingagents.dataflows.sosovalue_common as soso
+    import tradingagents.dataflows.vendor_common as kernel
     import tradingagents.dataflows.yfinance_common as yfc
 
-    assert farside._cache_dir is soso._cache_dir
+    assert farside._cache_dir is kernel.cache_dir
     # The whale-positioning vendor imports the same object rather than
     # keeping a copy, so a refactor that gave it one would drop out of
     # this guard silently.
-    assert whales._cache_dir is soso._cache_dir
-    assert cftc._cache_dir is soso._cache_dir
+    assert whales._cache_dir is kernel.cache_dir
+    assert cftc._cache_dir is kernel.cache_dir
 
-    monkeypatch.setattr(soso, "get_config", dict)
+    monkeypatch.setattr(kernel, "get_config", dict)
     with pytest.raises(WiringGapError, match="cache configuration"):
-        soso._cache_dir()
+        kernel.cache_dir()
 
     monkeypatch.setattr(yfc, "get_config", dict)
     with pytest.raises(WiringGapError, match="OHLCV cache configuration"):
@@ -356,9 +356,9 @@ def test_the_cache_directory_readers_name_the_gap_rather_than_the_vendor(monkeyp
     # The other half of what the guard covers, and the reason ``makedirs``
     # is inside it: a key set to something that is not a path answers with a
     # TypeError, which outside the guard would read as the vendor's library.
-    monkeypatch.setattr(soso, "get_config", lambda: {"data_cache_dir": 12345})
+    monkeypatch.setattr(kernel, "get_config", lambda: {"data_cache_dir": 12345})
     with pytest.raises(WiringGapError, match="cache configuration"):
-        soso._cache_dir()
+        kernel.cache_dir()
 
 
 @pytest.mark.unit

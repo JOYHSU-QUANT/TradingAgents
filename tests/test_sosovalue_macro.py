@@ -19,7 +19,7 @@ from urllib.parse import quote
 import pytest
 import requests
 
-from tradingagents.dataflows import interface, sosovalue_common, sosovalue_macro
+from tradingagents.dataflows import interface, sosovalue_common, sosovalue_macro, vendor_common
 from tradingagents.dataflows.config import set_config
 from tradingagents.default_config import DEFAULT_CONFIG
 
@@ -925,7 +925,7 @@ class TestCacheAndLoad:
     def _setup(self, tmp_path, monkeypatch, now="2026-08-11T06:00:00Z"):
         set_config({"data_cache_dir": str(tmp_path)})
         monkeypatch.setenv("SOSOVALUE_API_KEY", "test-key")
-        monkeypatch.setattr(sosovalue_common, "_utc_now", lambda: _at(now))
+        monkeypatch.setattr(vendor_common, "_utc_now", lambda: _at(now))
         impl = _request_impl()
         monkeypatch.setattr(sosovalue_macro, "_request", impl)
         return impl
@@ -961,7 +961,7 @@ class TestCacheAndLoad:
         # logged warning and a served (uncached) snapshot, not a vendor failure.
         self._setup(tmp_path, monkeypatch)
         with (
-            mock.patch.object(sosovalue_common.json, "dump", side_effect=OSError("disk full")),
+            mock.patch.object(vendor_common.json, "dump", side_effect=OSError("disk full")),
             caplog.at_level("WARNING"),
         ):
             snapshot = sosovalue_macro._load_snapshot()
@@ -2391,7 +2391,7 @@ class TestDroppedCalendarContentIsNamedNotBlamedOnTheProvider:
     def _cache_setup(self, tmp_path, monkeypatch, now="2026-08-11T08:00:00Z"):
         set_config({"data_cache_dir": str(tmp_path)})
         monkeypatch.setenv("SOSOVALUE_API_KEY", "test-key")
-        monkeypatch.setattr(sosovalue_common, "_utc_now", lambda: _at(now))
+        monkeypatch.setattr(vendor_common, "_utc_now", lambda: _at(now))
         impl = _request_impl()
         monkeypatch.setattr(sosovalue_macro, "_request", impl)
         return impl
@@ -3019,11 +3019,11 @@ class TestArgumentGuards:
         # A call site that forgets the keywords must fail closed: empty and
         # whitespace-padded strings are rejected by default and need the
         # explicit opt-down the macro value predicate uses.
-        assert not sosovalue_common._is_safe_text("", 10)
-        assert not sosovalue_common._is_safe_text(" x ", 10)
-        assert sosovalue_common._is_safe_text("x", 10)
-        assert sosovalue_common._is_safe_text("", 10, min_len=0, stripped=False)
-        assert sosovalue_common._is_safe_text(" x ", 10, min_len=0, stripped=False)
+        assert not vendor_common.is_safe_text("", 10)
+        assert not vendor_common.is_safe_text(" x ", 10)
+        assert vendor_common.is_safe_text("x", 10)
+        assert vendor_common.is_safe_text("", 10, min_len=0, stripped=False)
+        assert vendor_common.is_safe_text(" x ", 10, min_len=0, stripped=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -3034,7 +3034,7 @@ class TestRoundTwoDropDisclosure:
     def _cache_setup(self, tmp_path, monkeypatch, now):
         set_config({"data_cache_dir": str(tmp_path)})
         monkeypatch.setenv("SOSOVALUE_API_KEY", "test-key")
-        monkeypatch.setattr(sosovalue_common, "_utc_now", lambda: _at(now))
+        monkeypatch.setattr(vendor_common, "_utc_now", lambda: _at(now))
         impl = _request_impl()
         monkeypatch.setattr(sosovalue_macro, "_request", impl)
         return impl

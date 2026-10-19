@@ -26,7 +26,7 @@ from langchain_core.runnables import RunnableLambda
 from tradingagents.agents.analysts import news_analyst as news_analyst_module
 from tradingagents.agents.analysts.news_analyst import create_news_analyst
 from tradingagents.agents.utils import crypto_data_tools
-from tradingagents.dataflows import cftc_cot, interface, sosovalue_common
+from tradingagents.dataflows import cftc_cot, interface, vendor_common
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.errors import VendorRateLimitError, VendorUnavailableError
 from tradingagents.default_config import DEFAULT_CONFIG
@@ -76,7 +76,7 @@ class _Cftc:
 def _freeze(monkeypatch, at: datetime) -> None:
     # The family clock: the snapshot skeleton stamps and ages the cache on it,
     # and the module reads its own time through it, so one patch moves both.
-    monkeypatch.setattr(sosovalue_common, "_utc_now", lambda: at)
+    monkeypatch.setattr(vendor_common, "_utc_now", lambda: at)
 
 
 @pytest.fixture
@@ -409,7 +409,7 @@ class TestCache:
         assert f"Ignoring CFTC COT BTC cache {path}: " in caplog.text and reason in caplog.text
 
     def test_the_cache_directory_and_the_clock_are_the_familys(self, monkeypatch):
-        assert cftc_cot._cache_dir is sosovalue_common._cache_dir
+        assert cftc_cot._cache_dir is vendor_common.cache_dir
         _freeze(monkeypatch, NOW)
         assert cftc_cot._utc_now() == NOW
 

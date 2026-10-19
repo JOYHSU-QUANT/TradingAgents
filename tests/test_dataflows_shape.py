@@ -36,7 +36,7 @@ from pathlib import Path
 from .conftest import dataflows_module_trees, package_module_trees, repo_text
 
 # The modules the fork wrote (first commit by the fork, absent from upstream
-# ``main``) plus ``interface.py``. The same twelve ``pyproject.toml``
+# ``main``) plus ``interface.py``. The same thirteen ``pyproject.toml``
 # ``[tool.mypy] files`` lists under ``tradingagents/dataflows/``, and a test
 # below holds the two lists equal.
 _IN_SCOPE = frozenset(
@@ -53,6 +53,7 @@ _IN_SCOPE = frozenset(
         "sosovalue_macro",
         "sosovalue_treasuries",
         "throttle",
+        "vendor_common",
     }
 )
 
@@ -109,90 +110,36 @@ _LONG_FUNCTIONS: dict[tuple[str, str], int] = {
     ("fear_greed", "get_fear_greed_data"): 203,
     ("interface", "route_to_vendor"): 486,
     ("sosovalue", "get_etf_flow_data"): 582,
-    ("sosovalue_common", "load_rolling_snapshot"): 194,
     ("sosovalue_macro", "get_economic_calendar_data"): 1053,
     ("sosovalue_treasuries", "get_btc_treasury_data"): 582,
+    ("vendor_common", "load_rolling_snapshot"): 194,
 }
 
 # ``(importer, source, name)`` for every underscore name a module in scope
-# reaches in another dataflows module. All of it is what the six vendors take
-# from ``sosovalue_common``: the vendor-neutral cache, clock, validator and
-# format helpers (``cftc_cot``'s own ``_utc_now`` delegates to the family's,
-# through the module bound as ``family``) plus the SoSoValue-side ``_request``
-# and ``_sanitize``. D1 moves the neutral part into a module under public
-# names, and this set shrinks there.
+# reaches in another dataflows module. Two kinds are left: the SoSoValue-side
+# ``_sanitize`` the three SoSoValue modules take from ``sosovalue_common`` by
+# its private name (the plan's D1-b decides its home), and the kernel's clock
+# seam, which ``cftc_cot``'s own ``_utc_now`` reads through the module bound
+# as ``vendor_common`` — an underscore name on purpose, being the name the
+# tests patch (:data:`_CLOCK_SEAM`).
 _PRIVATE_CROSS_IMPORTS: frozenset[tuple[str, str, str]] = frozenset(
     {
-        ("cftc_cot", "sosovalue_common", "_cache_dir"),
-        ("cftc_cot", "sosovalue_common", "_cache_rejecter"),
-        ("cftc_cot", "sosovalue_common", "_read_cache_preamble"),
-        ("cftc_cot", "sosovalue_common", "_stale_caveat"),
-        ("cftc_cot", "sosovalue_common", "_utc_now"),
-        ("farside", "sosovalue_common", "_cache_dir"),
-        ("farside", "sosovalue_common", "_cache_rejecter"),
-        ("farside", "sosovalue_common", "_read_cache_preamble"),
-        ("farside", "sosovalue_common", "_stale_caveat"),
-        ("hyperliquid_whales", "sosovalue_common", "_cache_dir"),
-        ("hyperliquid_whales", "sosovalue_common", "_cache_rejecter"),
-        ("hyperliquid_whales", "sosovalue_common", "_read_cache_preamble"),
-        ("hyperliquid_whales", "sosovalue_common", "_stale_caveat"),
-        ("sosovalue", "sosovalue_common", "_cache_dir"),
-        ("sosovalue", "sosovalue_common", "_cache_rejecter"),
-        ("sosovalue", "sosovalue_common", "_concentration_share_str"),
-        ("sosovalue", "sosovalue_common", "_is_finite_number"),
-        ("sosovalue", "sosovalue_common", "_is_iso_date"),
-        ("sosovalue", "sosovalue_common", "_is_non_negative_int"),
-        ("sosovalue", "sosovalue_common", "_is_valid_ticker"),
-        ("sosovalue", "sosovalue_common", "_plural"),
-        ("sosovalue", "sosovalue_common", "_plural_days"),
-        ("sosovalue", "sosovalue_common", "_read_cache_preamble"),
-        ("sosovalue", "sosovalue_common", "_request"),
+        ("cftc_cot", "vendor_common", "_utc_now"),
         ("sosovalue", "sosovalue_common", "_sanitize"),
-        ("sosovalue", "sosovalue_common", "_sign"),
-        ("sosovalue", "sosovalue_common", "_stale_caveat"),
-        ("sosovalue_macro", "sosovalue_common", "_cache_dir"),
-        ("sosovalue_macro", "sosovalue_common", "_cache_rejecter"),
-        ("sosovalue_macro", "sosovalue_common", "_coverage_gap_note"),
-        ("sosovalue_macro", "sosovalue_common", "_days_unobserved"),
-        ("sosovalue_macro", "sosovalue_common", "_is_iso_date"),
-        ("sosovalue_macro", "sosovalue_common", "_is_non_negative_int"),
-        ("sosovalue_macro", "sosovalue_common", "_is_safe_text"),
-        ("sosovalue_macro", "sosovalue_common", "_plural"),
-        ("sosovalue_macro", "sosovalue_common", "_plural_days"),
-        ("sosovalue_macro", "sosovalue_common", "_read_cache_preamble"),
-        ("sosovalue_macro", "sosovalue_common", "_request"),
         ("sosovalue_macro", "sosovalue_common", "_sanitize"),
-        ("sosovalue_macro", "sosovalue_common", "_stale_caveat"),
-        ("sosovalue_macro", "sosovalue_common", "_valid_dated_rows"),
-        ("sosovalue_treasuries", "sosovalue_common", "_cache_dir"),
-        ("sosovalue_treasuries", "sosovalue_common", "_cache_rejecter"),
-        ("sosovalue_treasuries", "sosovalue_common", "_concentration_share_str"),
-        ("sosovalue_treasuries", "sosovalue_common", "_coverage_gap_note"),
-        ("sosovalue_treasuries", "sosovalue_common", "_days_unobserved"),
-        ("sosovalue_treasuries", "sosovalue_common", "_is_finite_number"),
-        ("sosovalue_treasuries", "sosovalue_common", "_is_iso_date"),
-        ("sosovalue_treasuries", "sosovalue_common", "_is_non_negative_int"),
-        ("sosovalue_treasuries", "sosovalue_common", "_is_safe_text"),
-        ("sosovalue_treasuries", "sosovalue_common", "_is_valid_ticker"),
-        ("sosovalue_treasuries", "sosovalue_common", "_plural"),
-        ("sosovalue_treasuries", "sosovalue_common", "_plural_days"),
-        ("sosovalue_treasuries", "sosovalue_common", "_read_cache_preamble"),
-        ("sosovalue_treasuries", "sosovalue_common", "_request"),
         ("sosovalue_treasuries", "sosovalue_common", "_sanitize"),
-        ("sosovalue_treasuries", "sosovalue_common", "_stale_caveat"),
-        ("sosovalue_treasuries", "sosovalue_common", "_valid_dated_rows"),
     }
 )
 
 # The modules whose ``_utc_now`` a test freezes with ``monkeypatch.setattr``
-# (``cftc_cot``'s is read by its tests and delegates to the family's, which
-# they patch). The binding is a test contract: it must stay a module-level
+# (``cftc_cot``'s is read by its tests and delegates to ``vendor_common``'s,
+# which they patch). The binding is a test contract: it must stay a module-level
 # name (a ``def``, an assignment or an import binding all count) so a patch
 # on the module reaches every call in it. Frozen by hand rather than derived from
 # the tests on purpose: a PR that moves a seam and repoints its tests has to
 # edit this row too, which is the review the plan's §2.6 asks for. The three
-# SoSoValue vendors read the clock through ``sosovalue_common`` and have none
-# of their own; the neutral kernel D1 creates is added here when it gets one.
+# SoSoValue vendors and ``sosovalue_common`` read the clock through
+# ``vendor_common`` and have none of their own.
 _CLOCK_SEAM = "_utc_now"
 _CLOCK_SEAMS = frozenset(
     {
@@ -201,7 +148,7 @@ _CLOCK_SEAMS = frozenset(
         "deribit",
         "farside",
         "hyperliquid_whales",
-        "sosovalue_common",
+        "vendor_common",
     }
 )
 

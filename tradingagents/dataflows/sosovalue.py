@@ -91,25 +91,27 @@ from .sosovalue_common import (
     SoSoValueNotConfiguredError as SoSoValueNotConfiguredError,
     SoSoValueRateLimitError,
     SoSoValueUnavailableError,
-    _cache_dir,
-    _cache_rejecter,
-    _concentration_share_str,
-    _is_finite_number,
-    _is_iso_date,
-    _is_non_negative_int,
-    _is_valid_ticker,
-    _plural,
-    _plural_days,
-    _read_cache_preamble,
-    _request,
     _sanitize,
-    _sign,
-    _stale_caveat,
     get_api_key as get_api_key,
-    load_rolling_snapshot,
+    request as _request,
 )
 from .symbol_utils import classify_crypto_asset
 from .utils import MAX_UNTRUSTED_CHARS, date_refusal, echo_argument, quote_argument
+from .vendor_common import (
+    cache_dir as _cache_dir,
+    cache_rejecter as _cache_rejecter,
+    concentration_share_str as _concentration_share_str,
+    is_finite_real as _is_finite_number,
+    is_iso_date as _is_iso_date,
+    is_non_negative_int as _is_non_negative_int,
+    is_valid_ticker as _is_valid_ticker,
+    load_rolling_snapshot,
+    plural as _plural,
+    plural_days as _plural_days,
+    read_cache_preamble as _read_cache_preamble,
+    sign as _sign,
+    stale_caveat as _stale_caveat,
+)
 
 logger = logging.getLogger(__name__)
 

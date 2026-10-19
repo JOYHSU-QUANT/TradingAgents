@@ -95,8 +95,10 @@ filterwarnings = [
 # plan, D0) with their 50 errors pinned where they sit, as the perp layers'
 # were (one line in ``cftc_cot`` already carried a pin); the two in
 # ``interface.py`` the plan lists as behaviour candidates (§5) are pinned,
-# not fixed, here. ``tests/test_dataflows_shape.py`` scopes its shape
-# ratchets to the same twelve modules and holds the two lists equal.
+# not fixed, here. ``vendor_common`` (the kernel D1-a moved out of
+# ``sosovalue_common``) joined with no pins on 2026-10-19.
+# ``tests/test_dataflows_shape.py`` scopes its shape ratchets to the same
+# thirteen modules and holds the two lists equal.
 files = [
     "contrib/core",
     "contrib/hyperliquid_perp/common",
@@ -121,6 +123,7 @@ files = [
     "tradingagents/dataflows/sosovalue_macro.py",
     "tradingagents/dataflows/sosovalue_treasuries.py",
     "tradingagents/dataflows/throttle.py",
+    "tradingagents/dataflows/vendor_common.py",
 ]
 exclude = [
     "^contrib/carry/tests/",

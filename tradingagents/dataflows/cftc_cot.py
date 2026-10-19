@@ -40,7 +40,7 @@ Neither asset's series stands in for another's.
 Each series is small (444 Bitcoin rows back to 2018-04 and 288 Ether rows
 back to 2021-04 on 2026-10-12, neither with a missing week), so one fetch per
 asset serves every question: each is cached as its own rolling JSON snapshot
-through the family's skeleton (``sosovalue_common.load_rolling_snapshot``),
+through the shared skeleton (``vendor_common.load_rolling_snapshot``),
 refreshed daily, served stale for up to ``MAX_STALE_DAYS`` when the fetch
 fails, and never written on a failed fetch. Holding the series also pays for
 the scale: the report says what size of weekly change is ordinary and where
@@ -57,15 +57,8 @@ from typing import NamedTuple
 
 import requests
 
-from . import sosovalue_common as family
+from . import vendor_common
 from .errors import VendorError, VendorRateLimitError, VendorUnavailableError
-from .sosovalue_common import (
-    _cache_dir,
-    _cache_rejecter,
-    _read_cache_preamble,
-    _stale_caveat,
-    load_rolling_snapshot,
-)
 from .symbol_utils import classify_crypto_asset
 from .utils import (
     data_lag_note,
@@ -76,6 +69,13 @@ from .utils import (
     json_body_or_outage,
     quote_argument,
     raise_for_http_status,
+)
+from .vendor_common import (
+    cache_dir as _cache_dir,
+    cache_rejecter as _cache_rejecter,
+    load_rolling_snapshot,
+    read_cache_preamble as _read_cache_preamble,
+    stale_caveat as _stale_caveat,
 )
 
 logger = logging.getLogger(__name__)
@@ -224,14 +224,14 @@ class Report(NamedTuple):
 
 
 def _utc_now() -> datetime:
-    """The family's clock, read through its module so one patch moves both.
+    """The kernel's clock, read through its module so one patch moves both.
 
     The snapshot skeleton stamps ``fetched_at`` and judges TTL and staleness
-    on ``sosovalue_common``'s clock; a clock of this module's own would be a
+    on ``vendor_common``'s clock; a clock of this module's own would be a
     second seam beside it, and the rendered cache age could then disagree
     with the decision to serve it (the split #279 measured on farside).
     """
-    return family._utc_now()
+    return vendor_common._utc_now()
 
 
 def _rate_limited(_response) -> None:

@@ -97,26 +97,28 @@ from urllib.parse import quote
 from .sosovalue_common import (
     SoSoValueError,
     SoSoValueUnavailableError,
-    _cache_dir,
-    _cache_rejecter,
-    _coverage_gap_note,
-    _days_unobserved,
-    _is_iso_date,
-    _is_non_negative_int,
-    _is_safe_text,
-    _plural,
-    _plural_days,
-    _read_cache_preamble,
-    _request,
     _sanitize,
-    _stale_caveat,
-    _valid_dated_rows,
     fetch_each,
     get_api_key,
-    load_rolling_snapshot,
     raise_all_failed,
+    request as _request,
 )
 from .utils import MAX_UNTRUSTED_CHARS, date_refusal
+from .vendor_common import (
+    cache_dir as _cache_dir,
+    cache_rejecter as _cache_rejecter,
+    coverage_gap_note as _coverage_gap_note,
+    days_unobserved as _days_unobserved,
+    is_iso_date as _is_iso_date,
+    is_non_negative_int as _is_non_negative_int,
+    is_safe_text as _is_safe_text,
+    load_rolling_snapshot,
+    plural as _plural,
+    plural_days as _plural_days,
+    read_cache_preamble as _read_cache_preamble,
+    stale_caveat as _stale_caveat,
+    valid_dated_rows as _valid_dated_rows,
+)
 
 logger = logging.getLogger(__name__)
 

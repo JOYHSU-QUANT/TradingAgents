@@ -24,6 +24,7 @@ from tradingagents.dataflows import (
     sosovalue_common,
     sosovalue_macro,
     sosovalue_treasuries,
+    vendor_common,
 )
 from tradingagents.dataflows.config import set_config
 from tradingagents.default_config import DEFAULT_CONFIG
@@ -206,7 +207,7 @@ class TestParseAmount:
         # math.isfinite raise OverflowError. Both must resolve to None/False.
         assert sosovalue_treasuries._parse_amount("9" * 320) is None
         assert sosovalue_treasuries._parse_amount(10**400) is None
-        assert sosovalue_common._is_finite_number(10**400) is False
+        assert vendor_common.is_finite_real(10**400) is False
 
 
 # --------------------------------------------------------------------------- #
@@ -565,7 +566,7 @@ class TestCacheAndLoad:
     def _setup(self, tmp_path, monkeypatch, now="2026-08-11T12:00:00Z"):
         set_config({"data_cache_dir": str(tmp_path)})
         monkeypatch.setenv("SOSOVALUE_API_KEY", "test-key")
-        monkeypatch.setattr(sosovalue_common, "_utc_now", lambda: _at(now))
+        monkeypatch.setattr(vendor_common, "_utc_now", lambda: _at(now))
         impl = _request_impl()
         monkeypatch.setattr(sosovalue_treasuries, "_request", impl)
         return impl
@@ -736,7 +737,7 @@ class TestCacheAndLoad:
     def test_cache_write_failure_is_non_fatal(self, tmp_path, monkeypatch, caplog):
         self._setup(tmp_path, monkeypatch)
         with (
-            mock.patch.object(sosovalue_common.json, "dump", side_effect=OSError("disk full")),
+            mock.patch.object(vendor_common.json, "dump", side_effect=OSError("disk full")),
             caplog.at_level("WARNING"),
         ):
             snapshot = sosovalue_treasuries._load_snapshot()

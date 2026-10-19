@@ -21,7 +21,14 @@ import pytest
 import requests
 
 import tradingagents.default_config as default_config
-from tradingagents.dataflows import errors, farside, interface, sosovalue, sosovalue_common
+from tradingagents.dataflows import (
+    errors,
+    farside,
+    interface,
+    sosovalue,
+    sosovalue_common,
+    vendor_common,
+)
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.utils import MAX_UNTRUSTED_CHARS, sanitize_untrusted
 
@@ -160,7 +167,7 @@ class TestRequestBudget:
             mock.patch.dict(os.environ, {"SOSOVALUE_API_KEY": "test-key"}),
             mock.patch.object(sosovalue_common.requests, "get", return_value=response),
         ):
-            return sosovalue_common._request(path, {})
+            return sosovalue_common.request(path, {})
 
     def test_a_full_window_of_requests_never_waits(self, budget_clock):
         for _ in range(self.LIMIT):
@@ -229,7 +236,7 @@ class TestRequestBudget:
             mock.patch.dict(os.environ, {}, clear=True),
             pytest.raises(sosovalue.SoSoValueNotConfiguredError),
         ):
-            sosovalue_common._request("/etfs", {})
+            sosovalue_common.request("/etfs", {})
         assert budget_clock.sleeps == []
 
     def test_the_budget_is_shared_by_every_vendor_module(self, budget_clock):
@@ -237,9 +244,9 @@ class TestRequestBudget:
         # one helper, so the 21st request waits whichever module sends it.
         from tradingagents.dataflows import sosovalue_macro, sosovalue_treasuries
 
-        assert sosovalue._request is sosovalue_common._request
-        assert sosovalue_macro._request is sosovalue_common._request
-        assert sosovalue_treasuries._request is sosovalue_common._request
+        assert sosovalue._request is sosovalue_common.request
+        assert sosovalue_macro._request is sosovalue_common.request
+        assert sosovalue_treasuries._request is sosovalue_common.request
         for _ in range(self.LIMIT):
             self._send("/etfs/summary-history")
         self._send("/btc-treasuries")
@@ -1331,7 +1338,7 @@ class TestRender:
     def test_stale_serve_time_stamps_the_restatement_caveat(self, monkeypatch):
         # Same anchoring as the revision caveat: on a stale serve the
         # disclosure is as old as the snapshot and must say so.
-        monkeypatch.setattr(sosovalue_common, "_utc_now", lambda: _at("2026-07-10T00:00:00Z"))
+        monkeypatch.setattr(vendor_common, "_utc_now", lambda: _at("2026-07-10T00:00:00Z"))
         out = self._render(
             "2026-07-09",
             snapshot=_snapshot(
@@ -1386,7 +1393,7 @@ class TestRender:
         assert "all ETH US spot ETFs since inception" in out
 
     def test_stale_caveat_shows_age_from_the_shared_clock(self, monkeypatch):
-        monkeypatch.setattr(sosovalue_common, "_utc_now", lambda: _at("2026-07-08T12:00:00Z"))
+        monkeypatch.setattr(vendor_common, "_utc_now", lambda: _at("2026-07-08T12:00:00Z"))
         out = self._render(
             "2026-07-08",
             snapshot=_snapshot(fetched_at="2026-07-08T00:00:00Z", stale=True),
@@ -1511,7 +1518,7 @@ class TestRender:
         # A stale serve restates the cached revisions for up to the 14-day
         # cap; the caveat must anchor the disclosure to the snapshot's own
         # refresh, or an outage reads as recurring catch-up activity.
-        monkeypatch.setattr(sosovalue_common, "_utc_now", lambda: _at("2026-07-10T00:00:00Z"))
+        monkeypatch.setattr(vendor_common, "_utc_now", lambda: _at("2026-07-10T00:00:00Z"))
         out = self._render(
             "2026-07-08",
             snapshot=_snapshot(
@@ -1638,7 +1645,7 @@ class TestRender:
         assert "the fetch succeeded — no newer filing is visible as of 2026-07-19" in out
 
     def test_stale_serve_does_not_also_claim_the_fetch_succeeded(self, monkeypatch):
-        monkeypatch.setattr(sosovalue_common, "_utc_now", lambda: _at("2026-07-19T00:00:00Z"))
+        monkeypatch.setattr(vendor_common, "_utc_now", lambda: _at("2026-07-19T00:00:00Z"))
         out = self._render(
             "2026-07-19",
             look_back_days=15,
@@ -1770,12 +1777,12 @@ class TestCacheAndLoad:
     def _setup(self, tmp_path, monkeypatch, now="2026-08-01T00:00:00Z"):
         set_config({"data_cache_dir": str(tmp_path)})
         monkeypatch.setenv("SOSOVALUE_API_KEY", "test-key")
-        monkeypatch.setattr(sosovalue_common, "_utc_now", lambda: _at(now))
+        monkeypatch.setattr(vendor_common, "_utc_now", lambda: _at(now))
 
     def _advance(self, monkeypatch, hours=0, minutes=0):
         """Pin the module clock to the _setup base time plus an offset."""
         later = _at("2026-08-01T00:00:00Z") + timedelta(hours=hours, minutes=minutes)
-        monkeypatch.setattr(sosovalue_common, "_utc_now", lambda: later)
+        monkeypatch.setattr(vendor_common, "_utc_now", lambda: later)
 
     def _write_cache(self, tmp_path, **overrides):
         payload = {
@@ -1917,7 +1924,7 @@ class TestCacheAndLoad:
         self._setup(tmp_path, monkeypatch)
         _stub_requests(monkeypatch)
         sosovalue.get_etf_flow_data("BTC", "2026-07-31")
-        monkeypatch.setattr(sosovalue_common, "_utc_now", lambda: _at("2026-08-02T00:00:00Z"))
+        monkeypatch.setattr(vendor_common, "_utc_now", lambda: _at("2026-08-02T00:00:00Z"))
         down = sosovalue_common.SoSoValueUnavailableError(
             "SoSoValue answered HTTP 503 without data on /etfs/summary-history"
         )
@@ -2012,7 +2019,7 @@ class TestCacheAndLoad:
         self._setup(tmp_path, monkeypatch)
         _stub_requests(monkeypatch)
         sosovalue.get_etf_flow_data("BTC", "2026-07-31")
-        monkeypatch.setattr(sosovalue_common, "_utc_now", lambda: _at("2026-08-02T00:00:00Z"))
+        monkeypatch.setattr(vendor_common, "_utc_now", lambda: _at("2026-08-02T00:00:00Z"))
         _stub_requests(monkeypatch, fail={"/etfs/summary-history"})
         with caplog.at_level(logging.DEBUG, logger=SOSOVALUE_LOGGER):
             out = sosovalue.get_etf_flow_data("BTC", "2026-07-31")
@@ -2031,7 +2038,7 @@ class TestCacheAndLoad:
         self._setup(tmp_path, monkeypatch)
         _stub_requests(monkeypatch)
         sosovalue.get_etf_flow_data("BTC", "2026-07-31")
-        monkeypatch.setattr(sosovalue_common, "_utc_now", lambda: _at("2026-08-02T00:00:00Z"))
+        monkeypatch.setattr(vendor_common, "_utc_now", lambda: _at("2026-08-02T00:00:00Z"))
         _stub_requests(monkeypatch, summary=[{"date": "garbage"}])
         with caplog.at_level(logging.DEBUG, logger=SOSOVALUE_LOGGER):
             out = sosovalue.get_etf_flow_data("BTC", "2026-07-31")
@@ -2552,7 +2559,7 @@ class TestCacheAndLoad:
         self._setup(tmp_path, monkeypatch)
         _stub_requests(monkeypatch)
         with (
-            mock.patch.object(sosovalue_common.json, "dump", side_effect=OSError("disk full")),
+            mock.patch.object(vendor_common.json, "dump", side_effect=OSError("disk full")),
             caplog.at_level(logging.WARNING, logger=SOSOVALUE_LOGGER),
         ):
             out = sosovalue.get_etf_flow_data("BTC", "2026-07-31")
@@ -2769,7 +2776,7 @@ class TestEndToEndFixture:
     def test_full_render_from_live_fixtures(self, tmp_path, monkeypatch):
         set_config({"data_cache_dir": str(tmp_path)})
         monkeypatch.setenv("SOSOVALUE_API_KEY", "test-key")
-        monkeypatch.setattr(sosovalue_common, "_utc_now", lambda: _at("2026-08-04T02:00:00Z"))
+        monkeypatch.setattr(vendor_common, "_utc_now", lambda: _at("2026-08-04T02:00:00Z"))
 
         def _impl(path, params):
             if path == "/etfs/summary-history":
@@ -2808,7 +2815,7 @@ class TestEndToEndFixture:
     def test_lookahead_against_fixtures(self, tmp_path, monkeypatch):
         set_config({"data_cache_dir": str(tmp_path)})
         monkeypatch.setenv("SOSOVALUE_API_KEY", "test-key")
-        monkeypatch.setattr(sosovalue_common, "_utc_now", lambda: _at("2026-08-04T02:00:00Z"))
+        monkeypatch.setattr(vendor_common, "_utc_now", lambda: _at("2026-08-04T02:00:00Z"))
         _stub_requests(
             monkeypatch,
             summary=SUMMARY_FIX["data"],
@@ -3045,7 +3052,7 @@ class TestRollingSnapshotIsTheFamilysNotSoSoValues:
             "max_stale_hours": 6,
             "log": logging.getLogger("test"),
         }
-        return sosovalue_common.load_rolling_snapshot(**(defaults | kwargs))
+        return vendor_common.load_rolling_snapshot(**(defaults | kwargs))
 
     def test_no_precheck_means_no_key_is_required(self, tmp_path, monkeypatch):
         # A keyless vendor must not be made to have an API key by the skeleton
@@ -3068,9 +3075,28 @@ class TestRollingSnapshotIsTheFamilysNotSoSoValues:
         # emergency-disable flip is delayed by up to the TTL.
         assert order == []
 
+    def test_any_vendors_not_configured_error_escapes_the_stale_fallback(
+        self, tmp_path, monkeypatch
+    ):
+        # The kernel names no vendor's type: a vendor's own not-configured
+        # error (the base class, not SoSoValue's subclass) must surface like
+        # SoSoValue's rather than be absorbed into a stale serve that hides
+        # config breakage for up to the cap. Past the TTL so a refresh runs,
+        # inside the cap so the stale serve is what would otherwise happen.
+        monkeypatch.setattr(vendor_common, "_utc_now", lambda: _at("2026-09-21T12:00:00Z"))
+        cached = {"fetched_at": "2026-09-21T00:00:00Z", "rows": [0]}
+
+        def _fail(_cached):
+            raise errors.VendorNotConfiguredError("no key")
+
+        with pytest.raises(errors.VendorNotConfiguredError, match="no key"):
+            self._load(
+                tmp_path, read_cache=lambda _p: cached, fetch_all=_fail, max_stale_hours=24
+            )
+
     def test_a_sub_day_cap_is_expressible_and_enforced(self, tmp_path, monkeypatch):
         # The whole reason for hours: a day-granular bound could not say six.
-        monkeypatch.setattr(sosovalue_common, "_utc_now", lambda: _at("2026-09-21T12:00:00Z"))
+        monkeypatch.setattr(vendor_common, "_utc_now", lambda: _at("2026-09-21T12:00:00Z"))
         cached = {"fetched_at": "2026-09-21T00:00:00Z", "rows": [0]}
 
         def _fail(_cached):
@@ -3100,7 +3126,7 @@ class TestRollingSnapshotIsTheFamilysNotSoSoValues:
         # broken parser just because its error is not a SoSoValueError.
         # Past the 6-hour TTL so a refresh is attempted, inside the 24-hour
         # cap so the stale serve is reached - the branch that logs.
-        monkeypatch.setattr(sosovalue_common, "_utc_now", lambda: _at("2026-09-21T08:00:00Z"))
+        monkeypatch.setattr(vendor_common, "_utc_now", lambda: _at("2026-09-21T08:00:00Z"))
         cached = {"fetched_at": "2026-09-21T00:00:00Z", "rows": [0]}
 
         class _OtherVendorError(errors.VendorError):

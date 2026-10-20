@@ -5120,3 +5120,24 @@ class TestThePromptCoversAnUnrankedDvol:
         prompt = str(_run_analyst("crypto").prompt_value)
         assert "the only figure in the report that can carry a historical basis" in prompt
         assert "the only figure in the report carrying a historical basis" not in prompt
+
+
+class TestTheBodyLinesAreQuotedWhole:
+    """The two body lines the split's mutation probe found pinned only by a prefix.
+
+    Each is the one line a reader of the body sees for a half that is not in the
+    report, so the whole sentence is what has to hold, not its opening words.
+    Both tests render through the public entry point.
+    """
+
+    def test_the_dvol_unavailable_line_is_quoted_whole(self):
+        out = _report(dvol=deribit.DeribitError("dvol down"))
+        assert "**DVOL:** unavailable — dvol down. Do not fabricate a DVOL level." in out
+
+    def test_the_proxied_chain_line_is_quoted_whole(self):
+        out = _report(asset="SOL")
+        assert (
+            "**Options chain (ATM IV / 25Δ skew):** not served for 'SOL' — see the note "
+            "above. BTC's skew describes demand for downside in BTC, not in 'SOL'. Do not "
+            "substitute it." in out
+        )

@@ -284,6 +284,49 @@ Breaking changes within the 0.x line are called out explicitly.
   history that starts on or before the window start staying silent. No
   behaviour change beyond that overflow edge.
 
+- **The options-volatility entry point is split into its sections** (dataflows
+  refactor plan 2026-10-16, D2-d, the first of its two halves).
+  `deribit.get_options_market_data` drops from 674 lines to 132 (55 of them
+  its docstring); it refuses an unusable date, resolves the symbol
+  (`_resolve_asset`, as in the ETF and treasury splits), reads the clock once,
+  fetches the DVOL half and then the chain half (`_fetch_chain_half`, which
+  classifies why that half is withheld by policy through
+  `_withholding_decision`, owns the pre-fetch clock re-take and answers
+  `_ChainHalf` with the settled `_Withholding` inside it, so the entry point
+  never holds a pre-re-test verdict), and assembles the report
+  from module-level helpers that each take only what they read: the
+  both-halves-failed error (`_both_halves_failure`, answering the exception
+  for the entry point to raise), the heading (`_title_lines`), the
+  analysis-date note (`_analysis_date_notes`, handing the ahead-of-clock case
+  to `_ahead_of_clock_notes`), the two outage notes (`_chain_outage_notes`,
+  `_dvol_outage_notes`), the source bullet (`_source_line`), the body line for
+  each absent half (`_dvol_unavailable_line`, `_chain_absent_line`) and the
+  two Reading-line clauses (`_chain_absence`, `_dvol_absence`). What several
+  helpers read travels as three NamedTuples the module defines for itself:
+  `_Dates` (the canonical `curr_date`, the clock taken before the DVOL fetch
+  and `days_ahead`), `_Asset` (the quoted symbol, the currency served and the
+  proxy flag) and `_Withholding` (the chain's withholding reason after the
+  fetch's midnight re-test, and whether that re-test is what withheld it);
+  the withholding vocabulary is the `_WithheldReason` `Literal`, closed for
+  the reason `_MissReason` already is. The
+  moved bodies keep every rendered string and every comment but eleven
+  repointed at the helpers that now hold the code they describe, and the
+  derive-it-once remark on `withheld_mid_run`, which is now `_Withholding`'s
+  docstring; besides that glue they differ only in indentation,
+  `header_lines.append` becoming each helper's `notes.append`,
+  `sections.append` and `raise` becoming a helper's `return`, the `elif` chain
+  of body lines becoming early returns, and `attempted` annotated
+  `list[BaseException]`, which retires the one `# type: ignore[arg-type]` the
+  block carried. The old function and the new one, run over 60,000 generated
+  reports (both fetches stubbed with random series, snapshots and failures,
+  the clock a two-reading sequence), rendered byte-identical reports and
+  raised identical errors. The length ratchet loses the row; `_fetch_dvol`
+  and `_dvol_section` keep theirs for the second half, and `_reading_line`,
+  which the plan leaves whole, keeps its own. Two tests pin what a
+  thirty-two-mutation probe found held only by a prefix: the whole
+  DVOL-unavailable body line and the whole proxied-chain body line. No
+  behaviour change.
+
 ### Fixed
 
 - **`fred.get_macro_data` checks the caller's `look_back_days` the way the

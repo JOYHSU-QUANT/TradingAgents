@@ -1383,6 +1383,16 @@ class TestRender:
             assert f"no spot-ETF flow signal for '{sym}'" in out
             assert "## Spot ETF Flows" not in out
 
+    def test_truthy_non_string_asset_is_the_callers_bug(self):
+        # Probe-found gap (dataflows plan D2-b): the symbol-string guard had no
+        # test of its own here, unlike deribit's and the treasuries module's.
+        # A truthy non-string is the caller's bug and belongs in the
+        # vendor-failed lane, not in a no-signal sentence about b'BTC'.
+        with pytest.raises(
+            sosovalue.SoSoValueError, match="asset must be a symbol string, got bytes"
+        ):
+            self._render("2026-07-08", asset=b"BTC")
+
     def test_eth_reports_natively(self):
         recs = [_srow("2026-07-08", 9.0, cum_m=11_210.2)]
         out = self._render(

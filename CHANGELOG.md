@@ -190,6 +190,48 @@ Breaking changes within the 0.x line are called out explicitly.
   released window of exactly `MAX_ROWS` rows carries no cap note. No
   behaviour change.
 
+- **The two spot-ETF flow renderers are split into their sections** (dataflows
+  refactor plan 2026-10-16, D2-b). `sosovalue.get_etf_flow_data` drops from
+  582 lines to 113 and `farside.get_etf_flow_data` from 301 to 115; each
+  checks its arguments, loads its snapshot, prints the stale caveat and
+  assembles the rest of its report from module-level helpers of its own
+  (nineteen for SoSoValue, ten for Farside), each taking only what it reads
+  and returning its lines. The two vendors stay apart, as the plan's §6
+  says: the same-named helpers (`_title_lines`, `_data_lag_notes`,
+  `_latest_line`, `_cumulative_line`, `_streak_line`, `_net_cell`,
+  `_flow_table`) render each vendor's own wording and are not shared (all
+  but `_data_lag_notes`, which both vendors render word for word; a dedupe
+  candidate for a later round, not this one). The
+  symbol handling that both entry points began with (the truthy-non-string
+  guard, the echo and quoting, the classification) is `_resolve_asset`,
+  answering `(asset_key, market_proxy, quoted)`; the no-signal sentence stays
+  in the entry point. The normalised dates travel as `_Window` (SoSoValue's
+  carries the window start in both forms because the clamp note measures the
+  API's reach in days from the one and prints the other), bound to `bounds` because the entry points already call the
+  window's rows `window`. SoSoValue's reconciliation check is
+  `_reconciliation`, returning `_Reconciliation(all_filed, gap_disclosed,
+  notes)`: the breadth line reads both flags, so they travel with the note
+  rather than being measured twice. The `_is_retraction` and `_net_cell`
+  closures are module-level and take what they closed over (`rows_by_date`
+  and the funds; Farside's `_net_cell` closed over nothing). The moved
+  bodies keep every rendered string and, but for one Farside comment
+  repointed at the entry point's stale caveat, every comment; besides that
+  glue, they differ only in indentation, `header_lines.append` becoming
+  each helper's `notes.append`, Farside's leaders line moving from the
+  summary expression into `_leaders_line`, one statement the formatter now
+  fits on one line and one (`retracted`) it now splits over five because
+  `_is_retraction` takes `rows_by_date` and `funds` by keyword. The helpers
+  whose adjacent parameters share a type (`_flow_table`'s two row lists,
+  the second of `_title_lines`' two strings, `_is_retraction`'s two maps)
+  take them as keywords, so a positional mix-up raises `TypeError` at the
+  call instead of rendering the wrong table. The old functions and the new
+  ones, run over 63,000
+  generated snapshots each, rendered byte-identical reports. The length
+  ratchet loses both rows. Three tests pin what a mutation probe found
+  unguarded in both vendors: a truthy non-string `asset` raises the
+  vendor's error (the guard every other vendor already pins) and Farside's
+  leaders line stops at `TOP_ISSUERS`. No behaviour change.
+
 ### Fixed
 
 - **`contrib/dashboard`: the `history/` directory keeps its setgid bit.** The

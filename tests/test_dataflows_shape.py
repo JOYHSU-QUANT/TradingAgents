@@ -109,10 +109,8 @@ _LONG_FUNCTIONS: dict[tuple[str, str], int] = {
     ("deribit", "_reading_line"): 229,
     ("deribit", "get_options_market_data"): 674,
     ("farside", "_parse_flow_table"): 153,
-    ("farside", "get_etf_flow_data"): 301,
     ("fear_greed", "get_fear_greed_data"): 203,
     ("interface", "route_to_vendor"): 486,
-    ("sosovalue", "get_etf_flow_data"): 582,
     ("sosovalue_treasuries", "get_btc_treasury_data"): 582,
     ("vendor_common", "load_rolling_snapshot"): 194,
 }

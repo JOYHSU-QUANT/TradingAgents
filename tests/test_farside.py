@@ -349,6 +349,26 @@ class TestRender:
         assert "no spot-ETF flow signal for 'WOOF'" in out
         assert "## Spot ETF Flows" not in out
 
+    def test_truthy_non_string_asset_is_the_callers_bug(self):
+        # Probe-found gap (dataflows plan D2-b): the symbol-string guard had no
+        # test of its own here, unlike deribit's and the treasuries module's.
+        # A truthy non-string is the caller's bug and belongs in the
+        # vendor-failed lane, not in a no-signal sentence about b'BTC'.
+        with pytest.raises(farside.FarsideError, match="asset must be a symbol string, got bytes"):
+            self._render("2026-07-08", asset=b"BTC")
+
+    def test_leaders_line_caps_at_top_issuers(self):
+        # Probe-found gap (dataflows plan D2-b): nothing pinned the TOP_ISSUERS
+        # cap, so a leaders line listing every issuer went unnoticed. Six
+        # issuers, five named, largest absolute flow first, the smallest dropped.
+        issuers = {f"F{i}": float(10 * i) for i in range(1, 7)}
+        recs = [{"date": "2026-07-09", "issuers": issuers, "total": 210.0}]
+        out = self._render("2026-07-09", snapshot=_snapshot(recs))
+        assert (
+            "**Latest-day leaders:** F6 +60.0, F5 +50.0, F4 +40.0, F3 +30.0, F2 +20.0"
+            in out.splitlines()
+        )
+
     def test_proxy_marker_is_in_the_heading(self):
         # The caveat line alone is not enough: this report gets re-summarised by
         # downstream agents, and a heading identical to a real BTC report is what

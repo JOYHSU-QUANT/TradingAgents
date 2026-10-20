@@ -928,52 +928,13 @@ def _is_unreported_day(row: dict, fund_flows: dict[str, float]) -> bool:
     return row["total_net_inflow"] == 0 and not fund_flows
 
 
-def get_etf_flow_data(
-    asset: str,
-    curr_date: str,
-    look_back_days: int | None = None,
-) -> str:
-    """Fetch US spot-ETF daily net flows for a crypto asset as a markdown report.
+def _resolve_asset(asset: str) -> tuple[str | None, bool, str]:
+    """``(asset_key, market_proxy, quoted)`` for a caller's symbol.
 
-    Args:
-        asset: "BTC" or "ETH" (also accepts pair forms like "BTC-USD"). A
-            recognized crypto risk asset with no spot ETF of its own (e.g.
-            SOL, XRP) is served BTC flows as a market-wide risk-on/off proxy;
-            a stablecoin or unrecognized symbol gets a no-signal message.
-        curr_date: End of the window (yyyy-mm-dd); rows dated after it are
-            dropped so a past date never leaks future flows.
-        look_back_days: Trailing window length; ``None`` uses
-            DEFAULT_LOOKBACK_DAYS. Bounds the cumulative figure and the
-            rendered table; the streak spans every session visible to
-            ``curr_date`` within the API's ~30-day window and is labelled
-            "≥N" when it reaches that window's edge, because the true streak
-            may extend further back.
-
-    Returns:
-        A markdown report shaped like the Farside vendor's (Farside-shaped
-        core sections, same US$m units): latest day's net flow, window
-        cumulative, since-launch cumulative, streak, latest-day fund leaders,
-        a breadth line (how many funds moved together and, when any moved,
-        how concentrated the flow was), and a recent daily-flow table.
-
-        An unusable ``curr_date`` answers the shared ``INVALID_CURR_DATE``
-        sentinel before any request, as the core-category tools do (#119);
-        the Farside vendor of this tool says the same sentence.
+    ``asset_key`` is ``None`` for a symbol with no spot-ETF signal (the entry
+    point answers the no-signal sentence); ``quoted`` is the caller's spelling
+    as the report may echo it inside quotes.
     """
-    refusal = date_refusal(curr_date, what="ETF flows", kind="point")
-    if refusal is not None:
-        return refusal
-
-    if look_back_days is None or look_back_days <= 0:
-        look_back_days = DEFAULT_LOOKBACK_DAYS
-
-    # Normalise curr_date BEFORE any lexical date comparison: strptime accepts
-    # non-zero-padded input ("2026-6-5"), which compares wrong against
-    # canonical ISO row dates and would silently admit future rows. The
-    # refusal above already proved this parses.
-    curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
-    curr_date = curr_dt.strftime("%Y-%m-%d")
-
     # Before the echo, not after: ``echo_argument`` goes through ``str``, so a
     # TRUTHY non-string would be silently turned into a symbol and answered
     # about — ``b"BTC"`` came back as a confident "there is no ETF flow signal
@@ -1000,23 +961,28 @@ def get_etf_flow_data(
     asset = echo_argument(asset)
     quoted = quote_argument(asset)
     asset_key, market_proxy = _classify_asset(asset)
-    if asset_key is None:
-        # Same no-signal statement as the Farside vendor: a stablecoin has no
-        # risk-on/off flow character to proxy, so serving BTC flows for it
-        # would be a misleading signal, and a specific message beats the
-        # generic degraded-category sentinel.
-        return (
-            f"There is no spot-ETF flow signal for {quoted}: it has no US spot ETF of "
-            f"its own and is not a recognized crypto risk asset for which BTC flows serve "
-            f"as a market-wide proxy (e.g. a stablecoin, an unrecognized symbol, or a cross "
-            f"priced in another asset such as ETH-BTC). Do not substitute BTC or ETH flows."
-        )
+    return asset_key, market_proxy, quoted
 
-    snapshot = _load_snapshot(asset_key)
-    visible = [r for r in snapshot.summary_rows if r["date"] <= curr_date]
-    latest = visible[-1] if visible else None
-    latest_flows = _fund_flows_on(snapshot.funds, latest["date"]) if latest else {}
 
+class _Window(NamedTuple):
+    """The dates one render is measured against, normalised once by the entry point.
+
+    ``curr_date`` is ``curr_dt`` in canonical ISO form (never the caller's
+    spelling); ``window_start_dt`` / ``window_start`` open the
+    ``look_back_days`` window in both forms, because the clamp note measures
+    the API's reach in days from the one and the row filter compares on the
+    other.
+    """
+
+    curr_dt: datetime
+    curr_date: str
+    window_start_dt: datetime
+    window_start: str
+    look_back_days: int
+
+
+def _title_lines(asset_key: str, quoted: str, market_proxy: bool) -> list[str]:
+    """The heading, plus the proxy caveat when ``asset_key`` stands in for ``quoted``."""
     if market_proxy:
         # The proxy marker must live in the heading, not only the caveat: the
         # report is re-summarised downstream and the heading is what survives.
@@ -1028,10 +994,12 @@ def get_etf_flow_data(
         ]
     else:
         header_lines = [f"## Spot ETF Flows — {asset_key} (SoSoValue, net US$m)"]
+    return header_lines
 
-    if snapshot.stale:
-        header_lines.append(_stale_caveat(snapshot.fetched_at, "Treat with caution."))
 
+def _breakdown_notes(snapshot: _FlowSnapshot, latest: dict | None) -> list[str]:
+    """The issuer-breakdown caveat: unavailable, or incomplete, when the fund sweep fell short."""
+    notes: list[str] = []
     # Both breakdown caveats are guarded on ``latest`` like the window-clamp
     # one: with no visible rows the report below is the no-rows message, and
     # a caveat about "the leaders and breadth lines" or "the aggregate
@@ -1047,7 +1015,7 @@ def get_etf_flow_data(
                 f" ({n} listing {_plural(n, 'entry', 'entries')} had no usable ticker)" if n else ""
             )
             reason = f"the fund list returned no usable funds{unusable_note}"
-        header_lines.append(
+        notes.append(
             f"_Issuer breakdown unavailable: {reason}, so the per-fund leaders and "
             f"breadth lines are omitted. The aggregate figures come from a separate "
             f"endpoint and are unaffected._"
@@ -1080,19 +1048,16 @@ def get_etf_flow_data(
             )
         else:
             consequence = "so the per-fund leaders and breadth lines are omitted"
-        header_lines.append(
+        notes.append(
             f"_Issuer breakdown incomplete ({fetched}/{snapshot.funds_total} funds): "
             f"{'; '.join(problems)}, {consequence}. The aggregate figures come from "
             f"a separate endpoint and are unaffected._"
         )
+    return notes
 
-    # Revisions are disclosed for every changed day still visible in this
-    # report (user decision): the common catch-up case is yesterday's
-    # provisional figure firming up after a newer day has already become the
-    # latest, which a latest-day-only check would silently skip. Filtering on
-    # the visible dates keeps a revised not-yet-visible row from leaking
-    # through the lookahead guard.
-    visible_dates = {r["date"] for r in visible}
+
+def _disclosure_stale_note(snapshot: _FlowSnapshot) -> str:
+    """The provenance clause the revision and restatement caveats carry on a cache serve."""
     # ANY cache serve — TTL-fresh or stale — replays refresh-diff disclosures
     # computed at the last real fetch: without a provenance note, repeat calls
     # inside one TTL window (or across an outage, up to the 14-day cap) read
@@ -1112,24 +1077,43 @@ def get_etf_flow_data(
             f" This disclosure dates from when the snapshot was last refreshed "
             f"(fetched {snapshot.fetched_at}), not from this call."
         )
+    return stale_note
+
+
+def _is_retraction(
+    d: str, new_m: float, rows_by_date: dict[str, dict], funds: dict[str, dict]
+) -> bool:
+    """A revision that pulled ``d`` back to the unposted placeholder, not a new figure."""
+    # A day pulled back to the exact-zero placeholder with no fund
+    # filing left renders as "not yet posted" in the table below, so
+    # calling its revision "reporting catch-up" would contradict the
+    # cell two paragraphs down — that entry is a retraction.
+    row = rows_by_date.get(d)
+    return (
+        new_m == 0.0
+        and row is not None
+        and row["total_net_inflow"] == 0
+        and _is_unreported_day(row, _fund_flows_on(funds, d))
+    )
+
+
+def _revision_notes(snapshot: _FlowSnapshot, visible: list[dict], stale_note: str) -> list[str]:
+    """The revision caveat for every visible day whose figure moved since the last snapshot."""
+    notes: list[str] = []
+    # Revisions are disclosed for every changed day still visible in this
+    # report (user decision): the common catch-up case is yesterday's
+    # provisional figure firming up after a newer day has already become the
+    # latest, which a latest-day-only check would silently skip. Filtering on
+    # the visible dates keeps a revised not-yet-visible row from leaking
+    # through the lookahead guard.
+    visible_dates = {r["date"] for r in visible}
     revised = sorted((d, pair) for d, pair in snapshot.revisions.items() if d in visible_dates)
     if revised:
         rows_by_date = {r["date"]: r for r in visible}
 
-        def _is_retraction(d: str, new_m: float) -> bool:
-            # A day pulled back to the exact-zero placeholder with no fund
-            # filing left renders as "not yet posted" in the table below, so
-            # calling its revision "reporting catch-up" would contradict the
-            # cell two paragraphs down — that entry is a retraction.
-            row = rows_by_date.get(d)
-            return (
-                new_m == 0.0
-                and row is not None
-                and row["total_net_inflow"] == 0
-                and _is_unreported_day(row, _fund_flows_on(snapshot.funds, d))
-            )
-
-        retracted = {d for d, (_old, new) in revised if _is_retraction(d, new)}
+        retracted = {
+            d for d, (_old, new) in revised if _is_retraction(d, new, rows_by_date, snapshot.funds)
+        }
         changes = "; ".join(
             f"{d}: {old:+.1f} → retracted (now unposted)"
             if d in retracted
@@ -1152,11 +1136,17 @@ def get_etf_flow_data(
             # Any non-retracted entry keeps the decided catch-up verdict; a
             # retracted entry in the mix is already labeled by its own arrow.
             verdict = "This is reporting catch-up on already-published days, not new flow events."
-        header_lines.append(
+        notes.append(
             f"_Revision: {len(revised)} {noun} changed since the previous snapshot "
             f"({changes}, US$m) as issuers file their daily reports. {verdict}{stale_note}_"
         )
+    return notes
 
+
+def _restatement_notes(snapshot: _FlowSnapshot, visible: list[dict], stale_note: str) -> list[str]:
+    """The restatement caveat, when history older than the visible window moved the cumulative."""
+    notes: list[str] = []
+    visible_dates = {r["date"] for r in visible}
     # The revision caveat above covers visible days only, and the mirror-file
     # cache drops rows that age out of the API window — so a restated day
     # older than the window would silently move the Since-launch figure
@@ -1166,7 +1156,7 @@ def get_etf_flow_data(
     # flags a shift its own since-launch figure does not include.
     cr = snapshot.cum_restated
     if cr and cr["date"] in visible_dates:
-        header_lines.append(
+        notes.append(
             f"_Restatement: the cumulative total as of {cr['date']} moved "
             f"{cr['old']:+.1f} → {cr['new']:+.1f} US$m since the previous snapshot — a "
             f"shift that day's own flow changes do not account for — so the API "
@@ -1174,9 +1164,14 @@ def get_etf_flow_data(
             f"window this report can display, and the since-launch cumulative moved "
             f"for reasons the daily rows below cannot show.{stale_note}_"
         )
+    return notes
 
-    window_start_dt = curr_dt - timedelta(days=look_back_days)
-    window_start = window_start_dt.strftime("%Y-%m-%d")
+
+def _window_clamp_notes(snapshot: _FlowSnapshot, latest: dict | None, bounds: _Window) -> list[str]:
+    """The clamp caveat, when the API's reach cannot fill the requested window."""
+    window_start_dt, window_start = bounds.window_start_dt, bounds.window_start
+    look_back_days = bounds.look_back_days
+    notes: list[str] = []
     oldest_fetched = snapshot.summary_rows[0]["date"]
     missing_days = (datetime.strptime(oldest_fetched, "%Y-%m-%d") - window_start_dt).days
     if latest is not None and missing_days > MAX_DATA_LAG_DAYS:
@@ -1190,13 +1185,19 @@ def get_etf_flow_data(
         # Guarded on ``latest``: with no visible rows at all the report below
         # is the no-rows message, and a caveat about "the cumulative and table
         # below" would describe sections that do not exist.
-        header_lines.append(
+        notes.append(
             f"_Window clamped: the requested {look_back_days}-day window would start "
             f"{window_start}, but the API plan serves only the most recent "
             f"~{PLAN_WINDOW_DAYS} days (oldest available row: {oldest_fetched}). The "
             f"cumulative and table below cover that shorter span._"
         )
+    return notes
 
+
+def _data_lag_notes(snapshot: _FlowSnapshot, latest: dict | None, bounds: _Window) -> list[str]:
+    """The data-lag caveat, when the newest published row sits well behind ``curr_date``."""
+    curr_dt, curr_date = bounds.curr_dt, bounds.curr_date
+    notes: list[str] = []
     if latest is not None:
         # Data recency is a separate question from fetch success: the feed can
         # be reachable while issuers have not filed for days.
@@ -1214,12 +1215,33 @@ def get_etf_flow_data(
                 if snapshot.stale
                 else f"the fetch succeeded — no newer filing is visible as of {curr_date}"
             )
-            header_lines.append(
+            notes.append(
                 f"_Data lag: the newest published row is {latest['date']}, {lag_days} "
                 f"{_plural_days(lag_days)} before {curr_date} ({cause}), so treat the "
                 f"figures below as {lag_days} {_plural_days(lag_days)} old._"
             )
+    return notes
 
+
+class _Reconciliation(NamedTuple):
+    """The aggregate-vs-fund-sum check for the latest day, measured once.
+
+    ``all_filed`` is the check's premise (every listed fund filed, nothing
+    failed or was dropped); ``gap_disclosed`` whether the residual exceeded
+    the tolerance and ``notes`` carries the caveat for it. The breadth line
+    reads both flags, which is why they travel with the note.
+    """
+
+    all_filed: bool
+    gap_disclosed: bool
+    notes: list[str]
+
+
+def _reconciliation(
+    snapshot: _FlowSnapshot, latest: dict | None, latest_flows: dict[str, float]
+) -> _Reconciliation:
+    """Reconcile the latest day's aggregate against its fund filings."""
+    notes: list[str] = []
     reconcile_gap_disclosed = False
     reconcile_all_filed = False
     if (
@@ -1241,7 +1263,7 @@ def get_etf_flow_data(
         gross_m = sum(abs(f) for f in latest_flows.values()) / _USD_PER_MILLION
         if abs(total_m - fund_sum_m) > max(RECONCILE_ABS_TOL_USD_M, RECONCILE_REL_TOL * gross_m):
             reconcile_gap_disclosed = True
-            header_lines.append(
+            notes.append(
                 f"_Reconciliation gap: the {snapshot.funds_total} fund filings for "
                 f"{latest['date']} sum to {fund_sum_m:+.1f} US$m but the aggregate "
                 f"reports {total_m:+.1f} ({total_m - fund_sum_m:+.1f} unaccounted). "
@@ -1249,26 +1271,72 @@ def get_etf_flow_data(
                 f"ETF), so the leaders and breadth lines below may not cover the "
                 f"whole day's flow._"
             )
+    return _Reconciliation(
+        all_filed=reconcile_all_filed, gap_disclosed=reconcile_gap_disclosed, notes=notes
+    )
 
-    header_lines.append(f"- Source: SoSoValue OpenAPI (US spot ETFs) | Window ending {curr_date}")
-    # Blank line between entries so consecutive italic caveats stay separate
-    # rendered paragraphs.
-    header = "\n\n".join(header_lines) + "\n"
 
-    if latest is None:
-        return (
-            header + f"\nNo ETF flow rows on or before {curr_date} (the API serves only "
-            f"the most recent ~{PLAN_WINDOW_DAYS} days, so older backtest dates have no "
-            f"reachable history). Report this as no ETF-flow data for the date; do not "
-            f"fabricate values."
-        )
+def _fund_scope(snapshot: _FlowSnapshot) -> str:
+    """The scope word the Latest, leaders and table-legend lines share: "no fund" or "no fetched fund"."""
+    # With failed histories in the mix, "no fund" would claim knowledge of
+    # filings those histories never delivered — and an unfetched listing or
+    # dropped listing entries leave the same gap: part (or all) of the
+    # universe was never enumerated, so "no fund" would assert over funds
+    # this client has never seen. The Latest and leaders lines share this one
+    # scope word so the two co-rendered claims cannot drift.
+    return (
+        "no fetched fund"
+        if snapshot.funds_failed or snapshot.funds_unusable or not snapshot.list_fetched
+        else "no fund"
+    )
 
-    window = [r for r in visible if r["date"] >= window_start]
+
+def _latest_line(latest: dict, latest_flows: dict[str, float], fund_scope: str) -> str:
+    """The ``**Latest**`` line: the day's net flow, or the unposted-placeholder wording."""
     latest_unreported = _is_unreported_day(latest, latest_flows)
+    if latest_unreported:
+        latest_line = (
+            f"\n**Latest ({latest['date']}):** no flow reported yet — the aggregate for "
+            f"this date is zero with {fund_scope} reporting a flow, which this API "
+            f"publishes both for a day issuers have not filed yet and for a genuine "
+            f"zero-flow day\n"
+        )
+    else:
+        latest_line = (
+            f"\n**Latest ({latest['date']}):** {_usd_m(latest['total_net_inflow']):+.1f} net\n"
+        )
+    return latest_line
 
+
+def _cumulative_line(window: list[dict], latest: dict, bounds: _Window) -> str:
+    """The window's cumulative net flow line, or the empty-window wording."""
+    look_back_days = bounds.look_back_days
     cumulative = sum(r["total_net_inflow"] for r in window)
     flow_sessions = sum(1 for r in window if _is_material(r["total_net_inflow"]))
+    if window:
+        cumulative_line = (
+            f"**{look_back_days}d cumulative net flow:** {_usd_m(cumulative):+.1f} "
+            f"({flow_sessions} flow sessions in the window)\n"
+        )
+    else:
+        cumulative_line = (
+            f"**{look_back_days}d cumulative net flow:** no flow rows within the "
+            f"{look_back_days}-day window (latest available is {latest['date']})\n"
+        )
+    return cumulative_line
 
+
+def _since_launch_line(latest: dict, asset_key: str) -> str:
+    """The since-launch cumulative line."""
+    return (
+        f"**Since-launch cumulative:** {_usd_m(latest['cum_net_inflow']):+.1f} "
+        f"(all {asset_key} US spot ETFs since inception, as of {latest['date']})\n"
+    )
+
+
+def _streak_line(visible: list[dict], bounds: _Window) -> str:
+    """The ``**Streak**`` line over every visible session, labelled ``≥N`` at the window's edge."""
+    curr_date = bounds.curr_date
     # Streak over every fetched session visible to curr_date. Days with no
     # material flow are transparent (placeholder vs genuine-zero ambiguity,
     # and sub-tick noise), mirroring the Farside vendor. Raw signs are safe
@@ -1303,45 +1371,17 @@ def get_etf_flow_data(
                 f"sessions with reported flow within the API's ~{PLAN_WINDOW_DAYS}-day "
                 f"window, not calendar days\n"
             )
+    return streak_line
 
-    # With failed histories in the mix, "no fund" would claim knowledge of
-    # filings those histories never delivered — and an unfetched listing or
-    # dropped listing entries leave the same gap: part (or all) of the
-    # universe was never enumerated, so "no fund" would assert over funds
-    # this client has never seen. The Latest and leaders lines share this one
-    # scope word so the two co-rendered claims cannot drift.
-    fund_scope = (
-        "no fetched fund"
-        if snapshot.funds_failed or snapshot.funds_unusable or not snapshot.list_fetched
-        else "no fund"
-    )
-    if latest_unreported:
-        latest_line = (
-            f"\n**Latest ({latest['date']}):** no flow reported yet — the aggregate for "
-            f"this date is zero with {fund_scope} reporting a flow, which this API "
-            f"publishes both for a day issuers have not filed yet and for a genuine "
-            f"zero-flow day\n"
-        )
-    else:
-        latest_line = (
-            f"\n**Latest ({latest['date']}):** {_usd_m(latest['total_net_inflow']):+.1f} net\n"
-        )
 
-    if window:
-        cumulative_line = (
-            f"**{look_back_days}d cumulative net flow:** {_usd_m(cumulative):+.1f} "
-            f"({flow_sessions} flow sessions in the window)\n"
-        )
-    else:
-        cumulative_line = (
-            f"**{look_back_days}d cumulative net flow:** no flow rows within the "
-            f"{look_back_days}-day window (latest available is {latest['date']})\n"
-        )
-    since_launch_line = (
-        f"**Since-launch cumulative:** {_usd_m(latest['cum_net_inflow']):+.1f} "
-        f"(all {asset_key} US spot ETFs since inception, as of {latest['date']})\n"
-    )
-
+def _leaders_and_breadth(
+    snapshot: _FlowSnapshot,
+    latest: dict,
+    latest_flows: dict[str, float],
+    fund_scope: str,
+    reconcile: _Reconciliation,
+) -> tuple[str, str]:
+    """``(leaders_line, breadth_line)`` for the latest day; either is empty when the breakdown cannot say."""
     # Latest-day fund leaders + breadth, from the per-fund histories. Both are
     # keyed strictly to the aggregate's latest visible date so they can never
     # describe a newer day than the headline figure. The breadth denominator
@@ -1393,59 +1433,7 @@ def get_etf_flow_data(
             f"{_plural(reported, 'fund', 'funds')} filed flat "
             f"($0 at the 0.1 US$m granularity shown) for {latest['date']}\n"
         )
-        if _is_material(latest["total_net_inflow"]):
-            if reconcile_gap_disclosed:
-                # Every listed fund has filed — that is the reconciliation
-                # gate's premise — so "filings still posting" cannot explain
-                # the material aggregate; the disclosed listing gap does.
-                breadth_line = (
-                    f"**Breadth ({latest['date']}):** 0 of {reported} reporting funds "
-                    f"saw inflows ({reported} flat) — the aggregate above shows a "
-                    f"material net flow that no fund filing reflects; every listed "
-                    f"fund has filed, so this is the reconciliation gap flagged "
-                    f"above, not filings still posting\n"
-                )
-            elif reconcile_all_filed:
-                # Same premise as the disclosed-gap branch — every listed
-                # fund has filed — but the aggregate-vs-sum residual stayed
-                # within the reconciliation tolerance: "still posting" is
-                # equally disproven, and a sub-tolerance residual is endpoint
-                # noise, not a pending filing.
-                breadth_line = (
-                    f"**Breadth ({latest['date']}):** 0 of {reported} reporting funds "
-                    f"saw inflows ({reported} flat) — the aggregate above shows a "
-                    f"material net flow that no fund filing reflects; every listed "
-                    f"fund has filed and the residual sits within the reconciliation "
-                    f"tolerance, so treat it as endpoint noise, not filings still "
-                    f"posting\n"
-                )
-            elif snapshot.funds_failed or snapshot.funds_unusable:
-                # With failed histories OR dropped listing entries in the mix,
-                # "still posting" is not the only (or likeliest) explanation —
-                # the flow may simply sit with the funds the breakdown could
-                # not cover, which the header caveat already discloses
-                # (unfetched histories and unusable listing entries have the
-                # same consequence here: filings this client never saw).
-                breadth_line = (
-                    f"**Breadth ({latest['date']}):** 0 of {reported} reporting funds "
-                    f"saw inflows ({reported} flat) — the aggregate above shows a "
-                    f"material net flow that no fetched fund's filing reflects; it "
-                    f"may sit with the funds the breakdown could not cover (flagged "
-                    f"above) or in filings still posting\n"
-                )
-            else:
-                breadth_line = (
-                    f"**Breadth ({latest['date']}):** 0 of {reported} reporting funds "
-                    f"saw inflows ({reported} flat) — the aggregate above shows a "
-                    f"material net flow that no fund filing reflects, so issuer "
-                    f"filings for the day are likely still posting\n"
-                )
-        else:
-            breadth_line = (
-                f"**Breadth ({latest['date']}):** 0 of {reported} reporting funds saw "
-                f"inflows ({reported} flat) — a confirmed flat day, not an "
-                f"unposted one\n"
-            )
+        breadth_line = _flat_day_breadth_line(snapshot, latest, reported, reconcile)
     elif snapshot.funds:
         leaders_line = (
             f"**Latest-day leaders:** {fund_scope} has filed a flow report for "
@@ -1456,16 +1444,87 @@ def get_etf_flow_data(
         # Breakdown unavailable entirely; the header caveat already says why.
         leaders_line = ""
         breadth_line = ""
+    return leaders_line, breadth_line
 
-    summary = (
-        latest_line
-        + cumulative_line
-        + since_launch_line
-        + streak_line
-        + leaders_line
-        + breadth_line
-    )
 
+def _flat_day_breadth_line(
+    snapshot: _FlowSnapshot, latest: dict, reported: int, reconcile: _Reconciliation
+) -> str:
+    """The breadth line when every filing is flat: whose call the day's verdict is."""
+    reconcile_gap_disclosed, reconcile_all_filed = reconcile.gap_disclosed, reconcile.all_filed
+    if _is_material(latest["total_net_inflow"]):
+        if reconcile_gap_disclosed:
+            # Every listed fund has filed — that is the reconciliation
+            # gate's premise — so "filings still posting" cannot explain
+            # the material aggregate; the disclosed listing gap does.
+            breadth_line = (
+                f"**Breadth ({latest['date']}):** 0 of {reported} reporting funds "
+                f"saw inflows ({reported} flat) — the aggregate above shows a "
+                f"material net flow that no fund filing reflects; every listed "
+                f"fund has filed, so this is the reconciliation gap flagged "
+                f"above, not filings still posting\n"
+            )
+        elif reconcile_all_filed:
+            # Same premise as the disclosed-gap branch — every listed
+            # fund has filed — but the aggregate-vs-sum residual stayed
+            # within the reconciliation tolerance: "still posting" is
+            # equally disproven, and a sub-tolerance residual is endpoint
+            # noise, not a pending filing.
+            breadth_line = (
+                f"**Breadth ({latest['date']}):** 0 of {reported} reporting funds "
+                f"saw inflows ({reported} flat) — the aggregate above shows a "
+                f"material net flow that no fund filing reflects; every listed "
+                f"fund has filed and the residual sits within the reconciliation "
+                f"tolerance, so treat it as endpoint noise, not filings still "
+                f"posting\n"
+            )
+        elif snapshot.funds_failed or snapshot.funds_unusable:
+            # With failed histories OR dropped listing entries in the mix,
+            # "still posting" is not the only (or likeliest) explanation —
+            # the flow may simply sit with the funds the breakdown could
+            # not cover, which the header caveat already discloses
+            # (unfetched histories and unusable listing entries have the
+            # same consequence here: filings this client never saw).
+            breadth_line = (
+                f"**Breadth ({latest['date']}):** 0 of {reported} reporting funds "
+                f"saw inflows ({reported} flat) — the aggregate above shows a "
+                f"material net flow that no fetched fund's filing reflects; it "
+                f"may sit with the funds the breakdown could not cover (flagged "
+                f"above) or in filings still posting\n"
+            )
+        else:
+            breadth_line = (
+                f"**Breadth ({latest['date']}):** 0 of {reported} reporting funds "
+                f"saw inflows ({reported} flat) — the aggregate above shows a "
+                f"material net flow that no fund filing reflects, so issuer "
+                f"filings for the day are likely still posting\n"
+            )
+    else:
+        breadth_line = (
+            f"**Breadth ({latest['date']}):** 0 of {reported} reporting funds saw "
+            f"inflows ({reported} flat) — a confirmed flat day, not an "
+            f"unposted one\n"
+        )
+    return breadth_line
+
+
+def _net_cell(r: dict, funds: dict[str, dict]) -> str:
+    """The table's Net Flow cell: the figure, or "not yet posted" for an unreported day."""
+    # The same placeholder honesty as the Latest line, applied to every
+    # table row: an unreported day must not read as a confident "+0.0" in
+    # the rows downstream agents most often re-quote. The cheap zero test
+    # runs first so the funds scan only happens for the rare all-zero row
+    # — it duplicates _is_unreported_day's exact-zero clause, so loosening
+    # that predicate's granularity would be silently suppressed here.
+    if r["total_net_inflow"] == 0 and _is_unreported_day(r, _fund_flows_on(funds, r["date"])):
+        return "not yet posted"
+    return f"{_usd_m(r['total_net_inflow']):+.1f}"
+
+
+def _flow_table(
+    funds: dict[str, dict], visible: list[dict], window: list[dict], latest: dict, fund_scope: str
+) -> str:
+    """The daily-flow table with its row-cap note and, when an older row needs it, the legend."""
     shown = window or visible[-1:]
     note = ""
     if len(window) > MAX_ROWS:
@@ -1474,20 +1533,7 @@ def get_etf_flow_data(
     elif not window:
         note = "\n_(table shows the latest available row)_\n"
 
-    def _net_cell(r: dict) -> str:
-        # The same placeholder honesty as the Latest line, applied to every
-        # table row: an unreported day must not read as a confident "+0.0" in
-        # the rows downstream agents most often re-quote. The cheap zero test
-        # runs first so the funds scan only happens for the rare all-zero row
-        # — it duplicates _is_unreported_day's exact-zero clause, so loosening
-        # that predicate's granularity would be silently suppressed here.
-        if r["total_net_inflow"] == 0 and _is_unreported_day(
-            r, _fund_flows_on(snapshot.funds, r["date"])
-        ):
-            return "not yet posted"
-        return f"{_usd_m(r['total_net_inflow']):+.1f}"
-
-    rendered_rows = [(r["date"], _net_cell(r)) for r in shown]
+    rendered_rows = [(r["date"], _net_cell(r, funds)) for r in shown]
     table = (
         "\n| Date | Net Flow |\n| --- | --- |\n"
         + "\n".join(f"| {date} | {cell} |" for date, cell in rendered_rows)
@@ -1508,5 +1554,116 @@ def get_etf_flow_data(
             f"{fund_scope} reporting a flow, which this API publishes both for a "
             f"day issuers have not filed yet and for a genuine zero-flow day._\n"
         )
+    return note + table
 
-    return header + summary + note + table
+
+def get_etf_flow_data(
+    asset: str,
+    curr_date: str,
+    look_back_days: int | None = None,
+) -> str:
+    """Fetch US spot-ETF daily net flows for a crypto asset as a markdown report.
+
+    Args:
+        asset: "BTC" or "ETH" (also accepts pair forms like "BTC-USD"). A
+            recognized crypto risk asset with no spot ETF of its own (e.g.
+            SOL, XRP) is served BTC flows as a market-wide risk-on/off proxy;
+            a stablecoin or unrecognized symbol gets a no-signal message.
+        curr_date: End of the window (yyyy-mm-dd); rows dated after it are
+            dropped so a past date never leaks future flows.
+        look_back_days: Trailing window length; ``None`` uses
+            DEFAULT_LOOKBACK_DAYS. Bounds the cumulative figure and the
+            rendered table; the streak spans every session visible to
+            ``curr_date`` within the API's ~30-day window and is labelled
+            "≥N" when it reaches that window's edge, because the true streak
+            may extend further back.
+
+    Returns:
+        A markdown report shaped like the Farside vendor's (Farside-shaped
+        core sections, same US$m units): latest day's net flow, window
+        cumulative, since-launch cumulative, streak, latest-day fund leaders,
+        a breadth line (how many funds moved together and, when any moved,
+        how concentrated the flow was), and a recent daily-flow table.
+
+        An unusable ``curr_date`` answers the shared ``INVALID_CURR_DATE``
+        sentinel before any request, as the core-category tools do (#119);
+        the Farside vendor of this tool says the same sentence.
+    """
+    refusal = date_refusal(curr_date, what="ETF flows", kind="point")
+    if refusal is not None:
+        return refusal
+
+    if look_back_days is None or look_back_days <= 0:
+        look_back_days = DEFAULT_LOOKBACK_DAYS
+
+    # Normalise curr_date BEFORE any lexical date comparison: strptime accepts
+    # non-zero-padded input ("2026-6-5"), which compares wrong against
+    # canonical ISO row dates and would silently admit future rows. The
+    # refusal above already proved this parses.
+    curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
+    curr_date = curr_dt.strftime("%Y-%m-%d")
+    asset_key, market_proxy, quoted = _resolve_asset(asset)
+    if asset_key is None:
+        # Same no-signal statement as the Farside vendor: a stablecoin has no
+        # risk-on/off flow character to proxy, so serving BTC flows for it
+        # would be a misleading signal, and a specific message beats the
+        # generic degraded-category sentinel.
+        return (
+            f"There is no spot-ETF flow signal for {quoted}: it has no US spot ETF of "
+            f"its own and is not a recognized crypto risk asset for which BTC flows serve "
+            f"as a market-wide proxy (e.g. a stablecoin, an unrecognized symbol, or a cross "
+            f"priced in another asset such as ETH-BTC). Do not substitute BTC or ETH flows."
+        )
+
+    snapshot = _load_snapshot(asset_key)
+    visible = [r for r in snapshot.summary_rows if r["date"] <= curr_date]
+    latest = visible[-1] if visible else None
+    latest_flows = _fund_flows_on(snapshot.funds, latest["date"]) if latest else {}
+    window_start_dt = curr_dt - timedelta(days=look_back_days)
+    window_start = window_start_dt.strftime("%Y-%m-%d")
+    bounds = _Window(
+        curr_dt=curr_dt,
+        curr_date=curr_date,
+        window_start_dt=window_start_dt,
+        window_start=window_start,
+        look_back_days=look_back_days,
+    )
+    stale_note = _disclosure_stale_note(snapshot)
+
+    header_lines = _title_lines(asset_key, quoted, market_proxy)
+    if snapshot.stale:
+        header_lines.append(_stale_caveat(snapshot.fetched_at, "Treat with caution."))
+    header_lines += _breakdown_notes(snapshot, latest)
+    header_lines += _revision_notes(snapshot, visible, stale_note)
+    header_lines += _restatement_notes(snapshot, visible, stale_note)
+    header_lines += _window_clamp_notes(snapshot, latest, bounds)
+    header_lines += _data_lag_notes(snapshot, latest, bounds)
+    reconcile = _reconciliation(snapshot, latest, latest_flows)
+    header_lines += reconcile.notes
+    header_lines.append(f"- Source: SoSoValue OpenAPI (US spot ETFs) | Window ending {curr_date}")
+    # Blank line between entries so consecutive italic caveats stay separate
+    # rendered paragraphs.
+    header = "\n\n".join(header_lines) + "\n"
+
+    if latest is None:
+        return (
+            header + f"\nNo ETF flow rows on or before {curr_date} (the API serves only "
+            f"the most recent ~{PLAN_WINDOW_DAYS} days, so older backtest dates have no "
+            f"reachable history). Report this as no ETF-flow data for the date; do not "
+            f"fabricate values."
+        )
+
+    window = [r for r in visible if r["date"] >= window_start]
+    fund_scope = _fund_scope(snapshot)
+    leaders_line, breadth_line = _leaders_and_breadth(
+        snapshot, latest, latest_flows, fund_scope, reconcile
+    )
+    summary = (
+        _latest_line(latest, latest_flows, fund_scope)
+        + _cumulative_line(window, latest, bounds)
+        + _since_launch_line(latest, asset_key)
+        + _streak_line(visible, bounds)
+        + leaders_line
+        + breadth_line
+    )
+    return header + summary + _flow_table(snapshot.funds, visible, window, latest, fund_scope)

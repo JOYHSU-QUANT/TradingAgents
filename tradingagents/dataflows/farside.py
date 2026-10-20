@@ -784,6 +784,263 @@ def _is_unposted_row(record: dict) -> bool:
     return record["total"] == 0 and not any(record["issuers"].values())
 
 
+def _resolve_asset(asset: str) -> tuple[str | None, bool, str]:
+    """``(asset_key, market_proxy, quoted)`` for a caller's symbol.
+
+    ``asset_key`` is ``None`` for a symbol with no spot-ETF signal (the entry
+    point answers the no-signal sentence); ``quoted`` is the caller's spelling
+    as the report may echo it inside quotes.
+    """
+    # Before the echo, not after: ``echo_argument`` goes through ``str``, so a
+    # TRUTHY non-string would be silently turned into a symbol and answered
+    # about — ``b"BTC"`` came back as a confident "there is no ETF flow signal
+    # for b'BTC'" to a model that asked about BTC. That is the caller's bug and
+    # belongs in the vendor-failed lane, which is where deribit and the
+    # treasuries module already put it (#233).
+    #
+    # Scoped to TRUTHY non-strings, which is deribit's standing decision and is
+    # pinned by a test there: a falsy argument keeps the no-signal sentence
+    # rather than being swallowed into an error. The exemption is not that a
+    # falsy value cannot be mistaken for a symbol — ``b""`` renders as ``b''``
+    # — but that widening it would change behaviour three modules already
+    # shipped, which is not this batch's call to make.
+    if asset and not isinstance(asset, str):
+        raise FarsideError(f"asset must be a symbol string, got {type(asset).__name__}")
+    # Flattened BEFORE classification, not after, so exactly one string is both
+    # decided on and rendered — sanitising afterwards makes the classified and
+    # the rendered strings disagree, and deribit's comment spells out what that
+    # produced there. ``asset`` is an LLM-written tool argument echoed into a
+    # markdown ``##`` heading, an emphasis caveat and the no-signal sentence,
+    # so every copy is a chance to forge structure (#233).
+    #
+    # ``echo_argument``, because the value is the CALLER'S OWN spelling coming
+    # back into text it reads: an edge marker becomes a space rather than
+    # vanishing, so "_SOL" is not quoted back as "SOL" beside a sentence
+    # saying there is no signal for it. The quoted sites take ``quoted``,
+    # whose delimiters ``repr`` has already escaped — a value carrying the
+    # quote character would otherwise close the span early and the prose after
+    # it would read as this tool's own words (#232). A clean symbol renders
+    # byte for byte as it did with the literal quotes: 'SOL'.
+    asset = echo_argument(asset)
+    quoted = quote_argument(asset)
+    asset_key, market_proxy = _classify_asset(asset)
+    return asset_key, market_proxy, quoted
+
+
+class _Window(NamedTuple):
+    """The dates one render is measured against, normalised once by the entry point.
+
+    ``curr_date`` is ``curr_dt`` in canonical ISO form (never the caller's
+    spelling); ``look_back_days`` is the window's length after the default
+    was applied. The window's start is the entry point's own concern: only
+    its row filter reads it.
+    """
+
+    curr_dt: datetime
+    curr_date: str
+    look_back_days: int
+
+
+def _title_lines(asset_key: str, quoted: str, market_proxy: bool) -> list[str]:
+    """The heading, plus the proxy caveat when ``asset_key`` stands in for ``quoted``."""
+    if market_proxy:
+        # The requested asset belongs in the heading, not only in the caveat
+        # below. This report is re-summarised by the downstream research / trader
+        # / risk agents, and a heading byte-identical to a real BTC report is
+        # exactly what survives that hop with the proxy framing stripped off.
+        header_lines = [
+            f"## Spot ETF Flows — {asset_key} (market-wide proxy for {quoted}, Farside, net US$m)",
+            f"_No spot ETF exists for {quoted}; showing {asset_key} spot-ETF flows as a "
+            f"market-wide crypto risk-on/off proxy, not an {quoted}-specific signal._",
+        ]
+    else:
+        header_lines = [f"## Spot ETF Flows — {asset_key} (Farside, net US$m)"]
+    return header_lines
+
+
+def _issuer_label_notes(snapshot: _FlowSnapshot) -> list[str]:
+    """The caveat for issuer columns the page's header row could not label."""
+    notes: list[str] = []
+    if not snapshot.issuers_named:
+        notes.append(
+            "_Issuer names incomplete: one or more issuer columns could not be labelled from "
+            "Farside's header row, so they appear below as 'unnamed col N' placeholders rather "
+            "than ticker symbols. The flow figures are still cross-checked; those particular "
+            "labels carry no meaning._"
+        )
+    return notes
+
+
+def _data_lag_notes(snapshot: _FlowSnapshot, latest: dict | None, bounds: _Window) -> list[str]:
+    """The data-lag caveat, when the newest published row sits well behind ``curr_date``."""
+    curr_dt, curr_date = bounds.curr_dt, bounds.curr_date
+    notes: list[str] = []
+    if latest is not None:
+        # Data recency is a separate question from fetch success: farside.co.uk
+        # can serve a perfectly parseable page that simply has not been updated
+        # in days. The stale-cache machinery above never sees that case, so
+        # without this the report would present week-old flows as current.
+        lag_days = (curr_dt - datetime.strptime(latest["date"], "%Y-%m-%d")).days
+        if lag_days > MAX_DATA_LAG_DAYS:
+            # Neither clause claims what it cannot know (the SoSoValue vendor's
+            # decided wording, ported): the stale branch does not equate
+            # snapshot age with row lag — the snapshot is hours-to-days old
+            # (the STALE line above) while the row lag is measured in days, and
+            # the two are independent quantities — and the fresh branch claims
+            # visibility as of curr_date, not the site's frontier (a backtest
+            # date in a mid-window gap has newer rows that the lookahead
+            # filter hides).
+            cause = (
+                "the stale snapshot above may itself be missing newer filings"
+                if snapshot.stale
+                else f"the fetch succeeded — no newer filing is visible as of {curr_date}"
+            )
+            notes.append(
+                f"_Data lag: the newest published row is {latest['date']}, {lag_days} "
+                f"{_plural_days(lag_days)} before {curr_date} ({cause}), so treat the "
+                f"figures below as {lag_days} {_plural_days(lag_days)} old._"
+            )
+    return notes
+
+
+def _latest_line(latest: dict) -> str:
+    """The ``**Latest**`` line: the day's net flow, or the unposted-row wording."""
+    # A row Farside has created but not yet populated parses to an all-blank,
+    # all-zero record. That is not a "$0 net flow" day: rendering it as "+0.0 net"
+    # directly above a multi-session inflow streak reads as "flows just stopped",
+    # and which of the two versions the analyst sees would depend only on what
+    # time of day the cycle happened to fire.
+    latest_unposted = _is_unposted_row(latest)
+    if latest_unposted:
+        # Blank and genuine-zero cells are indistinguishable in Farside's HTML, so
+        # state the ambiguity instead of picking one. What matters is not printing
+        # a confident "+0.0 net" that reads as "demand stopped".
+        latest_line = (
+            f"\n**Latest ({latest['date']}):** no flow reported — every issuer cell for "
+            f"this date is blank or zero, which Farside shows both for a row it has not "
+            f"populated yet and for a genuine zero-flow day\n"
+        )
+    else:
+        latest_line = f"\n**Latest ({latest['date']}):** {latest['total']:+.1f} net\n"
+    return latest_line
+
+
+def _cumulative_line(window: list[dict], latest: dict, bounds: _Window) -> str:
+    """The window's cumulative net flow line, or the empty-window wording."""
+    look_back_days = bounds.look_back_days
+    cumulative = sum(r["total"] for r in window)
+    # A zero/blank-total day (a genuine $0 net day or a not-yet-posted row) is not
+    # a flow session.
+    flow_sessions = sum(1 for r in window if r["total"] != 0)
+
+    if window:
+        cumulative_line = (
+            f"**{look_back_days}d cumulative net flow:** {cumulative:+.1f} "
+            f"({flow_sessions} flow sessions in the window)\n"
+        )
+    else:
+        # The freshest available row predates the window (e.g. a small
+        # look_back_days over a weekend/holiday publishing gap). A window sum of
+        # +0.0 next to a real "Latest" line reads as "flat"; state the gap
+        # instead so the report is not self-contradictory.
+        cumulative_line = (
+            f"**{look_back_days}d cumulative net flow:** no flow rows within the "
+            f"{look_back_days}-day window (latest available is {latest['date']})\n"
+        )
+    return cumulative_line
+
+
+def _streak_line(visible: list[dict]) -> str:
+    """The ``**Streak**`` line over all available history, counted in sessions."""
+    # Consecutive inflow/outflow streak over all available history, ending at the
+    # most recent non-zero-flow day. Zero/blank-total days are transparent: they
+    # neither break the streak nor count toward it.
+    flow_days = [r for r in visible if r["total"] != 0]
+    streak_sign = _sign(flow_days[-1]["total"]) if flow_days else 0
+    streak = 0
+    for r in reversed(flow_days):
+        if _sign(r["total"]) == streak_sign:
+            streak += 1
+        else:
+            break
+    # Say "session", not "day". The streak is counted over flow_days (zero/blank
+    # rows removed), so a 7-session run can span 11 calendar days across a holiday
+    # week — and an LLM weighing "persistence of demand" reads "7-day" literally.
+    # Printing the span makes the gap visible instead of implicit.
+    if streak_sign == 0:
+        streak_line = "**Streak:** no reported flow sessions on record\n"
+    else:
+        streak_word = "inflow" if streak_sign > 0 else "outflow"
+        streak_line = (
+            f"**Streak:** {streak}-session {streak_word} "
+            f"({flow_days[-streak]['date']} → {flow_days[-1]['date']}) — consecutive "
+            f"sessions with reported flow over all available history, not calendar days\n"
+        )
+    return streak_line
+
+
+def _leaders_line(latest: dict) -> str:
+    """The latest day's issuer leaders, largest absolute flow first."""
+    breakdown = sorted(
+        ((name, flow) for name, flow in latest["issuers"].items() if flow),
+        key=lambda kv: abs(kv[1]),
+        reverse=True,
+    )[:TOP_ISSUERS]
+    breakdown_str = (
+        ", ".join(f"{name} {flow:+.1f}" for name, flow in breakdown) or "no per-issuer flow"
+    )
+    return f"**Latest-day leaders:** {breakdown_str}\n"
+
+
+def _net_cell(r: dict) -> str:
+    """The table's Net Flow cell: the figure, or "not yet posted" for an unpopulated row."""
+    if _is_unposted_row(r):
+        return "not yet posted"
+    return f"{r['total']:+.1f}"
+
+
+def _flow_table(window: list[dict], visible: list[dict], latest: dict) -> str:
+    """The daily-flow table with its row-cap note and, when an older row needs it, the legend."""
+    # If the freshest row predates the window, show the latest available row(s)
+    # with a caveat (mirroring fear_greed) so the table matches the Latest line
+    # above rather than rendering empty.
+    shown = window or visible[-1:]
+    note = ""
+    if len(window) > MAX_ROWS:
+        shown = window[-MAX_ROWS:]
+        note = f"\n_(showing the most recent {MAX_ROWS} of {len(window)} days in the window)_\n"
+    elif not window:
+        # The cumulative line above already states that the window is empty and
+        # names the latest available date; repeating it here just said the same
+        # sentence twice. Keep only what the table itself needs to explain.
+        note = "\n_(table shows the latest available row)_\n"
+
+    # Keep the table's Net Flow cell consistent with the Latest line above: an
+    # unpopulated row must not appear as a confident "+0.0" in the densest part of
+    # the report (the rows downstream agents most often re-quote). Applied to every
+    # row, not just the latest — an older unposted row (a mid-history publishing
+    # gap) carries the same blank-vs-genuine-$0 ambiguity as the latest one.
+    table = (
+        "\n| Date | Net Flow |\n| --- | --- |\n"
+        + "\n".join(f"| {r['date']} | {_net_cell(r)} |" for r in shown)
+        + "\n"
+    )
+    # _net_cell tags every unposted row, but the Latest line explains the
+    # ambiguity only for the latest day — an older "not yet posted" cell (a
+    # mid-history publishing gap) would otherwise be the one unexplained
+    # label in the rows agents most re-quote. The latest row is excluded from
+    # the trigger (user decision): its tag is explained by the Latest line
+    # via the same predicate, and a legend there would repeat that sentence
+    # nearly verbatim in the routine today-not-yet-populated report.
+    if any(_is_unposted_row(r) for r in shown if r["date"] != latest["date"]):
+        table += (
+            '\n_"not yet posted": every issuer cell for that day is blank or zero, '
+            "which Farside shows both for a row it has not populated yet and for a "
+            "genuine zero-flow day._\n"
+        )
+    return note + table
+
+
 def get_etf_flow_data(
     asset: str,
     curr_date: str,
@@ -834,40 +1091,7 @@ def get_etf_flow_data(
     # proved this parses. (fear_greed.get_fear_greed_data carries the same guard.)
     curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
     curr_date = curr_dt.strftime("%Y-%m-%d")
-
-    # Before the echo, not after: ``echo_argument`` goes through ``str``, so a
-    # TRUTHY non-string would be silently turned into a symbol and answered
-    # about — ``b"BTC"`` came back as a confident "there is no ETF flow signal
-    # for b'BTC'" to a model that asked about BTC. That is the caller's bug and
-    # belongs in the vendor-failed lane, which is where deribit and the
-    # treasuries module already put it (#233).
-    #
-    # Scoped to TRUTHY non-strings, which is deribit's standing decision and is
-    # pinned by a test there: a falsy argument keeps the no-signal sentence
-    # rather than being swallowed into an error. The exemption is not that a
-    # falsy value cannot be mistaken for a symbol — ``b""`` renders as ``b''``
-    # — but that widening it would change behaviour three modules already
-    # shipped, which is not this batch's call to make.
-    if asset and not isinstance(asset, str):
-        raise FarsideError(f"asset must be a symbol string, got {type(asset).__name__}")
-    # Flattened BEFORE classification, not after, so exactly one string is both
-    # decided on and rendered — sanitising afterwards makes the classified and
-    # the rendered strings disagree, and deribit's comment spells out what that
-    # produced there. ``asset`` is an LLM-written tool argument echoed into a
-    # markdown ``##`` heading, an emphasis caveat and the no-signal sentence,
-    # so every copy is a chance to forge structure (#233).
-    #
-    # ``echo_argument``, because the value is the CALLER'S OWN spelling coming
-    # back into text it reads: an edge marker becomes a space rather than
-    # vanishing, so "_SOL" is not quoted back as "SOL" beside a sentence
-    # saying there is no signal for it. The quoted sites take ``quoted``,
-    # whose delimiters ``repr`` has already escaped — a value carrying the
-    # quote character would otherwise close the span early and the prose after
-    # it would read as this tool's own words (#232). A clean symbol renders
-    # byte for byte as it did with the literal quotes: 'SOL'.
-    asset = echo_argument(asset)
-    quoted = quote_argument(asset)
-    asset_key, market_proxy = _classify_asset(asset)
+    asset_key, market_proxy, quoted = _resolve_asset(asset)
     if asset_key is None:
         # Not a recognized crypto risk asset (a stablecoin like USDT/USDC, a
         # quote-only, an unrecognized symbol, or a cross such as ETH-BTC, which
@@ -886,19 +1110,9 @@ def get_etf_flow_data(
     snapshot = _load_flows(asset_key)
     visible = [r for r in snapshot.records if r["date"] <= curr_date]
     latest = visible[-1] if visible else None
+    bounds = _Window(curr_dt=curr_dt, curr_date=curr_date, look_back_days=look_back_days)
 
-    if market_proxy:
-        # The requested asset belongs in the heading, not only in the caveat
-        # below. This report is re-summarised by the downstream research / trader
-        # / risk agents, and a heading byte-identical to a real BTC report is
-        # exactly what survives that hop with the proxy framing stripped off.
-        header_lines = [
-            f"## Spot ETF Flows — {asset_key} (market-wide proxy for {quoted}, Farside, net US$m)",
-            f"_No spot ETF exists for {quoted}; showing {asset_key} spot-ETF flows as a "
-            f"market-wide crypto risk-on/off proxy, not an {quoted}-specific signal._",
-        ]
-    else:
-        header_lines = [f"## Spot ETF Flows — {asset_key} (Farside, net US$m)"]
+    header_lines = _title_lines(asset_key, quoted, market_proxy)
     if snapshot.stale:
         # The family's shared STALE template (one shape whichever vendor served
         # the call), with this vendor's own cause set: "refresh failed", not
@@ -918,38 +1132,8 @@ def get_etf_flow_data(
                 humanize=_humanize_age,
             )
         )
-    if not snapshot.issuers_named:
-        header_lines.append(
-            "_Issuer names incomplete: one or more issuer columns could not be labelled from "
-            "Farside's header row, so they appear below as 'unnamed col N' placeholders rather "
-            "than ticker symbols. The flow figures are still cross-checked; those particular "
-            "labels carry no meaning._"
-        )
-    if latest is not None:
-        # Data recency is a separate question from fetch success: farside.co.uk
-        # can serve a perfectly parseable page that simply has not been updated
-        # in days. The stale-cache machinery above never sees that case, so
-        # without this the report would present week-old flows as current.
-        lag_days = (curr_dt - datetime.strptime(latest["date"], "%Y-%m-%d")).days
-        if lag_days > MAX_DATA_LAG_DAYS:
-            # Neither clause claims what it cannot know (the SoSoValue vendor's
-            # decided wording, ported): the stale branch does not equate
-            # snapshot age with row lag — the snapshot is hours-to-days old
-            # (the STALE line above) while the row lag is measured in days, and
-            # the two are independent quantities — and the fresh branch claims
-            # visibility as of curr_date, not the site's frontier (a backtest
-            # date in a mid-window gap has newer rows that the lookahead
-            # filter hides).
-            cause = (
-                "the stale snapshot above may itself be missing newer filings"
-                if snapshot.stale
-                else f"the fetch succeeded — no newer filing is visible as of {curr_date}"
-            )
-            header_lines.append(
-                f"_Data lag: the newest published row is {latest['date']}, {lag_days} "
-                f"{_plural_days(lag_days)} before {curr_date} ({cause}), so treat the "
-                f"figures below as {lag_days} {_plural_days(lag_days)} old._"
-            )
+    header_lines += _issuer_label_notes(snapshot)
+    header_lines += _data_lag_notes(snapshot, latest, bounds)
     header_lines.append(
         f"- Source: farside.co.uk{ASSET_PATHS[asset_key]} | Window ending {curr_date}"
     )
@@ -965,123 +1149,10 @@ def get_etf_flow_data(
 
     window_start = (curr_dt - timedelta(days=look_back_days)).strftime("%Y-%m-%d")
     window = [r for r in visible if r["date"] >= window_start]
-    cumulative = sum(r["total"] for r in window)
-    # A zero/blank-total day (a genuine $0 net day or a not-yet-posted row) is not
-    # a flow session.
-    flow_sessions = sum(1 for r in window if r["total"] != 0)
-
-    # Consecutive inflow/outflow streak over all available history, ending at the
-    # most recent non-zero-flow day. Zero/blank-total days are transparent: they
-    # neither break the streak nor count toward it.
-    flow_days = [r for r in visible if r["total"] != 0]
-    streak_sign = _sign(flow_days[-1]["total"]) if flow_days else 0
-    streak = 0
-    for r in reversed(flow_days):
-        if _sign(r["total"]) == streak_sign:
-            streak += 1
-        else:
-            break
-    # Say "session", not "day". The streak is counted over flow_days (zero/blank
-    # rows removed), so a 7-session run can span 11 calendar days across a holiday
-    # week — and an LLM weighing "persistence of demand" reads "7-day" literally.
-    # Printing the span makes the gap visible instead of implicit.
-    if streak_sign == 0:
-        streak_line = "**Streak:** no reported flow sessions on record\n"
-    else:
-        streak_word = "inflow" if streak_sign > 0 else "outflow"
-        streak_line = (
-            f"**Streak:** {streak}-session {streak_word} "
-            f"({flow_days[-streak]['date']} → {flow_days[-1]['date']}) — consecutive "
-            f"sessions with reported flow over all available history, not calendar days\n"
-        )
-
-    breakdown = sorted(
-        ((name, flow) for name, flow in latest["issuers"].items() if flow),
-        key=lambda kv: abs(kv[1]),
-        reverse=True,
-    )[:TOP_ISSUERS]
-    breakdown_str = (
-        ", ".join(f"{name} {flow:+.1f}" for name, flow in breakdown) or "no per-issuer flow"
-    )
-
-    if window:
-        cumulative_line = (
-            f"**{look_back_days}d cumulative net flow:** {cumulative:+.1f} "
-            f"({flow_sessions} flow sessions in the window)\n"
-        )
-    else:
-        # The freshest available row predates the window (e.g. a small
-        # look_back_days over a weekend/holiday publishing gap). A window sum of
-        # +0.0 next to a real "Latest" line reads as "flat"; state the gap
-        # instead so the report is not self-contradictory.
-        cumulative_line = (
-            f"**{look_back_days}d cumulative net flow:** no flow rows within the "
-            f"{look_back_days}-day window (latest available is {latest['date']})\n"
-        )
-
-    # A row Farside has created but not yet populated parses to an all-blank,
-    # all-zero record. That is not a "$0 net flow" day: rendering it as "+0.0 net"
-    # directly above a multi-session inflow streak reads as "flows just stopped",
-    # and which of the two versions the analyst sees would depend only on what
-    # time of day the cycle happened to fire.
-    latest_unposted = _is_unposted_row(latest)
-    if latest_unposted:
-        # Blank and genuine-zero cells are indistinguishable in Farside's HTML, so
-        # state the ambiguity instead of picking one. What matters is not printing
-        # a confident "+0.0 net" that reads as "demand stopped".
-        latest_line = (
-            f"\n**Latest ({latest['date']}):** no flow reported — every issuer cell for "
-            f"this date is blank or zero, which Farside shows both for a row it has not "
-            f"populated yet and for a genuine zero-flow day\n"
-        )
-    else:
-        latest_line = f"\n**Latest ({latest['date']}):** {latest['total']:+.1f} net\n"
-
     summary = (
-        latest_line + cumulative_line + streak_line + f"**Latest-day leaders:** {breakdown_str}\n"
+        _latest_line(latest)
+        + _cumulative_line(window, latest, bounds)
+        + _streak_line(visible)
+        + _leaders_line(latest)
     )
-
-    # If the freshest row predates the window, show the latest available row(s)
-    # with a caveat (mirroring fear_greed) so the table matches the Latest line
-    # above rather than rendering empty.
-    shown = window or visible[-1:]
-    note = ""
-    if len(window) > MAX_ROWS:
-        shown = window[-MAX_ROWS:]
-        note = f"\n_(showing the most recent {MAX_ROWS} of {len(window)} days in the window)_\n"
-    elif not window:
-        # The cumulative line above already states that the window is empty and
-        # names the latest available date; repeating it here just said the same
-        # sentence twice. Keep only what the table itself needs to explain.
-        note = "\n_(table shows the latest available row)_\n"
-
-    # Keep the table's Net Flow cell consistent with the Latest line above: an
-    # unpopulated row must not appear as a confident "+0.0" in the densest part of
-    # the report (the rows downstream agents most often re-quote). Applied to every
-    # row, not just the latest — an older unposted row (a mid-history publishing
-    # gap) carries the same blank-vs-genuine-$0 ambiguity as the latest one.
-    def _net_cell(r: dict) -> str:
-        if _is_unposted_row(r):
-            return "not yet posted"
-        return f"{r['total']:+.1f}"
-
-    table = (
-        "\n| Date | Net Flow |\n| --- | --- |\n"
-        + "\n".join(f"| {r['date']} | {_net_cell(r)} |" for r in shown)
-        + "\n"
-    )
-    # _net_cell tags every unposted row, but the Latest line explains the
-    # ambiguity only for the latest day — an older "not yet posted" cell (a
-    # mid-history publishing gap) would otherwise be the one unexplained
-    # label in the rows agents most re-quote. The latest row is excluded from
-    # the trigger (user decision): its tag is explained by the Latest line
-    # via the same predicate, and a legend there would repeat that sentence
-    # nearly verbatim in the routine today-not-yet-populated report.
-    if any(_is_unposted_row(r) for r in shown if r["date"] != latest["date"]):
-        table += (
-            '\n_"not yet posted": every issuer cell for that day is blank or zero, '
-            "which Farside shows both for a row it has not populated yet and for a "
-            "genuine zero-flow day._\n"
-        )
-
-    return header + summary + note + table
+    return header + summary + _flow_table(window, visible, latest)

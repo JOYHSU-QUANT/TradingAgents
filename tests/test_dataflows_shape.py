@@ -104,8 +104,6 @@ LONG_FUNCTION_LINES = 150
 _LONG_FUNCTIONS: dict[tuple[str, str], int] = {
     ("cftc_cot", "get_futures_positioning"): 191,
     ("cme_basis", "get_futures_basis"): 215,
-    ("deribit", "_dvol_section"): 332,
-    ("deribit", "_fetch_dvol"): 354,
     ("deribit", "_reading_line"): 229,
     ("farside", "_parse_flow_table"): 153,
     ("fear_greed", "get_fear_greed_data"): 203,

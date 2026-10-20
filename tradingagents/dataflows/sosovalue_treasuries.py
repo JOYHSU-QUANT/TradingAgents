@@ -1157,6 +1157,11 @@ def _source_line(snapshot: _TreasurySnapshot, selected: int, window: _Window) ->
     )
 
 
+# ``(as-of date, ticker)`` — the reverse of a ``holders`` entry's ``(ticker,
+# row)``. Both elements are ``str``, so only the name says which is which.
+_AsOfRow = tuple[str, str]
+
+
 class _HoldingsFacts(NamedTuple):
     """The holdings section's figures, measured once for the summary and the concentration line.
 
@@ -1172,7 +1177,7 @@ class _HoldingsFacts(NamedTuple):
     combined: float
     holders: list[tuple[str, dict]]
     n_tracked: int
-    by_as_of: list[tuple[str, str]]
+    by_as_of: list[_AsOfRow]
     single_as_of: bool
 
 
@@ -1196,9 +1201,9 @@ def _holdings_facts(visible_by_company: dict[str, list[dict]]) -> _HoldingsFacts
     # One ordering serves both the span sentence and the per-company list: two
     # independent sorts of the same data could disagree about which filing is
     # the oldest, and the two lines sit next to each other in the report.
-    by_as_of = sorted((v[-1]["date"], t) for t, v in visible_by_company.items())
-    # One test feeding two sentences: the concentration line's basis clause
-    # below must not assert a mix of as-of dates while this line prints a
+    by_as_of: list[_AsOfRow] = sorted((v[-1]["date"], t) for t, v in visible_by_company.items())
+    # One test feeding two sentences: ``_concentration_line``'s basis clause
+    # must not assert a mix of as-of dates while ``_holdings_lines`` prints a
     # single one. They sit three rows apart in the report.
     single_as_of = by_as_of[0][0] == by_as_of[-1][0]
     return _HoldingsFacts(

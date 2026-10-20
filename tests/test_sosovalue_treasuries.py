@@ -1988,8 +1988,10 @@ class TestSectionProbeGaps:
         # start (2026-05-13 for the 90-day window ending 2026-08-11), the cap
         # hides nothing the window needs, so the understatement warning is
         # false and must stay silent — on the day before the start and on the
-        # start itself (the comparison is strict).
-        for start in (datetime(2026, 5, 1), datetime(2026, 5, 13)):
+        # start itself (the comparison is strict). As in the twin, the daily
+        # rows run past curr_date on purpose: the cap is measured on the full
+        # served history, the lookahead filter on the visible one.
+        for start in (datetime(2026, 5, 12), datetime(2026, 5, 13)):
             rows = [
                 _prow((start + timedelta(days=i)).strftime("%Y-%m-%d"), 100.0 + i, 1.0)
                 for i in range(sosovalue_treasuries.HISTORY_LIMIT)

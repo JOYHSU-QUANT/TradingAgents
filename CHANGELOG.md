@@ -256,16 +256,26 @@ Breaking changes within the 0.x line are called out explicitly.
   `_Window`, bound to `window` because nothing else here is called that. The
   `_label` closure is module-level and takes the companies map it closed
   over, by keyword. The moved bodies keep every rendered string and every
-  comment but four repointed at the helpers that now hold the code they
-  describe; besides that glue, they differ only in indentation,
-  `header_lines.append` becoming each helper's `notes.append`, the snapshot
-  field a helper is handed standing in for `snapshot.<field>`, the assembled
-  block's `=`/`+=` becoming the helper's `return`, the activity headline
-  losing the table expression that is now `_activity_table`'s own return,
-  and two pure statements moved to where their only reader is (`window_start`
-  into the `_Window` construction, the ordering clause into `_source_line`).
-  The old function and the new one, run over 65,000 generated snapshots,
-  rendered byte-identical reports. The length ratchet loses the row. Five
+  comment but five repointed at the helpers that now hold the code they
+  describe and the two section banners dropped; besides that glue, they
+  differ only in indentation, `header_lines.append` becoming each helper's
+  `notes.append`, the snapshot field a helper is handed standing in for
+  `snapshot.<field>`, the assembled block's `=`/`+=` becoming the helper's
+  `return`, the activity headline losing the table expression that is now
+  `_activity_table`'s own return, the `by_as_of` list annotated with the
+  `_AsOfRow` alias, and pure statements regrouped where their readers are
+  (`window_start` into the `_Window` construction, the ordering clause into
+  `_source_line`, the capped-history list measured beside the no-disclosure
+  list before the header rather than after the event scan, `n_tracked` ahead
+  of the top-holders string). One of those moves reaches a path it did not
+  run on before: `window_start` is now computed before the no-disclosures
+  early return, so a `look_back_days` beyond what `timedelta` can represent
+  (above roughly 739,000) raises `OverflowError` on that path as it already
+  did on every path with a visible disclosure; the escape of that error past
+  the vendor's own error family is a pre-existing defect shared by the
+  sibling vendors and is tracked separately. The old function and the new
+  one, run over 93,000 generated snapshots, rendered byte-identical reports
+  and raised identical errors. The length ratchet loses the row. Five
   tests pin what a thirty-mutation probe found unguarded: the three standing
   caveats' wording, the top-holders cut at `TOP_HOLDERS`, a company whose
   window nets to exactly zero counting on neither side, the table carrying

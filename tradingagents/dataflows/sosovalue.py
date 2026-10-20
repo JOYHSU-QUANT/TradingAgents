@@ -981,7 +981,7 @@ class _Window(NamedTuple):
     look_back_days: int
 
 
-def _title_lines(asset_key: str, quoted: str, market_proxy: bool) -> list[str]:
+def _title_lines(asset_key: str, *, quoted: str, market_proxy: bool) -> list[str]:
     """The heading, plus the proxy caveat when ``asset_key`` stands in for ``quoted``."""
     if market_proxy:
         # The proxy marker must live in the heading, not only the caveat: the
@@ -1081,7 +1081,7 @@ def _disclosure_stale_note(snapshot: _FlowSnapshot) -> str:
 
 
 def _is_retraction(
-    d: str, new_m: float, rows_by_date: dict[str, dict], funds: dict[str, dict]
+    d: str, new_m: float, *, rows_by_date: dict[str, dict], funds: dict[str, dict]
 ) -> bool:
     """A revision that pulled ``d`` back to the unposted placeholder, not a new figure."""
     # A day pulled back to the exact-zero placeholder with no fund
@@ -1112,7 +1112,9 @@ def _revision_notes(snapshot: _FlowSnapshot, visible: list[dict], stale_note: st
         rows_by_date = {r["date"]: r for r in visible}
 
         retracted = {
-            d for d, (_old, new) in revised if _is_retraction(d, new, rows_by_date, snapshot.funds)
+            d
+            for d, (_old, new) in revised
+            if _is_retraction(d, new, rows_by_date=rows_by_date, funds=snapshot.funds)
         }
         changes = "; ".join(
             f"{d}: {old:+.1f} → retracted (now unposted)"
@@ -1508,6 +1510,9 @@ def _flat_day_breadth_line(
     return breadth_line
 
 
+_FlowRow = tuple[str, str]
+
+
 def _net_cell(r: dict, funds: dict[str, dict]) -> str:
     """The table's Net Flow cell: the figure, or "not yet posted" for an unreported day."""
     # The same placeholder honesty as the Latest line, applied to every
@@ -1522,7 +1527,12 @@ def _net_cell(r: dict, funds: dict[str, dict]) -> str:
 
 
 def _flow_table(
-    funds: dict[str, dict], visible: list[dict], window: list[dict], latest: dict, fund_scope: str
+    funds: dict[str, dict],
+    *,
+    visible: list[dict],
+    window: list[dict],
+    latest: dict,
+    fund_scope: str,
 ) -> str:
     """The daily-flow table with its row-cap note and, when an older row needs it, the legend."""
     shown = window or visible[-1:]
@@ -1533,7 +1543,7 @@ def _flow_table(
     elif not window:
         note = "\n_(table shows the latest available row)_\n"
 
-    rendered_rows = [(r["date"], _net_cell(r, funds)) for r in shown]
+    rendered_rows: list[_FlowRow] = [(r["date"], _net_cell(r, funds)) for r in shown]
     table = (
         "\n| Date | Net Flow |\n| --- | --- |\n"
         + "\n".join(f"| {date} | {cell} |" for date, cell in rendered_rows)
@@ -1630,7 +1640,7 @@ def get_etf_flow_data(
     )
     stale_note = _disclosure_stale_note(snapshot)
 
-    header_lines = _title_lines(asset_key, quoted, market_proxy)
+    header_lines = _title_lines(asset_key, quoted=quoted, market_proxy=market_proxy)
     if snapshot.stale:
         header_lines.append(_stale_caveat(snapshot.fetched_at, "Treat with caution."))
     header_lines += _breakdown_notes(snapshot, latest)
@@ -1666,4 +1676,7 @@ def get_etf_flow_data(
         + leaders_line
         + breadth_line
     )
-    return header + summary + _flow_table(snapshot.funds, visible, window, latest, fund_scope)
+    table = _flow_table(
+        snapshot.funds, visible=visible, window=window, latest=latest, fund_scope=fund_scope
+    )
+    return header + summary + table

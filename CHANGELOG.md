@@ -192,7 +192,7 @@ Breaking changes within the 0.x line are called out explicitly.
 
 - **The two spot-ETF flow renderers are split into their sections** (dataflows
   refactor plan 2026-10-16, D2-b). `sosovalue.get_etf_flow_data` drops from
-  582 lines to 110 and `farside.get_etf_flow_data` from 301 to 119; each
+  582 lines to 113 and `farside.get_etf_flow_data` from 301 to 115; each
   checks its arguments, loads its snapshot, prints the stale caveat and
   assembles the rest of its report from module-level helpers of its own
   (nineteen for SoSoValue, ten for Farside), each taking only what it reads
@@ -217,7 +217,12 @@ Breaking changes within the 0.x line are called out explicitly.
   they differ only in indentation, `header_lines.append` becoming each
   helper's `notes.append`, Farside's leaders line moving from the summary
   expression into `_leaders_line`, and one statement the formatter now
-  fits on one line. The old functions and the new ones, run over 42,000
+  fits on one line and one (`retracted`) it now splits over three because
+  `_is_retraction` gained its two keyword arguments. The helpers whose
+  adjacent parameters share a type (`_flow_table`'s two row lists,
+  `_title_lines`' two strings, `_is_retraction`'s two maps) take them as
+  keywords, so a swapped call fails to parse rather than to render. The old
+  functions and the new ones, run over 63,000
   generated snapshots each, rendered byte-identical reports. The length
   ratchet loses both rows. Three tests pin what a mutation probe found
   unguarded in both vendors: a truthy non-string `asset` raises the

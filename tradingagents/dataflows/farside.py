@@ -841,7 +841,7 @@ class _Window(NamedTuple):
     look_back_days: int
 
 
-def _title_lines(asset_key: str, quoted: str, market_proxy: bool) -> list[str]:
+def _title_lines(asset_key: str, *, quoted: str, market_proxy: bool) -> list[str]:
     """The heading, plus the proxy caveat when ``asset_key`` stands in for ``quoted``."""
     if market_proxy:
         # The requested asset belongs in the heading, not only in the caveat
@@ -878,7 +878,7 @@ def _data_lag_notes(snapshot: _FlowSnapshot, latest: dict | None, bounds: _Windo
     if latest is not None:
         # Data recency is a separate question from fetch success: farside.co.uk
         # can serve a perfectly parseable page that simply has not been updated
-        # in days. The stale-cache machinery above never sees that case, so
+        # in days. The stale caveat the entry point prints never sees that case, so
         # without this the report would present week-old flows as current.
         lag_days = (curr_dt - datetime.strptime(latest["date"], "%Y-%m-%d")).days
         if lag_days > MAX_DATA_LAG_DAYS:
@@ -994,12 +994,17 @@ def _leaders_line(latest: dict) -> str:
 
 def _net_cell(r: dict) -> str:
     """The table's Net Flow cell: the figure, or "not yet posted" for an unpopulated row."""
+    # Keep the table's Net Flow cell consistent with the Latest line above: an
+    # unpopulated row must not appear as a confident "+0.0" in the densest part of
+    # the report (the rows downstream agents most often re-quote). Applied to every
+    # row, not just the latest — an older unposted row (a mid-history publishing
+    # gap) carries the same blank-vs-genuine-$0 ambiguity as the latest one.
     if _is_unposted_row(r):
         return "not yet posted"
     return f"{r['total']:+.1f}"
 
 
-def _flow_table(window: list[dict], visible: list[dict], latest: dict) -> str:
+def _flow_table(*, window: list[dict], visible: list[dict], latest: dict) -> str:
     """The daily-flow table with its row-cap note and, when an older row needs it, the legend."""
     # If the freshest row predates the window, show the latest available row(s)
     # with a caveat (mirroring fear_greed) so the table matches the Latest line
@@ -1015,11 +1020,6 @@ def _flow_table(window: list[dict], visible: list[dict], latest: dict) -> str:
         # sentence twice. Keep only what the table itself needs to explain.
         note = "\n_(table shows the latest available row)_\n"
 
-    # Keep the table's Net Flow cell consistent with the Latest line above: an
-    # unpopulated row must not appear as a confident "+0.0" in the densest part of
-    # the report (the rows downstream agents most often re-quote). Applied to every
-    # row, not just the latest — an older unposted row (a mid-history publishing
-    # gap) carries the same blank-vs-genuine-$0 ambiguity as the latest one.
     table = (
         "\n| Date | Net Flow |\n| --- | --- |\n"
         + "\n".join(f"| {r['date']} | {_net_cell(r)} |" for r in shown)
@@ -1112,7 +1112,7 @@ def get_etf_flow_data(
     latest = visible[-1] if visible else None
     bounds = _Window(curr_dt=curr_dt, curr_date=curr_date, look_back_days=look_back_days)
 
-    header_lines = _title_lines(asset_key, quoted, market_proxy)
+    header_lines = _title_lines(asset_key, quoted=quoted, market_proxy=market_proxy)
     if snapshot.stale:
         # The family's shared STALE template (one shape whichever vendor served
         # the call), with this vendor's own cause set: "refresh failed", not
@@ -1155,4 +1155,4 @@ def get_etf_flow_data(
         + _streak_line(visible)
         + _leaders_line(latest)
     )
-    return header + summary + _flow_table(window, visible, latest)
+    return header + summary + _flow_table(window=window, visible=visible, latest=latest)

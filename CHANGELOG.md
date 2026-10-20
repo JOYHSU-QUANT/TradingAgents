@@ -333,9 +333,10 @@ Breaking changes within the 0.x line are called out explicitly.
 - **mypy's `strict_equality` is on for the checked files.** A comparison
   between non-overlapping types — a `Literal` verdict tested against a
   misspelled constant, the case `_WithheldReason`'s comment names — is now a
-  type error at the comparison site rather than a silent fall-through; the 148
-  files already under `[tool.mypy]` carried no such comparison, so the floor
-  rises with zero new errors.
+  type error at the comparison site rather than a silent fall-through; that
+  comment is reworded to say both ends are checked. The 148 files already
+  under `[tool.mypy]` carried no such comparison, so the floor rises with zero
+  new errors.
 
 - **The DVOL fetch and the DVOL renderer are split into their sections**
   (dataflows refactor plan 2026-10-16, D2-d, the second of its two halves).
@@ -358,22 +359,27 @@ Breaking changes within the 0.x line are called out explicitly.
   threshold decides both, and the three quality notes one each
   (`_rejected_notes`, `_inconsistent_notes`, `_truncated_notes`); a helper that
   reads one field of the series is handed that value. The moved bodies keep
-  every rendered string, every log message and every comment but ten
-  repointed at the helpers that now hold the code they describe; besides that
-  glue they differ only in indentation, `lines.append` becoming each helper's
+  every rendered string, every log message and every comment but nine
+  repointed at the helpers that now hold the code they describe (twelve
+  lines), with two lines added where `_stale_history_error` reads the newest
+  day off the tally; besides that glue they differ only in indentation, `lines.append` becoming each helper's
   `notes.append`, `return` or `line =`, `raise` becoming `return` where a
   helper answers the error, the `elif` chain of the range line becoming early
   returns, `result["data"]` read once as `rows`, the handed-in value standing
   in for `series.<field>`, the newest usable day read as `max` of the tally
   rather than as the last of the sorted dates, and that sort moved below the
-  staleness refusal it no longer feeds. The old
-  functions and the new ones, run over 40,000 generated cases (the request
+  staleness refusal it no longer feeds. `_fetch_dvol`'s docstring points its
+  first paragraph at the two helpers and drops the paragraph on the request
+  span, which the `max()` comment inside `_fetch_dvol_candles` already
+  carries; `_dvol_section`'s docstring names `_dvol_window` for the closure.
+  The old functions and the new ones, run over 60,000 generated cases (seeds
+  7, 11 and 22; the request
   stubbed with synthetic payloads — shape faults, continuation cursors,
   malformed, out-of-range, non-positive, self-contradicting, duplicated and
   out-of-window candles, whole-feed fault modes — and the renderer handed
   synthetic series), rendered byte-identical reports and raised identical
   errors. The length ratchet loses both rows; `_reading_line` keeps its own.
-  One test pins what a thirty-six-mutation probe found held by nothing: the
+  One test pins what a thirty-seven-mutation probe found held by nothing: the
   whole out-of-range-timestamp body line. No behaviour change.
 
 ### Fixed

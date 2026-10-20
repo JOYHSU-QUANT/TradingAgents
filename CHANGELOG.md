@@ -286,7 +286,7 @@ Breaking changes within the 0.x line are called out explicitly.
 
 - **The options-volatility entry point is split into its sections** (dataflows
   refactor plan 2026-10-16, D2-d, the first of its two halves).
-  `deribit.get_options_market_data` drops from 674 lines to 132 (55 of them
+  `deribit.get_options_market_data` drops from 674 lines to 128 (54 of them
   its docstring); it refuses an unusable date, resolves the symbol
   (`_resolve_asset`, as in the ETF and treasury splits), reads the clock once,
   fetches the DVOL half and then the chain half (`_fetch_chain_half`, which
@@ -311,18 +311,21 @@ Breaking changes within the 0.x line are called out explicitly.
   the reason `_MissReason` already is. The
   moved bodies keep every rendered string and every comment but eleven
   repointed at the helpers that now hold the code they describe, and the
-  derive-it-once remark on `withheld_mid_run`, which is now `_Withholding`'s
+  derive-it-once remark on `withheld_mid_run`, reworded into `_Withholding`'s
   docstring; besides that glue they differ only in indentation,
   `header_lines.append` becoming each helper's `notes.append`,
   `sections.append` and `raise` becoming a helper's `return`, the `elif` chain
-  of body lines becoming early returns, and `attempted` annotated
-  `list[BaseException]`, which retires the one `# type: ignore[arg-type]` the
-  block carried. The old function and the new one, run over 60,000 generated
-  reports (both fetches stubbed with random series, snapshots and failures,
+  of body lines becoming early returns, `chain_withheld` annotated
+  `_WithheldReason | None`, and the one `# type: ignore[arg-type]` the
+  both-halves-failed block carried retired by widening
+  `_aggregate_failure_cls`'s parameter to `Sequence[BaseException]` (it only
+  reads the list, so the covariant type is the honest one). The old function
+  and the new one, run over 100,000 generated reports (seeds 7, 11, 21, 31
+  and 22; both fetches stubbed with random series, snapshots and failures,
   the clock a two-reading sequence), rendered byte-identical reports and
   raised identical errors. The length ratchet loses the row; `_fetch_dvol`
   and `_dvol_section` keep theirs for the second half, and `_reading_line`,
-  which the plan leaves whole, keeps its own. Two tests pin what a
+  which no plan item splits, keeps its own. Two tests pin what a
   thirty-two-mutation probe found held only by a prefix: the whole
   DVOL-unavailable body line and the whole proxied-chain body line. No
   behaviour change.

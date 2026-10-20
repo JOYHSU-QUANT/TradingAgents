@@ -5123,7 +5123,7 @@ class TestThePromptCoversAnUnrankedDvol:
 
 
 class TestTheBodyLinesAreQuotedWhole:
-    """The two body lines the split's mutation probe found pinned only by a prefix.
+    """The two body lines the split's mutation probe (dataflows plan D2-d) found pinned only by a prefix.
 
     Each is the one line a reader of the body sees for a half that is not in the
     report, so the whole sentence is what has to hold, not its opening words.

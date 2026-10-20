@@ -66,7 +66,7 @@ freshness-sensitive — a cached vol snapshot is worth little.
 import logging
 import math
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Literal, NamedTuple, TypeVar
 
@@ -398,10 +398,14 @@ _MissReason = Literal["no_bracket", "non_monotone"]
 _MISS_NO_BRACKET: _MissReason = "no_bracket"
 _MISS_NON_MONOTONE: _MissReason = "non_monotone"
 
-# Why the chain half is withheld by policy, closed for the reason ``_MissReason``
-# is: the verdict is compared against these three spellings at every consumer
-# (grep ``chain_withheld ==``), and under a plain ``str`` a mistyped one would
-# fall through to the outage wording silently.
+# Why the chain half is withheld by policy, closed the way ``_MissReason`` is.
+# What the Literal checks is the PRODUCER side: the assignments in
+# ``_withholding_decision`` and ``_fetch_chain_half`` and the ``_Withholding``
+# constructor must spell one of these three. The consumer comparisons (grep
+# ``chain_withheld ==``) are NOT checked — ``[tool.mypy]`` does not set
+# ``strict_equality`` — so a mistyped spelling there still falls through to the
+# outage wording. Named constants would close that side too, at the price of
+# editing every moved body, which the split deliberately did not.
 _WithheldReason = Literal["historical", "far_future", "proxy"]
 
 # The closing sentence both rejection notes carry. Each note can appear without
@@ -2538,7 +2542,7 @@ def _try_fetch(
 
 
 def _aggregate_failure_cls(
-    attempted: list[BaseException],
+    attempted: Sequence[BaseException],
 ) -> type[VendorRateLimitError] | type[DeribitUnavailableError] | type[DeribitError]:
     """The type for a report where every request made failed, judged over those alone.
 
@@ -2826,7 +2830,7 @@ def _both_halves_failure(
     # otherwise re-classify that same throttle.
     # (_try_fetch never reports None without an error, so this list is never
     # empty on the path that reaches here.)
-    attempted: list[BaseException] = [e for e in (dvol_error, skew_error) if e is not None]
+    attempted = [e for e in (dvol_error, skew_error) if e is not None]
     failure_cls = _aggregate_failure_cls(attempted)
     if failure_cls is VendorRateLimitError:
         return VendorRateLimitError(f"Deribit rate-limited every request made for {currency}")

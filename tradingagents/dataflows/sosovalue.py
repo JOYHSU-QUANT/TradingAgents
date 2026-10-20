@@ -970,8 +970,7 @@ class _Window(NamedTuple):
     ``curr_date`` is ``curr_dt`` in canonical ISO form (never the caller's
     spelling); ``window_start_dt`` / ``window_start`` open the
     ``look_back_days`` window in both forms, because the clamp note measures
-    the API's reach in days from the one and the row filter compares on the
-    other.
+    the API's reach in days from the one and prints the other.
     """
 
     curr_dt: datetime
@@ -1279,7 +1278,11 @@ def _reconciliation(
 
 
 def _fund_scope(snapshot: _FlowSnapshot) -> str:
-    """The scope word the Latest, leaders and table-legend lines share: "no fund" or "no fetched fund"."""
+    """The scope word the Latest, leaders and table-legend lines share.
+
+    "no fund" when every listed fund was enumerated and fetched, "no fetched
+    fund" when part of the universe was never seen.
+    """
     # With failed histories in the mix, "no fund" would claim knowledge of
     # filings those histories never delivered — and an unfetched listing or
     # dropped listing entries leave the same gap: part (or all) of the
@@ -1337,7 +1340,7 @@ def _since_launch_line(latest: dict, asset_key: str) -> str:
 
 
 def _streak_line(visible: list[dict], bounds: _Window) -> str:
-    """The ``**Streak**`` line over every visible session, labelled ``≥N`` at the window's edge."""
+    """The ``**Streak**`` line over every visible session, ``≥N`` at the window's edge."""
     curr_date = bounds.curr_date
     # Streak over every fetched session visible to curr_date. Days with no
     # material flow are transparent (placeholder vs genuine-zero ambiguity,
@@ -1383,7 +1386,7 @@ def _leaders_and_breadth(
     fund_scope: str,
     reconcile: _Reconciliation,
 ) -> tuple[str, str]:
-    """``(leaders_line, breadth_line)`` for the latest day; either is empty when the breakdown cannot say."""
+    """``(leaders_line, breadth_line)`` for the latest day; empty where the breakdown cannot say."""
     # Latest-day fund leaders + breadth, from the per-fund histories. Both are
     # keyed strictly to the aggregate's latest visible date so they can never
     # describe a newer day than the headline figure. The breadth denominator
@@ -1534,7 +1537,7 @@ def _flow_table(
     latest: dict,
     fund_scope: str,
 ) -> str:
-    """The daily-flow table with its row-cap note and, when an older row needs it, the legend."""
+    """The daily-flow table with its note and, for an older unposted row, the legend."""
     shown = window or visible[-1:]
     note = ""
     if len(window) > MAX_ROWS:

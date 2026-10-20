@@ -1005,7 +1005,7 @@ def _net_cell(r: dict) -> str:
 
 
 def _flow_table(*, window: list[dict], visible: list[dict], latest: dict) -> str:
-    """The daily-flow table with its row-cap note and, when an older row needs it, the legend."""
+    """The daily-flow table with its note and, for an older unposted row, the legend."""
     # If the freshest row predates the window, show the latest available row(s)
     # with a caveat (mirroring fear_greed) so the table matches the Latest line
     # above rather than rendering empty.

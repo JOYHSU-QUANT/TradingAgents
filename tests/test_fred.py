@@ -6,6 +6,7 @@ All API access is mocked, so these run without a network connection or a key.
 
 import copy
 import json
+import logging
 import unittest
 from unittest import mock
 
@@ -512,3 +513,65 @@ def test_non_zero_padded_curr_date_still_pins_the_vintage():
         assert captured[path]["realtime_start"] == "2026-06-05", path
         assert captured[path]["realtime_end"] == "2026-06-05", path
     assert captured["series/observations"]["observation_end"] == "2026-06-05"
+
+
+@pytest.mark.unit
+class TestLookBackWindow:
+    """#382: the fork's kernel checks guard the caller's window here too, ahead of any request."""
+
+    @staticmethod
+    def _refuse(look_back_days, match):
+        with (
+            mock.patch.object(fred, "_request", side_effect=AssertionError("must not request")),
+            pytest.raises(VendorError, match=match),
+        ):
+            fred.get_macro_data("unemployment", "2025-09-30", look_back_days)
+
+    @pytest.mark.parametrize("look_back_days", ["90", 90.5, float("nan"), True])
+    def test_a_non_integer_window_is_the_vendors_error(self, look_back_days):
+        # A string used to escape timedelta as TypeError, NaN as ValueError,
+        # 90.5 opened a window at a time of day and True meant one day.
+        self._refuse(look_back_days, "is not an integer")
+
+    @pytest.mark.parametrize("look_back_days", [400_000, 10**6, 10**10])
+    def test_a_window_the_calendar_cannot_hold_is_the_vendors_error(self, look_back_days):
+        # 400,000 opens the window in the year 930, under the MIN_WINDOW_YEAR
+        # floor; 10**6 overflows the subtraction and 10**10 the timedelta
+        # itself. All three used to reach FRED or escape as OverflowError.
+        self._refuse(look_back_days, "is too large for curr_date")
+
+    def test_zero_and_negative_windows_use_the_default(self):
+        # Before: zero made a one-day window and a negative count put the
+        # start after the end; both now fall back like every sibling vendor,
+        # requesting the same observation_start as None does.
+        captured = []
+
+        def _capture(path, params):
+            if path == "series/observations":
+                captured.append(params["observation_start"])
+            return _META if path == "series" else _OBS
+
+        with mock.patch.object(fred, "_request", side_effect=_capture):
+            for look_back_days in (None, 0, -3):
+                fred.get_macro_data("unemployment", "2025-09-30", look_back_days)
+        assert captured == ["2024-09-30"] * 3  # DEFAULT_LOOKBACK_DAYS (365) back
+
+    def test_the_refusal_takes_the_vendor_lane_through_the_router(self, caplog):
+        # A VendorError is a vendor verdict the router logs at WARNING and
+        # renders into the sentinel with its message; a bare built-in used to
+        # be wrapped as a library failure and logged at ERROR with a traceback.
+        set_config({"data_vendors": {"macro_data": "fred"}})
+        with (
+            mock.patch.object(fred, "_request", side_effect=AssertionError("must not request")),
+            caplog.at_level(logging.WARNING, logger="tradingagents.dataflows.interface"),
+        ):
+            out = interface.route_to_vendor("get_macro_indicators", "cpi", "2026-06-01", "90")
+        assert out.startswith("DATA_UNAVAILABLE")
+        assert "is not an integer" in out
+        levels = {
+            record.levelno
+            for record in caplog.records
+            if record.name == "tradingagents.dataflows.interface"
+        }
+        assert logging.WARNING in levels
+        assert logging.ERROR not in levels

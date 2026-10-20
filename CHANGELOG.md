@@ -286,6 +286,29 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **`fred.get_macro_data` checks the caller's `look_back_days` the way the
+  fork's vendors do** (#382, the upstream sibling of #380). The entry point
+  defaulted only `None` and then subtracted the count from `curr_date`
+  unguarded: a string escaped from `timedelta` as `TypeError`, `NaN` as
+  `ValueError`, a count past the calendar as `OverflowError` (each wrapped by
+  the router as a library failure at ERROR), a fraction opened a window at a
+  time of day, zero made a one-day window and a negative count put the
+  start after the end. It now calls the kernel's `look_back_window` and
+  `window_start_dt` (#381) with `VendorError`, the class its own identity
+  check already raises: a non-integer or an unholdable window is refused
+  before any request, and `None`, zero and a negative count fall back to
+  `DEFAULT_LOOKBACK_DAYS`. Every window the calendar holds requests the same
+  `observation_start` as before. This is an upstream file; the upstream-sync
+  conflict points are the `datetime` import (`timedelta` dropped), the new
+  `vendor_common` import, the `look_back_days` Args and Raises docstring
+  lines, and the argument-check block at the top of `get_macro_data`. Four
+  tests, nine
+  cases: the non-integer and the unholdable-window refusals (the year floor,
+  the subtraction overflow and `timedelta`'s own) with the request stubbed
+  to fail, the zero and negative defaults by the `observation_start` they
+  request, and one refusal driven through the router to pin the WARNING
+  vendor lane.
+
 - **A `look_back_days` the report cannot hold is refused as the vendor's own
   error, in every vendor the same way** (#380). The four fork data-source
   entry points that open a trailing window from the caller's `look_back_days`

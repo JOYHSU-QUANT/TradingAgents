@@ -11,7 +11,7 @@ the routing layer treats it as "unavailable" rather than a hard crash.
 
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import pytz
 import requests
@@ -29,6 +29,7 @@ from .utils import (
     raise_for_http_status,
     sanitize_untrusted,
 )
+from .vendor_common import look_back_window, window_start_dt
 
 logger = logging.getLogger(__name__)
 
@@ -232,16 +233,19 @@ def get_macro_data(
             run sees the values that were actually published by that date, not
             later revisions. Without this, revision-prone series (CPI, GDP, ...)
             would leak future information into a backtest (#1275).
-        look_back_days: Trailing window length; ``None`` uses DEFAULT_LOOKBACK_DAYS.
+        look_back_days: Trailing window length; ``None``, zero or a negative
+            count uses DEFAULT_LOOKBACK_DAYS; a non-integer, or a window the
+            calendar cannot hold, raises ``VendorError`` (#382).
 
     Returns:
         A markdown report with the series title, units, frequency, the latest
         value, the change over the window, and a recent observation table.
 
     Raises:
-        VendorError: When the series endpoint's metadata names a different
-            series than requested (identity echo, #36 family) — routed
-            callers turn this into try-next-vendor / DATA_UNAVAILABLE.
+        VendorError: When ``look_back_days`` is refused (see Args), or
+            when the series endpoint's metadata names a different series than
+            requested (identity echo, #36 family) — routed callers turn this
+            into try-next-vendor / DATA_UNAVAILABLE.
 
     An unusable ``curr_date`` answers the shared ``INVALID_CURR_DATE`` sentinel
     before any request, as the core-category tools do (#119): a bare
@@ -252,11 +256,14 @@ def get_macro_data(
     if refusal is not None:
         return refusal
 
-    if look_back_days is None:
-        look_back_days = DEFAULT_LOOKBACK_DAYS
+    # The caller's window, checked and defaulted the way the fork's vendors do (#380, #382).
+    look_back_days = look_back_window(
+        look_back_days, default=DEFAULT_LOOKBACK_DAYS, error_cls=VendorError
+    )
 
     end_dt = datetime.strptime(curr_date, "%Y-%m-%d")
-    start_date = (end_dt - timedelta(days=look_back_days)).strftime("%Y-%m-%d")
+    start_dt = window_start_dt(end_dt, look_back_days, error_cls=VendorError)
+    start_date = start_dt.strftime("%Y-%m-%d")
 
     # Pin the data vintage. FRED defaults both realtime bounds to today, serving
     # the LATEST revision of every observation; a single-day realtime interval

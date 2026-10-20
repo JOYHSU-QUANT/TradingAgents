@@ -3442,9 +3442,7 @@ class TestLookBackWindow:
             sosovalue_macro, "_load_snapshot", side_effect=AssertionError("must not load")
         ):
             for look_back_days in (10**6, 10**10):
-                with pytest.raises(
-                    sosovalue_macro.SoSoValueError, match="is too large"
-                ):
+                with pytest.raises(sosovalue_macro.SoSoValueError, match="is too large"):
                     sosovalue_macro.get_economic_calendar_data("2026-08-11", look_back_days)
 
     def test_the_kernel_helper_keeps_the_cause_and_the_vendors_class(self):

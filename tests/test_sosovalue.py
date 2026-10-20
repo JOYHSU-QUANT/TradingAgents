@@ -3192,9 +3192,7 @@ class TestOversizedLookBackWindow:
             sosovalue, "_load_snapshot", side_effect=AssertionError("must not load")
         ):
             for look_back_days in (10**6, 10**10):
-                with pytest.raises(
-                    sosovalue.SoSoValueError, match="is too large"
-                ):
+                with pytest.raises(sosovalue.SoSoValueError, match="is too large"):
                     sosovalue.get_etf_flow_data("BTC", "2026-07-08", look_back_days)
 
     def test_a_non_integer_window_is_the_vendors_error(self):

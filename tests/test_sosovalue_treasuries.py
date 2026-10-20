@@ -2010,9 +2010,7 @@ class TestOversizedLookBackWindow:
     """
 
     def _refuse(self, look_back_days, snapshot=None):
-        with pytest.raises(
-            sosovalue_treasuries.SoSoValueError, match="is too large"
-        ):
+        with pytest.raises(sosovalue_treasuries.SoSoValueError, match="is too large"):
             _render(snapshot or _snapshot(), look_back_days=look_back_days)
 
     def test_a_window_past_the_calendar_is_the_vendors_error(self):
@@ -2022,10 +2020,11 @@ class TestOversizedLookBackWindow:
 
     def test_the_guard_runs_before_the_snapshot_is_loaded(self):
         # An argument check, so no fetch and no cache read precede it.
-        with mock.patch.object(
-            sosovalue_treasuries, "_load_snapshot", side_effect=AssertionError("must not load")
-        ), pytest.raises(
-            sosovalue_treasuries.SoSoValueError, match="is too large"
+        with (
+            mock.patch.object(
+                sosovalue_treasuries, "_load_snapshot", side_effect=AssertionError("must not load")
+            ),
+            pytest.raises(sosovalue_treasuries.SoSoValueError, match="is too large"),
         ):
             sosovalue_treasuries.get_btc_treasury_data("BTC", "2026-08-11", 10**6)
 

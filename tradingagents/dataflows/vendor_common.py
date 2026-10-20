@@ -3,7 +3,8 @@
 This module holds what the fork's rolling-snapshot vendors import, each
 taking what it needs: the trust-boundary predicates, the clock and cache-age
 helpers, the cache read preamble and rejecter, the STALE template, the US$m
-formatters and the cache/TTL/stale-fallback skeleton
+formatters, the caller's-window checks (``look_back_window``,
+``window_start_dt``, #380) and the cache/TTL/stale-fallback skeleton
 (``load_rolling_snapshot``). They grew
 inside ``sosovalue_common``, the first family to need them, and moved out
 under public names (dataflows refactor plan 2026-10-16, D1); what is
@@ -232,7 +233,7 @@ def window_start_dt(
     The count has passed :func:`look_back_window`, so it is a positive int;
     what remains is its size (#380). Past roughly 739,000 days from a
     present-day ``curr_dt`` the subtraction leaves ``datetime``'s range and
-    past a billion ``timedelta`` refuses the count outright, both as
+    from a billion up ``timedelta`` refuses the count outright, both as
     ``OverflowError``; from about 375,000 the window opens before
     :data:`MIN_WINDOW_YEAR`, where its ISO string stops being four digits on
     every platform. All three are refused with one sentence naming both

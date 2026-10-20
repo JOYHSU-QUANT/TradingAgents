@@ -2151,8 +2151,8 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
             window the calendar cannot hold (before the year 1000), the caller's
             malformed argument being reported as this vendor's error class rather
             than left to escape as a raw ``TypeError``, which the router would
-            render into the model-visible sentinel with the argument echoed
-            verbatim; or if the live fetch fails — including on a pure network
+            render into the model-visible sentinel under the built-in's own
+            name; or if the live fetch fails — including on a pure network
             error — and no cache is usable, because none exists or the newest
             is past ``MAX_STALE_DAYS``.
         SoSoValueRateLimitError: same no-usable-cache case when the sweep died

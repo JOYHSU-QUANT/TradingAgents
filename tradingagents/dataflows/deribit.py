@@ -1593,8 +1593,8 @@ def _stale_history_error(
     """The staleness refusal, or ``None`` when the newest usable reading is recent enough.
 
     Answered rather than raised, like ``_empty_history_error``, so ``_fetch_dvol``'s
-    own frame raises it. Call only after ``_empty_history_error``'s check:
-    ``tally.by_date`` must be non-empty.
+    own frame raises it. Call only after ``_fetch_dvol``'s empty-history check
+    (``if not tally.by_date``): ``tally.by_date`` must be non-empty.
     """
     skipped_non_positive = tally.skipped_non_positive
     skipped_inconsistent = tally.skipped_inconsistent
@@ -1665,7 +1665,8 @@ def _stale_history_error(
             )
         )
         return DeribitError(
-            # "on or before {curr_date}", like every sibling message here and the
+            # "on or before {curr_date}", like every message ``_empty_history_error``
+            # answers and the
             # rendered lag line. The series is filtered to curr_date, so an
             # unqualified "the newest usable reading is dated X" is a claim about
             # the LIVE feed made from a view this module deliberately truncated —
@@ -1694,7 +1695,8 @@ def _fetch_dvol(currency: str, curr_dt: datetime, today: str) -> DvolSeries:
     ``today`` — the UTC date of the clock — is passed in rather than read here. The
     staleness bound is measured from ``min(curr_date, today)`` because a feed cannot
     be behind a date that has not arrived, and that is the identical rule
-    ``_dvol_section`` applies to the lag note it renders. Taking a fourth clock
+    ``_data_lag`` applies to the lag note ``_dvol_section`` renders. Taking a fourth
+    clock
     reading instead would let the two drift apart by a fetch envelope, which is how
     a report comes to refuse a reading on one arithmetic and date it on another.
     """
@@ -1956,7 +1958,7 @@ def _percentile_line(
             )
         else:
             line = (
-                # "usable", for the reason the range branch above carries it.
+                # "usable", for the reason ``_range_line``'s empty branch carries it.
                 f"**{DVOL_PERCENTILE_WINDOW_DAYS}d percentile:** not computed — no usable "
                 f"DVOL reading falls inside the {DVOL_PERCENTILE_WINDOW_DAYS} days ending "
                 f"{curr_date}"

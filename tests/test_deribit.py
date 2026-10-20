@@ -5147,7 +5147,8 @@ class TestARejectedTimestampNamesItself:
     """The out-of-range candle timestamp error, pinned whole through the public entry point.
 
     The split's mutation probe (dataflows plan D2-d, second half) found the
-    message held by nothing: the existing test asserts only the error type.
+    message held by nothing: no test fed a candle whose timestamp overflows the
+    conversion, so the raise ran under no assertion at all.
     """
 
     def test_an_out_of_range_candle_timestamp_is_quoted_whole(self):

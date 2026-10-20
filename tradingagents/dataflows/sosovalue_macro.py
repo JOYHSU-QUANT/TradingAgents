@@ -118,10 +118,12 @@ from .vendor_common import (
     is_non_negative_int as _is_non_negative_int,
     is_safe_text as _is_safe_text,
     load_rolling_snapshot,
+    look_back_window as _look_back_window,
     plural as _plural,
     read_cache_preamble as _read_cache_preamble,
     stale_caveat as _stale_caveat,
     valid_dated_rows as _valid_dated_rows,
+    window_start_dt as _window_start_dt,
 )
 
 logger = logging.getLogger(__name__)
@@ -2145,11 +2147,12 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
     argument.
 
     Raises:
-        SoSoValueError: if ``look_back_days`` is not an integer (a caller's
-            malformed argument is reported as this vendor's error class rather
+        SoSoValueError: if ``look_back_days`` is not an integer or opens a
+            window the calendar cannot hold (before the year 1000), the caller's
+            malformed argument being reported as this vendor's error class rather
             than left to escape as a raw ``TypeError``, which the router would
             render into the model-visible sentinel with the argument echoed
-            verbatim); or if the live fetch fails — including on a pure network
+            verbatim; or if the live fetch fails — including on a pure network
             error — and no cache is usable, because none exists or the newest
             is past ``MAX_STALE_DAYS``.
         SoSoValueRateLimitError: same no-usable-cache case when the sweep died
@@ -2171,19 +2174,10 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
     if refusal is not None:
         return refusal
 
-    # look_back_days is a caller-supplied tool argument, and a non-int reaches
-    # ``<=`` first, where the TypeError escapes the vendor taxonomy into the
-    # router's bare except and is rendered into the model-visible sentinel.
-    # bool is rejected explicitly even though it passes isinstance(x, int) —
-    # True would silently mean a one-day window rather than the default.
-    if look_back_days is not None and (
-        isinstance(look_back_days, bool) or not isinstance(look_back_days, int)
-    ):
-        raise SoSoValueError(
-            f"look_back_days {_sanitize(repr(look_back_days), limit=120)} is not an integer"
-        )
-    if look_back_days is None or look_back_days <= 0:
-        look_back_days = DEFAULT_LOOKBACK_DAYS
+    # The caller's window, checked and defaulted the way every vendor does (#380).
+    look_back_days = _look_back_window(
+        look_back_days, default=DEFAULT_LOOKBACK_DAYS, error_cls=SoSoValueError
+    )
 
     # Normalise curr_date BEFORE any lexical date comparison: strptime accepts
     # non-zero-padded input ("2026-6-5"), which compares wrong against
@@ -2192,7 +2186,8 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
     curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
     curr_date = curr_dt.strftime("%Y-%m-%d")
     ahead_end = (curr_dt + timedelta(days=AHEAD_DAYS)).strftime("%Y-%m-%d")
-    window_start = (curr_dt - timedelta(days=look_back_days)).strftime("%Y-%m-%d")
+    window_start_dt = _window_start_dt(curr_dt, look_back_days, error_cls=SoSoValueError)
+    window_start = window_start_dt.strftime("%Y-%m-%d")
 
     snapshot = _load_snapshot()
     window = _Window(

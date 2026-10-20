@@ -3180,3 +3180,30 @@ class TestRollingSnapshotIsTheFamilysNotSoSoValues:
         with pytest.raises(_Stop):
             module._load_snapshot(*args)
         assert seen["vendor"] == "SoSoValue"
+
+
+@pytest.mark.unit
+class TestOversizedLookBackWindow:
+    """#380: a window the calendar cannot hold is the caller's bug, reported as the vendor's error."""
+
+    def test_a_window_past_the_calendar_is_the_vendors_error(self):
+        # Checked before the snapshot is loaded, so no fetch precedes the refusal.
+        with mock.patch.object(
+            sosovalue, "_load_snapshot", side_effect=AssertionError("must not load")
+        ):
+            for look_back_days in (10**6, 10**10):
+                with pytest.raises(
+                    sosovalue.SoSoValueError, match="look_back_days is too large"
+                ):
+                    sosovalue.get_etf_flow_data("BTC", "2026-07-08", look_back_days)
+
+    def test_a_non_integer_window_is_the_vendors_error(self):
+        # NaN used to escape timedelta as a bare ValueError and 30.5 opened a
+        # window at a time of day; the family's kernel check now refuses both,
+        # as the macro and treasuries entry points already did.
+        with mock.patch.object(
+            sosovalue, "_load_snapshot", side_effect=AssertionError("must not load")
+        ):
+            for look_back_days in ("3", 3.5, float("nan"), True):
+                with pytest.raises(sosovalue.SoSoValueError, match="is not an integer"):
+                    sosovalue.get_etf_flow_data("BTC", "2026-07-08", look_back_days)

@@ -1115,3 +1115,25 @@ class TestRouting:
         assert interface.is_category_disabled("crypto_sentiment") is True
         set_config({"data_vendors": {"crypto_sentiment": "alternative_me"}})
         assert interface.is_category_disabled("crypto_sentiment") is False
+
+
+@pytest.mark.unit
+class TestOversizedLookBackWindow:
+    """#380: a window the calendar cannot hold is the caller's bug, reported as the vendor's error."""
+
+    def test_a_window_past_the_calendar_is_the_vendors_error(self):
+        # Checked before the page is loaded, so no fetch precedes the refusal;
+        # the empty-page early return no longer sits ahead of it either.
+        with mock.patch.object(farside, "_load_flows", side_effect=AssertionError("must not load")):
+            for look_back_days in (10**6, 10**10):
+                with pytest.raises(farside.FarsideError, match="look_back_days is too large"):
+                    farside.get_etf_flow_data("BTC", "2026-07-08", look_back_days)
+
+    def test_a_non_integer_window_is_the_vendors_error(self):
+        # NaN used to escape timedelta as a bare ValueError and 30.5 opened a
+        # window at a time of day; the family's kernel check now refuses both,
+        # as the SoSoValue entry points already did.
+        with mock.patch.object(farside, "_load_flows", side_effect=AssertionError("must not load")):
+            for look_back_days in ("30", 30.5, float("nan"), True):
+                with pytest.raises(farside.FarsideError, match="is not an integer"):
+                    farside.get_etf_flow_data("BTC", "2026-07-08", look_back_days)

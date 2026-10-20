@@ -72,7 +72,7 @@ are normalized to floats at the parse boundary, so the cache stores numbers.
 import logging
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import NamedTuple
 from urllib.parse import quote
 
@@ -107,10 +107,12 @@ from .vendor_common import (
     is_non_negative_int as _is_non_negative_int,
     is_safe_text as _is_safe_text,
     load_rolling_snapshot,
+    look_back_window as _look_back_window,
     plural as _plural,
     read_cache_preamble as _read_cache_preamble,
     stale_caveat as _stale_caveat,
     valid_dated_rows as _valid_dated_rows,
+    window_start_dt as _window_start_dt,
 )
 
 logger = logging.getLogger(__name__)
@@ -1493,7 +1495,8 @@ def get_btc_treasury_data(
     argument.
 
     Raises:
-        SoSoValueError: if ``look_back_days`` is not an integer, or if
+        SoSoValueError: if ``look_back_days`` is not an integer or opens a window
+            the calendar cannot hold (before the year 1000), or if
             ``asset`` is truthy but not a string (a caller's malformed argument
             is reported as this vendor's error class rather than left to escape
             as a raw ``TypeError``/``AttributeError``, which the router would
@@ -1521,25 +1524,18 @@ def get_btc_treasury_data(
     if refusal is not None:
         return refusal
 
-    # Guarded like ``asset`` in ``_resolve_asset``, and for the same reason: a
-    # non-int reaches ``<=`` first, where the TypeError escapes the vendor
-    # taxonomy into the router's bare except and is rendered into the
-    # model-visible sentinel. bool is rejected explicitly even though it passes
-    # isinstance(x, int) — True would silently mean a one-day window rather
-    # than the default. Mirrors the macro twin.
-    if look_back_days is not None and (
-        isinstance(look_back_days, bool) or not isinstance(look_back_days, int)
-    ):
-        raise SoSoValueError(
-            f"look_back_days {_sanitize(repr(look_back_days), limit=120)} is not an integer"
-        )
-    if look_back_days is None or look_back_days <= 0:
-        look_back_days = DEFAULT_LOOKBACK_DAYS
+    # The caller's window, checked and defaulted the way every vendor does (#380);
+    # ``asset`` is guarded for the same reason in ``_resolve_asset``.
+    look_back_days = _look_back_window(
+        look_back_days, default=DEFAULT_LOOKBACK_DAYS, error_cls=SoSoValueError
+    )
 
     # Normalise curr_date BEFORE any lexical date comparison (family rule).
     # The refusal above already proved this parses.
     curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
     curr_date = curr_dt.strftime("%Y-%m-%d")
+    window_start_dt = _window_start_dt(curr_dt, look_back_days, error_cls=SoSoValueError)
+    window_start = window_start_dt.strftime("%Y-%m-%d")
     asset_key, market_proxy, quoted = _resolve_asset(asset)
     if asset_key is None:
         return (
@@ -1553,7 +1549,7 @@ def get_btc_treasury_data(
     window = _Window(
         curr_dt=curr_dt,
         curr_date=curr_date,
-        window_start=(curr_dt - timedelta(days=look_back_days)).strftime("%Y-%m-%d"),
+        window_start=window_start,
         look_back_days=look_back_days,
     )
     visible_by_company = _visible_by_company(snapshot.companies, window)

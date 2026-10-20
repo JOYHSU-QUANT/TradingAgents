@@ -78,7 +78,7 @@ reaches — the report says so instead of pretending the history is complete.
 
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import NamedTuple
 from urllib.parse import quote
 
@@ -115,10 +115,12 @@ from .vendor_common import (
     is_iso_date as _is_iso_date,
     is_non_negative_int as _is_non_negative_int,
     load_rolling_snapshot,
+    look_back_window as _look_back_window,
     plural as _plural,
     read_cache_preamble as _read_cache_preamble,
     sign as _sign,
     stale_caveat as _stale_caveat,
+    window_start_dt as _window_start_dt,
 )
 
 logger = logging.getLogger(__name__)
@@ -1606,8 +1608,10 @@ def get_etf_flow_data(
     if refusal is not None:
         return refusal
 
-    if look_back_days is None or look_back_days <= 0:
-        look_back_days = DEFAULT_LOOKBACK_DAYS
+    # The caller's window, checked and defaulted the way every vendor does (#380).
+    look_back_days = _look_back_window(
+        look_back_days, default=DEFAULT_LOOKBACK_DAYS, error_cls=SoSoValueError
+    )
 
     # Normalise curr_date BEFORE any lexical date comparison: strptime accepts
     # non-zero-padded input ("2026-6-5"), which compares wrong against
@@ -1615,6 +1619,8 @@ def get_etf_flow_data(
     # refusal above already proved this parses.
     curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
     curr_date = curr_dt.strftime("%Y-%m-%d")
+    window_start_dt = _window_start_dt(curr_dt, look_back_days, error_cls=SoSoValueError)
+    window_start = window_start_dt.strftime("%Y-%m-%d")
     asset_key, market_proxy, quoted = _resolve_asset(asset)
     if asset_key is None:
         # Same no-signal statement as the Farside vendor: a stablecoin has no
@@ -1632,8 +1638,6 @@ def get_etf_flow_data(
     visible = [r for r in snapshot.summary_rows if r["date"] <= curr_date]
     latest = visible[-1] if visible else None
     latest_flows = _fund_flows_on(snapshot.funds, latest["date"]) if latest else {}
-    window_start_dt = curr_dt - timedelta(days=look_back_days)
-    window_start = window_start_dt.strftime("%Y-%m-%d")
     bounds = _Window(
         curr_dt=curr_dt,
         curr_date=curr_date,

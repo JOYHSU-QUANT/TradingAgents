@@ -386,3 +386,13 @@ class TestRouting:
         ):
             out = interface.route_to_vendor("get_fear_greed", "2026-07-23", 30)
         assert "DATA_UNAVAILABLE" in out
+
+@pytest.mark.unit
+class TestLookBackWindow:
+    """#380: the family's type check runs here too, ahead of the clamp and the fetch."""
+
+    def test_a_non_integer_window_is_the_vendors_error(self):
+        with mock.patch.object(fear_greed, "_request", side_effect=AssertionError("must not fetch")):
+            for look_back_days in ("30", 30.5, float("nan"), True):
+                with pytest.raises(fear_greed.FearGreedError, match="is not an integer"):
+                    fear_greed.get_fear_greed_data("2026-07-23", look_back_days)

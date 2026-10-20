@@ -30,6 +30,7 @@ from .utils import (
     raise_for_http_status,
     sanitize_untrusted,
 )
+from .vendor_common import look_back_window as _look_back_window
 
 logger = logging.getLogger(__name__)
 
@@ -203,16 +204,13 @@ def get_fear_greed_data(
     if refusal is not None:
         return refusal
 
-    # A None, zero, or negative window falls back to the default rather than
-    # sizing a nonsensical fetch limit. A 0-day window is especially degenerate
-    # here: unless a reading is dated exactly curr_date it collapses to the
-    # single-latest fallback. Symmetric with farside.get_etf_flow_data.
-    if look_back_days is None or look_back_days <= 0:
-        look_back_days = DEFAULT_LOOKBACK_DAYS
-    elif look_back_days > MAX_LOOKBACK_DAYS:
-        # An untrusted window must not size an unbounded outbound fetch (the
-        # `limit` below scales with it); clamp to a year, far beyond any real use.
-        look_back_days = MAX_LOOKBACK_DAYS
+    # The caller's window, checked and defaulted the way every vendor does
+    # (#380), then clamped to MAX_LOOKBACK_DAYS (see the constant): here it
+    # sizes the outbound fetch rather than only filtering rows.
+    look_back_days = min(
+        _look_back_window(look_back_days, default=DEFAULT_LOOKBACK_DAYS, error_cls=FearGreedError),
+        MAX_LOOKBACK_DAYS,
+    )
 
     # Normalise curr_date BEFORE the lookahead filter below. strptime accepts
     # non-zero-padded input ("2026-6-5"), which then compares wrong against the

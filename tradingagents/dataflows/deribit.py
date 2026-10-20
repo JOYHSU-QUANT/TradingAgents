@@ -401,11 +401,11 @@ _MISS_NON_MONOTONE: _MissReason = "non_monotone"
 # Why the chain half is withheld by policy, closed the way ``_MissReason`` is.
 # What the Literal checks is the PRODUCER side: the assignments in
 # ``_withholding_decision`` and ``_fetch_chain_half`` and the ``_Withholding``
-# constructor must spell one of these three. The consumer comparisons (grep
-# ``chain_withheld ==`` and ``!=``) are NOT checked — ``[tool.mypy]`` does not set
-# ``strict_equality`` — so a mistyped spelling there still falls through to the
-# outage wording. Named constants would close that side too, at the price of
-# editing every moved body, which the split deliberately did not.
+# constructor must spell one of these three, and — since ``[tool.mypy]`` sets
+# ``strict_equality`` — so must the consumer comparisons (grep
+# ``chain_withheld ==`` and ``!=``): a mistyped spelling at either end is a type
+# error rather than a silent fall-through to the outage wording. Named constants
+# would add nothing the checker does not already enforce.
 _WithheldReason = Literal["historical", "far_future", "proxy"]
 
 # The closing sentence both rejection notes carry. Each note can appear without
@@ -1279,25 +1279,29 @@ def _fetch_chain(currency: str, now: datetime) -> SkewSnapshot:
     return snapshot._replace(listed_for_expiry=listed)
 
 
-def _fetch_dvol(currency: str, curr_dt: datetime, today: str) -> DvolSeries:
-    """Fetch the DVOL daily readings for the window ending at ``curr_date``.
+class _DvolTally(NamedTuple):
+    """What ``_parse_dvol_candles`` kept and counted.
 
-    The request window ends at the last instant of ``curr_date`` (UTC) and the
-    parsed rows are filtered again on the date string, so a past ``curr_date``
-    cannot pick up a later reading even if Deribit widened the range it honours.
+    ``by_date`` is the usable close per day on or before ``curr_date``; the two
+    rejection classes travel with the newest rejected day of each, and
+    ``newest_rejected`` is the newer of those two dates (``None`` when nothing
+    was rejected), derived once there for the reason its comment gives.
+    """
 
-    The span is driven by the longer of the two statistics windows (the
-    percentile's), since the shorter range window is a subset of it.
+    by_date: dict[str, float]
+    skipped_non_positive: int
+    newest_skipped: str | None
+    skipped_inconsistent: int
+    newest_inconsistent: str | None
+    newest_rejected: str | None
 
-    Raises when the newest usable reading is older than MAX_DVOL_STALENESS_DAYS, so
-    a stalled feed reports its half absent rather than headlining a months-old print.
 
-    ``today`` — the UTC date of the clock — is passed in rather than read here. The
-    staleness bound is measured from ``min(curr_date, today)`` because a feed cannot
-    be behind a date that has not arrived, and that is the identical rule
-    ``_dvol_section`` applies to the lag note it renders. Taking a fourth clock
-    reading instead would let the two drift apart by a fetch envelope, which is how
-    a report comes to refuse a reading on one arithmetic and date it on another.
+def _fetch_dvol_candles(currency: str, curr_dt: datetime) -> tuple[list[object], bool]:
+    """Request the DVOL history ending on ``curr_dt``'s day: ``(rows, truncated)``.
+
+    Raises ``DeribitError`` when the response carries no ``data`` list;
+    ``truncated`` is whether Deribit set a continuation cursor (logged here and
+    carried into the report by the caller).
     """
     # max() rather than naming the percentile window directly: the span only has
     # to cover the LONGER of the two statistics windows, and hardcoding which one
@@ -1338,7 +1342,65 @@ def _fetch_dvol(currency: str, curr_dt: datetime, today: str) -> DvolSeries:
             currency,
             DVOL_PERCENTILE_WINDOW_DAYS,
         )
-    curr_date = curr_dt.strftime("%Y-%m-%d")
+    return result["data"], truncated
+
+
+def _candle_is_consistent(row: list[float]) -> bool:
+    """Whether a shape-checked candle satisfies its own arithmetic."""
+    # The candle must satisfy its own arithmetic: a positive low, with the open
+    # and the close both inside its high/low range.
+    # Until this check the row was guarded on ONE side only — a close of 0.0
+    # was refused as broken while a close of 3000.0 sitting in a 39.0/41.0
+    # candle was published as fact, and 3000% reads to a model as a real
+    # extreme-vol regime rather than as garbage. It set the headline level, the
+    # 30-day max and the percentile basis, in all three of the places an
+    # absence is otherwise disclosed, with no caveat anywhere. The row carries
+    # the evidence that refutes it.
+    #
+    # BOTH price fields are tested, not only the close this module reads: an
+    # open outside the range is the same evidence of the same fault. Every
+    # sentence describing the rejection therefore names each condition this
+    # tests, so the wording cannot be narrower than the test — the defect that
+    # first produced this guard, and which the guard's own first draft repeated.
+    #
+    # The positivity term is keyed off the LOW alone, and covers all four prices
+    # because of the ordering terms beside it: high >= open >= low and
+    # high >= close >= low, so low > 0 makes every price positive. Without it
+    # the row was still guarded on one side only, one level down — the close
+    # was checked for sign and the other three were not, so a candle carrying
+    # open -5 and low -10 beside a close of 40.5 passed both guards and
+    # published, though a negative low on an implied-vol index is exactly the
+    # sign or field-mapping fault this check exists to catch, and the row again
+    # carries the evidence that refutes it. contrib's Candle.__post_init__ is
+    # the same shape: one positivity comparison on the minimum, plus ordering.
+    #
+    # This is also the only check that can see a REORDERED row, which the shape
+    # guard in ``_parse_dvol_candles`` cannot: a permuted [ts, close, open, high, low] has length 5
+    # and five finite numbers, so the module would read the day's LOW as the
+    # close, silently, on every row, for a year.
+    #
+    # Skipped rather than fatal, on the grounds ``_parse_dvol_candles``'s non-positive branch already
+    # states: one bad candle must not cost a year of history, and dropping it
+    # leaves an older reading as the latest, which the report dates and ages
+    # honestly. No plausibility bound is implied — a uniformly rescaled candle
+    # is self-consistent and passes, and inventing a ceiling for DVOL is a
+    # different decision from enforcing the row's own arithmetic.
+    _, candle_open, candle_high, candle_low, candle_close = row
+    return (
+        candle_low > 0
+        and candle_low <= candle_open <= candle_high
+        and candle_low <= candle_close <= candle_high
+    )
+
+
+def _parse_dvol_candles(rows: list[object], *, currency: str, curr_date: str) -> _DvolTally:
+    """Keep the usable close per day on or before ``curr_date``; count what was rejected.
+
+    Raises ``DeribitError`` for a candle of the wrong shape or with an
+    out-of-range timestamp (fatal: the close would otherwise be misread); skips a
+    non-positive or self-contradicting candle (``_candle_is_consistent``) with a
+    warning, counting only the in-window ones.
+    """
     by_date: dict[str, float] = {}
     # The candle timestamp behind each kept day, so a repeated day resolves by
     # which candle is actually newer rather than by which arrived last. Deribit
@@ -1353,16 +1415,16 @@ def _fetch_dvol(currency: str, curr_dt: datetime, today: str) -> DvolSeries:
     # unrelated rejection a year ago renders identically to a feed whose every
     # recent print was rejected — two different operator actions.
     newest_skipped: str | None = None
-    # The same pair for the second rejection class (see the consistency check
-    # below), counted separately because it names a different fault.
+    # The same pair for the second rejection class (see
+    # ``_candle_is_consistent``), counted separately because it names a different fault.
     skipped_inconsistent = 0
     newest_inconsistent: str | None = None
-    for row in result["data"]:
+    for row in rows:
         # [timestamp_ms, open, high, low, close]; a shape change here would
         # silently reinterpret which number is the close, so it is fatal. Note
         # what this test can and cannot see: it catches a row of the wrong LENGTH
         # or carrying a non-number, but a permutation of the five values passes it
-        # untouched. The consistency check below is what covers that case.
+        # untouched. ``_candle_is_consistent`` is what covers that case.
         if not isinstance(row, list) or len(row) != 5 or not all(_is_finite_real(v) for v in row):
             raise DeribitError(
                 # Capped here rather than where this is rendered: the render sites
@@ -1406,50 +1468,7 @@ def _fetch_dvol(currency: str, curr_dt: datetime, today: str) -> DvolSeries:
                 currency,
             )
             continue
-        # The candle must satisfy its own arithmetic: a positive low, with the open
-        # and the close both inside its high/low range.
-        # Until this check the row was guarded on ONE side only — a close of 0.0
-        # was refused as broken while a close of 3000.0 sitting in a 39.0/41.0
-        # candle was published as fact, and 3000% reads to a model as a real
-        # extreme-vol regime rather than as garbage. It set the headline level, the
-        # 30-day max and the percentile basis, in all three of the places an
-        # absence is otherwise disclosed, with no caveat anywhere. The row carries
-        # the evidence that refutes it.
-        #
-        # BOTH price fields are tested, not only the close this module reads: an
-        # open outside the range is the same evidence of the same fault. Every
-        # sentence describing the rejection therefore names each condition this
-        # tests, so the wording cannot be narrower than the test — the defect that
-        # first produced this guard, and which the guard's own first draft repeated.
-        #
-        # The positivity term is keyed off the LOW alone, and covers all four prices
-        # because of the ordering terms beside it: high >= open >= low and
-        # high >= close >= low, so low > 0 makes every price positive. Without it
-        # the row was still guarded on one side only, one level down — the close
-        # was checked for sign and the other three were not, so a candle carrying
-        # open -5 and low -10 beside a close of 40.5 passed both guards and
-        # published, though a negative low on an implied-vol index is exactly the
-        # sign or field-mapping fault this check exists to catch, and the row again
-        # carries the evidence that refutes it. contrib's Candle.__post_init__ is
-        # the same shape: one positivity comparison on the minimum, plus ordering.
-        #
-        # This is also the only check that can see a REORDERED row, which the shape
-        # guard above cannot: a permuted [ts, close, open, high, low] has length 5
-        # and five finite numbers, so the module would read the day's LOW as the
-        # close, silently, on every row, for a year.
-        #
-        # Skipped rather than fatal, on the grounds the non-positive branch already
-        # states: one bad candle must not cost a year of history, and dropping it
-        # leaves an older reading as the latest, which the report dates and ages
-        # honestly. No plausibility bound is implied — a uniformly rescaled candle
-        # is self-consistent and passes, and inventing a ceiling for DVOL is a
-        # different decision from enforcing the row's own arithmetic.
-        _, candle_open, candle_high, candle_low, candle_close = row
-        if not (
-            candle_low > 0
-            and candle_low <= candle_open <= candle_high
-            and candle_low <= candle_close <= candle_high
-        ):
+        if not _candle_is_consistent(row):
             if day <= curr_date:
                 # Counted on the same terms as the non-positive class above, and
                 # for the same reason: only an IN-WINDOW candle was ever a
@@ -1473,14 +1492,14 @@ def _fetch_dvol(currency: str, curr_dt: datetime, today: str) -> DvolSeries:
             ts_by_date[day] = row[0]
             by_date[day] = float(row[4])
     # The newest date across BOTH rejection classes, derived once here rather than
-    # at each of the two places that interpolate it — the empty-series raises below
-    # and the staleness refusal further down. Both run after this loop, so the
+    # at each of the two places that interpolate it — ``_empty_history_error``
+    # and ``_stale_history_error``. Both run after this loop, so the
     # inputs are final at this point, and computing it twice gave a third rejection
     # class two sites to update in lockstep.
     #
     # ``default=None`` rather than a guard around the assignment: with no rejections
     # at all both dates are None, and a bare max() over the empty generator would
-    # raise ValueError on the plainest of the paths below. Bound unconditionally so
+    # raise ValueError on the plainest of their paths. Bound unconditionally so
     # the name exists on every path — a guard whose condition has to stay exactly
     # the union of the branches that read it is the kind of invariant that survives
     # only in a comment, and a later branch added outside it would read a
@@ -1490,81 +1509,115 @@ def _fetch_dvol(currency: str, curr_dt: datetime, today: str) -> DvolSeries:
     newest_rejected = max(
         (d for d in (newest_skipped, newest_inconsistent) if d is not None), default=None
     )
-    if not by_date:
-        # Distinct states, and the message is rendered verbatim into
-        # "**DVOL:** unavailable — ...". "No readings published" sends the reader
-        # to Deribit's status page; a fully-rejected history is a corrupt feed that
-        # answered in full, and WHICH rejection emptied it decides what the
-        # operator looks at. Also names the currency, which is the non-obvious part
-        # on a proxied asset.
-        #
-        # Both rejection classes are named, and named for what they are. Reporting
-        # only the non-positive count would have said "every reading was
-        # non-positive (0 skipped)" on a feed whose every candle was instead
-        # self-contradicting: a false cause with a self-refuting number beside it,
-        # sending the operator after a broken value when the likely fault is a
-        # changed response shape.
-        #
-        # The newest rejected date travels with every count, exactly as on the
-        # rendered path — and it matters MORE here, not less, because this is the
-        # branch where the reader gets no series at all, so it is the only thing
-        # saying whether the feed broke recently or has been broken throughout.
-        # The render note documents that reasoning at length; these raises had the
-        # value in scope and dropped it, the render-vs-raise drift this module has
-        # now been bitten by twice. (``newest_rejected`` is derived once above, so
-        # this branch and the staleness refusal below cannot drift apart either.)
-        if skipped_non_positive and skipped_inconsistent:
-            raise DeribitError(
-                # "candle", not "reading", and possessives that do not assume a
-                # count. Half of what this sentence tallies is malformed ROWS, and
-                # the module's own noun rule (see _WINDOW_COUNT_CAVEAT) reserves
-                # "reading" for a usable value; the count is also plural here
-                # whenever either class exceeds one, so "its own" was ungrammatical
-                # on the very branch that requires both classes to have fired.
-                f"Every {currency} DVOL candle on or before {curr_date} was rejected as broken "
-                f"({skipped_non_positive} "
-                + _BOTH_REJECTION_CLASSES.format(
-                    inconsistent=skipped_inconsistent, newest=newest_rejected
-                )
-                + "), so the feed "
-                "returned history but no usable level — a self-contradicting candle points at "
-                "a reordered candle shape rather than at bad values"
+    return _DvolTally(
+        by_date=by_date,
+        skipped_non_positive=skipped_non_positive,
+        newest_skipped=newest_skipped,
+        skipped_inconsistent=skipped_inconsistent,
+        newest_inconsistent=newest_inconsistent,
+        newest_rejected=newest_rejected,
+    )
+
+
+def _empty_history_error(tally: _DvolTally, *, currency: str, curr_date: str) -> DeribitError:
+    """The error for a history with no usable reading on or before ``curr_date``.
+
+    Worded for what emptied it — the feed published nothing, or every candle was
+    rejected (by one class, the other, or both). Answered rather than raised, so
+    ``_fetch_dvol``'s own frame raises it.
+    """
+    skipped_non_positive = tally.skipped_non_positive
+    skipped_inconsistent = tally.skipped_inconsistent
+    newest_rejected = tally.newest_rejected
+    # Distinct states, and the message is rendered verbatim into
+    # "**DVOL:** unavailable — ...". "No readings published" sends the reader
+    # to Deribit's status page; a fully-rejected history is a corrupt feed that
+    # answered in full, and WHICH rejection emptied it decides what the
+    # operator looks at. Also names the currency, which is the non-obvious part
+    # on a proxied asset.
+    #
+    # Both rejection classes are named, and named for what they are. Reporting
+    # only the non-positive count would have said "every reading was
+    # non-positive (0 skipped)" on a feed whose every candle was instead
+    # self-contradicting: a false cause with a self-refuting number beside it,
+    # sending the operator after a broken value when the likely fault is a
+    # changed response shape.
+    #
+    # The newest rejected date travels with every count, exactly as on the
+    # rendered path — and it matters MORE here, not less, because this is the
+    # branch where the reader gets no series at all, so it is the only thing
+    # saying whether the feed broke recently or has been broken throughout.
+    # The render note documents that reasoning at length; these raises had the
+    # value in scope and dropped it, the render-vs-raise drift this module has
+    # now been bitten by twice. (``newest_rejected`` is derived once, in
+    # ``_parse_dvol_candles``, so this and ``_stale_history_error`` cannot drift apart either.)
+    if skipped_non_positive and skipped_inconsistent:
+        return DeribitError(
+            # "candle", not "reading", and possessives that do not assume a
+            # count. Half of what this sentence tallies is malformed ROWS, and
+            # the module's own noun rule (see _WINDOW_COUNT_CAVEAT) reserves
+            # "reading" for a usable value; the count is also plural here
+            # whenever either class exceeds one, so "its own" was ungrammatical
+            # on the very branch that requires both classes to have fired.
+            f"Every {currency} DVOL candle on or before {curr_date} was rejected as broken "
+            f"({skipped_non_positive} "
+            + _BOTH_REJECTION_CLASSES.format(
+                inconsistent=skipped_inconsistent, newest=newest_rejected
             )
-        if skipped_non_positive:
-            raise DeribitError(
-                f"Every {currency} DVOL reading on or before {curr_date} was non-positive "
-                f"({skipped_non_positive} skipped, the newest dated {newest_rejected}), so the "
-                f"feed returned history but no usable level"
-            )
-        if skipped_inconsistent:
-            raise DeribitError(
-                f"Every {currency} DVOL candle on or before {curr_date} carried a non-positive "
-                f"low or an open or close "
-                f"outside its own high/low range ({skipped_inconsistent} skipped, the newest "
-                f"dated {newest_rejected}), so the feed returned history but no usable level — "
-                f"across "
-                f"a whole history this points at a reordered candle shape rather than at bad "
-                f"values"
-            )
-        raise DeribitError(f"No {currency} DVOL readings on or before {curr_date}")
-    dates = sorted(by_date)
+            + "), so the feed "
+            "returned history but no usable level — a self-contradicting candle points at "
+            "a reordered candle shape rather than at bad values"
+        )
+    if skipped_non_positive:
+        return DeribitError(
+            f"Every {currency} DVOL reading on or before {curr_date} was non-positive "
+            f"({skipped_non_positive} skipped, the newest dated {newest_rejected}), so the "
+            f"feed returned history but no usable level"
+        )
+    if skipped_inconsistent:
+        return DeribitError(
+            f"Every {currency} DVOL candle on or before {curr_date} carried a non-positive "
+            f"low or an open or close "
+            f"outside its own high/low range ({skipped_inconsistent} skipped, the newest "
+            f"dated {newest_rejected}), so the feed returned history but no usable level — "
+            f"across "
+            f"a whole history this points at a reordered candle shape rather than at bad "
+            f"values"
+        )
+    return DeribitError(f"No {currency} DVOL readings on or before {curr_date}")
+
+
+def _stale_history_error(
+    tally: _DvolTally, *, currency: str, curr_date: str, today: str
+) -> DeribitError | None:
+    """The staleness refusal, or ``None`` when the newest usable reading is recent enough.
+
+    Answered rather than raised, like ``_empty_history_error``, so ``_fetch_dvol``'s
+    own frame raises it. Call only after ``_fetch_dvol``'s empty-history check
+    (``if not tally.by_date``): ``tally.by_date`` must be non-empty.
+    """
+    skipped_non_positive = tally.skipped_non_positive
+    skipped_inconsistent = tally.skipped_inconsistent
+    newest_rejected = tally.newest_rejected
     # The staleness ceiling, applied here rather than at render time so the half is
     # ABSENT rather than present-with-a-caveat: every other withholding decision in
     # this module turns on the same judgement, that a caveat does not survive a
     # downstream summary while the number it qualifies does.
     #
-    # min(curr_date, today), matching _dvol_section's lag_from exactly. On a
+    # min(curr_date, today), matching ``_data_lag``'s lag_from exactly. On a
     # historical date the series is filtered to curr_date, so measuring from the
     # clock would call every backtest stale; on an ahead-of-clock date the feed has
     # simply not reached curr_date yet, which is not the feed being behind.
-    latest_date = dates[-1]
+    # Read off the tally rather than handed in beside it, so the counts and the
+    # date this refusal quotes cannot describe two different histories.
+    latest_date = max(tally.by_date)
     lag_from = min(curr_date, today)
     stale_days = (
         datetime.strptime(lag_from, "%Y-%m-%d") - datetime.strptime(latest_date, "%Y-%m-%d")
     ).days
     if stale_days > MAX_DVOL_STALENESS_DAYS:
         # The rejection counts travel with the refusal for the reason they travel
-        # with the empty-by_date raises above: a reader cannot otherwise tell a feed
+        # with ``_empty_history_error``'s messages: a reader cannot otherwise tell a feed
         # that stopped publishing from one whose recent prints this module dropped,
         # and the two are different operator actions. Named only when non-zero, so
         # the ordinary stall says nothing about rejections that did not happen.
@@ -1611,9 +1664,10 @@ def _fetch_dvol(currency: str, curr_dt: datetime, today: str) -> DvolSeries:
                 f"may be prints that arrived and were dropped)"
             )
         )
-        raise DeribitError(
-            # "on or before {curr_date}", like every sibling message here and the
-            # rendered lag line. The series is filtered to curr_date, so an
+        return DeribitError(
+            # "on or before {curr_date}", like every message ``_empty_history_error``
+            # answers and the rendered lag line. The series is filtered to curr_date,
+            # so an
             # unqualified "the newest usable reading is dated X" is a claim about
             # the LIVE feed made from a view this module deliberately truncated —
             # false on any backtest where the index kept publishing, which is the
@@ -1624,13 +1678,44 @@ def _fetch_dvol(currency: str, curr_dt: datetime, today: str) -> DvolSeries:
             f"vendor serves ({MAX_DVOL_STALENESS_DAYS} days), so the level is withheld rather "
             f"than presented as the current volatility regime{dropped_note}"
         )
+    return None
+
+
+def _fetch_dvol(currency: str, curr_dt: datetime, today: str) -> DvolSeries:
+    """Fetch the DVOL daily readings for the window ending at ``curr_date``.
+
+    ``_fetch_dvol_candles`` requests the window (ending at the last instant of
+    ``curr_date``, UTC) and ``_parse_dvol_candles`` filters the rows again on the
+    date string, so a past ``curr_date`` cannot pick up a later reading even if
+    Deribit widened the range it honours.
+
+    Raises when the newest usable reading is older than MAX_DVOL_STALENESS_DAYS, so
+    a stalled feed reports its half absent rather than headlining a months-old print.
+
+    ``today`` — the UTC date of the clock — is passed in rather than read here. The
+    staleness bound is measured from ``min(curr_date, today)`` because a feed cannot
+    be behind a date that has not arrived, and that is the identical rule
+    ``_data_lag`` applies to the lag note ``_dvol_section`` renders. Taking a
+    fourth clock
+    reading instead would let the two drift apart by a fetch envelope, which is how
+    a report comes to refuse a reading on one arithmetic and date it on another.
+    """
+    rows, truncated = _fetch_dvol_candles(currency, curr_dt)
+    curr_date = curr_dt.strftime("%Y-%m-%d")
+    tally = _parse_dvol_candles(rows, currency=currency, curr_date=curr_date)
+    if not tally.by_date:
+        raise _empty_history_error(tally, currency=currency, curr_date=curr_date)
+    refusal = _stale_history_error(tally, currency=currency, curr_date=curr_date, today=today)
+    if refusal is not None:
+        raise refusal
+    dates = sorted(tally.by_date)
     return DvolSeries(
         dates=dates,
-        closes=[by_date[d] for d in dates],
-        dropped_non_positive=skipped_non_positive,
-        newest_dropped_date=newest_skipped,
-        dropped_inconsistent=skipped_inconsistent,
-        newest_inconsistent_date=newest_inconsistent,
+        closes=[tally.by_date[d] for d in dates],
+        dropped_non_positive=tally.skipped_non_positive,
+        newest_dropped_date=tally.newest_skipped,
+        dropped_inconsistent=tally.skipped_inconsistent,
+        newest_inconsistent_date=tally.newest_inconsistent,
         truncated=truncated,
     )
 
@@ -1720,58 +1805,28 @@ def _ordinal(value: float) -> str:
     return f"{number}{suffix}"
 
 
-def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolReport:
-    """Render the DVOL lines.
+# Exclusive lower bound: N calendar days ending at curr_date is
+# curr_date-(N-1) ... curr_date. An inclusive bound would put N+1 readings in a
+# window the report calls "Nd".
+def _dvol_window(series: DvolSeries, curr_dt: datetime, days: int) -> list[float]:
+    """The readings inside the ``days`` calendar days ending on ``curr_dt``'s day."""
+    start = (curr_dt - timedelta(days=days)).strftime("%Y-%m-%d")
+    # strict=True: the two lists are built together in _fetch_dvol, so a length
+    # mismatch would mean dates and readings had drifted out of correspondence.
+    # Under wiring_gap because the correspondence is ours to keep across
+    # those two functions, and zip's own message ("argument 2 is shorter
+    # than argument 1") says nothing to a reader who would otherwise meet
+    # it as this vendor's library failing (#219). The guard covers the
+    # pairing only, so it cannot claim the correspondence over a failure
+    # in the comparison below.
+    with wiring_gap("DVOL series correspondence"):
+        paired = list(zip(series.dates, series.closes, strict=True))
+    return [c for d, c in paired if d > start]
 
-    ``curr_date`` is derived here rather than passed alongside ``curr_dt``. As two
-    parameters nothing made them agree, and a mismatched pair computes both
-    windows off one while every rendered line names the other — a silently wrong
-    window of exactly the kind the ``_window`` bound comment exists to prevent.
 
-    The range and the percentile are computed over DIFFERENT windows and printed on
-    separate lines, each naming its own span and its own sample count. Folding them
-    into one line was how "the latest reading sits at the Nth percentile" came to
-    sit beside a span it was not computed over.
-
-    The percentile is None — and no percentile is rendered — whenever its window
-    holds fewer than ``_MIN_PERCENTILE_SAMPLE`` readings, so a sparse or stalled
-    feed cannot manufacture a position-within-range that only reflects how few
-    observations arrived.
-
-    ``today`` is the UTC date of the clock, which is not always ``curr_date``: a
-    caller deriving its analysis date from a local clock east of UTC hands us a
-    ``curr_date`` a few hours into the future. The newest candle is judged open
-    against ``today`` (a candle is open because the day is not over, which has
-    nothing to do with the date being analysed), and the feed is judged late
-    against whichever of the two is earlier (no feed can be behind a date that
-    has not happened yet).
-    """
-    curr_date = curr_dt.strftime("%Y-%m-%d")
-
-    # Exclusive lower bound: N calendar days ending at curr_date is
-    # curr_date-(N-1) ... curr_date. An inclusive bound would put N+1 readings in a
-    # window the report calls "Nd".
-    def _window(days: int) -> list[float]:
-        start = (curr_dt - timedelta(days=days)).strftime("%Y-%m-%d")
-        # strict=True: the two lists are built together in _fetch_dvol, so a length
-        # mismatch would mean dates and readings had drifted out of correspondence.
-        # Under wiring_gap because the correspondence is ours to keep across
-        # those two functions, and zip's own message ("argument 2 is shorter
-        # than argument 1") says nothing to a reader who would otherwise meet
-        # it as this vendor's library failing (#219). The guard covers the
-        # pairing only, so it cannot claim the correspondence over a failure
-        # in the comparison below.
-        with wiring_gap("DVOL series correspondence"):
-            paired = list(zip(series.dates, series.closes, strict=True))
-        return [c for d, c in paired if d > start]
-
-    window = _window(DVOL_WINDOW_DAYS)
-    pct_window = _window(DVOL_PERCENTILE_WINDOW_DAYS)
+def _latest_line(series: DvolSeries, today: str) -> tuple[str, bool]:
+    """``(line, latest_is_open)``: the headline level, caveated when its candle is still open."""
     latest = series.latest
-    percentile = (
-        _percentile_of(latest, pct_window) if len(pct_window) >= _MIN_PERCENTILE_SAMPLE else None
-    )
-
     # The unit is stated because the chain half labels its own figures ("39.59%",
     # "vol points") and this one did not, leaving a downstream agent comparing
     # "DVOL 40.45" against "ATM IV 39.59%" with nothing in the text saying the two
@@ -1813,8 +1868,11 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
         latest_line += (
             " (that day's candle was still open when it was read, so this is the level so far)"
         )
-    lines = [latest_line]
+    return latest_line, latest_is_open
 
+
+def _range_line(window: list[float], curr_date: str) -> str:
+    """The range line over ``window``, or why it was not computed."""
     if not window:
         # Every reading predates the window. Say so rather than computing a range
         # over a one-element fallback sample, whose min and max would both be the
@@ -1839,7 +1897,7 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
         # truncated view of it — false whenever the index kept publishing after the
         # analysis date, which is the ordinary case for any backtest, and stated
         # three lines under the header note saying the history was filtered.
-        lines.append(
+        return (
             # "no usable reading", for the reason _readings() carries the same
             # word: candles rejected here are absent from this window too, so an
             # unqualified "no DVOL reading falls inside" is false whenever the
@@ -1848,25 +1906,36 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
             f"inside the {DVOL_WINDOW_DAYS} days ending {curr_date}; the level above is the "
             f"newest usable reading on or before {curr_date}"
         )
-    elif len(window) < _MIN_RANGE_SAMPLE:
+    if len(window) < _MIN_RANGE_SAMPLE:
         # The same objection as the empty case, one reading later: min and max
         # would both be the latest value, printing a collapsed range that reads as
         # a month of pinned volatility.
-        lines.append(
+        return (
             f"**{DVOL_WINDOW_DAYS}d range:** not computed — the {DVOL_WINDOW_DAYS} days ending "
             f"{curr_date} hold only {_readings(len(window))}, so a min and a max would "
             f"both be the level above"
         )
-    else:
-        # Dated, like both refusal branches of this line. The success branch was
-        # the one DVOL line carrying no window end, so quoted on its own during a
-        # backtest it read as "the last 30 days" from the reader's present.
-        lines.append(
-            f"**{DVOL_WINDOW_DAYS}d range:** min {min(window):.2f}% / max {max(window):.2f}% "
-            f"over the {_readings(len(window))} in the {DVOL_WINDOW_DAYS} days ending "
-            f"{curr_date}"
-        )
+    # Dated, like both refusal branches of this line. The success branch was
+    # the one DVOL line carrying no window end, so quoted on its own during a
+    # backtest it read as "the last 30 days" from the reader's present.
+    return (
+        f"**{DVOL_WINDOW_DAYS}d range:** min {min(window):.2f}% / max {max(window):.2f}% "
+        f"over the {_readings(len(window))} in the {DVOL_WINDOW_DAYS} days ending "
+        f"{curr_date}"
+    )
 
+
+def _percentile_line(
+    latest: float, pct_window: list[float], curr_date: str
+) -> tuple[str, float | None]:
+    """``(line, percentile)``: the percentile over ``pct_window``, and its line or why there is none.
+
+    Computed beside the sentence that explains its absence, so the two cannot
+    disagree about why there is no percentile.
+    """
+    percentile = (
+        _percentile_of(latest, pct_window) if len(pct_window) >= _MIN_PERCENTILE_SAMPLE else None
+    )
     if percentile is None:
         # Two genuinely different states, and the "latest reading is itself in the
         # sample" rationale only applies to one of them: appended to both, it told
@@ -1880,7 +1949,7 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
             # figure it describes can actually breach, which is worse than no
             # bound. floor() at one decimal states a value that is always true.
             floor_pct = math.floor(1000 / len(pct_window)) / 10
-            lines.append(
+            line = (
                 f"**{DVOL_PERCENTILE_WINDOW_DAYS}d percentile:** not computed — the "
                 f"{DVOL_PERCENTILE_WINDOW_DAYS} days ending {curr_date} hold only "
                 f"{_readings(len(pct_window))}, and the latest usable reading is itself in that "
@@ -1888,34 +1957,44 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
                 f"{floor_pct:.1f}%"
             )
         else:
-            lines.append(
-                # "usable", for the reason the range branch above carries it.
+            line = (
+                # "usable", for the reason ``_range_line``'s empty branch carries it.
                 f"**{DVOL_PERCENTILE_WINDOW_DAYS}d percentile:** not computed — no usable "
                 f"DVOL reading falls inside the {DVOL_PERCENTILE_WINDOW_DAYS} days ending "
                 f"{curr_date}"
             )
     else:
-        lines.append(
+        line = (
             f"**{DVOL_PERCENTILE_WINDOW_DAYS}d percentile:** the latest usable reading sits at "
             f"the "
             f"{_ordinal(percentile)} percentile of the {_readings(len(pct_window))} in "
             f"the {DVOL_PERCENTILE_WINDOW_DAYS} days ending {curr_date} (percentile = share "
             f"of those readings at or below it)"
         )
+    return line, percentile
 
+
+def _data_lag(latest_date: str, *, curr_date: str, today: str) -> tuple[list[str], str]:
+    """``(notes, as_of_phrase)``: the lateness note and the as-of phrase the reading line quotes.
+
+    Measured from the earlier of the analysis date and the clock. ``notes`` is
+    ``[]`` within MAX_DATA_LAG_DAYS and ``as_of_phrase`` carries the lag only on
+    the same condition, so the two cannot disagree about whether the feed is late.
+    """
+    notes: list[str] = []
     # A feed cannot be behind a date that has not arrived: measure lateness from
     # whichever of the analysis date and the clock is earlier, or a caller whose
     # curr_date runs ahead of UTC would be told a perfectly current index had
     # "not printed" for days.
     lag_from = min(curr_date, today)
     lag_days = (
-        datetime.strptime(lag_from, "%Y-%m-%d") - datetime.strptime(series.latest_date, "%Y-%m-%d")
+        datetime.strptime(lag_from, "%Y-%m-%d") - datetime.strptime(latest_date, "%Y-%m-%d")
     ).days
     # Always dated, not only when late: this phrase is the only date the reading
     # line carries, and that line is what a downstream summary quotes on its own.
     # Gated on the lag threshold, a reading a day old — the ordinary
     # case — was quoted bare and read as current.
-    as_of_phrase = f"as of {series.latest_date}"
+    as_of_phrase = f"as of {latest_date}"
     if lag_days > MAX_DATA_LAG_DAYS:
         # (The threshold makes lag_days at least 2 here, so "days" is always the
         # right plural. It stays right for any MAX_DATA_LAG_DAYS >= 1; drop the
@@ -1927,7 +2006,7 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
             # is then false in the ordinary backtest case — the feed kept
             # publishing, we simply declined to look — and it is asserted in the
             # same section whose header note says the history was filtered.
-            lines.append(
+            notes.append(
                 # "no usable reading", not "nothing": the rejection note below may
                 # be reporting that the index DID publish across this span and
                 # that this module dropped those prints as broken. Two adjacent
@@ -1940,7 +2019,7 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
                 # feed whose recent prints are all corrupt) that note exists to
                 # expose.
                 f"_Data lag: the newest usable DVOL reading on or before {curr_date} is "
-                f"{series.latest_date}, {lag_days} days earlier — the index published no "
+                f"{latest_date}, {lag_days} days earlier — the index published no "
                 f"usable reading between the two. Treat the level as {lag_days} days old as "
                 f"at the analysis date._"
             )
@@ -1948,7 +2027,7 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
             # Here curr_date has been reached, so the gap runs to the present and a
             # successful fetch really does mean a live series that stopped
             # updating: Deribit answered normally with a history that ends short.
-            lines.append(
+            notes.append(
                 # "published no usable reading", not "has not printed since". The
                 # rejection note below may be reporting that the index DID print
                 # across this very span and that this module dropped those prints
@@ -1956,7 +2035,7 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
                 # summary that keeps only those. The historical branch above was
                 # corrected for exactly this and this branch was left behind; the
                 # two operator actions differ (vendor status page vs corrupt feed).
-                f"_Data lag: the newest usable DVOL reading is {series.latest_date}, "
+                f"_Data lag: the newest usable DVOL reading is {latest_date}, "
                 f"{lag_days} days before {lag_from} — the fetch succeeded, so the index "
                 f"published no usable reading between the two. Treat the level as "
                 f"{lag_days} days old._"
@@ -1965,7 +2044,13 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
         # on its own beside "the window ending on the analysis date", so a bare "N
         # days old" was the one figure in that sentence with an unstated reference
         # — and the two differ whenever curr_date runs ahead of the clock.
-        as_of_phrase = f"as of {series.latest_date}, {lag_days} days before {lag_from}"
+        as_of_phrase = f"as of {latest_date}, {lag_days} days before {lag_from}"
+    return notes, as_of_phrase
+
+
+def _rejected_notes(series: DvolSeries, curr_date: str) -> list[str]:
+    """The note on candles rejected as non-positive; ``[]`` when none were."""
+    notes: list[str] = []
     if series.dropped_non_positive:
         # The counts above are of readings that SURVIVED; this is what did not.
         # Without it the shortfall sentences describe a window this module
@@ -1973,7 +2058,7 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
         # judging sample sufficiency cannot tell a sparse feed from a corrupt one
         # — which are different operator actions.
         dropped = series.dropped_non_positive
-        lines.append(
+        notes.append(
             # Scoped to what the count actually measures. `dropped_non_positive`
             # counts rejections across the whole FETCH span (the longer window
             # plus its buffer), not within the two statistics windows named above,
@@ -1996,6 +2081,12 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
             f"is not a low reading), the newest dated {series.newest_dropped_date}. "
             f"A rejected reading {_WINDOW_COUNT_CAVEAT}_"
         )
+    return notes
+
+
+def _inconsistent_notes(series: DvolSeries, curr_date: str) -> list[str]:
+    """The note on candles rejected as self-contradicting; ``[]`` when none were."""
+    notes: list[str] = []
     if series.dropped_inconsistent:
         # Its own sentence rather than a second clause on the line above, because
         # the two rejection classes point at different faults: a non-positive close
@@ -2010,7 +2101,7 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
         # being present — shared as _WINDOW_COUNT_CAVEAT rather than copied, since
         # copying it is precisely how the two would drift apart.
         bad = series.dropped_inconsistent
-        lines.append(
+        notes.append(
             f"_Inconsistent: {bad} DVOL candle{'' if bad == 1 else 's'} dated on or before "
             f"{curr_date} carried a non-positive low, or an open or close outside "
             f"{'its' if bad == 1 else 'their'} own "
@@ -2019,7 +2110,13 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
             f"would look exactly like this), the newest dated "
             f"{series.newest_inconsistent_date}. A rejected candle {_WINDOW_COUNT_CAVEAT}_"
         )
-    if series.truncated:
+    return notes
+
+
+def _truncated_notes(truncated: bool) -> list[str]:
+    """The note for a history Deribit paged; ``[]`` when it was delivered whole."""
+    notes: list[str] = []
+    if truncated:
         # The third way a count above can be short, and the only one that was not
         # the feed's doing at all. Stated separately from the two rejection notes
         # because it names a different fault again — those say this module dropped
@@ -2029,7 +2126,7 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
         # the level itself still trustworthy: the cap always keeps the NEWEST page,
         # so the headline reading and its date are unaffected and only the
         # statistics are under-sampled.
-        lines.append(
+        notes.append(
             # No date on the boundary. ``series.dates`` holds only the readings that
             # were KEPT, so its earliest entry is not where delivery stopped
             # whenever a rejected candle was older — and the two rejection notes
@@ -2049,6 +2146,48 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
             "index's publishing — the level and its date are unaffected, since the newest "
             "readings are the ones a truncated page keeps._"
         )
+    return notes
+
+
+def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolReport:
+    """Render the DVOL lines.
+
+    ``curr_date`` is derived here rather than passed alongside ``curr_dt``. As two
+    parameters nothing made them agree, and a mismatched pair computes both
+    windows off one while every rendered line names the other — a silently wrong
+    window of exactly the kind the ``_dvol_window`` bound comment exists to prevent.
+
+    The range and the percentile are computed over DIFFERENT windows and printed on
+    separate lines, each naming its own span and its own sample count. Folding them
+    into one line was how "the latest reading sits at the Nth percentile" came to
+    sit beside a span it was not computed over.
+
+    The percentile is None — and no percentile is rendered — whenever its window
+    holds fewer than ``_MIN_PERCENTILE_SAMPLE`` readings, so a sparse or stalled
+    feed cannot manufacture a position-within-range that only reflects how few
+    observations arrived.
+
+    ``today`` is the UTC date of the clock, which is not always ``curr_date``: a
+    caller deriving its analysis date from a local clock east of UTC hands us a
+    ``curr_date`` a few hours into the future. The newest candle is judged open
+    against ``today`` (a candle is open because the day is not over, which has
+    nothing to do with the date being analysed), and the feed is judged late
+    against whichever of the two is earlier (no feed can be behind a date that
+    has not happened yet).
+    """
+    curr_date = curr_dt.strftime("%Y-%m-%d")
+
+    window = _dvol_window(series, curr_dt, DVOL_WINDOW_DAYS)
+    pct_window = _dvol_window(series, curr_dt, DVOL_PERCENTILE_WINDOW_DAYS)
+    latest = series.latest
+    latest_line, latest_is_open = _latest_line(series, today)
+    percentile_line, percentile = _percentile_line(latest, pct_window, curr_date)
+    lines = [latest_line, _range_line(window, curr_date), percentile_line]
+    lag_notes, as_of_phrase = _data_lag(series.latest_date, curr_date=curr_date, today=today)
+    lines += lag_notes
+    lines += _rejected_notes(series, curr_date)
+    lines += _inconsistent_notes(series, curr_date)
+    lines += _truncated_notes(series.truncated)
     return DvolReport(
         "\n".join(lines), percentile, len(pct_window), as_of_phrase, latest, latest_is_open
     )

@@ -330,6 +330,63 @@ Breaking changes within the 0.x line are called out explicitly.
   DVOL-unavailable body line and the whole proxied-chain body line. No
   behaviour change.
 
+- **mypy's `strict_equality` is on for the checked files.** A comparison
+  between non-overlapping types — a `Literal` verdict tested against a
+  misspelled constant, the case `_WithheldReason`'s comment names — is now a
+  type error at the comparison site rather than a silent fall-through; that
+  comment is reworded to say both ends are checked. The 148 files already
+  under `[tool.mypy]` carried no such comparison, so the floor rises with zero
+  new errors.
+
+- **The DVOL fetch and the DVOL renderer are split into their sections**
+  (dataflows refactor plan 2026-10-16, D2-d, the second of its two halves).
+  `deribit._fetch_dvol` drops from 354 lines to 36: it requests the history
+  (`_fetch_dvol_candles`, answering the rows and whether Deribit paged them),
+  parses it (`_parse_dvol_candles`, answering `_DvolTally` — the usable close
+  per day, the two rejection tallies with their newest dates, and the newer of
+  those dates derived once; the candle's arithmetic check is
+  `_candle_is_consistent`), and raises the error a helper answers
+  (`_empty_history_error` for a history with nothing usable,
+  `_stale_history_error` for one whose newest usable reading — read off the
+  tally, so the counts and the date cannot describe two histories — is past
+  the staleness ceiling, `None` otherwise). `deribit._dvol_section` drops
+  from 332 lines to 42: the `_window` closure is module-level as
+  `_dvol_window`, the
+  headline line and its open-candle flag come from `_latest_line`, the range
+  line from `_range_line` (the computed line or why it was not computed), the
+  percentile and its line together from `_percentile_line`, so the sentence
+  explaining an absent percentile cannot disagree with the computation, the
+  data-lag note and the as-of phrase together from `_data_lag`, since one
+  threshold decides both, and the three quality notes one each
+  (`_rejected_notes`, `_inconsistent_notes`, `_truncated_notes`); a helper that
+  reads one field of the series is handed that value. The moved bodies keep
+  every rendered string, every log message and every comment but eleven
+  repointed at the helpers that now hold the code they describe (fourteen
+  lines), with two lines added where `_stale_history_error` reads the newest
+  day off the tally; besides that glue they differ only in indentation,
+  `lines.append` becoming each helper's `notes.append`, `return` or `line =`,
+  `raise` becoming `return` where a helper answers the error, the `elif`
+  chain of the range line becoming early returns, the consistency condition
+  returned by `_candle_is_consistent` rather than tested inline,
+  `result["data"]` read once as `rows`, the handed-in value standing in for
+  `series.<field>` and `tally.<field>` for the parse loop's locals (re-bound
+  under their old names at the top of the two error helpers), the newest
+  usable day read as `max` of the tally rather than as the last of the
+  sorted dates, and that sort moved below the staleness refusal it no longer
+  feeds. `_fetch_dvol`'s docstring points its first paragraph at the two
+  helpers, its last at `_data_lag`, and drops the paragraph on the request
+  span, which the `max()` comment inside `_fetch_dvol_candles` already
+  carries; `_dvol_section`'s docstring names `_dvol_window` for the closure.
+  The old functions and the new ones, run over 60,000 generated cases (seeds
+  7, 11 and 22; the request stubbed with synthetic payloads — shape faults,
+  continuation cursors, malformed, out-of-range, non-positive,
+  self-contradicting, duplicated and out-of-window candles, whole-feed fault
+  modes — and the renderer handed synthetic series), rendered byte-identical
+  reports and raised identical errors. The length ratchet loses both rows;
+  `_reading_line` keeps its own.
+  One test pins what a thirty-seven-mutation probe found held by nothing: the
+  whole out-of-range-timestamp body line. No behaviour change.
+
 ### Fixed
 
 - **`fred.get_macro_data` checks the caller's `look_back_days` the way the

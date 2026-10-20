@@ -5141,3 +5141,19 @@ class TestTheBodyLinesAreQuotedWhole:
             "above. BTC's skew describes demand for downside in BTC, not in 'SOL'. Do not "
             "substitute it." in out
         )
+
+
+class TestARejectedTimestampNamesItself:
+    """The out-of-range candle timestamp error, pinned whole through the public entry point.
+
+    The split's mutation probe (dataflows plan D2-d, second half) found the
+    message held by nothing: no test fed a candle whose timestamp overflows the
+    conversion, so the raise ran under no assertion at all.
+    """
+
+    def test_an_out_of_range_candle_timestamp_is_quoted_whole(self):
+        out = _report(dvol={"data": [[1e20, 40.0, 41.0, 39.0, 40.0]]})
+        assert (
+            "**DVOL:** unavailable — Out-of-range DVOL candle timestamp 1e+20. Do not "
+            "fabricate a DVOL level." in out
+        )

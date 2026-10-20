@@ -1666,8 +1666,8 @@ def _stale_history_error(
         )
         return DeribitError(
             # "on or before {curr_date}", like every message ``_empty_history_error``
-            # answers and the
-            # rendered lag line. The series is filtered to curr_date, so an
+            # answers and the rendered lag line. The series is filtered to curr_date,
+            # so an
             # unqualified "the newest usable reading is dated X" is a claim about
             # the LIVE feed made from a view this module deliberately truncated —
             # false on any backtest where the index kept publishing, which is the
@@ -1695,8 +1695,8 @@ def _fetch_dvol(currency: str, curr_dt: datetime, today: str) -> DvolSeries:
     ``today`` — the UTC date of the clock — is passed in rather than read here. The
     staleness bound is measured from ``min(curr_date, today)`` because a feed cannot
     be behind a date that has not arrived, and that is the identical rule
-    ``_data_lag`` applies to the lag note ``_dvol_section`` renders. Taking a fourth
-    clock
+    ``_data_lag`` applies to the lag note ``_dvol_section`` renders. Taking a
+    fourth clock
     reading instead would let the two drift apart by a fetch envelope, which is how
     a report comes to refuse a reading on one arithmetic and date it on another.
     """

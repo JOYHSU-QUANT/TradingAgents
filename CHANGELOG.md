@@ -349,8 +349,9 @@ Breaking changes within the 0.x line are called out explicitly.
   (`_empty_history_error` for a history with nothing usable,
   `_stale_history_error` for one whose newest usable reading — read off the
   tally, so the counts and the date cannot describe two histories — is past
-  the staleness ceiling, `None` otherwise). `deribit._dvol_section` drops from 332
-  lines to 42: the `_window` closure is module-level as `_dvol_window`, the
+  the staleness ceiling, `None` otherwise). `deribit._dvol_section` drops
+  from 332 lines to 42: the `_window` closure is module-level as
+  `_dvol_window`, the
   headline line and its open-candle flag come from `_latest_line`, the range
   line from `_range_line` (the computed line or why it was not computed), the
   percentile and its line together from `_percentile_line`, so the sentence
@@ -378,11 +379,11 @@ Breaking changes within the 0.x line are called out explicitly.
   carries; `_dvol_section`'s docstring names `_dvol_window` for the closure.
   The old functions and the new ones, run over 60,000 generated cases (seeds
   7, 11 and 22; the request stubbed with synthetic payloads — shape faults,
-  continuation cursors,
-  malformed, out-of-range, non-positive, self-contradicting, duplicated and
-  out-of-window candles, whole-feed fault modes — and the renderer handed
-  synthetic series), rendered byte-identical reports and raised identical
-  errors. The length ratchet loses both rows; `_reading_line` keeps its own.
+  continuation cursors, malformed, out-of-range, non-positive,
+  self-contradicting, duplicated and out-of-window candles, whole-feed fault
+  modes — and the renderer handed synthetic series), rendered byte-identical
+  reports and raised identical errors. The length ratchet loses both rows;
+  `_reading_line` keeps its own.
   One test pins what a thirty-seven-mutation probe found held by nothing: the
   whole out-of-range-timestamp body line. No behaviour change.
 

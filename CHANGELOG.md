@@ -232,6 +232,58 @@ Breaking changes within the 0.x line are called out explicitly.
   vendor's error (the guard every other vendor already pins) and Farside's
   leaders line stops at `TOP_ISSUERS`. No behaviour change.
 
+- **The corporate-treasury renderer is split into its sections** (dataflows
+  refactor plan 2026-10-16, D2-c). `sosovalue_treasuries.get_btc_treasury_data`
+  drops from 582 lines to 141 (45 of them its docstring); it checks its
+  arguments, loads its snapshot, measures what the window can see
+  (`_visible_by_company`, and `_company_coverage` answering the
+  no-disclosure and capped-history lists together, as the macro split's
+  `_event_coverage` does), prints the stale caveat and assembles the rest of
+  the report from twenty-three module-level helpers, each taking only what
+  it reads and returning its lines: the header caveats one each
+  (`_blind_tail_notes`, `_failed_history_notes`, `_empty_history_notes`,
+  `_unusable_listing_notes`, `_no_disclosure_notes`, `_standing_caveats`),
+  the Source line with its ordering clause (`_source_line`,
+  `_ordering_clause`), the holdings section as a measurement and two
+  renderings (`_holdings_facts` answering `_HoldingsFacts`, which the
+  combined-holdings lines and the concentration line both read, so the
+  single-as-of-date test cannot be made twice), and the activity section as
+  the event scan (`_activity_events`, answering the events and the
+  underivable count together), the headline line, the table, the empty-window
+  line and the three trailing notes (the gap line takes the three
+  contributed-nothing lists by keyword). The symbol handling at the top is
+  `_resolve_asset`, as in the ETF twins; the normalised dates travel as
+  `_Window`, bound to `window` because nothing else here is called that. The
+  `_label` closure is module-level and takes the companies map it closed
+  over, by keyword. The moved bodies keep every rendered string and every
+  comment but five repointed at the helpers that now hold the code they
+  describe and the two section banners dropped; besides that glue, they
+  differ only in indentation, `header_lines.append` becoming each helper's
+  `notes.append`, the snapshot field a helper is handed standing in for
+  `snapshot.<field>`, the assembled block's `=`/`+=` becoming the helper's
+  `return`, the activity headline losing the table expression that is now
+  `_activity_table`'s own return, the `by_as_of` list annotated with the
+  `_AsOfRow` alias, and pure statements regrouped where their readers are
+  (`window_start` into the `_Window` construction, the ordering clause into
+  `_source_line`, the capped-history list measured beside the no-disclosure
+  list before the header rather than after the event scan, `n_tracked` ahead
+  of the top-holders string). One of those moves reaches a path it did not
+  run on before: `window_start` is now computed before the no-disclosures
+  early return, so a `look_back_days` that takes the subtraction past what
+  `datetime` can represent (above roughly 739,000 for a 2026 `curr_date`)
+  raises `OverflowError` on that path as it already did on every path with a
+  visible disclosure; the escape of that error past the vendor's own error
+  family is a pre-existing defect shared by the sibling vendors, tracked as
+  #380. The old function and the new
+  one, run over 93,000 generated snapshots, rendered byte-identical reports
+  and raised identical errors. The length ratchet loses the row. Five
+  tests pin what a thirty-mutation probe found unguarded: the three standing
+  caveats' wording, the top-holders cut at `TOP_HOLDERS`, a company whose
+  window nets to exactly zero counting on neither side, the table carrying
+  every row up to `MAX_ROWS` and dropping the oldest past it, and a capped
+  history that starts on or before the window start staying silent. No
+  behaviour change beyond that overflow edge.
+
 ### Fixed
 
 - **`contrib/dashboard`: the `history/` directory keeps its setgid bit.** The

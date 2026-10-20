@@ -111,7 +111,6 @@ _LONG_FUNCTIONS: dict[tuple[str, str], int] = {
     ("farside", "_parse_flow_table"): 153,
     ("fear_greed", "get_fear_greed_data"): 203,
     ("interface", "route_to_vendor"): 486,
-    ("sosovalue_treasuries", "get_btc_treasury_data"): 582,
     ("vendor_common", "load_rolling_snapshot"): 194,
 }
 

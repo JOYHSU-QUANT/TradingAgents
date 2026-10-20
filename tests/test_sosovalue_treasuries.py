@@ -1914,3 +1914,88 @@ class TestAnEarlyExitIsAttributedToWhoeverCausedIt:
         assert self._read(tmp_path, payload) is None
         payload["breaker_skipped"] = False
         assert self._read(tmp_path, payload) is not None
+
+
+@pytest.mark.unit
+class TestSectionProbeGaps:
+    """What a mutation probe over the split renderer (dataflows plan D2-c) found unpinned.
+
+    Each test pins a sentence or a bound that a whole-condition removal in one
+    section left the suite green on. All through the public entry point.
+    """
+
+    def test_the_standing_caveats_are_all_three_present(self):
+        # The lumpiness caveat was asserted by its first clause only; its
+        # reading instruction and the other two standing sentences had no pin.
+        report = _render(_snapshot())
+        assert "read it as a medium-term demand-side signal, not a timing signal" in report
+        assert "Dates are disclosure dates and may lag the underlying transactions" in report
+        assert "The company universe is the provider's listing order" in report
+
+    def test_the_top_holders_line_stops_at_top_holders(self):
+        # TOP_HOLDERS + 1 companies: the five largest are named, the sixth is
+        # not — but the as-of list under it names every contributor.
+        cut = sosovalue_treasuries.TOP_HOLDERS
+        companies = {
+            f"C{i}": {"name": "", "rows": [_prow("2026-08-01", 100.0 * (cut + 1 - i), 1.0)]}
+            for i in range(cut + 1)
+        }
+        report = _render(_snapshot(companies=companies))
+        top = next(ln for ln in report.splitlines() if ln.startswith("**Top holders:**"))
+        for i in range(cut):
+            assert f"C{i} {100 * (cut + 1 - i):,} BTC" in top
+        assert f"C{cut} " not in top
+        as_of = next(ln for ln in report.splitlines() if "(oldest first):**" in ln)
+        assert f"C{cut} 2026-08-01" in as_of
+
+    def test_a_company_whose_window_nets_to_zero_is_neither_adding_nor_reducing(self):
+        # +5 then -5 inside the window: a net of exactly zero must count on
+        # neither side, or the headline claims accumulation that did not happen.
+        rows = [_prow("2026-08-01", 105.0, 5.0), _prow("2026-08-05", 100.0, -5.0)]
+        report = _render(_snapshot(companies={"X": {"name": "", "rows": rows}}))
+        assert (
+            "**90d disclosed net change:** +0 BTC (0 companies adding, 0 reducing, of 1 tracked)"
+            in report
+        )
+
+    def test_the_table_carries_every_row_up_to_the_cap_and_drops_the_oldest(self):
+        # Three events render three rows; MAX_ROWS + 2 events render exactly
+        # MAX_ROWS, and it is the oldest two that go.
+        rows = [_prow(f"2026-08-0{d}", 100.0 + d, 1.0) for d in (1, 2, 3)]
+        report = _render(_snapshot(companies={"X": {"name": "", "rows": rows}}))
+        assert [ln for ln in report.splitlines() if ln.startswith("| 2026-")] == [
+            "| 2026-08-01 | X | +1 | — | — |",
+            "| 2026-08-02 | X | +1 | — | — |",
+            "| 2026-08-03 | X | +1 | — | — |",
+        ]
+        start = datetime(2026, 7, 1)
+        dates = [
+            (start + timedelta(days=i)).strftime("%Y-%m-%d")
+            for i in range(sosovalue_treasuries.MAX_ROWS + 2)
+        ]
+        rows = [_prow(date, 100.0 + i, 1.0) for i, date in enumerate(dates)]
+        report = _render(
+            _snapshot(companies={"X": {"name": "", "rows": rows}}),
+            curr_date=dates[-1],
+            look_back_days=len(dates),
+        )
+        shown = [ln for ln in report.splitlines() if ln.startswith("| 2026-")]
+        assert [ln[2:12] for ln in shown] == dates[2:]
+
+    def test_a_capped_history_starting_before_the_window_is_not_called_shallow(self):
+        # The twin of test_a_capped_history_starting_inside_the_window_is_disclosed:
+        # at the per-company cap but with visible[0] on or before the window
+        # start (2026-05-13 for the 90-day window ending 2026-08-11), the cap
+        # hides nothing the window needs, so the understatement warning is
+        # false and must stay silent — on the day before the start and on the
+        # start itself (the comparison is strict). As in the twin, the daily
+        # rows run past curr_date on purpose: the cap is measured on the full
+        # served history, the lookahead filter on the visible one.
+        for start in (datetime(2026, 5, 12), datetime(2026, 5, 13)):
+            rows = [
+                _prow((start + timedelta(days=i)).strftime("%Y-%m-%d"), 100.0 + i, 1.0)
+                for i in range(sosovalue_treasuries.HISTORY_LIMIT)
+            ]
+            report = _render(_snapshot(companies={"X": {"name": "", "rows": rows}}))
+            assert "**90d disclosed net change:**" in report
+            assert "runs to the provider's per-company cap" not in report

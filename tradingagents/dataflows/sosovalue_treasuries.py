@@ -807,6 +807,663 @@ def _fmt_btc(value: float) -> str:
     return f"{value:,.0f}"
 
 
+def _resolve_asset(asset: str) -> tuple[str | None, bool, str]:
+    """``(asset_key, market_proxy, quoted)`` for a caller's symbol.
+
+    ``asset_key`` is ``None`` for a symbol with no treasury signal (the entry
+    point answers the no-signal sentence); ``quoted`` is the caller's spelling
+    as the report may echo it inside quotes.
+    """
+    # The caller's symbol, guarded the way the entry point guards
+    # ``look_back_days``. A truthy non-string asset reaches
+    # ``normalize_symbol((asset or "").replace(...))`` and escapes as
+    # AttributeError — again a caller's bug reported as a vendor outage.
+    # ``bytes`` has to be caught HERE rather than duck-typed away:
+    # ``bytes.replace`` exists, so it survives a hasattr check and only fails
+    # deeper in. isinstance rather than ``type(...) is str`` so a str subclass,
+    # which every operation below handles, is still accepted.
+    if asset and not isinstance(asset, str):
+        raise SoSoValueError(f"asset must be a symbol string, got {type(asset).__name__}")
+    # Flattened BEFORE classification, not after, so exactly one string is both
+    # decided on and rendered — sanitising afterwards makes the classified and
+    # the rendered strings disagree (deribit's comment spells out that failure).
+    # ``asset`` is an LLM-written tool argument echoed into a markdown ``##``
+    # heading, an emphasis caveat and the no-signal sentence, so every copy is a
+    # chance to forge structure: an asset of
+    # "ETH-USD | ## Combined holdings: 9,999,999 BTC" classifies on its base
+    # "ETH", takes the proxy branch, and lands that heading inside the report.
+    # ``echo_argument`` and not the vendor default: this is the CALLER'S OWN
+    # spelling coming back into text it reads, so an edge marker becomes a
+    # space rather than vanishing — "_SOL" must not be quoted back as "SOL"
+    # inside a sentence saying we have no signal for it (#232, #233).
+    asset = echo_argument(asset)
+    # Every site that names the asset does so INSIDE QUOTES, and a value carrying the
+    # quote character closes the span early — the prose after it then reads to
+    # the model as this tool's own words rather than as the caller's argument.
+    # ``quote_argument`` supplies delimiters ``repr`` has already escaped, so
+    # those sentences must not add quotes of their own. A clean symbol
+    # renders byte for byte as it did with the literal quotes: ``'SOL'``.
+    quoted = quote_argument(asset)
+    asset_key, market_proxy = _classify_asset(asset)
+    return asset_key, market_proxy, quoted
+
+
+class _Window(NamedTuple):
+    """The dates one render is measured against, normalised once by the entry point.
+
+    ``curr_date`` is ``curr_dt`` in canonical ISO form (never the caller's
+    spelling); ``window_start`` opens the ``look_back_days`` activity window.
+    """
+
+    curr_dt: datetime
+    curr_date: str
+    window_start: str
+    look_back_days: int
+
+
+def _visible_by_company(companies: dict[str, dict], window: _Window) -> dict[str, list[dict]]:
+    """Each fetched company's rows dated on or before ``curr_date``; companies with none are absent."""
+    curr_date = window.curr_date
+    # Visible rows per company; a company's latest disclosure is its last
+    # visible row (one source of truth — a parallel latest-row dict could
+    # silently disagree after a later filter).
+    visible_by_company: dict[str, list[dict]] = {}
+    for ticker, company in companies.items():
+        visible = [r for r in company["rows"] if r["date"] <= curr_date]
+        if visible:
+            visible_by_company[ticker] = visible
+    return visible_by_company
+
+
+def _company_coverage(
+    visible_by_company: dict[str, list[dict]], companies: dict[str, dict], window: _Window
+) -> tuple[list[str], list[str]]:
+    """``(no_disclosure, shallow)``: the fetched companies the window cannot fully see.
+
+    ``no_disclosure`` are those with no row on or before ``curr_date``;
+    ``shallow`` those whose served history is at the provider's cap and still
+    starts inside the window. Both are measured here and rendered by their
+    own note helpers.
+    """
+    window_start = window.window_start
+    # A fetched company whose every disclosure postdates curr_date drops out of
+    # the whole report — combined holdings, the tracked count and the
+    # concentration denominator all shrink with it. That is a coverage gap like
+    # any other and must be disclosed, not applied silently.
+    no_disclosure = sorted(set(companies) - set(visible_by_company))
+    # History-depth honesty, gated on the provider's per-company row cap.
+    # ``len(rows) >= HISTORY_LIMIT`` is what makes the claim true, matching the
+    # macro twin: only a history the per-request cap actually truncated can be
+    # hiding earlier activity. A company that simply began disclosing inside
+    # the window — a recent adopter, the common shape among smaller filers —
+    # has nothing older to show, and saying otherwise invents a gap and tells
+    # the reader to discount a net-change figure that is in fact complete.
+    # Measured on the full served history rather than the curr_date-filtered
+    # view: the cap drops the OLDEST rows, independently of that filter.
+    shallow = sorted(
+        t
+        for t, visible in visible_by_company.items()
+        if len(companies[t]["rows"]) >= HISTORY_LIMIT and visible[0]["date"] > window_start
+    )
+    return no_disclosure, shallow
+
+
+def _title_lines(quoted: str, market_proxy: bool) -> list[str]:
+    """The heading, plus the proxy caveat when BTC treasuries stand in for ``quoted``."""
+    if market_proxy:
+        header_lines = [
+            f"## BTC Corporate Treasuries (market-wide demand proxy for {quoted}, SoSoValue)",
+            f"_Corporate treasuries hold BTC, not {quoted}; showing BTC treasury "
+            f"holdings and flows as a market-wide crypto demand proxy, not an "
+            f"{quoted}-specific signal._",
+        ]
+    else:
+        header_lines = ["## BTC Corporate Treasuries (SoSoValue)"]
+    return header_lines
+
+
+def _blind_tail_notes(fetched_at: str, window: _Window) -> list[str]:
+    """The unobserved-tail caveat, when the snapshot was fetched before ``curr_date``."""
+    curr_dt, look_back_days = window.curr_dt, window.look_back_days
+    notes: list[str] = []
+    # NOT gated on staleness. The window below is labelled by curr_date, but no
+    # snapshot can carry a disclosure filed after it was fetched, so its most
+    # recent stretch is empty by construction rather than quiet. Treasury flow
+    # is lumpy and announcement-driven: "no disclosed holdings changes" is
+    # exactly the sentence a reader turns into "no corporate accumulation", and
+    # that misreading does not depend on the snapshot being stale — at a 24h
+    # TTL any serve whose fetch fell on an earlier day has the same blind tail,
+    # which is an ordinary serve rather than an edge case. The guard is the
+    # fact itself (blind > 0), so on the production default
+    # curr_date == fetched_at[:10] the sentence stays silent. Counterpart of
+    # the macro module's sentence.
+    fetched_day = fetched_at[:10]
+    blind = _days_unobserved(fetched_at, curr_dt)
+    if blind is not None and blind > 0:
+        # Clamped to the window: look_back_days is a caller-supplied tool
+        # argument, so an age larger than it would claim a tail longer than
+        # the window it describes ("the most recent 10 days" of a 5-day
+        # window). When the age swallows the window the true statement is
+        # the stronger one, not a truncated version of the weaker one.
+        # Strict >, not >=: the window is inclusive at both ends, so it
+        # spans look_back_days + 1 days while the unobserved stretch
+        # (fetched_day, curr_date] is exactly blind. At equality
+        # fetched_day IS window_start, whose own filings are observable —
+        # the whole-window claim needs the fetch to precede the window.
+        unseen = min(blind, look_back_days)
+        extent = (
+            "the whole of it is"
+            if blind > look_back_days
+            else f"the most recent {unseen} {_plural_days(unseen)} of it "
+            f"{_plural(unseen, 'is', 'are')}"
+        )
+        notes.append(
+            f"_The window below is bounded by the fetch date: this snapshot cannot carry "
+            f"a disclosure filed after {fetched_day}, so {extent} unobserved rather than "
+            f"quiet — read a flat net change as coverage ending early, not as no "
+            f"accumulation._"
+        )
+    return notes
+
+
+def _failed_history_notes(snapshot: _TreasurySnapshot, selected: int) -> list[str]:
+    """The coverage caveat for histories the sweep could not fetch, and why the sweep ended."""
+    notes: list[str] = []
+    if snapshot.companies_failed:
+        n = len(snapshot.companies_failed)
+        # "could not be fetched" on its own reads as the provider withholding
+        # these histories, and a reader who downgrades the whole feed on that
+        # basis is acting on a gap this client opened. Appended rather than
+        # substituted: the bucket also collects transport failures and
+        # swallowed parse breaks from before the 429, so the quota explains
+        # part of the list, never provably all of it. Mirrors the macro twin.
+        # Two ways the sweep ends early, two different corrections: the quota is
+        # a gap this client OPENED, while the breaker leaves real upstream
+        # trouble that was only ever OBSERVED on the companies actually asked
+        # for. Mutually exclusive by construction (either arm breaks the loop)
+        # and read-side too, so the branch order carries no precedence.
+        quota = ""
+        if snapshot.rate_limited:
+            quota = (
+                " This client's own per-minute request quota ran out partway through the "
+                "sweep: the request it stopped on was refused for that reason and every "
+                "company behind it was never attempted, so that much of the gap is this "
+                "client's rather than the provider going quiet, and it is retried on the "
+                "short TTL."
+            )
+        elif snapshot.breaker_skipped:
+            quota = (
+                f" This client stopped the sweep after "
+                f"{MAX_CONSECUTIVE_NETWORK_FAILURES} consecutive transport failures, so "
+                f"the companies behind that point were never requested: the failures are "
+                f"established only for the ones actually attempted, and the rest are "
+                f"retried on the short TTL."
+            )
+        notes.append(
+            f"_Coverage incomplete ({n} of {selected} selected companies): histories "
+            f"for {', '.join(sorted(snapshot.companies_failed))} could not be fetched, "
+            f"so the figures below exclude them.{quota}_"
+        )
+    return notes
+
+
+def _empty_history_notes(companies_empty: list[str]) -> list[str]:
+    """The caveat for listed companies the provider serves no history for."""
+    notes: list[str] = []
+    if companies_empty:
+        n = len(companies_empty)
+        notes.append(
+            f"_{n} selected {_plural(n, 'company', 'companies')} "
+            f"({', '.join(sorted(companies_empty))}) "
+            f"{_plural(n, 'is', 'are')} listed by the provider but "
+            f"{_plural(n, 'has', 'have')} no served purchase history at all, so "
+            f"{_plural(n, 'it holds', 'they hold')} no figures below._"
+        )
+    return notes
+
+
+def _unusable_listing_notes(companies_unusable: int, *, selected: int) -> list[str]:
+    """The caveat for listing entries dropped for want of a usable ticker."""
+    notes: list[str] = []
+    if companies_unusable:
+        n = companies_unusable
+        notes.append(
+            f"_{n} listing {_plural(n, 'entry', 'entries')} had no usable ticker and "
+            f"{_plural(n, 'was', 'were')} skipped; a dropped entry may itself be a "
+            f"large holder, so the top-{selected} cut may not be the true top "
+            f"{selected}._"
+        )
+    return notes
+
+
+def _no_disclosure_notes(no_disclosure: list[str], window: _Window) -> list[str]:
+    """The caveat for fetched companies whose every disclosure postdates ``curr_date``."""
+    curr_date = window.curr_date
+    notes: list[str] = []
+    if no_disclosure:
+        n = len(no_disclosure)
+        notes.append(
+            f"_{n} fetched {_plural(n, 'company', 'companies')} "
+            f"({', '.join(no_disclosure)}) {_plural(n, 'has', 'have')} no disclosure "
+            f"dated on or before {curr_date}, so {_plural(n, 'it is', 'they are')} "
+            f"excluded from every figure below, including the combined total, the "
+            f"tracked-company count and the concentration share._"
+        )
+    return notes
+
+
+def _standing_caveats(selected: int, window: _Window) -> list[str]:
+    """The three caveats every report carries: disclosure lag, lumpiness, and the hindsight universe."""
+    curr_date = window.curr_date
+    notes: list[str] = []
+    notes.append(
+        "_Dates are disclosure dates and may lag the underlying transactions; some "
+        "companies disclose only monthly or quarterly snapshots, so each holding is "
+        "as of that company's own latest filing, not a common date._"
+    )
+    notes.append(
+        "_Treasury flow is announcement-driven and lumpy — read it as a medium-term "
+        "demand-side signal, not a timing signal._"
+    )
+    # The rows are lookahead-filtered to curr_date but the SELECTION is not:
+    # the listing is fetched now and ranked by present holdings. On a
+    # historical curr_date that is a hindsight universe — a company that was a
+    # large holder then and has since fallen out of the listing's head is
+    # absent from every figure here, and the no_disclosure caveat cannot name
+    # it because it was never fetched. Same class of disclosure as the macro
+    # module's "current figures, not point-in-time snapshots".
+    notes.append(
+        f"_The company universe is the provider's listing order at the time this "
+        f"snapshot was fetched. Individual disclosures are filtered to {curr_date}, but "
+        f"the top-{selected} cut is not — so where {curr_date} sits earlier than that "
+        f"fetch, a company that ranked large then and has since dropped out of the "
+        f"listing's head is missing from every figure below with nothing above naming "
+        f"it._"
+    )
+    return notes
+
+
+def _ordering_clause(order_unverified: bool, companies: dict[str, dict]) -> str:
+    """How far the top-N claim is earned, for the Source line's coverage parenthetical."""
+    # Which of the two states the flag records, said apart the way the
+    # fetch-time log already says them apart. Below two fetched histories
+    # nothing was compared, so calling the listing misordered would be the same
+    # unearned assertion the flag exists to avoid; an actual contradiction is
+    # the stronger fact — the provider's own ordering disagrees with the
+    # figures it served — and reached the reader as the same hedge. Recomputed
+    # rather than inferred from len(): a cache may legitimately carry True over
+    # holdings that do descend, and that third state must claim neither.
+    if not order_unverified:
+        ordering = "provider lists largest holders first"
+    else:
+        # Recomputed rather than inferred from the flag alone: the flag records
+        # only THAT the claim is unearned, and the two causes read very
+        # differently to an analyst. "only 1 history" is exact — _fetch_all
+        # raises rather than returning zero companies and _read_cache rejects
+        # an empty dict, so the too-few case is always exactly one.
+        order = _holdings_order(companies)
+        if order == _ORDER_TOO_FEW:
+            ordering = (
+                "provider ordering unchecked — only 1 history fetched, so nothing was "
+                "compared; these may not be the true largest holders"
+            )
+        elif order == _ORDER_CONTRADICTED:
+            ordering = (
+                "the fetched holdings contradict the provider's listing order, so this "
+                "selection may not be the true largest holders"
+            )
+        else:
+            # A cache may legitimately carry True over holdings that do
+            # descend (see _read_cache), so this third state claims neither.
+            ordering = (
+                "provider ordering unverified for this snapshot, so these may not be the "
+                "true largest holders"
+            )
+    return ordering
+
+
+def _source_line(snapshot: _TreasurySnapshot, selected: int, window: _Window) -> str:
+    """The ``- Source:`` line: provenance, the top-N-of-M coverage and the window end."""
+    curr_date = window.curr_date
+    ordering = _ordering_clause(snapshot.order_unverified, snapshot.companies)
+    # "listed companies" only while the two numbers come from the same
+    # universe. companies_total is len(listing) AFTER _parse_company_list drops
+    # entries with no valid ticker, so with companies_unusable > 0 the
+    # denominator is the provider's count minus this client's drops — "top 15
+    # of 47 listed companies" would state a provider figure that is short by
+    # exactly those drops. The caveat above discloses that entries were skipped
+    # and that the top-N cut may be wrong, but never that the denominator
+    # itself shrank.
+    # The shortfall rides inside the ordering parenthetical rather than opening
+    # a second one: two bracketed clauses back to back on the same line read as
+    # a formatting slip, and this line already carries three fields.
+    listing_scope = (
+        f"{snapshot.companies_total} listed "
+        f"{_plural(snapshot.companies_total, 'company', 'companies')}"
+    )
+    unreadable = ""
+    if snapshot.companies_unusable:
+        n_bad = snapshot.companies_unusable
+        listing_scope = (
+            f"{snapshot.companies_total} readable listing "
+            f"{_plural(snapshot.companies_total, 'entry', 'entries')}"
+        )
+        unreadable = f"; {n_bad} further {_plural(n_bad, 'entry', 'entries')} could not be read"
+    return (
+        f"- Source: SoSoValue OpenAPI (BTC treasuries) | Snapshot fetched "
+        f"{snapshot.fetched_at} | Coverage: top {selected} of "
+        f"{listing_scope} ({ordering}{unreadable}) | Window ending "
+        f"{curr_date}"
+    )
+
+
+# ``(as-of date, ticker)`` — the reverse of a ``holders`` entry's ``(ticker,
+# row)``. Both elements are ``str``, so only the name says which is which.
+_AsOfRow = tuple[str, str]
+
+
+class _HoldingsFacts(NamedTuple):
+    """The holdings section's figures, measured once for the summary and the concentration line.
+
+    ``holders`` is ``(ticker, latest visible row)`` largest holding first;
+    ``by_as_of`` is ``(as-of date, ticker)`` oldest filing first — one
+    ordering serving both the span sentence and the per-company list, so two
+    independent sorts cannot disagree about which filing is the oldest; and
+    ``single_as_of`` whether every contributor shares one as-of date, read by
+    the combined-holdings line and the concentration line's basis clause,
+    which must not contradict each other.
+    """
+
+    combined: float
+    holders: list[tuple[str, dict]]
+    n_tracked: int
+    by_as_of: list[_AsOfRow]
+    single_as_of: bool
+
+
+def _holdings_facts(visible_by_company: dict[str, list[dict]]) -> _HoldingsFacts:
+    """Measure the holdings section's figures over the visible rows.
+
+    ``visible_by_company`` must be non-empty: the entry point answers the
+    no-disclosures sentence before any holdings figure is measured.
+    """
+    combined = sum(v[-1]["btc_holding"] for v in visible_by_company.values())
+    holders = sorted(
+        ((t, v[-1]) for t, v in visible_by_company.items()),
+        key=lambda kv: kv[1]["btc_holding"],
+        reverse=True,
+    )
+    n_tracked = len(visible_by_company)
+    # Per-company as-of dates can differ by months (some filers are
+    # quarterly); the span makes that staleness mix visible on the headline
+    # figure itself, not only in the top-5 as-of dates (user decision).
+    #
+    # One ordering serves both the span sentence and the per-company list: two
+    # independent sorts of the same data could disagree about which filing is
+    # the oldest, and the two lines sit next to each other in the report.
+    by_as_of: list[_AsOfRow] = sorted((v[-1]["date"], t) for t, v in visible_by_company.items())
+    # One test feeding two sentences: ``_concentration_line``'s basis clause
+    # must not assert a mix of as-of dates while ``_holdings_lines`` prints a
+    # single one. They sit three rows apart in the report.
+    single_as_of = by_as_of[0][0] == by_as_of[-1][0]
+    return _HoldingsFacts(
+        combined=combined,
+        holders=holders,
+        n_tracked=n_tracked,
+        by_as_of=by_as_of,
+        single_as_of=single_as_of,
+    )
+
+
+def _label(ticker: str, *, companies: dict[str, dict]) -> str:
+    """``TICKER (name)`` for the top-holders line, or the bare ticker when the name is empty."""
+    # The company name is free vendor text rendered verbatim into an
+    # LLM-visible line, so it is flattened here — _clean_name bounds the
+    # length and charset at the parse boundary but leaves markdown intact,
+    # and "*"/"`"/"|" inside a name can forge emphasis or a table cell.
+    name = _sanitize(companies[ticker]["name"])
+    return f"{ticker} ({name})" if name else ticker
+
+
+def _holdings_lines(facts: _HoldingsFacts, companies: dict[str, dict], window: _Window) -> str:
+    """The combined-holdings, top-holders and as-of-date lines."""
+    combined, holders, n_tracked = facts.combined, facts.holders, facts.n_tracked
+    by_as_of, single_as_of = facts.by_as_of, facts.single_as_of
+    curr_date = window.curr_date
+    top_str = "; ".join(
+        f"{_label(t, companies=companies)} {_fmt_btc(r['btc_holding'])} BTC (as of {r['date']})"
+        for t, r in holders[:TOP_HOLDERS]
+    )
+    as_of_note = (
+        f"as of {by_as_of[0][0]}"
+        if single_as_of
+        else f"as-of dates span {by_as_of[0][0]} → {by_as_of[-1][0]}"
+    )
+    # Every contributor's as-of date, not just the top five (user decision):
+    # the combined total and the concentration share weight all of them
+    # equally, so a company that stopped filing a year ago carries its stale
+    # holdings at full weight into a figure the report presents as current —
+    # and outside the top five it had no visible date at all. Oldest first,
+    # because those are the ones worth discounting.
+    as_of_line = "; ".join(f"{t} {d}" for d, t in by_as_of)
+    return (
+        f"\n**Combined holdings:** {_fmt_btc(combined)} BTC across {n_tracked} tracked "
+        f"{_plural(n_tracked, 'company', 'companies')}, each as of its latest "
+        f"disclosure on or before {curr_date} ({as_of_note})\n"
+        f"**Top holders:** {top_str}\n"
+        f"**As-of date of every company in that total (oldest first):** {as_of_line}\n"
+        f"_No filing-age cut is applied: a company that has not disclosed for months "
+        f"still contributes its last known holding at full weight above, so read the "
+        f"oldest dates in that list as the staleness carried by the combined figure._\n"
+    )
+
+
+def _concentration_line(facts: _HoldingsFacts) -> str:
+    """The largest holder's share of the combined total, when there is a total to share."""
+    combined, holders, n_tracked = facts.combined, facts.holders, facts.n_tracked
+    by_as_of, single_as_of = facts.by_as_of, facts.single_as_of
+    if combined > 0:
+        top_ticker, top_row = holders[0]
+        share = top_row["btc_holding"] / combined * 100
+        # The family's near-100 truncation band (this module's decided fix,
+        # now shared): "100" may be printed only for a share that IS the
+        # whole — see _concentration_share_str for why rounding cannot.
+        share_str = _concentration_share_str(share)
+        # Only claim dominance where the arithmetic supports it. Printed
+        # unconditionally, this clause told the reader to weight one filer's
+        # disclosures above everything else even at a 14% share — reachable
+        # whenever the mega-holder lands in companies_failed / companies_empty
+        # or has no disclosure on or before curr_date.
+        dominance = (
+            " and, at more than half the total, the combined figure moves mostly with "
+            "what this one company does"
+            if share > 50
+            else ""
+        )
+        # With one contributor — routine after a mid-sweep 429, or on a
+        # historical curr_date that leaves the rest in no_disclosure — every
+        # holding shares one as-of date, and the mixed-dates clause would
+        # contradict the combined-holdings line three rows above.
+        basis = (
+            f"and it divides holdings that are all as of {by_as_of[0][0]}"
+            if single_as_of
+            else "and not a single-date measure (it divides holdings carrying mixed as-of dates)"
+        )
+        return (
+            f"**Concentration:** largest holder {top_ticker} = {share_str} of the "
+            f"{n_tracked}-company combined total above — not of the whole market, "
+            f"{basis}{dominance}\n"
+        )
+    return ""
+
+
+def _activity_events(
+    visible_by_company: dict[str, list[dict]], window: _Window
+) -> tuple[list[_Activity], int]:
+    """``(events, underivable)``: the window's disclosed changes, and the holdings-only first rows no change can be derived for."""
+    window_start = window.window_start
+    events: list[_Activity] = []
+    underivable = 0
+    for ticker, visible in visible_by_company.items():
+        for i, row in enumerate(visible):
+            if row["date"] < window_start:
+                continue
+            if row["btc_acq"] is not None:
+                delta = row["btc_acq"]
+                since = None
+            elif i > 0:
+                # A holdings-only disclosure (live-verified: MARA): the change
+                # is implied by the move from the previous disclosure, and it
+                # spans everything SINCE that disclosure — the tag carries the
+                # start date so a multi-month drift is not read as a one-day
+                # event (user decision).
+                delta = row["btc_holding"] - visible[i - 1]["btc_holding"]
+                since = visible[i - 1]["date"]
+            else:
+                # First served row and no filed quantity: no baseline to
+                # derive a change from — disclosed below, not guessed.
+                underivable += 1
+                continue
+            # A filed cost belongs to a filed quantity. On a holdings-derived
+            # row the BTC change spans every transaction since the previous
+            # disclosure while acq_cost is one filing's own figure, so the two
+            # cells sit side by side with independent signs — a disposal row
+            # carrying a positive cost, which reads as a purchase of that size.
+            # Drop the cost on those rows (user decision) rather than print a
+            # number the legend cannot describe truthfully.
+            cost = row["acq_cost"] if since is None else None
+            # An implied price only makes sense for a filed quantity, and a
+            # zero cost is not a price: a self-mined coin filed at 0 would
+            # render an implied US$/BTC of exactly 0, indistinguishable in the
+            # column from a computed one.
+            implied = abs(cost / delta) if cost and delta != 0 else None
+            events.append(_Activity(row["date"], ticker, delta, cost, implied, since))
+    events.sort(key=lambda e: (e.date, e.ticker))
+    return events, underivable
+
+
+def _activity_summary_line(events: list[_Activity], window: _Window, n_tracked: int) -> str:
+    """The ``**Nd disclosed net change:**`` line, with the adding/reducing counts and the mix note."""
+    look_back_days = window.look_back_days
+    net = sum(e.delta for e in events)
+    by_company: dict[str, float] = {}
+    for e in events:
+        by_company[e.ticker] = by_company.get(e.ticker, 0.0) + e.delta
+    adders = sum(1 for v in by_company.values() if v > 0)
+    reducers = sum(1 for v in by_company.values() if v < 0)
+    # The rows are heterogeneous — filed quantities and holdings-derived
+    # deltas — and only the rows say so. The net, the adding/reducing
+    # counts and the window label all inherit that mix, so state it where
+    # the aggregate is read (user decision).
+    derived = sum(1 for e in events if e.derived)
+    mix_note = (
+        f" Of these, {derived} {_plural(derived, 'row is', 'rows are')} derived "
+        f"from a holdings change rather than a filed quantity, and each spans "
+        f"everything since that company's previous disclosure — which can start "
+        f"before this {look_back_days}-day window, so the net and the "
+        f"adding/reducing counts can cover a longer period than the label."
+        if derived
+        else ""
+    )
+    return (
+        f"\n**{look_back_days}d disclosed net change:** {_fmt_signed_btc(net)} BTC "
+        f"({adders} {_plural(adders, 'company', 'companies')} adding, {reducers} "
+        f"reducing, of {n_tracked} tracked).{mix_note}\n"
+    )
+
+
+def _activity_table(events: list[_Activity]) -> str:
+    """The legend and the activity table, capped at ``MAX_ROWS`` with the cap note."""
+    shown = events[-MAX_ROWS:]
+    note = (
+        f"\n_(showing the most recent {MAX_ROWS} of {len(events)} disclosures in the window)_\n"
+        if len(events) > MAX_ROWS
+        else ""
+    )
+    lines = [
+        "\n_BTC change is positive for an acquisition, negative for a disposal; "
+        "Cost is the amount the company filed for that same event in millions of "
+        "US dollars and carries the matching sign (negative = proceeds received on "
+        "a disposal, not a cost); Implied US$/BTC is that filing's own cost divided "
+        "by its own quantity as an absolute value — an average price for that "
+        "event, not a market price. Both are blank on a row derived from a holdings "
+        "change: there the BTC figure spans every transaction since the previous "
+        "disclosure, so no single filed cost belongs to it. Cost is blank on a FILED "
+        "row too whenever the company reported a quantity without a cost — common on "
+        "monthly snapshot disclosures — so a blank Cost does not by itself mark a row "
+        "as derived; only the 'from holdings change since' label does. Implied US$/BTC "
+        "is blank in that case as well, and on a cost of zero or a quantity of zero — "
+        "there is nothing to divide in any of those._",
+        "\n| Date | Company | BTC change | Cost (US$m) | Implied US$/BTC |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for e in shown:
+        delta_cell = _fmt_signed_btc(e.delta) + (
+            f" (from holdings change since {e.since})" if e.derived else ""
+        )
+        cost_cell = _fmt_signed_usd_m(e.cost) if e.cost is not None else "—"
+        implied_cell = f"{e.implied:,.0f}" if e.implied is not None else "—"
+        lines.append(f"| {e.date} | {e.ticker} | {delta_cell} | {cost_cell} | {implied_cell} |")
+    return "\n".join(lines) + "\n" + note
+
+
+def _empty_activity_line(visible_by_company: dict[str, list[dict]], window: _Window) -> str:
+    """The net-change line for a window with no disclosed change.
+
+    ``visible_by_company`` must be non-empty (the entry point's early return
+    guarantees it): the line names the latest disclosure across it.
+    """
+    look_back_days, curr_date = window.look_back_days, window.curr_date
+    latest_any = max(v[-1]["date"] for v in visible_by_company.values())
+    return (
+        f"\n**{look_back_days}d disclosed net change:** no disclosed holdings "
+        f"changes in the window ending {curr_date} (latest disclosure across "
+        f"tracked companies: {latest_any})\n"
+    )
+
+
+def _underivable_note(underivable: int) -> str:
+    """The note for holdings-only first rows the table cannot carry."""
+    if underivable:
+        return (
+            f"\n_{underivable} holdings-only "
+            f"{_plural(underivable, 'disclosure', 'disclosures')} in the window "
+            f"{_plural(underivable, 'is', 'are')} not in the table: as the first "
+            f"served row of {_plural(underivable, 'its company', 'their companies')}, "
+            f"no prior disclosure exists to derive the change from._\n"
+        )
+    return ""
+
+
+def _shallow_note(shallow: list[str]) -> str:
+    """The history-depth note, for companies whose capped history starts inside the window."""
+    if shallow:
+        return (
+            f"\n_The served history for {', '.join(shallow)} runs to the provider's "
+            f"per-company cap (at least {HISTORY_LIMIT} rows) and still starts inside "
+            f"the window, so earlier activity exists that this snapshot cannot show; "
+            f"the window totals can understate it._\n"
+        )
+    return ""
+
+
+def _empty_window_gap_line(
+    *, companies_failed: list[str], companies_empty: list[str], no_disclosure: list[str]
+) -> str:
+    """The coverage-gap line under an empty window: who contributed nothing."""
+    # Every bucket that contributed nothing, not just the failures: a
+    # company the provider lists with no served history at all, and one
+    # whose disclosures all postdate curr_date, leave the same hole.
+    gap = _coverage_gap_note(
+        set(companies_failed) | set(companies_empty) | set(no_disclosure),
+        "contributed nothing",
+        "no company disclosed a change",
+    )
+    if gap:
+        return f"\n_{gap}_\n"
+    return ""
+
+
 def get_btc_treasury_data(
     asset: str,
     curr_date: str,
@@ -864,12 +1521,12 @@ def get_btc_treasury_data(
     if refusal is not None:
         return refusal
 
-    # Guarded like asset below, and for the same reason: a non-int reaches
-    # ``<=`` first, where the TypeError escapes the vendor taxonomy into the
-    # router's bare except and is rendered into the model-visible sentinel.
-    # bool is rejected explicitly even though it passes isinstance(x, int) —
-    # True would silently mean a one-day window rather than the default.
-    # Mirrors the macro twin.
+    # Guarded like ``asset`` in ``_resolve_asset``, and for the same reason: a
+    # non-int reaches ``<=`` first, where the TypeError escapes the vendor
+    # taxonomy into the router's bare except and is rendered into the
+    # model-visible sentinel. bool is rejected explicitly even though it passes
+    # isinstance(x, int) — True would silently mean a one-day window rather
+    # than the default. Mirrors the macro twin.
     if look_back_days is not None and (
         isinstance(look_back_days, bool) or not isinstance(look_back_days, int)
     ):
@@ -883,37 +1540,7 @@ def get_btc_treasury_data(
     # The refusal above already proved this parses.
     curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
     curr_date = curr_dt.strftime("%Y-%m-%d")
-
-    # The other caller-supplied argument, guarded the same way. A truthy
-    # non-string asset reaches ``normalize_symbol((asset or "").replace(...))``
-    # and escapes as AttributeError — again a caller's bug reported as a vendor
-    # outage. ``bytes`` has to be caught HERE rather than duck-typed away:
-    # ``bytes.replace`` exists, so it survives a hasattr check and only fails
-    # deeper in. isinstance rather than ``type(...) is str`` so a str subclass,
-    # which every operation below handles, is still accepted.
-    if asset and not isinstance(asset, str):
-        raise SoSoValueError(f"asset must be a symbol string, got {type(asset).__name__}")
-    # Flattened BEFORE classification, not after, so exactly one string is both
-    # decided on and rendered — sanitising afterwards makes the classified and
-    # the rendered strings disagree (deribit's comment spells out that failure).
-    # ``asset`` is an LLM-written tool argument echoed into a markdown ``##``
-    # heading, an emphasis caveat and the no-signal sentence, so every copy is a
-    # chance to forge structure: an asset of
-    # "ETH-USD | ## Combined holdings: 9,999,999 BTC" classifies on its base
-    # "ETH", takes the proxy branch, and lands that heading inside the report.
-    # ``echo_argument`` and not the vendor default: this is the CALLER'S OWN
-    # spelling coming back into text it reads, so an edge marker becomes a
-    # space rather than vanishing — "_SOL" must not be quoted back as "SOL"
-    # inside a sentence saying we have no signal for it (#232, #233).
-    asset = echo_argument(asset)
-    # Every site below names the asset INSIDE QUOTES, and a value carrying the
-    # quote character closes the span early — the prose after it then reads to
-    # the model as this tool's own words rather than as the caller's argument.
-    # ``quote_argument`` supplies delimiters ``repr`` has already escaped, so
-    # the sentences below must not add quotes of their own. A clean symbol
-    # renders byte for byte as it did with the literal quotes: ``'SOL'``.
-    quoted = quote_argument(asset)
-    asset_key, market_proxy = _classify_asset(asset)
+    asset_key, market_proxy, quoted = _resolve_asset(asset)
     if asset_key is None:
         return (
             f"There is no corporate BTC-treasury signal for {quoted}: it is not a "
@@ -923,223 +1550,28 @@ def get_btc_treasury_data(
         )
 
     snapshot = _load_snapshot()
-
-    # Visible rows per company; a company's latest disclosure is its last
-    # visible row (one source of truth — a parallel latest-row dict could
-    # silently disagree after a later filter).
-    visible_by_company: dict[str, list[dict]] = {}
-    for ticker, company in snapshot.companies.items():
-        visible = [r for r in company["rows"] if r["date"] <= curr_date]
-        if visible:
-            visible_by_company[ticker] = visible
-
-    if market_proxy:
-        header_lines = [
-            f"## BTC Corporate Treasuries (market-wide demand proxy for {quoted}, SoSoValue)",
-            f"_Corporate treasuries hold BTC, not {quoted}; showing BTC treasury "
-            f"holdings and flows as a market-wide crypto demand proxy, not an "
-            f"{quoted}-specific signal._",
-        ]
-    else:
-        header_lines = ["## BTC Corporate Treasuries (SoSoValue)"]
-
-    if snapshot.stale:
-        header_lines.append(_stale_caveat(snapshot.fetched_at, "Treat with caution."))
-    # NOT gated on staleness. The window below is labelled by curr_date, but no
-    # snapshot can carry a disclosure filed after it was fetched, so its most
-    # recent stretch is empty by construction rather than quiet. Treasury flow
-    # is lumpy and announcement-driven: "no disclosed holdings changes" is
-    # exactly the sentence a reader turns into "no corporate accumulation", and
-    # that misreading does not depend on the snapshot being stale — at a 24h
-    # TTL any serve whose fetch fell on an earlier day has the same blind tail,
-    # which is an ordinary serve rather than an edge case. The guard is the
-    # fact itself (blind > 0), so on the production default
-    # curr_date == fetched_at[:10] the sentence stays silent. Counterpart of
-    # the macro module's sentence.
-    fetched_day = snapshot.fetched_at[:10]
-    blind = _days_unobserved(snapshot.fetched_at, curr_dt)
-    if blind is not None and blind > 0:
-        # Clamped to the window: look_back_days is a caller-supplied tool
-        # argument, so an age larger than it would claim a tail longer than
-        # the window it describes ("the most recent 10 days" of a 5-day
-        # window). When the age swallows the window the true statement is
-        # the stronger one, not a truncated version of the weaker one.
-        # Strict >, not >=: the window is inclusive at both ends, so it
-        # spans look_back_days + 1 days while the unobserved stretch
-        # (fetched_day, curr_date] is exactly blind. At equality
-        # fetched_day IS window_start, whose own filings are observable —
-        # the whole-window claim needs the fetch to precede the window.
-        unseen = min(blind, look_back_days)
-        extent = (
-            "the whole of it is"
-            if blind > look_back_days
-            else f"the most recent {unseen} {_plural_days(unseen)} of it "
-            f"{_plural(unseen, 'is', 'are')}"
-        )
-        header_lines.append(
-            f"_The window below is bounded by the fetch date: this snapshot cannot carry "
-            f"a disclosure filed after {fetched_day}, so {extent} unobserved rather than "
-            f"quiet — read a flat net change as coverage ending early, not as no "
-            f"accumulation._"
-        )
-
+    window = _Window(
+        curr_dt=curr_dt,
+        curr_date=curr_date,
+        window_start=(curr_dt - timedelta(days=look_back_days)).strftime("%Y-%m-%d"),
+        look_back_days=look_back_days,
+    )
+    visible_by_company = _visible_by_company(snapshot.companies, window)
     selected = (
         len(snapshot.companies) + len(snapshot.companies_failed) + len(snapshot.companies_empty)
     )
-    if snapshot.companies_failed:
-        n = len(snapshot.companies_failed)
-        # "could not be fetched" on its own reads as the provider withholding
-        # these histories, and a reader who downgrades the whole feed on that
-        # basis is acting on a gap this client opened. Appended rather than
-        # substituted: the bucket also collects transport failures and
-        # swallowed parse breaks from before the 429, so the quota explains
-        # part of the list, never provably all of it. Mirrors the macro twin.
-        # Two ways the sweep ends early, two different corrections: the quota is
-        # a gap this client OPENED, while the breaker leaves real upstream
-        # trouble that was only ever OBSERVED on the companies actually asked
-        # for. Mutually exclusive by construction (either arm breaks the loop)
-        # and read-side too, so the branch order carries no precedence.
-        quota = ""
-        if snapshot.rate_limited:
-            quota = (
-                " This client's own per-minute request quota ran out partway through the "
-                "sweep: the request it stopped on was refused for that reason and every "
-                "company behind it was never attempted, so that much of the gap is this "
-                "client's rather than the provider going quiet, and it is retried on the "
-                "short TTL."
-            )
-        elif snapshot.breaker_skipped:
-            quota = (
-                f" This client stopped the sweep after "
-                f"{MAX_CONSECUTIVE_NETWORK_FAILURES} consecutive transport failures, so "
-                f"the companies behind that point were never requested: the failures are "
-                f"established only for the ones actually attempted, and the rest are "
-                f"retried on the short TTL."
-            )
-        header_lines.append(
-            f"_Coverage incomplete ({n} of {selected} selected companies): histories "
-            f"for {', '.join(sorted(snapshot.companies_failed))} could not be fetched, "
-            f"so the figures below exclude them.{quota}_"
-        )
-    if snapshot.companies_empty:
-        n = len(snapshot.companies_empty)
-        header_lines.append(
-            f"_{n} selected {_plural(n, 'company', 'companies')} "
-            f"({', '.join(sorted(snapshot.companies_empty))}) "
-            f"{_plural(n, 'is', 'are')} listed by the provider but "
-            f"{_plural(n, 'has', 'have')} no served purchase history at all, so "
-            f"{_plural(n, 'it holds', 'they hold')} no figures below._"
-        )
-    if snapshot.companies_unusable:
-        n = snapshot.companies_unusable
-        header_lines.append(
-            f"_{n} listing {_plural(n, 'entry', 'entries')} had no usable ticker and "
-            f"{_plural(n, 'was', 'were')} skipped; a dropped entry may itself be a "
-            f"large holder, so the top-{selected} cut may not be the true top "
-            f"{selected}._"
-        )
-    # A fetched company whose every disclosure postdates curr_date drops out of
-    # the whole report — combined holdings, the tracked count and the
-    # concentration denominator all shrink with it. That is a coverage gap like
-    # any other and must be disclosed, not applied silently.
-    no_disclosure = sorted(set(snapshot.companies) - set(visible_by_company))
-    if no_disclosure:
-        n = len(no_disclosure)
-        header_lines.append(
-            f"_{n} fetched {_plural(n, 'company', 'companies')} "
-            f"({', '.join(no_disclosure)}) {_plural(n, 'has', 'have')} no disclosure "
-            f"dated on or before {curr_date}, so {_plural(n, 'it is', 'they are')} "
-            f"excluded from every figure below, including the combined total, the "
-            f"tracked-company count and the concentration share._"
-        )
+    no_disclosure, shallow = _company_coverage(visible_by_company, snapshot.companies, window)
 
-    header_lines.append(
-        "_Dates are disclosure dates and may lag the underlying transactions; some "
-        "companies disclose only monthly or quarterly snapshots, so each holding is "
-        "as of that company's own latest filing, not a common date._"
-    )
-    header_lines.append(
-        "_Treasury flow is announcement-driven and lumpy — read it as a medium-term "
-        "demand-side signal, not a timing signal._"
-    )
-    # Which of the two states the flag records, said apart the way the
-    # fetch-time log already says them apart. Below two fetched histories
-    # nothing was compared, so calling the listing misordered would be the same
-    # unearned assertion the flag exists to avoid; an actual contradiction is
-    # the stronger fact — the provider's own ordering disagrees with the
-    # figures it served — and reached the reader as the same hedge. Recomputed
-    # rather than inferred from len(): a cache may legitimately carry True over
-    # holdings that do descend, and that third state must claim neither.
-    if not snapshot.order_unverified:
-        ordering = "provider lists largest holders first"
-    else:
-        # Recomputed rather than inferred from the flag alone: the flag records
-        # only THAT the claim is unearned, and the two causes read very
-        # differently to an analyst. "only 1 history" is exact — _fetch_all
-        # raises rather than returning zero companies and _read_cache rejects
-        # an empty dict, so the too-few case is always exactly one.
-        order = _holdings_order(snapshot.companies)
-        if order == _ORDER_TOO_FEW:
-            ordering = (
-                "provider ordering unchecked — only 1 history fetched, so nothing was "
-                "compared; these may not be the true largest holders"
-            )
-        elif order == _ORDER_CONTRADICTED:
-            ordering = (
-                "the fetched holdings contradict the provider's listing order, so this "
-                "selection may not be the true largest holders"
-            )
-        else:
-            # A cache may legitimately carry True over holdings that do
-            # descend (see _read_cache), so this third state claims neither.
-            ordering = (
-                "provider ordering unverified for this snapshot, so these may not be the "
-                "true largest holders"
-            )
-    # The rows are lookahead-filtered to curr_date but the SELECTION is not:
-    # the listing is fetched now and ranked by present holdings. On a
-    # historical curr_date that is a hindsight universe — a company that was a
-    # large holder then and has since fallen out of the listing's head is
-    # absent from every figure here, and the no_disclosure caveat cannot name
-    # it because it was never fetched. Same class of disclosure as the macro
-    # module's "current figures, not point-in-time snapshots".
-    header_lines.append(
-        f"_The company universe is the provider's listing order at the time this "
-        f"snapshot was fetched. Individual disclosures are filtered to {curr_date}, but "
-        f"the top-{selected} cut is not — so where {curr_date} sits earlier than that "
-        f"fetch, a company that ranked large then and has since dropped out of the "
-        f"listing's head is missing from every figure below with nothing above naming "
-        f"it._"
-    )
-    # "listed companies" only while the two numbers come from the same
-    # universe. companies_total is len(listing) AFTER _parse_company_list drops
-    # entries with no valid ticker, so with companies_unusable > 0 the
-    # denominator is the provider's count minus this client's drops — "top 15
-    # of 47 listed companies" would state a provider figure that is short by
-    # exactly those drops. The caveat above discloses that entries were skipped
-    # and that the top-N cut may be wrong, but never that the denominator
-    # itself shrank.
-    # The shortfall rides inside the ordering parenthetical rather than opening
-    # a second one: two bracketed clauses back to back on the same line read as
-    # a formatting slip, and this line already carries three fields.
-    listing_scope = (
-        f"{snapshot.companies_total} listed "
-        f"{_plural(snapshot.companies_total, 'company', 'companies')}"
-    )
-    unreadable = ""
-    if snapshot.companies_unusable:
-        n_bad = snapshot.companies_unusable
-        listing_scope = (
-            f"{snapshot.companies_total} readable listing "
-            f"{_plural(snapshot.companies_total, 'entry', 'entries')}"
-        )
-        unreadable = f"; {n_bad} further {_plural(n_bad, 'entry', 'entries')} could not be read"
-    header_lines.append(
-        f"- Source: SoSoValue OpenAPI (BTC treasuries) | Snapshot fetched "
-        f"{snapshot.fetched_at} | Coverage: top {selected} of "
-        f"{listing_scope} ({ordering}{unreadable}) | Window ending "
-        f"{curr_date}"
-    )
+    header_lines = _title_lines(quoted, market_proxy)
+    if snapshot.stale:
+        header_lines.append(_stale_caveat(snapshot.fetched_at, "Treat with caution."))
+    header_lines += _blind_tail_notes(snapshot.fetched_at, window)
+    header_lines += _failed_history_notes(snapshot, selected)
+    header_lines += _empty_history_notes(snapshot.companies_empty)
+    header_lines += _unusable_listing_notes(snapshot.companies_unusable, selected=selected)
+    header_lines += _no_disclosure_notes(no_disclosure, window)
+    header_lines += _standing_caveats(selected, window)
+    header_lines.append(_source_line(snapshot, selected, window))
     header = "\n\n".join(header_lines) + "\n"
 
     if not visible_by_company:
@@ -1154,238 +1586,22 @@ def get_btc_treasury_data(
             f"fabricate values."
         )
 
-    # ---- holdings -----------------------------------------------------------
-    combined = sum(v[-1]["btc_holding"] for v in visible_by_company.values())
-    holders = sorted(
-        ((t, v[-1]) for t, v in visible_by_company.items()),
-        key=lambda kv: kv[1]["btc_holding"],
-        reverse=True,
-    )
+    facts = _holdings_facts(visible_by_company)
+    holdings_block = _holdings_lines(facts, snapshot.companies, window) + _concentration_line(facts)
 
-    def _label(ticker: str) -> str:
-        # The company name is free vendor text rendered verbatim into an
-        # LLM-visible line, so it is flattened here — _clean_name bounds the
-        # length and charset at the parse boundary but leaves markdown intact,
-        # and "*"/"`"/"|" inside a name can forge emphasis or a table cell.
-        name = _sanitize(snapshot.companies[ticker]["name"])
-        return f"{ticker} ({name})" if name else ticker
-
-    top_str = "; ".join(
-        f"{_label(t)} {_fmt_btc(r['btc_holding'])} BTC (as of {r['date']})"
-        for t, r in holders[:TOP_HOLDERS]
-    )
-    n_tracked = len(visible_by_company)
-    # Per-company as-of dates can differ by months (some filers are
-    # quarterly); the span makes that staleness mix visible on the headline
-    # figure itself, not only in the top-5 as-of dates (user decision).
-    #
-    # One ordering serves both the span sentence and the per-company list: two
-    # independent sorts of the same data could disagree about which filing is
-    # the oldest, and the two lines sit next to each other in the report.
-    by_as_of = sorted((v[-1]["date"], t) for t, v in visible_by_company.items())
-    # One test feeding two sentences: the concentration line's basis clause
-    # below must not assert a mix of as-of dates while this line prints a
-    # single one. They sit three rows apart in the report.
-    single_as_of = by_as_of[0][0] == by_as_of[-1][0]
-    as_of_note = (
-        f"as of {by_as_of[0][0]}"
-        if single_as_of
-        else f"as-of dates span {by_as_of[0][0]} → {by_as_of[-1][0]}"
-    )
-    # Every contributor's as-of date, not just the top five (user decision):
-    # the combined total and the concentration share weight all of them
-    # equally, so a company that stopped filing a year ago carries its stale
-    # holdings at full weight into a figure the report presents as current —
-    # and outside the top five it had no visible date at all. Oldest first,
-    # because those are the ones worth discounting.
-    as_of_line = "; ".join(f"{t} {d}" for d, t in by_as_of)
-    holdings_block = (
-        f"\n**Combined holdings:** {_fmt_btc(combined)} BTC across {n_tracked} tracked "
-        f"{_plural(n_tracked, 'company', 'companies')}, each as of its latest "
-        f"disclosure on or before {curr_date} ({as_of_note})\n"
-        f"**Top holders:** {top_str}\n"
-        f"**As-of date of every company in that total (oldest first):** {as_of_line}\n"
-        f"_No filing-age cut is applied: a company that has not disclosed for months "
-        f"still contributes its last known holding at full weight above, so read the "
-        f"oldest dates in that list as the staleness carried by the combined figure._\n"
-    )
-    if combined > 0:
-        top_ticker, top_row = holders[0]
-        share = top_row["btc_holding"] / combined * 100
-        # The family's near-100 truncation band (this module's decided fix,
-        # now shared): "100" may be printed only for a share that IS the
-        # whole — see _concentration_share_str for why rounding cannot.
-        share_str = _concentration_share_str(share)
-        # Only claim dominance where the arithmetic supports it. Printed
-        # unconditionally, this clause told the reader to weight one filer's
-        # disclosures above everything else even at a 14% share — reachable
-        # whenever the mega-holder lands in companies_failed / companies_empty
-        # or has no disclosure on or before curr_date.
-        dominance = (
-            " and, at more than half the total, the combined figure moves mostly with "
-            "what this one company does"
-            if share > 50
-            else ""
-        )
-        # With one contributor — routine after a mid-sweep 429, or on a
-        # historical curr_date that leaves the rest in no_disclosure — every
-        # holding shares one as-of date, and the mixed-dates clause would
-        # contradict the combined-holdings line three rows above.
-        basis = (
-            f"and it divides holdings that are all as of {by_as_of[0][0]}"
-            if single_as_of
-            else "and not a single-date measure (it divides holdings carrying mixed as-of dates)"
-        )
-        holdings_block += (
-            f"**Concentration:** largest holder {top_ticker} = {share_str} of the "
-            f"{n_tracked}-company combined total above — not of the whole market, "
-            f"{basis}{dominance}\n"
-        )
-
-    # ---- activity -----------------------------------------------------------
-    window_start = (curr_dt - timedelta(days=look_back_days)).strftime("%Y-%m-%d")
-
-    events: list[_Activity] = []
-    underivable = 0
-    for ticker, visible in visible_by_company.items():
-        for i, row in enumerate(visible):
-            if row["date"] < window_start:
-                continue
-            if row["btc_acq"] is not None:
-                delta = row["btc_acq"]
-                since = None
-            elif i > 0:
-                # A holdings-only disclosure (live-verified: MARA): the change
-                # is implied by the move from the previous disclosure, and it
-                # spans everything SINCE that disclosure — the tag carries the
-                # start date so a multi-month drift is not read as a one-day
-                # event (user decision).
-                delta = row["btc_holding"] - visible[i - 1]["btc_holding"]
-                since = visible[i - 1]["date"]
-            else:
-                # First served row and no filed quantity: no baseline to
-                # derive a change from — disclosed below, not guessed.
-                underivable += 1
-                continue
-            # A filed cost belongs to a filed quantity. On a holdings-derived
-            # row the BTC change spans every transaction since the previous
-            # disclosure while acq_cost is one filing's own figure, so the two
-            # cells sit side by side with independent signs — a disposal row
-            # carrying a positive cost, which reads as a purchase of that size.
-            # Drop the cost on those rows (user decision) rather than print a
-            # number the legend cannot describe truthfully.
-            cost = row["acq_cost"] if since is None else None
-            # An implied price only makes sense for a filed quantity, and a
-            # zero cost is not a price: a self-mined coin filed at 0 would
-            # render an implied US$/BTC of exactly 0, indistinguishable in the
-            # column from a computed one.
-            implied = abs(cost / delta) if cost and delta != 0 else None
-            events.append(_Activity(row["date"], ticker, delta, cost, implied, since))
-    events.sort(key=lambda e: (e.date, e.ticker))
-
-    # History-depth honesty, gated on the provider's per-company row cap.
-    # ``len(rows) >= HISTORY_LIMIT`` is what makes the claim true, matching the
-    # macro twin: only a history the per-request cap actually truncated can be
-    # hiding earlier activity. A company that simply began disclosing inside
-    # the window — a recent adopter, the common shape among smaller filers —
-    # has nothing older to show, and saying otherwise invents a gap and tells
-    # the reader to discount a net-change figure that is in fact complete.
-    # Measured on the full served history rather than the curr_date-filtered
-    # view: the cap drops the OLDEST rows, independently of that filter.
-    shallow = sorted(
-        t
-        for t, visible in visible_by_company.items()
-        if len(snapshot.companies[t]["rows"]) >= HISTORY_LIMIT and visible[0]["date"] > window_start
-    )
-
+    events, underivable = _activity_events(visible_by_company, window)
     if events:
-        shown = events[-MAX_ROWS:]
-        note = (
-            f"\n_(showing the most recent {MAX_ROWS} of {len(events)} disclosures in the window)_\n"
-            if len(events) > MAX_ROWS
-            else ""
-        )
-        lines = [
-            "\n_BTC change is positive for an acquisition, negative for a disposal; "
-            "Cost is the amount the company filed for that same event in millions of "
-            "US dollars and carries the matching sign (negative = proceeds received on "
-            "a disposal, not a cost); Implied US$/BTC is that filing's own cost divided "
-            "by its own quantity as an absolute value — an average price for that "
-            "event, not a market price. Both are blank on a row derived from a holdings "
-            "change: there the BTC figure spans every transaction since the previous "
-            "disclosure, so no single filed cost belongs to it. Cost is blank on a FILED "
-            "row too whenever the company reported a quantity without a cost — common on "
-            "monthly snapshot disclosures — so a blank Cost does not by itself mark a row "
-            "as derived; only the 'from holdings change since' label does. Implied US$/BTC "
-            "is blank in that case as well, and on a cost of zero or a quantity of zero — "
-            "there is nothing to divide in any of those._",
-            "\n| Date | Company | BTC change | Cost (US$m) | Implied US$/BTC |",
-            "| --- | --- | --- | --- | --- |",
-        ]
-        for e in shown:
-            delta_cell = _fmt_signed_btc(e.delta) + (
-                f" (from holdings change since {e.since})" if e.derived else ""
-            )
-            cost_cell = _fmt_signed_usd_m(e.cost) if e.cost is not None else "—"
-            implied_cell = f"{e.implied:,.0f}" if e.implied is not None else "—"
-            lines.append(f"| {e.date} | {e.ticker} | {delta_cell} | {cost_cell} | {implied_cell} |")
-        net = sum(e.delta for e in events)
-        by_company: dict[str, float] = {}
-        for e in events:
-            by_company[e.ticker] = by_company.get(e.ticker, 0.0) + e.delta
-        adders = sum(1 for v in by_company.values() if v > 0)
-        reducers = sum(1 for v in by_company.values() if v < 0)
-        # The rows are heterogeneous — filed quantities and holdings-derived
-        # deltas — and only the rows say so. The net, the adding/reducing
-        # counts and the window label all inherit that mix, so state it where
-        # the aggregate is read (user decision).
-        derived = sum(1 for e in events if e.derived)
-        mix_note = (
-            f" Of these, {derived} {_plural(derived, 'row is', 'rows are')} derived "
-            f"from a holdings change rather than a filed quantity, and each spans "
-            f"everything since that company's previous disclosure — which can start "
-            f"before this {look_back_days}-day window, so the net and the "
-            f"adding/reducing counts can cover a longer period than the label."
-            if derived
-            else ""
-        )
-        activity_block = (
-            f"\n**{look_back_days}d disclosed net change:** {_fmt_signed_btc(net)} BTC "
-            f"({adders} {_plural(adders, 'company', 'companies')} adding, {reducers} "
-            f"reducing, of {n_tracked} tracked).{mix_note}\n" + "\n".join(lines) + "\n" + note
-        )
+        activity_block = _activity_summary_line(events, window, facts.n_tracked)
+        activity_block += _activity_table(events)
     else:
-        latest_any = max(v[-1]["date"] for v in visible_by_company.values())
-        activity_block = (
-            f"\n**{look_back_days}d disclosed net change:** no disclosed holdings "
-            f"changes in the window ending {curr_date} (latest disclosure across "
-            f"tracked companies: {latest_any})\n"
-        )
-    if underivable:
-        activity_block += (
-            f"\n_{underivable} holdings-only "
-            f"{_plural(underivable, 'disclosure', 'disclosures')} in the window "
-            f"{_plural(underivable, 'is', 'are')} not in the table: as the first "
-            f"served row of {_plural(underivable, 'its company', 'their companies')}, "
-            f"no prior disclosure exists to derive the change from._\n"
-        )
-    if shallow:
-        activity_block += (
-            f"\n_The served history for {', '.join(shallow)} runs to the provider's "
-            f"per-company cap (at least {HISTORY_LIMIT} rows) and still starts inside "
-            f"the window, so earlier activity exists that this snapshot cannot show; "
-            f"the window totals can understate it._\n"
-        )
+        activity_block = _empty_activity_line(visible_by_company, window)
+    activity_block += _underivable_note(underivable)
+    activity_block += _shallow_note(shallow)
     if not events:
-        # Every bucket that contributed nothing, not just the failures: a
-        # company the provider lists with no served history at all, and one
-        # whose disclosures all postdate curr_date, leave the same hole.
-        gap = _coverage_gap_note(
-            set(snapshot.companies_failed) | set(snapshot.companies_empty) | set(no_disclosure),
-            "contributed nothing",
-            "no company disclosed a change",
+        activity_block += _empty_window_gap_line(
+            companies_failed=snapshot.companies_failed,
+            companies_empty=snapshot.companies_empty,
+            no_disclosure=no_disclosure,
         )
-        if gap:
-            activity_block += f"\n_{gap}_\n"
 
     return header + holdings_block + activity_block

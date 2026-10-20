@@ -269,11 +269,12 @@ Breaking changes within the 0.x line are called out explicitly.
   list before the header rather than after the event scan, `n_tracked` ahead
   of the top-holders string). One of those moves reaches a path it did not
   run on before: `window_start` is now computed before the no-disclosures
-  early return, so a `look_back_days` beyond what `timedelta` can represent
-  (above roughly 739,000) raises `OverflowError` on that path as it already
-  did on every path with a visible disclosure; the escape of that error past
-  the vendor's own error family is a pre-existing defect shared by the
-  sibling vendors and is tracked separately. The old function and the new
+  early return, so a `look_back_days` that takes the subtraction past what
+  `datetime` can represent (above roughly 739,000 for a 2026 `curr_date`)
+  raises `OverflowError` on that path as it already did on every path with a
+  visible disclosure; the escape of that error past the vendor's own error
+  family is a pre-existing defect shared by the sibling vendors, tracked as
+  #380. The old function and the new
   one, run over 93,000 generated snapshots, rendered byte-identical reports
   and raised identical errors. The length ratchet loses the row. Five
   tests pin what a thirty-mutation probe found unguarded: the three standing
@@ -281,7 +282,7 @@ Breaking changes within the 0.x line are called out explicitly.
   window nets to exactly zero counting on neither side, the table carrying
   every row up to `MAX_ROWS` and dropping the oldest past it, and a capped
   history that starts on or before the window start staying silent. No
-  behaviour change.
+  behaviour change beyond that overflow edge.
 
 ### Fixed
 

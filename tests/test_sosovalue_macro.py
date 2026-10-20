@@ -3431,3 +3431,72 @@ class TestAnEarlyExitIsAttributedToWhoeverCausedIt:
         # is the conjunction and not the bucket it sits next to.
         payload["breaker_skipped"] = False
         assert self._read(tmp_path, payload) is not None
+
+
+@pytest.mark.unit
+class TestLookBackWindow:
+    """#380: a window the calendar cannot hold is the caller's bug, reported as the vendor's error."""
+
+    def test_a_window_past_the_calendar_is_the_vendors_error(self):
+        with mock.patch.object(
+            sosovalue_macro, "_load_snapshot", side_effect=AssertionError("must not load")
+        ):
+            for look_back_days in (10**6, 10**10):
+                with pytest.raises(sosovalue_macro.SoSoValueError, match="is too large"):
+                    sosovalue_macro.get_economic_calendar_data("2026-08-11", look_back_days)
+
+    def test_the_kernel_helper_keeps_the_cause_and_the_vendors_class(self):
+        # The family's one home for the check: the subtraction when it fits,
+        # the vendor's class chained to the OverflowError when it does not.
+        curr_dt = datetime(2026, 8, 11)
+        assert vendor_common.window_start_dt(curr_dt, 90, error_cls=ValueError) == datetime(
+            2026, 5, 13
+        )
+        # 10**6 overflows the subtraction, 10**10 the timedelta itself; both chain.
+        for look_back_days in (10**6, 10**10):
+            with pytest.raises(ValueError, match="is too large") as exc:
+                vendor_common.window_start_dt(curr_dt, look_back_days, error_cls=ValueError)
+            assert isinstance(exc.value.__cause__, OverflowError)
+
+    def test_the_kernel_refuses_a_window_before_the_year_floor(self):
+        # No OverflowError to chain here: the subtraction fits, the year does not.
+        curr_dt = datetime(2026, 8, 11)
+        to_floor = (curr_dt - datetime(vendor_common.MIN_WINDOW_YEAR, 1, 1)).days
+        assert vendor_common.window_start_dt(curr_dt, to_floor, error_cls=ValueError) == datetime(
+            vendor_common.MIN_WINDOW_YEAR, 1, 1
+        )
+        with pytest.raises(ValueError, match="is too large") as exc:
+            vendor_common.window_start_dt(curr_dt, to_floor + 1, error_cls=ValueError)
+        assert exc.value.__cause__ is None
+
+    def test_the_kernel_look_back_window_defaults_and_refuses(self):
+        def resolve(value):
+            return vendor_common.look_back_window(value, default=90, error_cls=ValueError)
+
+        assert resolve(None) == 90
+        assert resolve(0) == 90
+        assert resolve(-3) == 90
+        assert resolve(5) == 5
+        for bad in (True, "90", 30.5, float("nan"), float("inf")):
+            with pytest.raises(ValueError, match="is not an integer"):
+                resolve(bad)
+
+    def test_the_too_large_refusal_names_both_arguments(self):
+        # The count is echoed like any caller argument; an int past the
+        # interpreter's digit limit gets quote_argument's placeholder; and a
+        # curr_date that itself sits before the floor is refused the same way.
+        with pytest.raises(ValueError, match="look_back_days 1000000 is too large for curr_date"):
+            vendor_common.window_start_dt(datetime(2026, 8, 11), 10**6, error_cls=ValueError)
+        with pytest.raises(ValueError, match="<int value> is too large"):
+            vendor_common.window_start_dt(datetime(2026, 8, 11), 10**5000, error_cls=ValueError)
+        with pytest.raises(ValueError, match="is too large for curr_date"):
+            vendor_common.window_start_dt(datetime(500, 6, 1), 30, error_cls=ValueError)
+
+
+@pytest.mark.unit
+class TestCalendarEnd:
+    def test_a_curr_date_at_the_calendars_last_day_still_renders(self):
+        # The look-ahead used to overflow past 9999-12-31 and escape as a bare
+        # OverflowError (#381 review); it now stops at the calendar's last day.
+        report = _render(_snapshot(), curr_date="9999-12-31")
+        assert "9999-12-31" in report

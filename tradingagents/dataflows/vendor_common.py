@@ -3,7 +3,8 @@
 This module holds what the fork's rolling-snapshot vendors import, each
 taking what it needs: the trust-boundary predicates, the clock and cache-age
 helpers, the cache read preamble and rejecter, the STALE template, the US$m
-formatters and the cache/TTL/stale-fallback skeleton
+formatters, the caller's-window checks (``look_back_window``,
+``window_start_dt``, #380) and the cache/TTL/stale-fallback skeleton
 (``load_rolling_snapshot``). They grew
 inside ``sosovalue_common``, the first family to need them, and moved out
 under public names (dataflows refactor plan 2026-10-16, D1); what is
@@ -25,7 +26,7 @@ import logging
 import math
 import os
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TypeGuard
 
 from .config import get_config
@@ -35,7 +36,7 @@ from .errors import (
     VendorRateLimitError,
     VendorUnavailableError,
 )
-from .utils import failure_account, finite_float, plural_days, wiring_gap
+from .utils import failure_account, finite_float, plural_days, quote_argument, wiring_gap
 
 
 def is_finite_real(x: object) -> TypeGuard[float]:
@@ -178,6 +179,76 @@ def days_unobserved(fetched_at: str, curr_dt: datetime) -> int | None:
     if not is_iso_date(fetched_day):
         return None
     return (curr_dt - datetime.strptime(fetched_day, "%Y-%m-%d")).days
+
+
+# The earliest year a window may open in. ``curr_date`` is only normalised on
+# the way in (``date_refusal`` accepts any date ``strptime`` parses), so this
+# is a rule of the window's own: ``strftime`` pads the year to four digits
+# only on some platforms (glibc writes the year 931 as "931") and the vendors'
+# row filters compare those strings lexically, so a window opening earlier
+# would silently empty or misfilter the report where a refusal is owed. It is
+# the four-digit shape :func:`is_iso_date` demands of a vendor's own dates.
+MIN_WINDOW_YEAR = 1000
+
+
+def _window_too_large(look_back_days: int) -> str:
+    """The refusal for a window the calendar cannot hold, naming both arguments.
+
+    The count is echoed the way the family echoes a caller's argument;
+    :func:`quote_argument` already answers a placeholder for an int whose
+    ``repr`` the interpreter refuses past its digit limit.
+    """
+    return (
+        f"look_back_days {quote_argument(look_back_days)} is too large for curr_date: "
+        f"the window would open before the year {MIN_WINDOW_YEAR}, the earliest the "
+        f"report's dates can write"
+    )
+
+
+def look_back_window(
+    look_back_days: int | None, *, default: int, error_cls: type[Exception]
+) -> int:
+    """The caller's trailing window in days: ``default`` for None or non-positive, ``error_cls`` for a non-integer.
+
+    One check for every vendor that opens a window from the caller's
+    ``look_back_days`` (#380). ``bool`` counts as a non-integer: ``True``
+    would silently mean a one-day window. The refusal echoes the value the
+    way the family echoes a caller's argument, quoted, flattened and capped,
+    and reaches the router as the vendor's own class rather than as the bare
+    ``TypeError`` or ``ValueError`` a ``<=`` or ``timedelta`` would have
+    raised over it.
+    """
+    if look_back_days is None:
+        return default
+    if isinstance(look_back_days, bool) or not isinstance(look_back_days, int):
+        raise error_cls(f"look_back_days {quote_argument(look_back_days)} is not an integer")
+    return default if look_back_days <= 0 else look_back_days
+
+
+def window_start_dt(
+    curr_dt: datetime, look_back_days: int, *, error_cls: type[Exception]
+) -> datetime:
+    """``curr_dt`` less ``look_back_days`` days, or ``error_cls`` when the calendar cannot hold the window.
+
+    The count has passed :func:`look_back_window`, so it is a positive int;
+    what remains is its size (#380). Past roughly 739,000 days from a
+    present-day ``curr_dt`` the subtraction leaves ``datetime``'s range and
+    from a billion up ``timedelta`` refuses the count outright, both as
+    ``OverflowError``; from about 375,000 the window opens before
+    :data:`MIN_WINDOW_YEAR`, where its ISO string stops being four digits on
+    every platform. All three are refused with one sentence naming both
+    arguments — a ``curr_dt`` that itself sits before the floor is refused the
+    same way, since ``date_refusal`` only normalises the date on the way in —
+    as the vendor's own class, the ``OverflowError`` chained where there was
+    one.
+    """
+    try:
+        start = curr_dt - timedelta(days=look_back_days)
+    except OverflowError as e:
+        raise error_cls(_window_too_large(look_back_days)) from e
+    if start.year < MIN_WINDOW_YEAR:
+        raise error_cls(_window_too_large(look_back_days))
+    return start
 
 
 def _humanize_span(hours: float) -> str:

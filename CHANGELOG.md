@@ -286,6 +286,69 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **A `look_back_days` the report cannot hold is refused as the vendor's own
+  error, in every vendor the same way** (#380). The four fork data-source
+  entry points that open a trailing window from the caller's `look_back_days`
+  (`sosovalue.get_etf_flow_data`, `farside.get_etf_flow_data`,
+  `sosovalue_macro.get_economic_calendar_data`,
+  `sosovalue_treasuries.get_btc_treasury_data`) each checked it in their own
+  way, and none of them to the end. Two of the four (the macro calendar and
+  the treasuries) refused a non-integer as `SoSoValueError`; Farside and the
+  ETF flows did not, so a string reached `<=` and escaped as `TypeError`,
+  `NaN` reached `timedelta` and escaped as `ValueError`, and a fraction
+  opened a window at a time of day. All four then subtracted the count from
+  `curr_date` unguarded, so a value past what the calendar holds (roughly
+  739,000 days from a present-day `curr_date`, where the result falls before
+  year 1, or from a billion up, where `timedelta` refuses the count) escaped as
+  `OverflowError`, and a count between about 375,000 and that opened the
+  window in years 1–999, whose ISO string `strftime` writes without
+  zero-padding on glibc, the deploy and CI platform, so the lexical row
+  filters silently emptied the report instead of refusing. Every one of
+  the escapes reached the router as a bare built-in, which its catch-all
+  lane wraps as a library failure and logs at ERROR, only `timedelta`'s own
+  messages (the NaN and the billion-plus refusals) carrying the argument
+  into the sentinel and the other two naming nothing the caller could act
+  on, where the caller's argument was what was wrong. The checks now
+  live in two kernel helpers every entry point calls among its argument
+  checks, before any snapshot is loaded: `vendor_common.look_back_window`
+  refuses a non-integer (`bool` included) and defaults `None`, zero and a
+  negative count, with the same "is not an integer" sentence the two guarded
+  vendors already used; `vendor_common.window_start_dt` does the subtraction
+  and refuses, with one sentence and the `OverflowError` chained where there
+  was one, a window that overflows or opens before `MIN_WINDOW_YEAR` (1000),
+  the earliest year the report's dates write as four digits everywhere (a
+  rule of the window's own: `curr_date` is only normalised on the way in, so
+  a `curr_date` that itself sits before the floor is refused the same way,
+  and the sentence names both arguments). Both echo the count through
+  `quote_argument` like every other caller argument, which already answers
+  a placeholder for an int past the interpreter's digit limit, and both
+  raise the vendor's class (`SoSoValueError`, `FarsideError`), which the
+  router takes as a vendor verdict at WARNING: the level, the class the
+  operator reads, the chained cause and the family's quoted, capped echo of
+  the count in place of whatever the built-in's message happened to say are
+  the change. For the ETF flows, Farside and the treasuries the
+  subtraction thereby moves ahead of the snapshot load and of the
+  no-signal return for an unsupported asset, and for Farside ahead of its
+  empty-page early return, so the refusal is the same on every path.
+  `fear_greed.get_fear_greed_data`, whose window sizes an outbound request
+  and is therefore clamped to `MAX_LOOKBACK_DAYS` rather than refused, runs
+  the same type check first and keeps its clamp, still silently. The macro
+  calendar's look-ahead, the one date sum in the family, stops at the
+  calendar's last day instead of overflowing for a `curr_date` within
+  `AHEAD_DAYS` (14) of it. Every window inside the floor renders unchanged (the
+  one opening on 1000-01-01 still renders with its rows; one more day
+  refuses); the inputs whose outcome changes are the ones that used to
+  crash, empty the window or, for Farside, the ETF flows and Fear & Greed,
+  accept a fractional count, plus an unsupported asset asked with an
+  unholdable window, which is now refused for the window before the
+  no-signal sentence is reached (a call wrong in both arguments is likewise
+  refused for the window first). Fifteen tests pin it: through each public
+  entry point with the fetch stubbed to fail (so the refusal is proven to
+  precede it), the treasuries empty-snapshot path, the year floor from both
+  sides with the rows asserted, the calendar's last day, and the two kernel
+  helpers directly, including the chained cause, the echoed count, the
+  digit-limit placeholder and the pre-floor `curr_date`.
+
 - **`contrib/dashboard`: the `history/` directory keeps its setgid bit.** The
   exporter made it `2750` by name, and a chmod that names the bit has the
   kernel drop it for a user outside the directory's group (trader is not in

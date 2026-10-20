@@ -1999,3 +1999,49 @@ class TestSectionProbeGaps:
             report = _render(_snapshot(companies={"X": {"name": "", "rows": rows}}))
             assert "**90d disclosed net change:**" in report
             assert "runs to the provider's per-company cap" not in report
+
+
+@pytest.mark.unit
+class TestOversizedLookBackWindow:
+    """#380: a window the calendar cannot hold is the caller's bug, reported as the vendor's error.
+
+    It used to escape as a bare ``OverflowError``, which the router's catch-all
+    lane renders as the vendor failing.
+    """
+
+    def _refuse(self, look_back_days, snapshot=None):
+        with pytest.raises(sosovalue_treasuries.SoSoValueError, match="is too large"):
+            _render(snapshot or _snapshot(), look_back_days=look_back_days)
+
+    def test_a_window_past_the_calendar_is_the_vendors_error(self):
+        # 10**6 overflows the date subtraction, 10**10 the timedelta itself.
+        for look_back_days in (10**6, 10**10):
+            self._refuse(look_back_days)
+
+    def test_the_guard_runs_before_the_snapshot_is_loaded(self):
+        # An argument check, so no fetch and no cache read precede it.
+        with (
+            mock.patch.object(
+                sosovalue_treasuries, "_load_snapshot", side_effect=AssertionError("must not load")
+            ),
+            pytest.raises(sosovalue_treasuries.SoSoValueError, match="is too large"),
+        ):
+            sosovalue_treasuries.get_btc_treasury_data("BTC", "2026-08-11", 10**6)
+
+    def test_the_empty_snapshot_path_refuses_too(self):
+        # The path that answered the no-disclosures report before #379's split
+        # and raised OverflowError after it: now the same refusal as every path.
+        future_only = _snapshot(companies={"X": {"name": "", "rows": [_prow("2026-09-01", 10.0)]}})
+        self._refuse(10**6, snapshot=future_only)
+
+    def test_the_boundary_is_the_year_floor_not_a_clamp(self):
+        # The floor is MIN_WINDOW_YEAR, not datetime's range: the window that
+        # opens on 1000-01-01 still renders with its rows inside, one more
+        # day refuses. Pinned by the rows, not only the heading, so a
+        # platform that wrote the year without padding could not pass by
+        # silently emptying the window.
+        to_floor = (datetime(2026, 8, 11) - datetime(vendor_common.MIN_WINDOW_YEAR, 1, 1)).days
+        report = _render(_snapshot(), look_back_days=to_floor)
+        assert f"**{to_floor}d disclosed net change:**" in report
+        assert "| 2026-08-10 | MSTR | -1,690 | -108.6 | 64,260 |" in report
+        self._refuse(to_floor + 1)

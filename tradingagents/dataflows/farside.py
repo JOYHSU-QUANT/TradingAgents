@@ -40,7 +40,7 @@ import logging
 import math
 import os
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import NamedTuple
 
 import requests
@@ -62,9 +62,11 @@ from .vendor_common import (
     cache_rejecter as _cache_rejecter,
     is_finite_real as _is_finite_real,
     is_iso_date as _is_iso_date,
+    look_back_window as _look_back_window,
     read_cache_preamble as _read_cache_preamble,
     sign as _sign,
     stale_caveat as _stale_caveat,
+    window_start_dt as _window_start_dt,
 )
 
 logger = logging.getLogger(__name__)
@@ -1057,7 +1059,9 @@ def get_etf_flow_data(
             meaningful proxy for it).
         curr_date: End of the window (yyyy-mm-dd); rows dated after it are
             dropped so a past date never leaks future flows.
-        look_back_days: Trailing window length; ``None`` uses DEFAULT_LOOKBACK_DAYS.
+        look_back_days: Trailing window length; ``None`` uses DEFAULT_LOOKBACK_DAYS;
+            a non-integer, or a window the calendar cannot hold, raises
+            ``FarsideError`` (#380).
             Bounds the cumulative figure and the rendered table. The inflow/outflow
             streak is reported over all available history (labelled as such), not
             just the window.
@@ -1076,12 +1080,10 @@ def get_etf_flow_data(
     if refusal is not None:
         return refusal
 
-    # A None, zero, or nonsensical negative window (e.g. a hallucinated tool
-    # argument) falls back to the default rather than producing a degenerate
-    # report: a 0-day window would collapse to just curr_date's single row, whose
-    # figure the "Latest" line already carries. Symmetric with fear_greed.
-    if look_back_days is None or look_back_days <= 0:
-        look_back_days = DEFAULT_LOOKBACK_DAYS
+    # The caller's window, checked and defaulted the way every vendor does (#380).
+    look_back_days = _look_back_window(
+        look_back_days, default=DEFAULT_LOOKBACK_DAYS, error_cls=FarsideError
+    )
 
     # Normalise curr_date BEFORE any lexical date comparison below. strptime
     # accepts non-zero-padded input ("2026-6-5"), which then compares wrong
@@ -1091,6 +1093,8 @@ def get_etf_flow_data(
     # proved this parses. (fear_greed.get_fear_greed_data carries the same guard.)
     curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
     curr_date = curr_dt.strftime("%Y-%m-%d")
+    window_start_dt = _window_start_dt(curr_dt, look_back_days, error_cls=FarsideError)
+    window_start = window_start_dt.strftime("%Y-%m-%d")
     asset_key, market_proxy, quoted = _resolve_asset(asset)
     if asset_key is None:
         # Not a recognized crypto risk asset (a stablecoin like USDT/USDC, a
@@ -1147,7 +1151,6 @@ def get_etf_flow_data(
             "Report this as no ETF-flow data for the date; do not fabricate values."
         )
 
-    window_start = (curr_dt - timedelta(days=look_back_days)).strftime("%Y-%m-%d")
     window = [r for r in visible if r["date"] >= window_start]
     summary = (
         _latest_line(latest)

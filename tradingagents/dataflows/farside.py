@@ -1059,7 +1059,9 @@ def get_etf_flow_data(
             meaningful proxy for it).
         curr_date: End of the window (yyyy-mm-dd); rows dated after it are
             dropped so a past date never leaks future flows.
-        look_back_days: Trailing window length; ``None`` uses DEFAULT_LOOKBACK_DAYS.
+        look_back_days: Trailing window length; ``None`` uses DEFAULT_LOOKBACK_DAYS;
+            a non-integer, or a window the calendar cannot hold, raises
+            ``FarsideError`` (#380).
             Bounds the cumulative figure and the rendered table. The inflow/outflow
             streak is reported over all available history (labelled as such), not
             just the window.

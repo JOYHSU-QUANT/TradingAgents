@@ -3193,7 +3193,7 @@ class TestOversizedLookBackWindow:
         ):
             for look_back_days in (10**6, 10**10):
                 with pytest.raises(
-                    sosovalue.SoSoValueError, match="look_back_days is too large"
+                    sosovalue.SoSoValueError, match="is too large"
                 ):
                     sosovalue.get_etf_flow_data("BTC", "2026-07-08", look_back_days)
 

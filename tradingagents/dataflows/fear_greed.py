@@ -169,6 +169,7 @@ def get_fear_greed_data(
         look_back_days: Trailing window length; ``None``/non-positive uses
             DEFAULT_LOOKBACK_DAYS, and a value above MAX_LOOKBACK_DAYS is clamped
             (it sizes the outbound fetch, so an untrusted argument stays bounded).
+            A non-integer raises ``FearGreedError`` (#380).
 
     Returns:
         A markdown report: the latest value and classification, the change vs 7

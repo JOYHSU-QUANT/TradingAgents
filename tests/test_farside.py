@@ -1126,7 +1126,7 @@ class TestOversizedLookBackWindow:
         # the empty-page early return no longer sits ahead of it either.
         with mock.patch.object(farside, "_load_flows", side_effect=AssertionError("must not load")):
             for look_back_days in (10**6, 10**10):
-                with pytest.raises(farside.FarsideError, match="look_back_days is too large"):
+                with pytest.raises(farside.FarsideError, match="is too large"):
                     farside.get_etf_flow_data("BTC", "2026-07-08", look_back_days)
 
     def test_a_non_integer_window_is_the_vendors_error(self):

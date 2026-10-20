@@ -304,36 +304,46 @@ Breaking changes within the 0.x line are called out explicitly.
   window in years 1–999, whose ISO string `strftime` writes without
   zero-padding on glibc, the deploy and CI platform, so the lexical row
   filters silently emptied the report instead of refusing. Every one of
-  those reached the router's catch-all lane as a bare built-in, so the
-  operator read a `TypeError` or `OverflowError` where the caller's argument
-  was wrong and the sentinel could carry the raw argument. The checks now
+  those reached the router as a bare built-in, which its catch-all lane
+  wraps as a library failure and logs at ERROR with the raw argument in the
+  sentinel, where the caller's argument was what was wrong. The checks now
   live in two kernel helpers every entry point calls among its argument
   checks, before any snapshot is loaded: `vendor_common.look_back_window`
   refuses a non-integer (`bool` included) and defaults `None`, zero and a
   negative count, with the same "is not an integer" sentence the two guarded
-  vendors already used and the value echoed through `quote_argument` like
-  every other caller argument; `vendor_common.window_start_dt` does the
-  subtraction and refuses, with one sentence and the `OverflowError` chained
-  where there was one, a window that overflows or opens before
-  `MIN_WINDOW_YEAR` (1000), the earliest year the report's dates write as
-  four digits everywhere, the same canonical-date rule `is_iso_date` already
-  applies to `curr_date`. Both raise the vendor's class (`SoSoValueError`,
-  `FarsideError`): the lane the error takes is unchanged, what changes is the
-  class the operator reads, the chained cause, and that no raw argument
-  reaches the sentinel. For Farside and the ETF flows the subtraction thereby
-  moves ahead of the snapshot load, and for Farside ahead of its empty-page
-  early return, so the refusal is the same on every path.
+  vendors already used; `vendor_common.window_start_dt` does the subtraction
+  and refuses, with one sentence and the `OverflowError` chained where there
+  was one, a window that overflows or opens before `MIN_WINDOW_YEAR` (1000),
+  the earliest year the report's dates write as four digits everywhere (a
+  rule of the window's own: `curr_date` is only normalised on the way in, so
+  a `curr_date` that itself sits before the floor is refused the same way,
+  and the sentence names both arguments). Both echo the count through
+  `quote_argument` like every other caller argument, which already answers
+  a placeholder for an int past the interpreter's digit limit, and both
+  raise the vendor's class (`SoSoValueError`, `FarsideError`), which the
+  router takes as a vendor verdict at WARNING, the class the operator reads,
+  the chained cause and the absence of the raw argument from the sentinel
+  being the change. For the ETF flows, Farside and the treasuries the
+  subtraction thereby moves ahead of the snapshot load and of the
+  no-signal return for an unsupported asset, and for Farside ahead of its
+  empty-page early return, so the refusal is the same on every path.
   `fear_greed.get_fear_greed_data`, whose window sizes an outbound request
   and is therefore clamped to `MAX_LOOKBACK_DAYS` rather than refused, runs
-  the same type check first and keeps its clamp. Every window inside the
-  floor renders unchanged (the one opening on 1000-01-01 still renders with
-  its rows; one more day refuses); the only inputs whose outcome changes are
-  the ones that used to crash, empty the window or, for Farside, the ETF
-  flows and Fear & Greed, accept a fractional count. Thirteen tests pin it:
-  through each public entry point with the fetch stubbed to fail (so the
-  refusal is proven to precede it), the treasuries empty-snapshot path, the
-  year floor from both sides with the rows asserted, and the two kernel
-  helpers directly, including the chained cause.
+  the same type check first and keeps its clamp, still silently. The macro
+  calendar's look-ahead, the one date sum in the family, stops at the
+  calendar's last day instead of overflowing for a `curr_date` in the last
+  month of year 9999. Every window inside the floor renders unchanged (the
+  one opening on 1000-01-01 still renders with its rows; one more day
+  refuses); the inputs whose outcome changes are the ones that used to
+  crash, empty the window or, for Farside, the ETF flows and Fear & Greed,
+  accept a fractional count, plus an unsupported asset asked with an
+  unholdable window, which is now refused for the window before the
+  no-signal sentence is reached. Fifteen tests pin it: through each public
+  entry point with the fetch stubbed to fail (so the refusal is proven to
+  precede it), the treasuries empty-snapshot path, the year floor from both
+  sides with the rows asserted, the calendar's last day, and the two kernel
+  helpers directly, including the chained cause, the echoed count, the
+  digit-limit placeholder and the pre-floor `curr_date`.
 
 - **`contrib/dashboard`: the `history/` directory keeps its setgid bit.** The
   exporter made it `2750` by name, and a chmod that names the bit has the

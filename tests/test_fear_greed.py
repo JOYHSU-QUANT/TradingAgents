@@ -387,6 +387,7 @@ class TestRouting:
             out = interface.route_to_vendor("get_fear_greed", "2026-07-23", 30)
         assert "DATA_UNAVAILABLE" in out
 
+
 @pytest.mark.unit
 class TestLookBackWindow:
     """#380: the family's type check runs here too, ahead of the clamp and the fetch."""

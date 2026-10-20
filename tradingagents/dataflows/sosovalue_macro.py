@@ -2185,7 +2185,13 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
     # refusal above already proved this parses.
     curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
     curr_date = curr_dt.strftime("%Y-%m-%d")
-    ahead_end = (curr_dt + timedelta(days=AHEAD_DAYS)).strftime("%Y-%m-%d")
+    try:
+        ahead_end = (curr_dt + timedelta(days=AHEAD_DAYS)).strftime("%Y-%m-%d")
+    except OverflowError:
+        # A curr_date within AHEAD_DAYS of the calendar's last day: the
+        # look-ahead stops there rather than escaping as a bare built-in
+        # (#381 review; the look-back twin is window_start_dt's job).
+        ahead_end = datetime.max.strftime("%Y-%m-%d")
     window_start_dt = _window_start_dt(curr_dt, look_back_days, error_cls=SoSoValueError)
     window_start = window_start_dt.strftime("%Y-%m-%d")
 

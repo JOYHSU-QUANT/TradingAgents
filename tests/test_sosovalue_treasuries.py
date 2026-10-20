@@ -2011,7 +2011,7 @@ class TestOversizedLookBackWindow:
 
     def _refuse(self, look_back_days, snapshot=None):
         with pytest.raises(
-            sosovalue_treasuries.SoSoValueError, match="look_back_days is too large"
+            sosovalue_treasuries.SoSoValueError, match="is too large"
         ):
             _render(snapshot or _snapshot(), look_back_days=look_back_days)
 
@@ -2025,7 +2025,7 @@ class TestOversizedLookBackWindow:
         with mock.patch.object(
             sosovalue_treasuries, "_load_snapshot", side_effect=AssertionError("must not load")
         ), pytest.raises(
-            sosovalue_treasuries.SoSoValueError, match="look_back_days is too large"
+            sosovalue_treasuries.SoSoValueError, match="is too large"
         ):
             sosovalue_treasuries.get_btc_treasury_data("BTC", "2026-08-11", 10**6)
 

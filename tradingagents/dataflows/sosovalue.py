@@ -1587,7 +1587,9 @@ def get_etf_flow_data(
         curr_date: End of the window (yyyy-mm-dd); rows dated after it are
             dropped so a past date never leaks future flows.
         look_back_days: Trailing window length; ``None`` uses
-            DEFAULT_LOOKBACK_DAYS. Bounds the cumulative figure and the
+            DEFAULT_LOOKBACK_DAYS; a non-integer, or a window the calendar
+            cannot hold, raises ``SoSoValueError`` (#380). Bounds the
+            cumulative figure and the
             rendered table; the streak spans every session visible to
             ``curr_date`` within the API's ~30-day window and is labelled
             "≥N" when it reaches that window's edge, because the true streak

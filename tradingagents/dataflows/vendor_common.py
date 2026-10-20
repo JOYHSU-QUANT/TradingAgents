@@ -180,20 +180,28 @@ def days_unobserved(fetched_at: str, curr_dt: datetime) -> int | None:
     return (curr_dt - datetime.strptime(fetched_day, "%Y-%m-%d")).days
 
 
-# The earliest year a window may open in. The family already refuses a
-# ``curr_date`` that does not round-trip through ``strftime`` as a canonical
-# ``YYYY-MM-DD`` (:func:`is_iso_date`); this is that rule applied to the
-# window start, as a fixed year rather than a round-trip because ``strftime``
-# pads the year to four digits only on some platforms (glibc writes the year
-# 931 as "931") and the vendors' row filters compare those strings lexically,
-# so a window opening earlier would silently empty or misfilter the report
-# where a refusal is owed.
+# The earliest year a window may open in. ``curr_date`` is only normalised on
+# the way in (``date_refusal`` accepts any date ``strptime`` parses), so this
+# is a rule of the window's own: ``strftime`` pads the year to four digits
+# only on some platforms (glibc writes the year 931 as "931") and the vendors'
+# row filters compare those strings lexically, so a window opening earlier
+# would silently empty or misfilter the report where a refusal is owed. It is
+# the four-digit shape :func:`is_iso_date` demands of a vendor's own dates.
 MIN_WINDOW_YEAR = 1000
 
-_WINDOW_TOO_LARGE = (
-    "look_back_days is too large: the window would open before the year 1000, "
-    "the earliest the report's dates can write"
-)
+
+def _window_too_large(look_back_days: int) -> str:
+    """The refusal for a window the calendar cannot hold, naming both arguments.
+
+    The count is echoed the way the family echoes a caller's argument;
+    :func:`quote_argument` already answers a placeholder for an int whose
+    ``repr`` the interpreter refuses past its digit limit.
+    """
+    return (
+        f"look_back_days {quote_argument(look_back_days)} is too large for curr_date: "
+        f"the window would open before the year {MIN_WINDOW_YEAR}, the earliest the "
+        f"report's dates can write"
+    )
 
 
 def look_back_window(
@@ -227,17 +235,18 @@ def window_start_dt(
     past a billion ``timedelta`` refuses the count outright, both as
     ``OverflowError``; from about 375,000 the window opens before
     :data:`MIN_WINDOW_YEAR`, where its ISO string stops being four digits on
-    every platform. All three are refused with one sentence as the vendor's
-    own class, the ``OverflowError`` chained where there was one. The value
-    is not echoed: an integer that large has no useful spelling, and ``str``
-    refuses one past the interpreter's digit limit.
+    every platform. All three are refused with one sentence naming both
+    arguments — a ``curr_dt`` that itself sits before the floor is refused the
+    same way, since ``date_refusal`` only normalises the date on the way in —
+    as the vendor's own class, the ``OverflowError`` chained where there was
+    one.
     """
     try:
         start = curr_dt - timedelta(days=look_back_days)
     except OverflowError as e:
-        raise error_cls(_WINDOW_TOO_LARGE) from e
+        raise error_cls(_window_too_large(look_back_days)) from e
     if start.year < MIN_WINDOW_YEAR:
-        raise error_cls(_WINDOW_TOO_LARGE)
+        raise error_cls(_window_too_large(look_back_days))
     return start
 
 

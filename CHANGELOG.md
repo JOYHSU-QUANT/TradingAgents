@@ -301,13 +301,15 @@ Breaking changes within the 0.x line are called out explicitly.
   `observation_start` as before. This is an upstream file; the upstream-sync
   conflict points are the `datetime` import (`timedelta` dropped), the new
   `vendor_common` import, the `look_back_days` Args and Raises docstring
-  lines, and the argument-check block at the top of `get_macro_data`. Four
-  tests, nine
-  cases: the non-integer and the unholdable-window refusals (the year floor,
-  the subtraction overflow and `timedelta`'s own) with the request stubbed
-  to fail, the zero and negative defaults by the `observation_start` they
-  request, and one refusal driven through the router to pin the WARNING
-  vendor lane.
+  lines, and the argument-check block at the top of `get_macro_data`.
+  Upstream has since moved the file to `dataflows/vendors/fred.py` and
+  renamed `curr_date` to `as_of_date` there, with the unguarded lines still
+  in place, so the next sync hand-merges this region whatever happens. Four
+  tests, nine cases: the non-integer and the unholdable-window refusals (the
+  year floor, the subtraction overflow and `timedelta`'s own) with the
+  request stubbed to fail, the zero and negative defaults by the
+  `observation_start` they request, and one refusal driven through the
+  router to pin the WARNING vendor lane.
 
 - **A `look_back_days` the report cannot hold is refused as the vendor's own
   error, in every vendor the same way** (#380). The four fork data-source

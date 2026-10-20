@@ -297,7 +297,7 @@ Breaking changes within the 0.x line are called out explicitly.
   `window_start_dt` (#381) with `VendorError`, the class its own identity
   check already raises: a non-integer or an unholdable window is refused
   before any request, and `None`, zero and a negative count fall back to
-  `DEFAULT_LOOKBACK_DAYS`. Every window the calendar holds requests the same
+  `DEFAULT_LOOKBACK_DAYS`. Every window inside the floor requests the same
   `observation_start` as before. This is an upstream file; the upstream-sync
   conflict points are the `datetime` import (`timedelta` dropped), the new
   `vendor_common` import, the `look_back_days` Args and Raises docstring

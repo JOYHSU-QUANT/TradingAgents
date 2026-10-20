@@ -402,7 +402,7 @@ _MISS_NON_MONOTONE: _MissReason = "non_monotone"
 # What the Literal checks is the PRODUCER side: the assignments in
 # ``_withholding_decision`` and ``_fetch_chain_half`` and the ``_Withholding``
 # constructor must spell one of these three. The consumer comparisons (grep
-# ``chain_withheld ==``) are NOT checked — ``[tool.mypy]`` does not set
+# ``chain_withheld ==`` and ``!=``) are NOT checked — ``[tool.mypy]`` does not set
 # ``strict_equality`` — so a mistyped spelling there still falls through to the
 # outage wording. Named constants would close that side too, at the price of
 # editing every moved body, which the split deliberately did not.
@@ -2614,9 +2614,10 @@ class _Withholding(NamedTuple):
     a flag: only the mid-run re-take can withhold as historical while curr_date
     is still >= the clock the run started on.
 
-    Both are settled in ``_fetch_chain_half`` and handed to every consumer —
-    ``_both_halves_failure``, ``_analysis_date_notes``, ``_chain_absent_line``
-    and ``_chain_absence`` — rather than re-derived at each. The mid-run flag
+    Both are settled in ``_fetch_chain_half`` and handed whole to every consumer
+    of the pair — ``_both_halves_failure``, ``_analysis_date_notes``,
+    ``_chain_absent_line`` and ``_chain_absence`` — rather than re-derived at
+    each (``_chain_outage_notes`` reads ``chain_withheld`` alone). The mid-run flag
     used to be computed after the both-halves-failed raise, so that raise was
     the one consumer of "historical" that could not read it and re-decided the
     wording by hand — and got it wrong in exactly the state the flag exists to
@@ -2697,7 +2698,7 @@ def _resolve_asset(asset: str) -> tuple[str | None, bool, str]:
     # space rather than vanishing — "_SOL" must not be quoted back as "SOL"
     # inside a sentence saying this vendor serves no chain for it (#232, #233).
     asset = echo_argument(asset)
-    # Every site below names it INSIDE QUOTES, and a value carrying the quote
+    # Every site that renders it names it INSIDE QUOTES, and a value carrying the quote
     # character closes the span early, after which the prose reads to the model
     # as this tool's own words. ``quote_argument`` supplies delimiters ``repr``
     # has already escaped, so those sentences must not add quotes of their own;
@@ -2711,7 +2712,7 @@ def _withholding_decision(dates: _Dates, *, market_proxy: bool) -> _WithheldReas
     """Why the chain half is withheld by policy, or ``None`` to fetch it.
 
     One of ``"historical"`` / ``"far_future"`` / ``"proxy"``, in that precedence;
-    the comment on the classification says why each outranks the next.
+    the comment on the classification says why historical outranks proxy.
     """
     curr_date, today, days_ahead = dates
     # The chain endpoint takes no date, so its figures are always the present,
@@ -2720,7 +2721,7 @@ def _withholding_decision(dates: _Dates, *, market_proxy: bool) -> _WithheldReas
     # owns it (including why the test is "earlier than the clock" rather than
     # "different from it"), and the whale-positioning vendor withholds on the
     # same one. ``today`` is this module's own clock, taken once by the entry point, so the
-    # rule cannot straddle midnight against the windowing below. The DVOL half
+    # rule cannot straddle midnight against the DVOL windowing, which takes the same ``today``. The DVOL half
     # is genuinely date-filtered and is served either way.
     is_historical = is_past_analysis_date(curr_date, today)
     # Why the chain half is not in the report, classified ONCE. Several later sites
@@ -2946,7 +2947,7 @@ def _analysis_date_notes(
 
     One of three, in precedence order: the chain withheld for a historical
     date, withheld for a date too far ahead of the clock, or a date ahead of the
-    clock by no more than MAX_FUTURE_DAYS with the chain still served
+    clock by no more than MAX_FUTURE_DAYS, which withholds nothing by itself
     (``_ahead_of_clock_notes``). ``[]`` for an ordinary date.
     """
     curr_date, today, days_ahead = dates
@@ -2955,7 +2956,7 @@ def _analysis_date_notes(
     # Without saying so the report calls today's date "a historical date" and gives
     # the reader nothing to reconstruct why — the historical branch, unlike the
     # far-future one, never prints the clock. ``withheld_mid_run`` is derived once
-    # by the entry point (``_Withholding``) and reused by all FOUR consumers
+    # by ``_fetch_chain_half`` (``_Withholding``) and reused by all FOUR consumers
     # (``_both_halves_failure``, this note, ``_chain_absent_line`` and
     # ``_chain_absence``), which otherwise re-decide the distinction by hand — how
     # the sibling notes drifted apart five times.
@@ -3005,7 +3006,7 @@ def _analysis_date_notes(
 def _ahead_of_clock_notes(
     dates: _Dates, *, skew: SkewSnapshot | None, chain_date: str, dvol: DvolSeries | None
 ) -> list[str]:
-    """The note for an analysis date past the UTC clock while the chain is still served.
+    """The note for an analysis date past the UTC clock by no more than MAX_FUTURE_DAYS.
 
     ``[]`` unless at least one consequence sentence applies (the closing comment
     says why the opening sentence is not printed alone).

@@ -42,7 +42,8 @@ from tests.conftest import registry_pairs
 from tests.test_vendor_routing import SHIPPED_OFF_CATEGORIES
 from tradingagents.dataflows import interface
 from tradingagents.dataflows.config import set_config
-from tradingagents.dataflows.utils import _DATE_ARGUMENT_TAGS, invalid_date_sentinel
+from tradingagents.dataflows.dates import DATE_ARGUMENT_TAGS as _DATE_ARGUMENT_TAGS
+from tradingagents.dataflows.utils import invalid_date_sentinel
 
 
 @pytest.mark.unit

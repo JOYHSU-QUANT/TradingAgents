@@ -1,0 +1,170 @@
+"""The freshness disclosures a report carries, and the bounds that trigger them.
+
+:func:`data_lag_note` for a vendor whose newest row lags the analysis date,
+:func:`live_snapshot_note` for a live-only vendor rendering a past date
+(#30), with the bounds the vendors of one routed tool must agree on (#58,
+#69, #70) and, beside them, :func:`parse_day` (the lenient prefix parser the
+notes and upstream's ``alpha_vantage_common`` share),
+:func:`statement_lag_bound` and :func:`plural_days`. Annotations, never
+raises: each note returns ``""`` when the data is fresh enough or a date will
+not parse.
+
+Moved out of ``utils`` on 2026-10-21 (dataflows refactor plan 2026-10-16,
+D4); ``utils`` re-exports the names it imports from here for its legacy
+readers.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import date, datetime
+
+logger = logging.getLogger(__name__)
+
+
+# How far the analysis date may sit behind the wall clock before a live-only
+# vendor that DISCLOSES says its values are today's, not that date's. One
+# shared bound (the default of live_snapshot_note) so those vendors agree on
+# what counts as "a backtest" within the same run (#30).
+#
+# Not every live-only vendor discloses: the options chain, whale positioning
+# and the fundamentals profile WITHHOLD instead, on the stricter family rule in
+# ``date_window.is_past_analysis_date`` (any date before today, because a prose
+# warning is not a guard). This bound governs the vendors that still render -
+# prediction markets and the live message streams - and a vendor moving to the
+# withholding rule leaves this one behind rather than tightening it.
+MAX_LIVE_SNAPSHOT_BEHIND_DAYS = 2
+
+# A vendor's latest OHLCV row this many calendar days before the requested date
+# is treated as stale. Generous enough to span long holiday weekends, tight
+# enough to catch the year-old frames yfinance occasionally returns (#1021).
+# One definition for both market-data paths — the stockstats/yfinance loader and
+# the Alpha Vantage daily getter reject the same gap, so a stalled feed cannot
+# short-circuit the vendor chain that could have served fresh bars (#30, #70).
+MAX_OHLCV_STALE_DAYS = 10
+
+# Maximum age (calendar days) of the newest insider filing before the report
+# carries a lag note. Insider activity is legitimately sparse, so the bound is
+# generous — the note flags a long-dead filing stream, not a quiet quarter.
+# Relative to the wall clock: no curr_date reaches the insider call path, and
+# the filings are fetched live either way (#30). Shared by both vendors serving
+# the insider tool so its honesty does not depend on which one ``data_vendors``
+# selected (#69).
+MAX_INSIDER_LAG_DAYS = 90
+
+# Maximum age (calendar days) of the newest financial-statement period relative
+# to curr_date before the report carries a data-lag note, keyed by the requested
+# freq. Statements file with a delay, so a period plus a filing window is normal
+# cadence — a quarter+~90d for quarterlies, a year+filing window for annuals;
+# beyond that the newest statement is genuinely old (#30). Shared rather than
+# per-vendor so a statement tool's honesty does not depend on which vendor
+# ``data_vendors`` happened to select (#58).
+MAX_STATEMENT_LAG_DAYS = {"quarterly": 180, "annual": 550}
+
+
+def statement_lag_bound(freq) -> int:
+    """Days the newest fiscal period may lag curr_date before it is flagged.
+
+    An unknown or missing freq falls back to the annual bound — the looser one,
+    because an annotation must not false-alarm. Shared by every vendor serving
+    the statement tools so that fallback rule cannot drift between them (#58).
+    """
+    key = freq.lower() if isinstance(freq, str) else ""
+    return MAX_STATEMENT_LAG_DAYS.get(key, MAX_STATEMENT_LAG_DAYS["annual"])
+
+
+def plural_days(n: int) -> str:
+    return "day" if n == 1 else "days"
+
+
+def parse_day(value, label: str) -> datetime | None:
+    """Parse a date-ish value's ``yyyy-mm-dd`` prefix, or ``None``.
+
+    Accepts strings, datetimes, and pandas Timestamps (anything whose ``str``
+    starts with the date). An unparseable non-empty value is logged: the
+    freshness annotations degrade to silence on bad input, and without a log
+    line a vendor-side date-format change would turn every future disclosure
+    off invisibly.
+    """
+    try:
+        return datetime.strptime(str(value)[:10], "%Y-%m-%d")
+    except (TypeError, ValueError):
+        if value:
+            # Context-neutral wording: single-value callers suppress their
+            # note on this, but row-reduction callers may still note from the
+            # other rows — so the log claims only what is true everywhere.
+            logger.warning("freshness note: unparseable %s %r; ignored", label, value)
+        return None
+
+
+def data_lag_note(
+    latest_date,
+    curr_date,
+    max_lag_days: int,
+    source_phrase: str,
+) -> str:
+    """Return a one-line staleness disclosure when the newest data row lags curr_date.
+
+    Opt-in freshness annotation (#30): a vendor that renders a "latest" value
+    compares that row's date against the date being analysed and discloses the
+    gap instead of letting an old value read as current. Annotation, not a
+    raise (PR #16 route): these vendors have no fresher fallback and a lag
+    usually means the upstream has not published yet, so the honest output is
+    the stale value plus this disclosure.
+
+    Both dates accept ``yyyy-mm-dd`` strings (extra ISO time suffixes are
+    ignored) or date-like objects. Returns ``""`` when the data is fresh
+    enough or when either date is unparseable — an annotation helper must
+    degrade, never raise.
+    """
+    latest_dt = parse_day(latest_date, "latest_date")
+    curr_dt = parse_day(curr_date, "curr_date")
+    if latest_dt is None or curr_dt is None:
+        return ""
+    lag_days = (curr_dt - latest_dt).days
+    if lag_days <= max_lag_days:
+        return ""
+    return (
+        f"_Data lag: the newest {source_phrase} is {latest_dt.strftime('%Y-%m-%d')}, "
+        f"{lag_days} {plural_days(lag_days)} before {str(curr_date)[:10]}; "
+        f"treat the latest value as stale._"
+    )
+
+
+def live_snapshot_note(
+    curr_date,
+    source_phrase: str,
+    max_behind_days: int = MAX_LIVE_SNAPSHOT_BEHIND_DAYS,
+    today: str | None = None,
+) -> str:
+    """Return a disclosure when live-only data is rendered for a past analysis date.
+
+    Some vendors (prediction markets, live message streams) can only serve
+    *today's* values — there is no historical snapshot to fetch. The vendors
+    that WITHHOLD instead of disclosing do not call this: see
+    ``date_window.is_past_analysis_date``. When the date being analysed sits meaningfully behind the wall
+    clock (a backtest), the report must say the numbers are live as of the
+    fetch, not as of ``curr_date``, or the agent will read today's state as
+    history (#30).
+
+    Returns ``""`` when curr_date is close enough to today or unparseable —
+    same degrade-never-raise contract as :func:`data_lag_note`. That silence
+    is only honest when the date came from inside the program (the graph's
+    own ``end_date``, as the StockTwits block receives it): a getter whose
+    ``curr_date`` the model supplies must judge it with :func:`date_refusal`
+    first, or a string no sibling tool accepts is served here as an
+    undisclosed live report (#139).
+    """
+    today_str = today or date.today().strftime("%Y-%m-%d")
+    curr_dt = parse_day(curr_date, "curr_date")
+    today_dt = parse_day(today_str, "today")
+    if curr_dt is None or today_dt is None:
+        return ""
+    behind_days = (today_dt - curr_dt).days
+    if behind_days <= max_behind_days:
+        return ""
+    return (
+        f"_Note: {source_phrase} live values as of the fetch ({today_str}), not a "
+        f"snapshot as of {str(curr_date)[:10]} ({behind_days} {plural_days(behind_days)} "
+        f"earlier); do not read them as that date's state._"
+    )

@@ -51,8 +51,8 @@ from tradingagents.agents.utils import (
     prediction_markets_tools,
     technical_indicators_tools,
 )
+from tradingagents.dataflows.dates import DATE_ARGUMENT_TAGS as _DATE_ARGUMENT_TAGS
 from tradingagents.dataflows.errors import UnsupportedIndicatorError, VendorNotConfiguredError
-from tradingagents.dataflows.utils import _DATE_ARGUMENT_TAGS
 
 DATE = "2026-08-05"
 

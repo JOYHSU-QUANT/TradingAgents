@@ -1,14 +1,14 @@
 """Shape ratchets for ``tradingagents/dataflows``, read off the sources.
 
 The data-source modules the fork wrote (nine vendors, ``fear_greed`` and
-``throttle``, and since D1-a the ``vendor_common`` kernel the vendors share;
-none exists upstream) grew without any guard on their shape: nothing in the
-repo watched function length, cross-module private imports or the clock
-seams the tests patch. ``contrib/`` has had import-graph guards
-of this kind since refactor plan v2's T0 (the length table is new to the
-repo); this file gives the dataflows the same floor (dataflows refactor plan
-2026-10-16, D0), freezing what was measured on 2026-10-19 so it can only
-improve:
+``throttle``; since D1-a the ``vendor_common`` kernel the vendors share; since
+D4 the four modules the fork's half of ``utils`` moved to; none exists
+upstream) grew without any guard on their shape: nothing in the repo watched
+function length, cross-module private imports or the clock seams the tests
+patch. ``contrib/`` has had import-graph guards of this kind since refactor
+plan v2's T0 (the length table is new to the repo); this file gives the
+dataflows the same floor (dataflows refactor plan 2026-10-16, D0), freezing
+what was measured on 2026-10-19 so it can only improve:
 
 - :data:`_LONG_FUNCTIONS` — every function over :data:`LONG_FUNCTION_LINES`
   in the modules in scope, with its length as an upper bound;
@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import ast
 import functools
+import importlib
 import re
 from collections.abc import Iterable
 from pathlib import Path
@@ -39,23 +40,27 @@ from pathlib import Path
 from .conftest import dataflows_module_trees, package_module_trees, repo_text
 
 # The modules the fork wrote (first commit by the fork, absent from upstream
-# ``main``) plus ``interface.py``. The same thirteen ``pyproject.toml``
+# ``main``) plus ``interface.py``. The same set ``pyproject.toml``
 # ``[tool.mypy] files`` lists under ``tradingagents/dataflows/``, and a test
 # below holds the two lists equal.
 _IN_SCOPE = frozenset(
     {
         "cftc_cot",
         "cme_basis",
+        "dates",
         "deribit",
+        "failures",
         "farside",
         "fear_greed",
         "hyperliquid_whales",
         "interface",
+        "lag_notes",
         "sosovalue",
         "sosovalue_common",
         "sosovalue_macro",
         "sosovalue_treasuries",
         "throttle",
+        "untrusted",
         "vendor_common",
     }
 )
@@ -143,15 +148,23 @@ _CLOCK_SEAMS = frozenset(
     }
 )
 
+# The modules D4 split the fork's half of ``utils`` into, and the facade that
+# keeps re-exporting their names: the upstream modules and the agents layer
+# import from ``utils`` and are not edited, so every name the facade imports
+# from a home has to reach them unchanged (a test below holds it).
+_FACADE = "utils"
+_FACADE_HOMES = frozenset({"dates", "failures", "lag_notes", "untrusted"})
+
 # The kernel names no vendor: it may import the package's floor alone (the
-# configuration, the error taxonomy, the shared utilities). A vendor module in
-# its imports would put that vendor's types back into the shared skeleton —
-# the reason the sweep that raises SoSoValue's errors stayed in
+# configuration, the error taxonomy, the shared utilities; a home joins the
+# floor the day the kernel reads it rather than the facade). A vendor module
+# in its imports would put that vendor's types back into the shared
+# skeleton — the reason the sweep that raises SoSoValue's errors stayed in
 # ``sosovalue_common`` and the stale fallback re-raises the base
 # ``VendorNotConfiguredError`` — and would close an import cycle with that
 # vendor, which imports the kernel.
 _KERNEL = "vendor_common"
-_KERNEL_FLOOR = frozenset({"config", "errors", "utils"})
+_KERNEL_FLOOR = frozenset({"config", "errors", _FACADE})
 
 
 @functools.cache
@@ -329,13 +342,14 @@ def _sibling_imports(
     return frozenset(found)
 
 
-def _module_level_bindings(tree: ast.Module) -> set[str]:
+def _module_level_bindings(tree: ast.Module, *, imports: bool = True) -> set[str]:
     """The names a module binds by a direct top-level statement: def, class, assignment, import.
 
     Direct children only, on purpose: the seams the tests patch are plain
     top-level bindings, and the table is equality, so a seam that moved
     under an ``if`` or ``try`` reads as retired here (loudly, for review)
-    rather than as kept.
+    rather than as kept. ``imports=False`` leaves the import bindings out:
+    the names a module DEFINES, which the facade test reads.
     """
     found: set[str] = set()
     for node in tree.body:
@@ -347,9 +361,9 @@ def _module_level_bindings(tree: ast.Module) -> set[str]:
                 found.update(e.id for e in elts if isinstance(e, ast.Name))
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             found.add(node.target.id)
-        elif isinstance(node, ast.ImportFrom):
+        elif isinstance(node, ast.ImportFrom) and imports:
             found.update(alias.asname or alias.name for alias in node.names)
-        elif isinstance(node, ast.Import):
+        elif isinstance(node, ast.Import) and imports:
             found.update(alias.asname or alias.name.split(".")[0] for alias in node.names)
     return found
 
@@ -450,6 +464,60 @@ def test_the_clock_seams_are_exactly_the_modules_frozen_on_2026_10_19():
 def test_the_kernel_imports_only_the_packages_floor():
     found = _sibling_imports(dict(_modules(None))[_KERNEL])
     assert found <= _KERNEL_FLOOR, f"{_KERNEL} imports {sorted(found - _KERNEL_FLOOR)}"
+
+
+def _sibling_name_imports(
+    tree: ast.Module, package_name: str = "tradingagents.dataflows"
+) -> dict[str, tuple[str, str]]:
+    """``bound name: (sibling, name)`` for every name a top-level sibling ``from`` import binds."""
+    found: dict[str, tuple[str, str]] = {}
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom):
+            source = _sibling_module(node, package_name)
+            if source is not None:
+                found.update(
+                    (alias.asname or alias.name, (source, alias.name)) for alias in node.names
+                )
+    return found
+
+
+def test_utils_re_exports_its_imports_from_the_homes_as_the_same_object():
+    # Identity, not equality: a facade that re-defined a name (or rebound it
+    # to a wrapper) would still compare equal while the tests that patch the
+    # home module stopped reaching the vendors. Read off the facade's own
+    # imports, so a home may grow a helper without the legacy path carrying
+    # it. The last check is a guard, not the general property: ``utils``
+    # keeps upstream's own private names, so it may bind underscore names of
+    # its own, just not a twin of a public name a home defines.
+    facade = importlib.import_module(f"tradingagents.dataflows.{_FACADE}")
+    homes = {h: importlib.import_module(f"tradingagents.dataflows.{h}") for h in _FACADE_HOMES}
+    trees = dict(_modules(None))
+    exported = set(facade.__all__)
+    assert exported <= set(vars(facade)), sorted(exported - set(vars(facade)))
+    imports = {
+        bound: (home, name)
+        for bound, (home, name) in _sibling_name_imports(trees[_FACADE]).items()
+        if home in _FACADE_HOMES
+    }
+    assert {home for home, _name in imports.values()} == _FACADE_HOMES
+    for bound, (home, name) in sorted(imports.items()):
+        assert getattr(facade, bound) is getattr(homes[home], name), bound
+        if bound.startswith("_"):
+            assert bound == "_" + name, (bound, home, name)
+        else:
+            assert bound in exported, bound
+    defined_in_homes = {
+        name
+        for home in _FACADE_HOMES
+        for name in _module_level_bindings(trees[home], imports=False)
+        if not name.startswith("_") and name != "logger"  # a home's logger is not on offer
+    }
+    twins = sorted(
+        n
+        for n in _module_level_bindings(trees[_FACADE], imports=False)
+        if n.startswith("_") and n[1:] in defined_in_homes
+    )
+    assert twins == [], twins
 
 
 # -- the scanners themselves --------------------------------------------------------
@@ -585,6 +653,31 @@ def test_the_seam_scan_reads_module_level_bindings_of_every_kind(tmp_path):
         "by_alias",
         "by_plain_import",
     }
+
+
+def test_the_binding_scan_can_leave_the_imports_out(tmp_path):
+    _write(
+        tmp_path,
+        "m",
+        "import a\nfrom .b import c as d\nx = 1\ny: int = 2\np, q = 3, 4\n"
+        "def f():\n    pass\nclass K:\n    pass\n",
+    )
+    ((_m, tree),) = _modules(tmp_path)
+    assert _module_level_bindings(tree) == {"a", "d", "x", "y", "p", "q", "f", "K"}
+    assert _module_level_bindings(tree, imports=False) == {"x", "y", "p", "q", "f", "K"}
+
+
+def test_the_sibling_name_import_scan_keeps_the_bound_name_and_the_source(tmp_path):
+    _write(
+        tmp_path,
+        "m",
+        "from .x import a, b as _b\nfrom . import y\nfrom os import path as p\n"
+        "def f():\n    from .z import c\n",
+    )
+    ((_m, tree),) = _modules(tmp_path)
+    # ``from . import y`` binds a module, not a name; ``os`` is not a
+    # sibling; the lazy import inside ``f`` is not module level.
+    assert _sibling_name_imports(tree) == {"a": ("x", "a"), "_b": ("x", "b")}
 
 
 def test_the_sibling_import_scan_reads_every_spelling_at_any_depth(tmp_path):

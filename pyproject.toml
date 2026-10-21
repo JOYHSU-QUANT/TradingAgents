@@ -96,9 +96,10 @@ filterwarnings = [
 # were (one line in ``cftc_cot`` already carried a pin); the two in
 # ``interface.py`` the plan lists as behaviour candidates (§5) are pinned,
 # not fixed, here. ``vendor_common`` (the kernel D1-a moved out of
-# ``sosovalue_common``) joined with no pins on 2026-10-19.
+# ``sosovalue_common``) joined with no pins on 2026-10-19, as did ``dates``,
+# ``failures``, ``lag_notes`` and ``untrusted`` (D4) on 2026-10-21.
 # ``tests/test_dataflows_shape.py`` scopes its shape ratchets to the same
-# thirteen modules and holds the two lists equal.
+# modules and holds the two lists equal.
 files = [
     "contrib/core",
     "contrib/hyperliquid_perp/common",
@@ -113,16 +114,20 @@ files = [
     "contrib/uniswap_v3/ports.py",
     "tradingagents/dataflows/cftc_cot.py",
     "tradingagents/dataflows/cme_basis.py",
+    "tradingagents/dataflows/dates.py",
     "tradingagents/dataflows/deribit.py",
+    "tradingagents/dataflows/failures.py",
     "tradingagents/dataflows/farside.py",
     "tradingagents/dataflows/fear_greed.py",
     "tradingagents/dataflows/hyperliquid_whales.py",
     "tradingagents/dataflows/interface.py",
+    "tradingagents/dataflows/lag_notes.py",
     "tradingagents/dataflows/sosovalue.py",
     "tradingagents/dataflows/sosovalue_common.py",
     "tradingagents/dataflows/sosovalue_macro.py",
     "tradingagents/dataflows/sosovalue_treasuries.py",
     "tradingagents/dataflows/throttle.py",
+    "tradingagents/dataflows/untrusted.py",
     "tradingagents/dataflows/vendor_common.py",
 ]
 exclude = [

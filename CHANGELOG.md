@@ -397,9 +397,9 @@ Breaking changes within the 0.x line are called out explicitly.
   `_attempt_vendor` for each vendor in turn, which answers `_Served(result)`
   when the vendor returned or the state with the failure kept in its slot,
   and ends in `_resolve_outcome`, the verdict tree. The lanes stay one
-  `except` clause each inside `_attempt_vendor`, each now ending in a
-  `return state._replace(...)` of the slot it fills where it used to assign
-  and `continue`; the latch skip's log line and its `_Unconfirmed` come from
+  `except` clause each inside `_attempt_vendor`, each typed lane now ending
+  in a `return state._replace(...)` of the slot it fills where it used to
+  assign and `continue`; the latch skip's log line and its `_Unconfirmed` come from
   `_skipped_on_latch`, and the untyped `except Exception` lane — the
   outage / library / wiring classification — is `_met_untyped_failure`,
   which takes and returns the state as the lane read and wrote the locals.
@@ -409,19 +409,19 @@ Breaking changes within the 0.x line are called out explicitly.
   three paragraphs, each above the check it explains. `_met_outage`,
   `_met_library_failure` and `_note_unconfirmed` keep their slot-wise
   signatures and their call sites (the routing tests call two of them
-  directly), so the new helpers take the whole state where those take the
-  slots. The moved bodies keep every rendered string, every log message and
+  directly), so the four new helpers that keep or rank several slots take
+  the whole state where those take the slots. The moved bodies keep every rendered string, every log message and
   every comment but eight spans repointed at the function or local that
   now holds the code they describe (twenty-five lines becoming twenty-six;
   one of them also drops a stale "RuntimeError" for the raise that ends the
   verdict);
   besides that glue they differ only in indentation, `if x is None: x = …`
   becoming `state.x or …` wherever a lane fills a first-met slot
-  (`_met_outage`'s own idiom), the untyped lane's `else` branches becoming
-  early returns, the failure a lane keeps bound as `failed` rather than
+  (`_met_outage`'s own idiom), the untyped lane's `if`/`else` pairs
+  becoming early returns and fall-through, the failure a lane keeps bound as `failed` rather than
   `first_error` (so the library lane's optional binding of that name
   type-checks beside it), and the locals re-bound from the state at
-  the top of the two verdict helpers that read more than one slot. Of the
+  the top of the two verdict helpers that take the state. Of the
   three pins behind the two type holes the plan's §5 lists as behaviour
   candidates, the two on `first_library.error` move with their lines,
   unfixed, and the one on `unconfirmed.vendor` goes: its guard, read

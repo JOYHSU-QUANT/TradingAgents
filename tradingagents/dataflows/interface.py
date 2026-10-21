@@ -664,8 +664,8 @@ def _met_untyped_failure(
     The generic lane of ``_attempt_vendor``: classified here as the vendor
     being down, its library failing on data it did serve, this project's own
     wiring gap, or a failure like any other, and kept in the slot that
-    classification fills (``_met_library_failure`` and ``_met_outage`` for
-    the two that fill a pair).
+    classification fills (``_met_library_failure`` and ``_met_outage`` where
+    the pair has a helper of its own).
     """
     # Don't let one vendor's failure crash the call when another can
     # serve it, but never swallow silently: a broken primary must be

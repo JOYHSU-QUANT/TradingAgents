@@ -630,7 +630,11 @@ class _Served(NamedTuple):
 
 
 def _skipped_on_latch(vendor: str, method: str, remaining: float) -> _Unconfirmed:
-    """No request for a vendor on a live latch: the log line, and the skip for ``_note_unconfirmed`` to rank."""
+    """No request for a vendor on a live latch: the log line, and the skip.
+
+    The caller hands the skip to ``_note_unconfirmed``, which ranks it
+    against what the slot already holds.
+    """
     logger.info(
         "Vendor %r rate limited a recent request; skipping it for %s without "
         "contacting it (%.0fs left).",

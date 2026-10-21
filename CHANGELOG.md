@@ -422,12 +422,14 @@ Breaking changes within the 0.x line are called out explicitly.
   `first_error` (so the library lane's optional binding of that name
   type-checks beside it), and the locals re-bound from the state at
   the top of the two verdict helpers that read more than one slot. Of the
-  three pins the plan's §5 lists as behaviour candidates, the two on
-  `first_library.error` move with their lines, unfixed, and the one on
-  `unconfirmed.vendor` goes: its guard, read through the `was_down` local,
-  is inlined into the `if` so mypy narrows the slot — same truth table,
-  same evaluation order — which also answers the §5 question (no path reads
-  the slot outside the guard). No pin is added. The old function and the new
+  three pins behind the two type holes the plan's §5 lists as behaviour
+  candidates, the two on `first_library.error` move with their lines,
+  unfixed, and the one on `unconfirmed.vendor` goes: its guard, read
+  through the `was_down` local, is inlined into the `if` so mypy narrows
+  the slot — same truth table, and both tests are side-effect-free reads,
+  so the short-circuit changes nothing observable — which also answers the
+  §5 question (no path reads the slot outside the guard). No pin is
+  added. The old function and the new
   ones, run over 80,000 generated chains (seeds 7, 11, 22 and 31:
   configured strings including `default`, `none`, unknown names, duplicates
   and blanks; vendors returning values, falsy ones included, or raising
@@ -441,12 +443,14 @@ Breaking changes within the 0.x line are called out explicitly.
   first is the one raised. The length ratchet loses the `route_to_vendor`
   row. **Upstream sync conflict point: the whole of
   `route_to_vendor` and the six functions and two tuples above it**, from
-  `_ChainState` down — and since upstream `c42a2f2c` (2026-09-24) the file
+  `_ChainState` down — and since upstream `c42a2f2c` (2026-09-23) the file
   itself: upstream renamed `interface.py` to `dataflows/router.py` (its
-  `route_to_vendor` is about 98 lines there) and moved the vendors under
-  `dataflows/vendors/`, so the next sync meets a modify/delete conflict on
-  the whole file, resolved by keeping the fork's `interface.py` (or porting
-  it into `router.py`) and re-applying upstream's `router.route_to_vendor`
+  `route_to_vendor` is about 98 lines there) and, one commit later
+  (`6097b582`), moved the vendors under `dataflows/vendors/`. Git follows
+  the rename (72% similar), so the next sync lands the fork's `interface.py`
+  edits on `router.py` as a content conflict and drops `interface.py` from
+  the tree; the resolution is to restore the fork's `interface.py` (or port
+  it into `router.py`) and re-apply upstream's `router.route_to_vendor`
   changes since that commit by hand. No behaviour change.
 
 ### Fixed

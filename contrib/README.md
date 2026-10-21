@@ -6,7 +6,7 @@ fork 自己寫的所有東西都在這裡。上游 `tradingagents/`（多 agent 
 
 幾個下面會一直用到的詞：**線**＝一條交易線（`hyperliquid_perp`、`uniswap_v3`、`carry`），各自吐 `--json` 狀態；
 **RiskGate**＝perp 的確定性風控閘門；**交接檔**＝一個套件寫、另一個套件讀的小 JSON 文件；**sidecar**＝run 旁邊寫的附檔
-（payload、`.handoff.json`）；**file-target run**＝目標不由 agents 產、而是讀交接檔的 perp run；
+（payload＝每個 cycle 餵給模型的完整輸入，replay 拿它當考古題；`.handoff.json`＝perp 當天套用的交接檔紀錄）；**file-target run**＝目標不由 agents 產、而是讀交接檔的 perp run；
 **ledger／penalty／holdout**＝autoresearch 的實驗紀錄、多重比較門檻、最後才讀的保留窗口。
 
 ## 1. 導覽
@@ -42,7 +42,7 @@ fork 自己寫的所有東西都在這裡。上游 `tradingagents/`（多 agent 
         ▲
         │  JSON：carry 交接檔（perp 腿＝file-target run）
    carry signal ◄── autoresearch.sqlite（讀；可選讀兩腿 store 的 equity）
-        │  JSON：同一份交接檔 ──► uniswap_v3 `target` ──► uniswap.sqlite（只有它寫；現貨腿＝external_weights 策略）
+        │  JSON：同一份交接檔 ──► uniswap_v3 `target` ──► uniswap.sqlite（只有它寫；現貨腿＝`external_weights` 策略，持有 `targets` 給的比例）
         ▼
  事後
    replay       ◄── 讀：paper_trading.db、autoresearch.sqlite、payload sidecar ──► 成績單、replay.sqlite
@@ -54,7 +54,8 @@ fork 自己寫的所有東西都在這裡。上游 `tradingagents/`（多 agent 
 ```
 
 兩份進 perp 的 JSON（research signal、guardrail signal）都藏在 perp config 的開關後面，預設關。
-「讀」交易帳本是以唯讀模式開檔；「讀」研究 store 則仍走 autoresearch 自己的 store 建構（會做 schema migrate），
+「讀」交易帳本：carry 以 `mode=ro` 開檔；replay 走 perp 的 `Database(migrate=False)`，不 migrate、不寫，但不是唯讀開檔。
+「讀」研究 store 則仍走 autoresearch 自己的 store 建構（會做 schema migrate），
 所以研究 store 的規則是「只經 autoresearch 的寫入介面」，不是「只有 autoresearch 開它」。
 
 引擎程序（perp、uniswap_v3）跟它的生產者之間只靠這三種管道，引擎**不 import** 任何生產者；生產者可以 import 引擎的詞彙（§3）。
@@ -110,9 +111,9 @@ funding 歷史 → 一條規則（z-score 進出場）→ 日線邊界前寫交�
 
 ## 5. 跨套件的架構原則
 
-1. **交易帳本的寫入權責唯一；研究 store 只經 autoresearch 的寫入介面。** `paper_trading.db` 只有 `hyperliquid_perp` 寫、uniswap 的 store 只有 `uniswap_v3` 寫，其他套件以唯讀模式開。`autoresearch.sqlite` 的寫入介面在 `autoresearch`（`fetch`、`backfill_*`），`carry signal` 預設用它回補 funding，但不自己動 schema 或 ledger。`dashboard` 今天不開任何 store，只走三條線的 CLI；套件圖測試擋的是 import，不是開檔。
+1. **交易帳本的寫入權責唯一；研究 store 只經 autoresearch 的寫入介面。** `paper_trading.db` 只有 `hyperliquid_perp` 寫、uniswap 的 store 只有 `uniswap_v3` 寫，其他套件只讀不寫（carry 以 `mode=ro` 開；replay 經 perp 的 `Database(migrate=False)`，不 migrate 也不寫）。`autoresearch.sqlite` 的寫入介面在 `autoresearch`（`fetch`、`backfill_*`），`carry signal` 預設用它回補 funding，但不自己動 schema 或 ledger。`dashboard` 今天不開任何 store，只走三條線的 CLI；套件圖測試擋的是 import，不是開檔。
 2. **下單與簽單只在兩個引擎裡。** `autoresearch`、`replay`、`carry`、`dashboard` 不簽任何交易、不送單（carry 決定兩腿該持有什麼、guardrail 進 RiskGate，但送單的永遠是引擎）。`autoresearch`、`replay`、`carry` 的 README 開頭都把「不下單」寫成 scope 判準，要放寬就是 scope creep；`dashboard` 只讀三條線的 `--json`。這條靠慣例，沒有測試擋住生產者去碰引擎的下單模組。
-3. **引擎與生產者之間只走 JSON 交接檔、CLI 輸出或 SQLite，引擎不 import 生產者。** 反方向（生產者 import 引擎的詞彙）是允許的，見 §3。每份交接文件有自己的契約與版本欄位，目前有兩種做法：讀方宣告形狀、寫方 borrow 進來（`ResearchSignal` 住在 perp 的 schema，autoresearch 借它；只傳定性的帶，不傳研究 Sharpe 與策略門檻）；或兩邊各持一份版本常數、靠測試與文件對齊（carry 交接檔，因為讀方之一 `uniswap_v3` 不能 import 任何 contrib 套件）。`status --json`、`report --json` 各依自己的契約，裡面有數值。
+3. **引擎與生產者之間只走 JSON 交接檔、CLI 輸出或 SQLite，引擎不 import 生產者。** 反方向（生產者 import 引擎的詞彙）是允許的，見 §3。每份交接文件有自己的契約與版本欄位，目前有兩種做法：讀方宣告形狀、寫方 borrow 進來（`ResearchSignal` 住在 perp 的 schema，autoresearch 借它；只傳定性的帶，不傳研究 Sharpe 與策略門檻）；或兩邊各持一份版本常數、各自在自己的測試釘死同一個數字、沒有跨套件比對（carry 交接檔，因為讀方之一 `uniswap_v3` 不能 import 任何 contrib 套件）。`status --json`、`report --json` 各依自己的契約，裡面有數值。
 4. **`core` 只放不含策略、只依賴標準庫的東西。** 「只依賴標準庫」有測試，多一個第三方套件就紅；「不含策略」是慣例。
 5. **新增套件要同時改四處。** `tests/test_package_graph.py` 的 `ALLOWED` 加一列（少一列測試會點名），有借 perp 就同時改 `_PERP_REACH`；有借鄰居才需要自己的 `upstream.py`＋`tests/test_upstream.py` 列明借了誰；本檔 §1 的表、§2 的圖、§3 的圖。
 6. **交易路徑＝引擎程序內的 prompt 建構、閘門與送單；只有那裡禁止 import 生產者。** 生產者（autoresearch 的兩個 signal 指令、`carry signal`、`replay`）都在引擎程序外跑，有的排程、有的離線，交接只走 §2 的三種管道，所以它們可以 import 引擎的詞彙。`replay` 重建的是自己的模型輸入，不進線上交易員的 prompt 建構路徑。

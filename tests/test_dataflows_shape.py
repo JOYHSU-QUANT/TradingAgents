@@ -107,7 +107,6 @@ _LONG_FUNCTIONS: dict[tuple[str, str], int] = {
     ("deribit", "_reading_line"): 229,
     ("farside", "_parse_flow_table"): 153,
     ("fear_greed", "get_fear_greed_data"): 203,
-    ("interface", "route_to_vendor"): 486,
     ("vendor_common", "load_rolling_snapshot"): 194,
 }
 

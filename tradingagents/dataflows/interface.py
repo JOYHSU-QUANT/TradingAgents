@@ -1,6 +1,6 @@
 import logging
 import time
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from .alpha_vantage import (
     get_balance_sheet as get_alpha_vantage_balance_sheet,
@@ -572,6 +572,526 @@ def _optional_failure_words(e: Exception) -> str:
     return failure_account(e)
 
 
+class _ChainState(NamedTuple):
+    """What the chain has met so far, in the slots the verdict reads.
+
+    ``route_to_vendor`` starts one empty and hands it to ``_attempt_vendor``
+    for each vendor in turn, which answers the state after that vendor's
+    failure (or the answer it served); ``_resolve_outcome`` reads the last.
+    Each slot keeps what its own rule says — the first failure met, the last
+    no-data verdict, the lowest rank — so the ending depends on what the
+    chain met, never on how long it was.
+    """
+
+    last_no_data: NoMarketDataError | None = None
+    # Every failure kept below is kept with the vendor that met it: the
+    # optional category's sentinel names the vendor ahead of the words
+    # (#203), so a multi-vendor category's reader can tell which source
+    # failed without the log, whichever slot the failure surfaces from.
+    first_error: _VendorFailure | None = None
+    # A caller's mistake (an indicator name no vendor computes) is kept apart
+    # from the vendors' failures so it outranks them at the verdict (#137).
+    first_caller_error: _VendorFailure | None = None
+    # The first vendor that never confirmed the symbol — DOWN (answered with
+    # an outage page or could not be reached), throttled (a 429 actually
+    # met), or skipped on a latch without a request — and the words for it:
+    # a fallback's "no data" is then unconfirmed by the source that would
+    # normally serve the symbol, and the sentinel has to say so (#142,
+    # #172). One ranked slot (#217): an outage outranks a throttle met,
+    # which outranks a skip, whatever the chain order, so a lower rank
+    # replaces what is held and the verdict reads one slot. A missing key
+    # stays out — that is standing configuration the operator already sees
+    # in the log, not a source that would normally have answered. Text
+    # only, never the exception, where it travels into a sentinel the model
+    # reads; the throttle and the skip keep theirs, since either stands as
+    # the failure surfaced when nothing else raised.
+    unconfirmed: _Unconfirmed | None = None
+    # The first vendor library failure met (#187): kept apart from
+    # ``first_error`` because it decides a different ending — one line of
+    # report text rather than a raise — and must do so whatever its place in
+    # the chain (a missing key met before it must not surface instead and
+    # abort the call).
+    first_library: _VendorFailure | None = None
+    # The first wiring gap met, kept apart for the mirror-image reason: it is
+    # this project's own breakage, so it must not be the thing a vendor's
+    # library failure stands in front of. Before the conversion moved to the
+    # router only nine getters could fill ``first_library``, so which chains
+    # buried a wiring gap behind a report line depended on which vendor was
+    # one of the nine; now every vendor can fill it, and a missing key met at
+    # the first vendor would come back as the second vendor's parser bug for
+    # the analyst to read as an answer (#219).
+    first_wiring: _VendorFailure | None = None
+
+
+class _Served(NamedTuple):
+    """A vendor's turn that returned: ``result`` is the answer, whatever its value."""
+
+    result: Any
+
+
+def _skipped_on_latch(vendor: str, method: str, remaining: float) -> _Unconfirmed:
+    """No request for a vendor on a live latch: the log line, and the skip the ranked slot keeps."""
+    # A vendor that refused this client with a rate limit recently is
+    # skipped in its turn without a request (#114) — this lane is the one
+    # point every vendor's throttle passes through, so the memory lives
+    # here once, keyed by vendor because a quota is spent per key, not per
+    # endpoint. The chain goes on in its configured order, and the skip is
+    # recorded as a fallback verdict, so a chain with nothing else to say
+    # degrades the way it would have after contacting the vendor. A vendor
+    # that stands off behind its own cache (yfinance) or answers a throttle
+    # from cache (SoSoValue) is never latched here: its rate-limit type
+    # says so (``latches_vendor``), because skipping it would refuse an
+    # answer it had.
+    logger.info(
+        "Vendor %r rate limited a recent request; skipping it for %s without "
+        "contacting it (%.0fs left).",
+        vendor,
+        method,
+        remaining,
+    )
+    # The remaining stand-off is the one fact that tells a skip from
+    # an outage to the model: a source back in a minute is not a
+    # source that is down, and the two should weigh differently.
+    return _Unconfirmed(
+        _LATCH_SKIP,
+        vendor,
+        f"was skipped after a recent rate limit (for another {remaining:.0f}s)",
+        VendorRateLimitError(
+            f"Vendor {vendor!r} rate limited a recent request; skipped without "
+            f"contacting it for another {remaining:.0f}s"
+        ),
+    )
+
+
+def _met_untyped_failure(
+    state: _ChainState, category: str, method: str, vendor: str, args: tuple, e: Exception
+) -> _ChainState:
+    """``state`` after a failure the taxonomy did not name.
+
+    The generic lane of ``_attempt_vendor``: classified here as the vendor
+    being down, its library failing on data it did serve, this project's own
+    wiring gap, or a failure like any other, and kept in the slot that
+    classification fills (``_met_library_failure`` and ``_met_outage`` for
+    the two that fill a pair).
+    """
+    # Don't let one vendor's failure crash the call when another can
+    # serve it, but never swallow silently: a broken primary must be
+    # visible in the logs (#989), not hidden behind a fallback's verdict.
+    # exc_info so a real bug (e.g. in an HTML-scraping vendor) leaves a
+    # traceback instead of looking identical to a network outage.
+    # The same fact as ``_attempt_vendor``'s outage lane, for the verdict
+    # ``_resolve_outcome`` reads, read off the exception by
+    # ``is_vendor_outage`` — the status it carries, never its class
+    # (yfinance's HTTPError is curl_cffi's, not requests'). The words are
+    # ``generic_failure_words``' — the status or the class only, never the
+    # text: a requests message quotes the request URL, API key included.
+    #
+    # What the vendor was not down for, and did not fail to reach, is
+    # its library failing on data it did serve — the ending nine
+    # getters used to choose for themselves by wrapping their fetch,
+    # and their siblings at the same routed tool did not, so one
+    # pandas bug was a line of prose through yfinance and an aborted
+    # run through Alpha Vantage (#219). Decided here, once, for every
+    # vendor of every tool: what ``_as_library_failure`` returns joins
+    # the lane the typed raisers take, which is where the ending is
+    # written. The message travels as the failure's ``detail`` — the
+    # cap and the flatten are the report line's, and the log line each
+    # branch below writes is the uncapped copy, with the traceback the
+    # lane at the getter used to log. One line per failure, whichever
+    # branch takes it, so the levels stay readable: ERROR where a
+    # library failure is about to be reported as text, WARNING for
+    # everything else. A loud category takes the WARNING too — the
+    # conversion refuses it, so the failure reaches the caller as
+    # itself, with its own traceback, which is louder than a log
+    # line and is the whole point of the declaration.
+    outage = is_vendor_outage(e)
+    library = None if outage else _as_library_failure(category, method, args, e)
+    if library is not None:
+        # ERROR, where every other ending in this lane keeps the
+        # WARNING, and naming the subject rather than the method:
+        # this is the degrade the leaf lanes were added to make
+        # visible (#187 — seven of them logged nothing, so an
+        # operator never saw one happen), and it is the one ending
+        # here that hands the analyst a line of text in place of the
+        # data it asked for. A vendor being down or handing back a
+        # verdict is routine; its library breaking on data it did
+        # serve is a bug someone has to fix. Same words and level as
+        # the typed lane in ``_attempt_vendor``, which a boundary naming
+        # its own library bug takes.
+        logger.error(
+            _LIBRARY_FAILURE_LOG, vendor, library.what, method, e, exc_info=True
+        )
+        first_library, first_error = _met_library_failure(
+            state.first_library, state.first_error, category, vendor, library
+        )
+        return state._replace(first_library=first_library, first_error=first_error)
+    logger.warning("Vendor %r failed for %s: %s", vendor, method, e, exc_info=True)
+    if outage:
+        failed, unconfirmed = _met_outage(
+            state.first_error, state.unconfirmed, vendor, e, generic_failure_words(e)
+        )
+        return state._replace(first_error=failed, unconfirmed=unconfirmed)
+    failed = _VendorFailure(vendor, e)
+    if isinstance(e, WiringGapError):
+        state = state._replace(first_wiring=state.first_wiring or failed)
+    return state._replace(first_error=state.first_error or failed)
+
+
+def _attempt_vendor(
+    state: _ChainState, category: str, method: str, vendor: str, args: tuple, kwargs: dict
+) -> _Served | _ChainState:
+    """One vendor's turn in the chain: its answer, or ``state`` with its failure kept.
+
+    The body of ``route_to_vendor``'s loop, one vendor at a time: a vendor on
+    a live latch is skipped without a request, else it is called; a return
+    ends the chain as ``_Served``, and each failure the taxonomy names takes
+    its own lane here — logged in the lane's words and kept in the slot it
+    fills — while an untyped one is ``_met_untyped_failure``'s to classify.
+    """
+    vendor_impl = VENDOR_METHODS[method][vendor]  # type: ignore[index]
+    impl_func = vendor_impl[0] if isinstance(vendor_impl, list) else vendor_impl
+
+    remaining = VENDOR_THROTTLE_LATCH.remaining_s(vendor)
+    if remaining is not None:
+        skip = _skipped_on_latch(vendor, method, remaining)
+        return state._replace(unconfirmed=_note_unconfirmed(state.unconfirmed, skip))
+
+    # The send instant the latch compares against (#153). Taken here, so
+    # an impl that waits before sending would date its request early —
+    # the ones that do (SoSoValue's request budget; yfinance's un-hide
+    # lock and backoff ladder) raise types the router never latches, so
+    # nothing is misdated today.
+    sent_at = time.monotonic()
+    try:
+        result = impl_func(*args, **kwargs)
+    except VendorRateLimitError as e:
+        if e.latches_vendor:
+            # For as long as the raise says its refusal lasts, else the
+            # shared window: a spent daily quota is not over in five
+            # minutes, and re-probing it on that window only adds
+            # refused requests and log lines (#153).
+            ttl_s = VENDOR_THROTTLE_LATCH.arm(vendor, e.latch_ttl_s)
+            logger.warning(
+                "Vendor %r rate-limited for %s; trying next vendor, and skipping %r "
+                "without contacting it for the next %.0fs.",
+                vendor,
+                method,
+                vendor,
+                ttl_s,
+            )
+        else:
+            logger.warning("Vendor %r rate-limited for %s; trying next vendor.", vendor, method)
+        # The throttle carries the vendor's own words (a Retry-After)
+        # where a skip describes a request that was never sent.
+        return state._replace(
+            unconfirmed=_note_unconfirmed(
+                state.unconfirmed,
+                _Unconfirmed(_THROTTLE_MET, vendor, f"was rate limited ({failure_account(e)})", e),
+            )
+        )
+    except VendorNotConfiguredError as e:
+        # The message whole: it is the operator's remedy (the variable to
+        # set, where to get a key), and the optional sentinel no longer
+        # quotes it (#203) — this line and the verdict's are where the
+        # operator reads it. Every cycle, for a deployment that runs
+        # without an optional key on purpose; the boundary is trusted to
+        # have redacted the key itself (SoSoValue's 401 scrubs it).
+        logger.warning(
+            "Vendor %r not configured for %s; trying next vendor: %s", vendor, method, e
+        )
+        # Surface it if no other vendor can serve the call.
+        return state._replace(first_error=state.first_error or _VendorFailure(vendor, e))
+    except NoMarketDataError as e:
+        # No data here; another configured vendor may have it. INFO, not
+        # WARNING — a routine verdict — but logged whole: the detail is
+        # capped in the sentinel and this line is its only other copy.
+        logger.info("Vendor %r had no usable data for %s: %s", vendor, method, e)
+        return state._replace(last_no_data=e)
+    except VendorUnavailableError as e:
+        # The vendor answered with an outage page or an unparsable body
+        # (#136): the chain goes on and it surfaces at the end like a
+        # transport failure, but logged without a traceback — the untyped
+        # lane (``_met_untyped_failure``) reserves that for a bug, and a vendor
+        # being down is not one.
+        logger.warning("Vendor %r answered without data for %s: %s", vendor, method, e)
+        failed, unconfirmed = _met_outage(
+            state.first_error, state.unconfirmed, vendor, e, failure_account(e)
+        )
+        return state._replace(first_error=failed, unconfirmed=unconfirmed)
+    except VendorLibraryError as e:
+        # The vendor's own library failed computing the answer — a
+        # stockstats bug on a frame it did serve. The chain goes on: a
+        # sibling vendor computes the same routed tool its own way
+        # (Alpha Vantage has an RSI endpoint), and this used to be
+        # rendered as prose at the leaf, which read here as a successful
+        # answer and ended the chain at the vendor that had just failed
+        # (#187). No production boundary raises the type today — the
+        # conversion in ``_met_untyped_failure`` is where every library
+        # failure now enters — so this lane exists for a boundary that knows
+        # the failure is its library's and says so. It therefore logs the
+        # whole thing itself, at the same level and in the same words as the
+        # conversion — one shared format string, so neither can drift into
+        # its own wording — since there is no leaf lane left to have logged
+        # it first (#219).
+        logger.error(_LIBRARY_FAILURE_LOG, vendor, e.what, method, e.detail, exc_info=True)
+        first_library, first_error = _met_library_failure(
+            state.first_library, state.first_error, category, vendor, e
+        )
+        return state._replace(first_library=first_library, first_error=first_error)
+    except UnsupportedIndicatorError as e:
+        # A caller typo, not a vendor failure: logged without a traceback,
+        # which ``_met_untyped_failure`` reserves for a bug. The chain still goes
+        # on — another vendor may compute the name (yfinance serves mfi;
+        # Alpha Vantage has no endpoint for it) — and it surfaces at the
+        # end ahead of any vendor failure, for the tool wrapper to render
+        # as report text (#117): the name is the caller's to fix, and a
+        # missing key surfacing instead would send them to the wrong
+        # remedy (#137).
+        logger.warning("Vendor %r does not support the indicator for %s: %s", vendor, method, e)
+        return state._replace(
+            first_caller_error=state.first_caller_error or _VendorFailure(vendor, e)
+        )
+    except Exception as e:
+        return _met_untyped_failure(state, category, method, vendor, args, e)
+    # The vendor returned: drop a deadline that predates this request (a
+    # lapsed one), keep the one a sibling thread armed while it was in
+    # flight — why is ``ThrottleLatch.clear``'s (#153). "Returned", not
+    # "answered": a no-data or outage verdict raised above leaves the
+    # latch alone, by choice. Only a raised throttle arms the latch, so a
+    # vendor that renders a partial throttle into its report (Deribit,
+    # when not every request was refused) is never skipped on the
+    # strength of it.
+    VENDOR_THROTTLE_LATCH.clear(vendor, before=sent_at)
+    return _Served(result)
+
+
+def _no_data_sentinel(last_no_data: NoMarketDataError, unconfirmed: _Unconfirmed | None) -> str:
+    """The ``NO_DATA_AVAILABLE`` sentinel for the verdict ``last_no_data`` carries.
+
+    In the unconfirmed variant when a vendor never confirmed it — the one
+    ranked slot the lanes filled — and in the plain one when ``unconfirmed``
+    is ``None``: every vendor asked answered about the symbol.
+    """
+    # Both are the CALLER'S symbol echoed back into a sentence it reads —
+    # the model's own argument, or the alias table's answer for it — and
+    # both are quoted, so they take ``quote_argument`` rather than the
+    # bare-echo helper: a spelling carrying its own quote character would
+    # otherwise close the span early and the prose after it would read as
+    # the router's words (#232, #233). The comparison stays on the RAW
+    # pair, so the resolved clause still appears exactly when the alias
+    # table changed the symbol, not when the flattening did.
+    raw = last_no_data.symbol
+    canonical = last_no_data.canonical
+    sym = quote_argument(raw)
+    resolved = "" if canonical == raw else f" (resolved to {quote_argument(canonical)})"
+    # Surface the typed error's detail (e.g. "latest row is 2025-06-11 ...
+    # stale") so the agent sees the specific reason — invalid symbol, no
+    # coverage, or stale data — not just a generic "unavailable". The
+    # detail quotes what the vendor answered (a column list, a date), so
+    # it takes the same flatten-and-cap as the other two slots.
+    detail = sanitize_untrusted(last_no_data.detail or "", limit=MAX_UNTRUSTED_CHARS)
+    reason = f" ({detail})" if detail else ""
+    # Which source never confirmed the verdict, and the words for it:
+    # the one ranked slot the lanes filled (#217), chain-order neutral
+    # on purpose — the vendor may be the primary or the fallback. Each
+    # rank names what happened in its own words ("rate limited" is not
+    # "unavailable"; the model should not read a throttled source as a
+    # down one); the rest of the sentence is one literal, so the three
+    # variants stay one shape to every reader.
+    if unconfirmed is not None:
+        verdict = (
+            f": vendor '{unconfirmed.vendor}' {unconfirmed.state} and the other "
+            f"configured vendor(s) had no usable data{reason}. Treat the symbol as "
+            f"unconfirmed rather than invalid: a source that would normally serve it "
+            f"{_WHY[unconfirmed.rank]}, and the others' answers alone do not settle whether "
+            f"it is valid, delisted, or not covered."
+        )
+    else:
+        verdict = (
+            f" from any configured vendor{reason}. The symbol may be invalid, "
+            f"delisted, not covered, or the vendor returned stale data."
+        )
+    return (
+        f"NO_DATA_AVAILABLE: No usable market data for {sym}{resolved}{verdict} "
+        f"Do not estimate or fabricate values — report that data is unavailable "
+        f"for this symbol."
+    )
+
+
+def _surfacing_failure(state: _ChainState, method: str) -> _VendorFailure | None:
+    """The failure that surfaces when no vendor served and none reported clean no-data.
+
+    ``None`` when the chain met none, which ``_resolve_outcome`` classifies
+    as an empty registry. The two log lines say which failure stepped aside
+    for which.
+    """
+    first_error, first_caller_error, unconfirmed = (
+        state.first_error,
+        state.first_caller_error,
+        state.unconfirmed,
+    )
+    # The failure that surfaces, decided in one expression. Only an optional
+    # category still reaches here having met a library failure, a core chain
+    # having returned before this is read, and there it is one of the vendors' own
+    # failures like any other — held in the slot below, where first met
+    # wins; its words are the subject's rather than a class name, which is
+    # the whole of what it earns here (#219). First, a
+    # caller's mistake — the indicator name, which the tool wrapper renders
+    # as one line of report text — outranks a vendor's failure: a missing key
+    # surfacing instead would abort the call and point at the wrong remedy
+    # (#137). Unless a vendor was DOWN: then the name may be one that vendor
+    # computes, and the outage is the fact to surface — the typo stays in the
+    # logs, as the vendor failure does in the other case. Among the vendors'
+    # own failures the FIRST met still wins, an outage included: a missing
+    # key ahead of a down fallback surfaces the key, since that is the
+    # standing misconfiguration the operator has to fix either way, and the
+    # outage is in the logs. A chain exhausted by
+    # nothing but rate limits (e.g. a single-vendor chain hitting a 429 with
+    # no cache) must degrade like any other failure, not fall through to the
+    # bare no-vendor raise ``_resolve_outcome`` ends in: a throttle is the
+    # fallback verdict so a real error (network/auth/bug) stays the one
+    # surfaced, and a throttle actually met outranks a latch skip whatever
+    # the chain order, since it carries the vendor's own detail (a
+    # Retry-After) where the skip describes a request that was never sent.
+    was_down = unconfirmed is not None and unconfirmed.rank == _OUTAGE
+    if first_caller_error is not None and was_down:
+        logger.warning(
+            "Not surfacing the caller's indicator error for %s (%s): vendor %r was "
+            "down, so the name may be one it computes",
+            method,
+            first_caller_error.error,
+            unconfirmed.vendor,  # type: ignore[union-attr]
+        )
+        first_caller_error = None
+    elif first_caller_error is not None and first_error is not None:
+        logger.warning(
+            "Surfacing the caller's indicator error for %s; a vendor also failed: %s",
+            method,
+            first_error.error,
+        )
+    # A throttle met or a latch skip stands as the failure when nothing else
+    # raised — the slot holds the lower-ranked of the two whatever the chain
+    # order. An outage held there never surfaces from here: its lane set
+    # ``first_error``, which precedes the slot.
+    unconfirmed_by = (
+        _VendorFailure(unconfirmed.vendor, unconfirmed.error) if unconfirmed is not None else None
+    )
+    return first_caller_error or first_error or unconfirmed_by
+
+
+def _resolve_outcome(state: _ChainState, category: str, method: str) -> str:
+    """The chain's ending when no vendor served: a report line, a sentinel, or a raise.
+
+    The verdict ``route_to_vendor`` reached after its loop, ranked as it
+    always was: our wiring gap ahead of a library's failure, that failure's
+    report line ahead of a sibling's no-data, the no-data sentinel ahead of
+    the failure that surfaces (``_surfacing_failure``), and an empty registry
+    classified last.
+    """
+    last_no_data, first_error, unconfirmed, first_library, first_wiring = (
+        state.last_no_data,
+        state.first_error,
+        state.unconfirmed,
+        state.first_library,
+        state.first_wiring,
+    )
+    # Ahead of the report line, and ONLY there: a core category's chain that
+    # met both our wiring gap and some vendor's library failing must end on
+    # ours, which someone can fix, rather than hand the analyst the other as
+    # its answer. Both conditions, because this outranks nothing else — a
+    # sibling's clean no-data verdict still wins (the ranking every ending
+    # below keeps), the caller's own indicator mistake still surfaces ahead
+    # of any vendor failure (#137: a missing key in its place would point at
+    # the wrong remedy), and among the vendors' own failures the first met
+    # still wins. An optional category keeps its sentinel, where a gap and a
+    # library failure are named the same way, by whichever was met first
+    # (#219).
+    if (
+        first_wiring is not None
+        and first_library is not None
+        and category not in OPTIONAL_CATEGORIES
+    ):
+        raise first_wiring.error
+
+    # A core chain in which a vendor's own library failed ends as one line of
+    # report text, ahead of every other ending — a sibling's "no data"
+    # included: the vendor that failed DID have the symbol's data, its code
+    # failed on it, and a sentinel saying the symbol "may be invalid" would
+    # be a claim the source that served contradicts. This is the leaves' old
+    # policy — a library bug must not abort a run another data point could
+    # still serve, and it ended the call as text whatever the chain order —
+    # moved to the one place that knows whether any vendor served (#187).
+    # Placed here rather than at the leaf, it lets the chain reach a sibling
+    # vendor first, and a missing key, an outage or a no-data verdict met on
+    # the way stays in the logs, as it did when the leaf rendered the prose
+    # itself. Written for every vendor, so the sentence does not depend on
+    # which vendor failed (#58): the subject is the getter's, the library's
+    # message is flattened and capped on its way in — a pandas message can
+    # carry a frame repr, newlines and pipes included — and the ERROR the
+    # lane logged keeps the whole of it, where the leaf's own log line used
+    # to (#219). An optional category keeps its own
+    # sentinels below: no-data first, then ``DATA_UNAVAILABLE``.
+    if first_library is not None and category not in OPTIONAL_CATEGORIES:
+        logger.warning(
+            "No vendor served %s; reporting the library failure retrieving %s as text%s",
+            method,
+            first_library.error.what,  # type: ignore[attr-defined]
+            "" if last_no_data is None else f" (a vendor also reported no data: {last_no_data})",
+        )
+        return _library_failure_prose(first_library.error)  # type: ignore[arg-type]
+
+    # If any vendor reported "no data", the symbol is genuinely unavailable.
+    # Return one explicit, instructive sentinel rather than a vendor-specific
+    # empty string, so the agent reports "unavailable" instead of inventing a
+    # value. This takes precedence over incidental fallback errors — but not
+    # over what they say about the verdict: when a vendor in the chain was
+    # DOWN, or throttled before it could answer, or skipped on a latch, the
+    # rest's "no data" was never confirmed by the source that would normally
+    # serve the symbol, and "may be invalid" is a statement the agent reasons
+    # from (#142, #172). Those variants swap the middle clause only — the
+    # prefix every reader keys on and the do-not-fabricate tail are one
+    # literal — and do not assert the symbol valid either: a fallback that
+    # DID answer (a stale frame, an "Invalid API call") is still quoted in
+    # ``reason``, so the wording is "unconfirmed", not "fine".
+    if last_no_data is not None:
+        if first_error is not None:
+            # A vendor also hit a real error; surface it in logs so the no-data
+            # verdict can't hide a broken primary (network/auth/etc.). One slot
+            # is enough: a library failure fills this one too (#219), so it
+            # cannot be the only failure the chain met.
+            logger.warning(
+                "Returning NO_DATA for %s, but a vendor errored earlier: %s",
+                method,
+                first_error.error,
+            )
+        return _no_data_sentinel(last_no_data, unconfirmed)
+
+    failed = _surfacing_failure(state, method)
+
+    # No vendor returned data and none reported clean "no data" — surface the
+    # first real error (e.g. the primary vendor's network failure). Optional
+    # enrichment categories degrade to a sentinel instead, so flavour data can't
+    # abort the run.
+    if failed is not None:
+        if category in OPTIONAL_CATEGORIES:
+            logger.warning("Optional %s unavailable for %s: %s", category, method, failed.error)
+            # The vendor ahead of the words (#203): the lane's log line names
+            # it, but the sentinel is what the report artifacts keep, and a
+            # multi-vendor category's reader should not need the log to tell
+            # which source failed.
+            return (
+                f"DATA_UNAVAILABLE: optional {category} could not be retrieved "
+                f"({failed.vendor}: {_optional_failure_words(failed.error)}). Proceed without "
+                f"it; do not fabricate values."
+            )
+        raise failed.error
+
+    # An empty vendor registry for a known method is a configuration/registry
+    # problem — classify it (#32) so callers see the taxonomy, not a bare
+    # RuntimeError that bypasses every vendor-error handler.
+    raise VendorNotConfiguredError(f"No available vendor for '{method}'")
+
+
 def route_to_vendor(method: str, *args, **kwargs):
     """Route method calls to appropriate vendor implementation with fallback support."""
     category = get_category_for_method(method)
@@ -625,436 +1145,10 @@ def route_to_vendor(method: str, *args, **kwargs):
     else:
         vendor_chain = all_available_vendors
 
-    last_no_data: NoMarketDataError | None = None
-    # Every failure kept below is kept with the vendor that met it: the
-    # optional category's sentinel names the vendor ahead of the words
-    # (#203), so a multi-vendor category's reader can tell which source
-    # failed without the log, whichever slot the failure surfaces from.
-    first_error: _VendorFailure | None = None
-    # A caller's mistake (an indicator name no vendor computes) is kept apart
-    # from the vendors' failures so it outranks them at the verdict (#137).
-    first_caller_error: _VendorFailure | None = None
-    # The first vendor that never confirmed the symbol — DOWN (answered with
-    # an outage page or could not be reached), throttled (a 429 actually
-    # met), or skipped on a latch without a request — and the words for it:
-    # a fallback's "no data" is then unconfirmed by the source that would
-    # normally serve the symbol, and the sentinel has to say so (#142,
-    # #172). One ranked slot (#217): an outage outranks a throttle met,
-    # which outranks a skip, whatever the chain order, so a lower rank
-    # replaces what is held and the verdict reads one slot. A missing key
-    # stays out — that is standing configuration the operator already sees
-    # in the log, not a source that would normally have answered. Text
-    # only, never the exception, where it travels into a sentinel the model
-    # reads; the throttle and the skip keep theirs, since either stands as
-    # the failure surfaced when nothing else raised.
-    unconfirmed: _Unconfirmed | None = None
-    # The first vendor library failure met (#187): kept apart from
-    # ``first_error`` because it decides a different ending — one line of
-    # report text rather than a raise — and must do so whatever its place in
-    # the chain (a missing key met before it must not surface instead and
-    # abort the call).
-    first_library: _VendorFailure | None = None
-    # The first wiring gap met, kept apart for the mirror-image reason: it is
-    # this project's own breakage, so it must not be the thing a vendor's
-    # library failure stands in front of. Before the conversion moved to the
-    # router only nine getters could fill ``first_library``, so which chains
-    # buried a wiring gap behind a report line depended on which vendor was
-    # one of the nine; now every vendor can fill it, and a missing key met at
-    # the first vendor would come back as the second vendor's parser bug for
-    # the analyst to read as an answer (#219).
-    first_wiring: _VendorFailure | None = None
+    state = _ChainState()
     for vendor in vendor_chain:
-        vendor_impl = VENDOR_METHODS[method][vendor]  # type: ignore[index]
-        impl_func = vendor_impl[0] if isinstance(vendor_impl, list) else vendor_impl
-
-        # A vendor that refused this client with a rate limit recently is
-        # skipped in its turn without a request (#114) — this lane is the one
-        # point every vendor's throttle passes through, so the memory lives
-        # here once, keyed by vendor because a quota is spent per key, not per
-        # endpoint. The chain goes on in its configured order, and the skip is
-        # recorded as a fallback verdict, so a chain with nothing else to say
-        # degrades the way it would have after contacting the vendor. A vendor
-        # that stands off behind its own cache (yfinance) or answers a throttle
-        # from cache (SoSoValue) is never latched here: its rate-limit type
-        # says so (``latches_vendor``), because skipping it would refuse an
-        # answer it had.
-        remaining = VENDOR_THROTTLE_LATCH.remaining_s(vendor)
-        if remaining is not None:
-            logger.info(
-                "Vendor %r rate limited a recent request; skipping it for %s without "
-                "contacting it (%.0fs left).",
-                vendor,
-                method,
-                remaining,
-            )
-            # The remaining stand-off is the one fact that tells a skip from
-            # an outage to the model: a source back in a minute is not a
-            # source that is down, and the two should weigh differently.
-            unconfirmed = _note_unconfirmed(
-                unconfirmed,
-                _Unconfirmed(
-                    _LATCH_SKIP,
-                    vendor,
-                    f"was skipped after a recent rate limit (for another {remaining:.0f}s)",
-                    VendorRateLimitError(
-                        f"Vendor {vendor!r} rate limited a recent request; skipped without "
-                        f"contacting it for another {remaining:.0f}s"
-                    ),
-                ),
-            )
-            continue
-
-        # The send instant the latch compares against (#153). Taken here, so
-        # an impl that waits before sending would date its request early —
-        # the ones that do (SoSoValue's request budget; yfinance's un-hide
-        # lock and backoff ladder) raise types the router never latches, so
-        # nothing is misdated today.
-        sent_at = time.monotonic()
-        try:
-            result = impl_func(*args, **kwargs)
-        except VendorRateLimitError as e:
-            if e.latches_vendor:
-                # For as long as the raise says its refusal lasts, else the
-                # shared window: a spent daily quota is not over in five
-                # minutes, and re-probing it on that window only adds
-                # refused requests and log lines (#153).
-                ttl_s = VENDOR_THROTTLE_LATCH.arm(vendor, e.latch_ttl_s)
-                logger.warning(
-                    "Vendor %r rate-limited for %s; trying next vendor, and skipping %r "
-                    "without contacting it for the next %.0fs.",
-                    vendor,
-                    method,
-                    vendor,
-                    ttl_s,
-                )
-            else:
-                logger.warning("Vendor %r rate-limited for %s; trying next vendor.", vendor, method)
-            # The throttle carries the vendor's own words (a Retry-After)
-            # where a skip describes a request that was never sent.
-            unconfirmed = _note_unconfirmed(
-                unconfirmed,
-                _Unconfirmed(_THROTTLE_MET, vendor, f"was rate limited ({failure_account(e)})", e),
-            )
-            continue
-        except VendorNotConfiguredError as e:
-            # The message whole: it is the operator's remedy (the variable to
-            # set, where to get a key), and the optional sentinel no longer
-            # quotes it (#203) — this line and the verdict's are where the
-            # operator reads it. Every cycle, for a deployment that runs
-            # without an optional key on purpose; the boundary is trusted to
-            # have redacted the key itself (SoSoValue's 401 scrubs it).
-            logger.warning(
-                "Vendor %r not configured for %s; trying next vendor: %s", vendor, method, e
-            )
-            if first_error is None:
-                # Surface it if no other vendor can serve the call.
-                first_error = _VendorFailure(vendor, e)
-            continue
-        except NoMarketDataError as e:
-            # No data here; another configured vendor may have it. INFO, not
-            # WARNING — a routine verdict — but logged whole: the detail is
-            # capped in the sentinel and this line is its only other copy.
-            logger.info("Vendor %r had no usable data for %s: %s", vendor, method, e)
-            last_no_data = e
-            continue
-        except VendorUnavailableError as e:
-            # The vendor answered with an outage page or an unparsable body
-            # (#136): the chain goes on and it surfaces at the end like a
-            # transport failure, but logged without a traceback — the clause
-            # below reserves that for a bug, and a vendor being down is not one.
-            logger.warning("Vendor %r answered without data for %s: %s", vendor, method, e)
-            first_error, unconfirmed = _met_outage(
-                first_error, unconfirmed, vendor, e, failure_account(e)
-            )
-            continue
-        except VendorLibraryError as e:
-            # The vendor's own library failed computing the answer — a
-            # stockstats bug on a frame it did serve. The chain goes on: a
-            # sibling vendor computes the same routed tool its own way
-            # (Alpha Vantage has an RSI endpoint), and this used to be
-            # rendered as prose at the leaf, which read here as a successful
-            # answer and ended the chain at the vendor that had just failed
-            # (#187). No production boundary raises the type today — the
-            # conversion below is where every library failure now enters — so
-            # this lane exists for a boundary that knows the failure is its
-            # library's and says so. It therefore logs the whole thing itself,
-            # at the same level and in the same words as the conversion —
-            # one shared format string, so neither can drift into its own
-            # wording — since there is no leaf lane left to have logged it
-            # first (#219).
-            logger.error(_LIBRARY_FAILURE_LOG, vendor, e.what, method, e.detail, exc_info=True)
-            first_library, first_error = _met_library_failure(
-                first_library, first_error, category, vendor, e
-            )
-            continue
-        except UnsupportedIndicatorError as e:
-            # A caller typo, not a vendor failure: logged without a traceback,
-            # which the clause below reserves for a bug. The chain still goes
-            # on — another vendor may compute the name (yfinance serves mfi;
-            # Alpha Vantage has no endpoint for it) — and it surfaces at the
-            # end ahead of any vendor failure, for the tool wrapper to render
-            # as report text (#117): the name is the caller's to fix, and a
-            # missing key surfacing instead would send them to the wrong
-            # remedy (#137).
-            logger.warning("Vendor %r does not support the indicator for %s: %s", vendor, method, e)
-            if first_caller_error is None:
-                first_caller_error = _VendorFailure(vendor, e)
-            continue
-        except Exception as e:
-            # Don't let one vendor's failure crash the call when another can
-            # serve it, but never swallow silently: a broken primary must be
-            # visible in the logs (#989), not hidden behind a fallback's verdict.
-            # exc_info so a real bug (e.g. in an HTML-scraping vendor) leaves a
-            # traceback instead of looking identical to a network outage.
-            # The same fact as the outage lane above, for the verdict below,
-            # read off the exception by ``is_vendor_outage`` — the status it
-            # carries, never its class (yfinance's HTTPError is curl_cffi's,
-            # not requests'). The words are ``generic_failure_words``' — the
-            # status or the class only, never the text: a requests message
-            # quotes the request URL, API key included.
-            #
-            # What the vendor was not down for, and did not fail to reach, is
-            # its library failing on data it did serve — the ending nine
-            # getters used to choose for themselves by wrapping their fetch,
-            # and their siblings at the same routed tool did not, so one
-            # pandas bug was a line of prose through yfinance and an aborted
-            # run through Alpha Vantage (#219). Decided here, once, for every
-            # vendor of every tool: what ``_as_library_failure`` returns joins
-            # the lane the typed raisers take, which is where the ending is
-            # written. The message travels as the failure's ``detail`` — the
-            # cap and the flatten are the report line's, and the log line each
-            # branch below writes is the uncapped copy, with the traceback the
-            # lane at the getter used to log. One line per failure, whichever
-            # branch takes it, so the levels stay readable: ERROR where a
-            # library failure is about to be reported as text, WARNING for
-            # everything else. A loud category takes the WARNING too — the
-            # conversion refuses it, so the failure reaches the caller as
-            # itself, with its own traceback, which is louder than a log
-            # line and is the whole point of the declaration.
-            outage = is_vendor_outage(e)
-            library = None if outage else _as_library_failure(category, method, args, e)
-            if library is not None:
-                # ERROR, where every other ending in this lane keeps the
-                # WARNING, and naming the subject rather than the method:
-                # this is the degrade the leaf lanes were added to make
-                # visible (#187 — seven of them logged nothing, so an
-                # operator never saw one happen), and it is the one ending
-                # here that hands the analyst a line of text in place of the
-                # data it asked for. A vendor being down or handing back a
-                # verdict is routine; its library breaking on data it did
-                # serve is a bug someone has to fix. Same words and level as
-                # the typed lane above, which a boundary naming its own
-                # library bug takes.
-                logger.error(
-                    _LIBRARY_FAILURE_LOG, vendor, library.what, method, e, exc_info=True
-                )
-                first_library, first_error = _met_library_failure(
-                    first_library, first_error, category, vendor, library
-                )
-            else:
-                logger.warning("Vendor %r failed for %s: %s", vendor, method, e, exc_info=True)
-                if outage:
-                    first_error, unconfirmed = _met_outage(
-                        first_error, unconfirmed, vendor, e, generic_failure_words(e)
-                    )
-                else:
-                    if isinstance(e, WiringGapError) and first_wiring is None:
-                        first_wiring = _VendorFailure(vendor, e)
-                    if first_error is None:
-                        first_error = _VendorFailure(vendor, e)
-            continue
-        # The vendor returned: drop a deadline that predates this request (a
-        # lapsed one), keep the one a sibling thread armed while it was in
-        # flight — why is ``ThrottleLatch.clear``'s (#153). "Returned", not
-        # "answered": a no-data or outage verdict raised above leaves the
-        # latch alone, by choice. Only a raised throttle arms the latch, so a
-        # vendor that renders a partial throttle into its report (Deribit,
-        # when not every request was refused) is never skipped on the
-        # strength of it.
-        VENDOR_THROTTLE_LATCH.clear(vendor, before=sent_at)
-        return result
-
-    # If any vendor reported "no data", the symbol is genuinely unavailable.
-    # Return one explicit, instructive sentinel rather than a vendor-specific
-    # empty string, so the agent reports "unavailable" instead of inventing a
-    # value. This takes precedence over incidental fallback errors — but not
-    # over what they say about the verdict: when a vendor in the chain was
-    # DOWN, or throttled before it could answer, or skipped on a latch, the
-    # rest's "no data" was never confirmed by the source that would normally
-    # serve the symbol, and "may be invalid" is a statement the agent reasons
-    # from (#142, #172). Those variants swap the middle clause only — the
-    # prefix every reader keys on and the do-not-fabricate tail are one
-    # literal — and do not assert the symbol valid either: a fallback that
-    # DID answer (a stale frame, an "Invalid API call") is still quoted in
-    # ``reason``, so the wording is "unconfirmed", not "fine".
-    # A core chain in which a vendor's own library failed ends as one line of
-    # report text, ahead of every other ending — a sibling's "no data"
-    # included: the vendor that failed DID have the symbol's data, its code
-    # failed on it, and a sentinel saying the symbol "may be invalid" would
-    # be a claim the source that served contradicts. This is the leaves' old
-    # policy — a library bug must not abort a run another data point could
-    # still serve, and it ended the call as text whatever the chain order —
-    # moved to the one place that knows whether any vendor served (#187).
-    # Placed here rather than at the leaf, it lets the chain reach a sibling
-    # vendor first, and a missing key, an outage or a no-data verdict met on
-    # the way stays in the logs, as it did when the leaf rendered the prose
-    # itself. Written for every vendor, so the sentence does not depend on
-    # which vendor failed (#58): the subject is the getter's, the library's
-    # message is flattened and capped on its way in — a pandas message can
-    # carry a frame repr, newlines and pipes included — and the ERROR the
-    # lane logged keeps the whole of it, where the leaf's own log line used
-    # to (#219). An optional category keeps its own
-    # sentinels below: no-data first, then ``DATA_UNAVAILABLE``.
-    # Ahead of the report line, and ONLY there: a core category's chain that
-    # met both our wiring gap and some vendor's library failing must end on
-    # ours, which someone can fix, rather than hand the analyst the other as
-    # its answer. Both conditions, because this outranks nothing else — a
-    # sibling's clean no-data verdict still wins (the ranking every ending
-    # below keeps), the caller's own indicator mistake still surfaces ahead
-    # of any vendor failure (#137: a missing key in its place would point at
-    # the wrong remedy), and among the vendors' own failures the first met
-    # still wins. An optional category keeps its sentinel, where a gap and a
-    # library failure are named the same way, by whichever was met first
-    # (#219).
-    if (
-        first_wiring is not None
-        and first_library is not None
-        and category not in OPTIONAL_CATEGORIES
-    ):
-        raise first_wiring.error
-
-    if first_library is not None and category not in OPTIONAL_CATEGORIES:
-        logger.warning(
-            "No vendor served %s; reporting the library failure retrieving %s as text%s",
-            method,
-            first_library.error.what,  # type: ignore[attr-defined]
-            "" if last_no_data is None else f" (a vendor also reported no data: {last_no_data})",
-        )
-        return _library_failure_prose(first_library.error)  # type: ignore[arg-type]
-
-    if last_no_data is not None:
-        if first_error is not None:
-            # A vendor also hit a real error; surface it in logs so the no-data
-            # verdict can't hide a broken primary (network/auth/etc.). One slot
-            # is enough: a library failure fills this one too (#219), so it
-            # cannot be the only failure the chain met.
-            logger.warning(
-                "Returning NO_DATA for %s, but a vendor errored earlier: %s",
-                method,
-                first_error.error,
-            )
-        # Both are the CALLER'S symbol echoed back into a sentence it reads —
-        # the model's own argument, or the alias table's answer for it — and
-        # both are quoted, so they take ``quote_argument`` rather than the
-        # bare-echo helper: a spelling carrying its own quote character would
-        # otherwise close the span early and the prose after it would read as
-        # the router's words (#232, #233). The comparison stays on the RAW
-        # pair, so the resolved clause still appears exactly when the alias
-        # table changed the symbol, not when the flattening did.
-        raw = last_no_data.symbol
-        canonical = last_no_data.canonical
-        sym = quote_argument(raw)
-        resolved = "" if canonical == raw else f" (resolved to {quote_argument(canonical)})"
-        # Surface the typed error's detail (e.g. "latest row is 2025-06-11 ...
-        # stale") so the agent sees the specific reason — invalid symbol, no
-        # coverage, or stale data — not just a generic "unavailable". The
-        # detail quotes what the vendor answered (a column list, a date), so
-        # it takes the same flatten-and-cap as the other two slots.
-        detail = sanitize_untrusted(last_no_data.detail or "", limit=MAX_UNTRUSTED_CHARS)
-        reason = f" ({detail})" if detail else ""
-        # Which source never confirmed the verdict, and the words for it:
-        # the one ranked slot the lanes filled (#217), chain-order neutral
-        # on purpose — the vendor may be the primary or the fallback. Each
-        # rank names what happened in its own words ("rate limited" is not
-        # "unavailable"; the model should not read a throttled source as a
-        # down one); the rest of the sentence is one literal, so the three
-        # variants stay one shape to every reader.
-        if unconfirmed is not None:
-            verdict = (
-                f": vendor '{unconfirmed.vendor}' {unconfirmed.state} and the other "
-                f"configured vendor(s) had no usable data{reason}. Treat the symbol as "
-                f"unconfirmed rather than invalid: a source that would normally serve it "
-                f"{_WHY[unconfirmed.rank]}, and the others' answers alone do not settle whether "
-                f"it is valid, delisted, or not covered."
-            )
-        else:
-            verdict = (
-                f" from any configured vendor{reason}. The symbol may be invalid, "
-                f"delisted, not covered, or the vendor returned stale data."
-            )
-        return (
-            f"NO_DATA_AVAILABLE: No usable market data for {sym}{resolved}{verdict} "
-            f"Do not estimate or fabricate values — report that data is unavailable "
-            f"for this symbol."
-        )
-
-    # The failure that surfaces, decided in one expression. Only an optional
-    # category still reaches here having met a library failure, a core chain
-    # having returned above, and there it is one of the vendors' own
-    # failures like any other — held in the slot below, where first met
-    # wins; its words are the subject's rather than a class name, which is
-    # the whole of what it earns here (#219). First, a
-    # caller's mistake — the indicator name, which the tool wrapper renders
-    # as one line of report text — outranks a vendor's failure: a missing key
-    # surfacing instead would abort the call and point at the wrong remedy
-    # (#137). Unless a vendor was DOWN: then the name may be one that vendor
-    # computes, and the outage is the fact to surface — the typo stays in the
-    # logs, as the vendor failure does in the other case. Among the vendors'
-    # own failures the FIRST met still wins, an outage included: a missing
-    # key ahead of a down fallback surfaces the key, since that is the
-    # standing misconfiguration the operator has to fix either way, and the
-    # outage is in the logs. A chain exhausted by
-    # nothing but rate limits (e.g. a single-vendor chain hitting a 429 with
-    # no cache) must degrade like any other failure, not fall through to the
-    # bare no-vendor RuntimeError below: a throttle is the fallback verdict so
-    # a real error (network/auth/bug) stays the one surfaced, and a throttle
-    # actually met outranks a latch skip whatever the chain order, since it
-    # carries the vendor's own detail (a Retry-After) where the skip describes
-    # a request that was never sent.
-    was_down = unconfirmed is not None and unconfirmed.rank == _OUTAGE
-    if first_caller_error is not None and was_down:
-        logger.warning(
-            "Not surfacing the caller's indicator error for %s (%s): vendor %r was "
-            "down, so the name may be one it computes",
-            method,
-            first_caller_error.error,
-            unconfirmed.vendor,  # type: ignore[union-attr]
-        )
-        first_caller_error = None
-    elif first_caller_error is not None and first_error is not None:
-        logger.warning(
-            "Surfacing the caller's indicator error for %s; a vendor also failed: %s",
-            method,
-            first_error.error,
-        )
-    # A throttle met or a latch skip stands as the failure when nothing else
-    # raised — the slot holds the lower-ranked of the two whatever the chain
-    # order. An outage held there never surfaces from here: its lane set
-    # ``first_error``, which precedes the slot.
-    unconfirmed_by = (
-        _VendorFailure(unconfirmed.vendor, unconfirmed.error) if unconfirmed is not None else None
-    )
-    failed = first_caller_error or first_error or unconfirmed_by
-
-    # No vendor returned data and none reported clean "no data" — surface the
-    # first real error (e.g. the primary vendor's network failure). Optional
-    # enrichment categories degrade to a sentinel instead, so flavour data can't
-    # abort the run.
-    if failed is not None:
-        if category in OPTIONAL_CATEGORIES:
-            logger.warning("Optional %s unavailable for %s: %s", category, method, failed.error)
-            # The vendor ahead of the words (#203): the lane's log line names
-            # it, but the sentinel is what the report artifacts keep, and a
-            # multi-vendor category's reader should not need the log to tell
-            # which source failed.
-            return (
-                f"DATA_UNAVAILABLE: optional {category} could not be retrieved "
-                f"({failed.vendor}: {_optional_failure_words(failed.error)}). Proceed without "
-                f"it; do not fabricate values."
-            )
-        raise failed.error
-
-    # An empty vendor registry for a known method is a configuration/registry
-    # problem — classify it (#32) so callers see the taxonomy, not a bare
-    # RuntimeError that bypasses every vendor-error handler.
-    raise VendorNotConfiguredError(f"No available vendor for '{method}'")
+        attempt = _attempt_vendor(state, category, method, vendor, args, kwargs)
+        if isinstance(attempt, _Served):
+            return attempt.result
+        state = attempt
+    return _resolve_outcome(state, category, method)

@@ -387,6 +387,58 @@ Breaking changes within the 0.x line are called out explicitly.
   One test pins what a thirty-seven-mutation probe found held by nothing: the
   whole out-of-range-timestamp body line. No behaviour change.
 
+- **The vendor router's loop body and verdict are split out of
+  `route_to_vendor`** (dataflows refactor plan 2026-10-16, D3; the one PR of
+  the plan that touches an upstream file). `interface.route_to_vendor` drops
+  from 486 lines to 60: it resolves the chain as before, then hands a
+  `_ChainState` — the six slots the loop used to accumulate as locals
+  (`last_no_data`, `first_error`, `first_caller_error`, `unconfirmed`,
+  `first_library`, `first_wiring`), each with the comment it had — to
+  `_attempt_vendor` for each vendor in turn, which answers `_Served(result)`
+  when the vendor returned or the state with the failure kept in its slot,
+  and ends in `_resolve_outcome`, the verdict tree. The lanes stay one
+  `except` clause each inside `_attempt_vendor`, each now ending in a
+  `return state._replace(...)` of the slot it fills where it used to assign
+  and `continue`; the latch skip's log line and its `_Unconfirmed` come from
+  `_skipped_on_latch`, and the untyped `except Exception` lane — the
+  outage / library / wiring classification — is `_met_untyped_failure`,
+  which takes and returns the state as the lane read and wrote the locals.
+  Under the verdict, `_no_data_sentinel` builds the `NO_DATA_AVAILABLE`
+  sentinel and `_surfacing_failure` decides, with its two log lines, which
+  failure surfaces; the comment that opened the verdict is cut into its
+  three paragraphs, each above the check it explains. `_met_outage`,
+  `_met_library_failure` and `_note_unconfirmed` keep their slot-wise
+  signatures and their call sites (the routing tests call two of them
+  directly), so the new helpers take the whole state where those take the
+  slots. The moved bodies keep every rendered string, every log message and
+  every comment but seven spans repointed at the function that now holds
+  the code they describe (ten lines becoming fourteen; one of them also
+  drops a stale "RuntimeError" for the raise that ends the verdict);
+  besides that glue they differ only in indentation, `if x is None: x = …`
+  becoming `state.x or …` wherever a lane fills a first-met slot
+  (`_met_outage`'s own idiom), the untyped lane's `else` branches becoming
+  early returns, the failure a lane keeps bound as `failed` rather than
+  `first_error` (so the library lane's optional binding of that name
+  type-checks beside it), and the locals re-bound from the state at
+  the top of the two verdict helpers that read more than one slot. The
+  three pins the plan's §5 lists as behaviour candidates move with their
+  lines, unfixed; no pin is added or removed. The old function and the new
+  ones, run over 80,000 generated chains (seeds 7, 11, 22 and 31:
+  configured strings including `default`, `none`, unknown names, duplicates
+  and blanks; vendors returning values, falsy ones included, or raising
+  each type of the taxonomy, HTTP statuses, transport failures and untyped
+  bugs; latches pre-armed live or lapsed and armed from inside a call, on a
+  stepped monotonic clock), produced identical results, identical
+  `interface` log records (level, message, traceback or not) and identical
+  latch state. One test pins what a thirty-three-mutation probe, one per
+  helper and lane, run against the nine test modules that drive the router,
+  found held by nothing: among two wiring gaps met in one core chain the
+  first is the one raised. The length ratchet loses the `route_to_vendor`
+  row. **Upstream sync conflict point: the whole of
+  `route_to_vendor` and the six functions and two tuples above it**, from
+  `_ChainState` down — the upstream function is about 90 lines, and the
+  fork's rebuild of it now spans that range. No behaviour change.
+
 ### Fixed
 
 - **`fred.get_macro_data` checks the caller's `look_back_days` the way the

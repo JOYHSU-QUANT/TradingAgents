@@ -292,6 +292,31 @@ def test_a_wiring_gap_outranks_a_sibling_library_failure_in_a_core_chain(order):
 
 
 @pytest.mark.unit
+def test_the_first_wiring_gap_met_is_the_one_raised():
+    """Among two wiring gaps in one core chain, the first met is raised (dataflows plan D3).
+
+    Pinned where a mutation probe found nothing held it: the wiring slot
+    keeps the first gap like every other first-met slot, so a chain that
+    meets our breakage twice before a library failure names the gap the
+    operator meets first in the log.
+    """
+    first = WiringGapError("news configuration: 'news_article_limit'")
+    second = WiringGapError("news configuration: 'global_news_queries'")
+    chain = {
+        "yfinance": _raises(first),
+        "alpha_vantage": _raises(second),
+        "third": _raises(RuntimeError("pandas exploded")),
+    }
+    set_config({"data_vendors": {"news_data": "yfinance,alpha_vantage,third"}})
+    with (
+        mock.patch.dict(interface.VENDOR_METHODS, {"get_news": chain}),
+        pytest.raises(WiringGapError) as info,
+    ):
+        interface.route_to_vendor("get_news", "AAPL", "2026-06-01", "2026-06-05")
+    assert info.value is first
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "sibling, expected",
     [

@@ -630,18 +630,7 @@ class _Served(NamedTuple):
 
 
 def _skipped_on_latch(vendor: str, method: str, remaining: float) -> _Unconfirmed:
-    """No request for a vendor on a live latch: the log line, and the skip the ranked slot keeps."""
-    # A vendor that refused this client with a rate limit recently is
-    # skipped in its turn without a request (#114) — this lane is the one
-    # point every vendor's throttle passes through, so the memory lives
-    # here once, keyed by vendor because a quota is spent per key, not per
-    # endpoint. The chain goes on in its configured order, and the skip is
-    # recorded as a fallback verdict, so a chain with nothing else to say
-    # degrades the way it would have after contacting the vendor. A vendor
-    # that stands off behind its own cache (yfinance) or answers a throttle
-    # from cache (SoSoValue) is never latched here: its rate-limit type
-    # says so (``latches_vendor``), because skipping it would refuse an
-    # answer it had.
+    """No request for a vendor on a live latch: the log line, and the skip for ``_note_unconfirmed`` to rank."""
     logger.info(
         "Vendor %r rate limited a recent request; skipping it for %s without "
         "contacting it (%.0fs left).",
@@ -751,6 +740,17 @@ def _attempt_vendor(
     vendor_impl = VENDOR_METHODS[method][vendor]  # type: ignore[index]
     impl_func = vendor_impl[0] if isinstance(vendor_impl, list) else vendor_impl
 
+    # A vendor that refused this client with a rate limit recently is
+    # skipped in its turn without a request (#114) — this lane is the one
+    # point every vendor's throttle passes through, so the memory lives
+    # here once, keyed by vendor because a quota is spent per key, not per
+    # endpoint. The chain goes on in its configured order, and the skip is
+    # recorded as a fallback verdict, so a chain with nothing else to say
+    # degrades the way it would have after contacting the vendor. A vendor
+    # that stands off behind its own cache (yfinance) or answers a throttle
+    # from cache (SoSoValue) is never latched here: its rate-limit type
+    # says so (``latches_vendor``), because skipping it would refuse an
+    # answer it had.
     remaining = VENDOR_THROTTLE_LATCH.remaining_s(vendor)
     if remaining is not None:
         skip = _skipped_on_latch(vendor, method, remaining)
@@ -870,7 +870,7 @@ def _no_data_sentinel(last_no_data: NoMarketDataError, unconfirmed: _Unconfirmed
 
     In the unconfirmed variant when a vendor never confirmed it — the one
     ranked slot the lanes filled — and in the plain one when ``unconfirmed``
-    is ``None``: every vendor asked answered about the symbol.
+    is ``None``: no vendor was down, throttled or skipped.
     """
     # Both are the CALLER'S symbol echoed back into a sentence it reads —
     # the model's own argument, or the alias table's answer for it — and
@@ -953,14 +953,13 @@ def _surfacing_failure(state: _ChainState, method: str) -> _VendorFailure | None
     # surfaced, and a throttle actually met outranks a latch skip whatever
     # the chain order, since it carries the vendor's own detail (a
     # Retry-After) where the skip describes a request that was never sent.
-    was_down = unconfirmed is not None and unconfirmed.rank == _OUTAGE
-    if first_caller_error is not None and was_down:
+    if first_caller_error is not None and unconfirmed is not None and unconfirmed.rank == _OUTAGE:
         logger.warning(
             "Not surfacing the caller's indicator error for %s (%s): vendor %r was "
             "down, so the name may be one it computes",
             method,
             first_caller_error.error,
-            unconfirmed.vendor,  # type: ignore[union-attr]
+            unconfirmed.vendor,
         )
         first_caller_error = None
     elif first_caller_error is not None and first_error is not None:
@@ -1052,7 +1051,7 @@ def _resolve_outcome(state: _ChainState, category: str, method: str) -> str:
     # prefix every reader keys on and the do-not-fabricate tail are one
     # literal — and do not assert the symbol valid either: a fallback that
     # DID answer (a stale frame, an "Invalid API call") is still quoted in
-    # ``reason``, so the wording is "unconfirmed", not "fine".
+    # ``_no_data_sentinel``'s ``reason``, so the wording is "unconfirmed", not "fine".
     if last_no_data is not None:
         if first_error is not None:
             # A vendor also hit a real error; surface it in logs so the no-data

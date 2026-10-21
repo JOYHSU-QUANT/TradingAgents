@@ -389,7 +389,7 @@ Breaking changes within the 0.x line are called out explicitly.
 
 - **The vendor router's loop body and verdict are split out of
   `route_to_vendor`** (dataflows refactor plan 2026-10-16, D3; the one PR of
-  the plan that touches an upstream file). `interface.route_to_vendor` drops
+  the plan that rebuilds an upstream function). `interface.route_to_vendor` drops
   from 486 lines to 60: it resolves the chain as before, then hands a
   `_ChainState` — the six slots the loop used to accumulate as locals
   (`last_no_data`, `first_error`, `first_caller_error`, `unconfirmed`,
@@ -411,18 +411,23 @@ Breaking changes within the 0.x line are called out explicitly.
   signatures and their call sites (the routing tests call two of them
   directly), so the new helpers take the whole state where those take the
   slots. The moved bodies keep every rendered string, every log message and
-  every comment but seven spans repointed at the function that now holds
-  the code they describe (ten lines becoming fourteen; one of them also
-  drops a stale "RuntimeError" for the raise that ends the verdict);
+  every comment but eight spans repointed at the function or local that
+  now holds the code they describe (twenty-five lines becoming twenty-six;
+  one of them also drops a stale "RuntimeError" for the raise that ends the
+  verdict);
   besides that glue they differ only in indentation, `if x is None: x = …`
   becoming `state.x or …` wherever a lane fills a first-met slot
   (`_met_outage`'s own idiom), the untyped lane's `else` branches becoming
   early returns, the failure a lane keeps bound as `failed` rather than
   `first_error` (so the library lane's optional binding of that name
   type-checks beside it), and the locals re-bound from the state at
-  the top of the two verdict helpers that read more than one slot. The
-  three pins the plan's §5 lists as behaviour candidates move with their
-  lines, unfixed; no pin is added or removed. The old function and the new
+  the top of the two verdict helpers that read more than one slot. Of the
+  three pins the plan's §5 lists as behaviour candidates, the two on
+  `first_library.error` move with their lines, unfixed, and the one on
+  `unconfirmed.vendor` goes: its guard, read through the `was_down` local,
+  is inlined into the `if` so mypy narrows the slot — same truth table,
+  same evaluation order — which also answers the §5 question (no path reads
+  the slot outside the guard). No pin is added. The old function and the new
   ones, run over 80,000 generated chains (seeds 7, 11, 22 and 31:
   configured strings including `default`, `none`, unknown names, duplicates
   and blanks; vendors returning values, falsy ones included, or raising
@@ -431,13 +436,18 @@ Breaking changes within the 0.x line are called out explicitly.
   stepped monotonic clock), produced identical results, identical
   `interface` log records (level, message, traceback or not) and identical
   latch state. One test pins what a thirty-three-mutation probe, one per
-  helper and lane, run against the nine test modules that drive the router,
-  found held by nothing: among two wiring gaps met in one core chain the
+  helper and lane, run against nine of the test modules that drive the
+  router, found held by nothing: among two wiring gaps met in one core chain the
   first is the one raised. The length ratchet loses the `route_to_vendor`
   row. **Upstream sync conflict point: the whole of
   `route_to_vendor` and the six functions and two tuples above it**, from
-  `_ChainState` down — the upstream function is about 90 lines, and the
-  fork's rebuild of it now spans that range. No behaviour change.
+  `_ChainState` down — and since upstream `c42a2f2c` (2026-09-24) the file
+  itself: upstream renamed `interface.py` to `dataflows/router.py` (its
+  `route_to_vendor` is about 98 lines there) and moved the vendors under
+  `dataflows/vendors/`, so the next sync meets a modify/delete conflict on
+  the whole file, resolved by keeping the fork's `interface.py` (or porting
+  it into `router.py`) and re-applying upstream's `router.route_to_vendor`
+  changes since that commit by hand. No behaviour change.
 
 ### Fixed
 

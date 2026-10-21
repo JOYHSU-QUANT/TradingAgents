@@ -453,7 +453,7 @@ Breaking changes within the 0.x line are called out explicitly.
   it into `router.py`) and re-apply upstream's `router.route_to_vendor`
   changes since that commit by hand. No behaviour change.
 
-- **The fork's additions to `dataflows/utils.py` move to four modules of their
+- **The fork's half of `dataflows/utils.py` moves to four modules of its
   own** (dataflows refactor plan 2026-10-16, D4, the plan's optional PR;
   `utils.py` is upstream's file). Upstream's `utils` is some forty lines — the
   ticker path guard and `get_current_date` — and the fork had grown it to 1,215
@@ -474,36 +474,42 @@ Breaking changes within the 0.x line are called out explicitly.
   what fits none of the four — the ticker guard, `INDICATOR_DESCRIPTIONS`,
   `finite_float`, `is_finite_number`, the four sentences the vendors of one
   routed tool share, `save_output`, `get_current_date` — and re-exports every
-  moved name, the same object, under an `__all__` — the two names read across
-  modules go public in their new homes (`DATE_ARGUMENT_TAGS`, `parse_day`,
-  as D1-a's moved names did), and `utils` keeps `_parse_day` as an alias for
-  the one reader the plan does not edit: the upstream modules (the
-  Alpha Vantage family, `fred`, `polymarket`, `stocktwits`, the yfinance
-  modules, `date_window`, `market_data_validator`), the router and the agents
-  layer import from `utils` and are not edited; nor is any of the fork's
-  vendor modules, which read the same path. The 47 moved and kept definitions
-  are copied line for line (an `ast` comparison of each against the old file
+  moved name, the same object, under an `__all__`. The two names read from
+  outside the file go public in their new homes (`DATE_ARGUMENT_TAGS`, read
+  by three tests; `parse_day`, read by upstream's `alpha_vantage_common`; as
+  D1-a's moved names did), and `utils` keeps `_parse_day` as an alias for
+  that one reader, which the plan does not edit. The upstream modules (the
+  Alpha Vantage family, `fred`, `polymarket`, `reddit`, `stocktwits`, the
+  yfinance modules, `date_window`, `market_data_validator`), the router, the
+  graph and the agents layer import from `utils` and are not edited; nor is
+  any of the fork's vendor modules, which read the same path. The 47
+  definitions besides the module logger are copied line for line (an `ast` comparison of each against the old file
   finds no difference once docstrings are set aside and the two renames are
   mapped), with two cross-references repointed in prose
   (`normalize_iso_date`'s "`_parse_day` below", the shared sentences'
   "`_OMIT_CLAUSE` above"). What changes
   observably is the logger two functions log under — `refuse_date`'s refusal
-  line is `tradingagents.dataflows.dates` now and `_parse_day`'s
-  unparseable-date warning `tradingagents.dataflows.lag_notes`, where both
+  line is `tradingagents.dataflows.dates` now and `parse_day`'s (formerly
+  `_parse_day`) unparseable-date warning `tradingagents.dataflows.lag_notes`
+  (each module creates its own logger), where both
   were `tradingagents.dataflows.utils` — and eight tests follow: three
   repoint a `caplog` logger name, three read `DATE_ARGUMENT_TAGS` from
   `dates`, one patches `quote_argument` on `dates` rather than `utils` (the
   module `refuse_date` reads it from now), and the one that pins where the
   two outage sentences are authored names `failures.py`. The four
-  modules join the shape ratchets' scope, the kernel's import floor and the
-  mypy file list (152 files, no pins); the length table gains no row, and one
-  test pins the facade: every public name a home module defines is the same
-  object under `utils` and listed in its `__all__`, and every underscore
-  alias `utils` binds is a home's public name. **Upstream sync conflict point:
-  `utils.py`'s import block and the re-export block under it** — upstream's
-  own lines are unchanged and sit where they sat, so an upstream edit to
-  `safe_ticker_component` or `get_current_date` merges clean, while one that
-  adds to the file lands beside the fork's imports. No behaviour change.
+  modules join the shape ratchets' scope and the mypy file list (152 files,
+  no pins); the length table gains no row, the kernel's import floor stays
+  `config`/`errors`/`utils` until the kernel reads a home, and one test pins
+  the facade: every name `utils` imports from a home is the same object
+  there and listed in `__all__`, every entry of `__all__` is bound, an
+  underscore alias is its public name's own spelling, and `utils` defines no
+  underscore twin of a home's public name. **Upstream sync conflict point:
+  the whole of `utils.py`, as a modify/delete** — upstream `c42a2f2c`
+  (2026-09-23) deleted the file, moving `safe_ticker_component` to
+  `dataflows/symbols.py` and `get_current_date` to `date_window.py`, so the
+  next sync meets the fork's edited `utils.py` against upstream's deletion,
+  and nothing upstream imports `utils` any more; how to resolve it is the
+  sync PR's call. No behaviour change.
 
 ### Fixed
 

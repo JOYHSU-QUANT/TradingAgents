@@ -150,20 +150,21 @@ _CLOCK_SEAMS = frozenset(
 
 # The modules D4 split the fork's half of ``utils`` into, and the facade that
 # keeps re-exporting their names: the upstream modules and the agents layer
-# import from ``utils`` and are not edited, so every public name a home
-# defines has to reach them unchanged (a test below holds it).
+# import from ``utils`` and are not edited, so every name the facade imports
+# from a home has to reach them unchanged (a test below holds it).
 _FACADE = "utils"
 _FACADE_HOMES = frozenset({"dates", "failures", "lag_notes", "untrusted"})
 
 # The kernel names no vendor: it may import the package's floor alone (the
-# configuration, the error taxonomy, the facade and its homes). A vendor
-# module in its imports would put that vendor's types back into the shared
+# configuration, the error taxonomy, the shared utilities; a home joins the
+# floor the day the kernel reads it rather than the facade). A vendor module
+# in its imports would put that vendor's types back into the shared
 # skeleton — the reason the sweep that raises SoSoValue's errors stayed in
 # ``sosovalue_common`` and the stale fallback re-raises the base
 # ``VendorNotConfiguredError`` — and would close an import cycle with that
 # vendor, which imports the kernel.
 _KERNEL = "vendor_common"
-_KERNEL_FLOOR = frozenset({"config", "errors", _FACADE}) | _FACADE_HOMES
+_KERNEL_FLOOR = frozenset({"config", "errors", _FACADE})
 
 
 @functools.cache
@@ -465,48 +466,53 @@ def test_the_kernel_imports_only_the_packages_floor():
     assert found <= _KERNEL_FLOOR, f"{_KERNEL} imports {sorted(found - _KERNEL_FLOOR)}"
 
 
-def _underscore_aliases(
+def _sibling_name_imports(
     tree: ast.Module, package_name: str = "tradingagents.dataflows"
 ) -> dict[str, tuple[str, str]]:
-    """``alias: (sibling, name)`` for every top-level ``from .x import name as _alias``."""
+    """``bound name: (sibling, name)`` for every name a top-level ``from .x import`` binds."""
     found: dict[str, tuple[str, str]] = {}
     for node in tree.body:
         if isinstance(node, ast.ImportFrom):
             source = _sibling_module(node, package_name)
             if source is not None:
-                found.update(
-                    (alias.asname, (source, alias.name))
-                    for alias in node.names
-                    if alias.asname and alias.asname.startswith("_")
-                )
+                found.update((a.asname or a.name, (source, a.name)) for a in node.names)
     return found
 
 
-def test_utils_re_exports_every_name_the_four_modules_define_as_the_same_object():
+def test_utils_re_exports_its_imports_from_the_homes_as_the_same_object():
     # Identity, not equality: a facade that re-defined a name (or rebound it
     # to a wrapper) would still compare equal while the tests that patch the
-    # home module stopped reaching the vendors. ``__all__`` lists every
-    # re-export, and an underscore spelling the facade keeps for a reader
-    # the plan does not edit (upstream's ``alpha_vantage_common`` reads
-    # ``_parse_day``) is an alias of a public name in a home, never a
-    # definition of its own.
+    # home module stopped reaching the vendors. Read off the facade's own
+    # imports, so a home may grow a helper without the legacy path carrying
+    # it. The last check is a guard, not the general property: ``utils``
+    # keeps upstream's own private names, so it may bind underscore names of
+    # its own, just not a twin of a public name a home defines.
     facade = importlib.import_module(f"tradingagents.dataflows.{_FACADE}")
     homes = {h: importlib.import_module(f"tradingagents.dataflows.{h}") for h in _FACADE_HOMES}
     trees = dict(_modules(None))
     exported = set(facade.__all__)
-    for home, module in sorted(homes.items()):
-        public = {
-            n
-            for n in _module_level_bindings(trees[home], imports=False)
-            if not n.startswith("_") and n != "logger"
-        }
-        assert public, home
-        rebound = sorted(n for n in public if getattr(facade, n, None) is not getattr(module, n))
-        assert rebound == [], f"{home} names not re-exported as the same object: {rebound}"
-        assert public <= exported, sorted(public - exported)
-    for alias, (home, name) in _underscore_aliases(trees[_FACADE]).items():
-        assert home in _FACADE_HOMES and alias == "_" + name, (alias, home, name)
-        assert getattr(facade, alias) is getattr(homes[home], name), alias
+    assert exported <= set(vars(facade)), sorted(exported - set(vars(facade)))
+    imports = {
+        bound: (home, name)
+        for bound, (home, name) in _sibling_name_imports(trees[_FACADE]).items()
+        if home in _FACADE_HOMES
+    }
+    assert {home for home, _name in imports.values()} == _FACADE_HOMES
+    for bound, (home, name) in sorted(imports.items()):
+        assert getattr(facade, bound) is getattr(homes[home], name), bound
+        if bound.startswith("_"):
+            assert bound == "_" + name, (bound, home, name)
+        else:
+            assert bound in exported, bound
+    defined_in_homes = set().union(
+        *(_module_level_bindings(trees[home], imports=False) for home in _FACADE_HOMES)
+    ) - {"logger"}  # each home's own logger is not a name it offers
+    twins = sorted(
+        n
+        for n in _module_level_bindings(trees[_FACADE], imports=False)
+        if n.startswith("_") and n[1:] in defined_in_homes
+    )
+    assert twins == [], twins
 
 
 # -- the scanners themselves --------------------------------------------------------
@@ -654,6 +660,19 @@ def test_the_binding_scan_can_leave_the_imports_out(tmp_path):
     ((_m, tree),) = _modules(tmp_path)
     assert _module_level_bindings(tree) == {"a", "d", "x", "y", "p", "q", "f", "K"}
     assert _module_level_bindings(tree, imports=False) == {"x", "y", "p", "q", "f", "K"}
+
+
+def test_the_sibling_name_import_scan_keeps_the_bound_name_and_the_source(tmp_path):
+    _write(
+        tmp_path,
+        "m",
+        "from .x import a, b as _b\nfrom . import y\nfrom os import path as p\n"
+        "def f():\n    from .z import c\n",
+    )
+    ((_m, tree),) = _modules(tmp_path)
+    # ``from . import y`` binds a module, not a name; ``os`` is not a
+    # sibling; the lazy import inside ``f`` is not module level.
+    assert _sibling_name_imports(tree) == {"a": ("x", "a"), "_b": ("x", "b")}
 
 
 def test_the_sibling_import_scan_reads_every_spelling_at_any_depth(tmp_path):

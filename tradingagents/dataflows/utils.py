@@ -40,7 +40,7 @@ from .lag_notes import (
     data_lag_note,
     live_snapshot_note,
     parse_day,
-    parse_day as _parse_day,  # noqa: F401 - upstream's alpha_vantage_common reads it so
+    parse_day as _parse_day,  # noqa: F401 - upstream's alpha_vantage_common reads it
     plural_days,
     statement_lag_bound,
 )

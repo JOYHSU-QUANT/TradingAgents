@@ -81,7 +81,7 @@ class TestTheSharedSentence:
 
     def test_the_argument_tags_are_a_closed_set(self):
         # The tags are read by the model, so a new one is a decision made in
-        # utils, not minted by whatever name a new call site passes (#84's
+        # ``dates``, not minted by whatever name a new call site passes (#84's
         # reasoning for the disposition vocabulary). An unknown name raises at
         # the call instead of inventing INVALID_AS_OF_DATE.
         from tradingagents.dataflows.dates import DATE_ARGUMENT_TAGS as _DATE_ARGUMENT_TAGS

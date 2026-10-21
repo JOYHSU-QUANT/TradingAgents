@@ -1,9 +1,10 @@
 """Flattening for text the vendor - or the model - did not author.
 
-:func:`sanitize_untrusted` is the one flattening (the comment above it says
-why); :func:`echo_argument` and :func:`quote_argument` are the two guards
-for the MODEL's own argument quoted back at it, bare in running prose or
-inside ``repr``'s own quotes (#140, #232).
+:func:`sanitize_untrusted` is the one flattening (the comment above
+``MARKDOWN_CONTROL`` says why); :func:`echo_argument` and
+:func:`quote_argument` are the two guards for the MODEL's own argument
+quoted back at it, bare in running prose or inside ``repr``'s own quotes
+(#140, #232).
 
 Moved out of ``utils`` on 2026-10-21 (dataflows refactor plan 2026-10-16,
 D4); ``utils`` re-exports every name here for its readers.

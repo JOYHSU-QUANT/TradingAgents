@@ -3,8 +3,11 @@
 :func:`data_lag_note` for a vendor whose newest row lags the analysis date,
 :func:`live_snapshot_note` for a live-only vendor rendering a past date
 (#30), with the bounds the vendors of one routed tool must agree on (#58,
-#69, #70). Annotations, never raises: each returns ``""`` when the data is
-fresh enough or a date will not parse.
+#69, #70) and, beside them, :func:`parse_day` (the lenient prefix parser the
+notes and upstream's ``alpha_vantage_common`` share),
+:func:`statement_lag_bound` and :func:`plural_days`. Annotations, never
+raises: each note returns ``""`` when the data is fresh enough or a date will
+not parse.
 
 Moved out of ``utils`` on 2026-10-21 (dataflows refactor plan 2026-10-16,
 D4); ``utils`` re-exports every name here for its readers.

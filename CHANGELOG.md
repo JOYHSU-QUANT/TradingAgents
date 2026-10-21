@@ -12,8 +12,8 @@ Breaking changes within the 0.x line are called out explicitly.
 
 - **A `contrib/README.md` overview of the fork's packages.** One page answering
   what each of the seven packages does, how they hand data to each other (JSON
-  handoff documents, `--json` command output, or a read-only SQLite store, with
-  the single writer of each trading ledger named), which Python imports the
+  handoff documents, `--json` command output, or a SQLite store that others
+  only read, with the single writer of each trading ledger named), which Python imports the
   package-graph test permits (every `ALLOWED` edge, as a Mermaid graph), the four
   loops (trading, research, post-hoc evaluation, carry) plus the dashboard tick,
   six cross-package rules, and a reading-entry table by task. Details stay in

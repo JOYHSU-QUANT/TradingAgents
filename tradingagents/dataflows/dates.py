@@ -10,7 +10,8 @@ is the tool-description paragraph that describes the sentinel, kept beside it
 so the two cannot drift (#140).
 
 Moved out of ``utils`` on 2026-10-21 (dataflows refactor plan 2026-10-16,
-D4); ``utils`` re-exports every name here for its readers.
+D4); ``utils`` re-exports the names it imports from here for its legacy
+readers.
 """
 
 from __future__ import annotations

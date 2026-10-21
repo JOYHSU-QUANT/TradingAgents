@@ -193,8 +193,8 @@ class TestUnusableCurrDateIsVendorAgnostic:
 
     def test_the_refusal_is_the_single_shared_decision(self):
         # Pins that neither vendor holds its own copy of the judgement: both
-        # names resolve to the one in utils, so a refinement made there reaches
-        # both. It does NOT prove a getter still calls it — the equality
+        # names resolve to the one ``utils`` re-exports, so a refinement in its
+        # home reaches both. It does NOT prove a getter still calls it — the equality
         # assertions below are what pin the answers themselves.
         import tradingagents.agents.utils.market_data_validation_tools as mdv
         import tradingagents.dataflows.alpha_vantage_fundamentals as avf

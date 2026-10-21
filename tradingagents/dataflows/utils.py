@@ -6,11 +6,11 @@ from datetime import date
 from typing import TYPE_CHECKING, Annotated
 
 # Upstream's file: the ticker guard and ``get_current_date``. The fork's
-# additions moved to ``dates``, ``untrusted``, ``lag_notes`` and ``failures``
-# on 2026-10-21 (dataflows refactor plan 2026-10-16, D4) and are re-exported
-# here, the same object, because the upstream modules and the agents layer
-# import from this path and are not edited. What is still defined below fits
-# none of the four.
+# half moved to ``dates``, ``untrusted``, ``lag_notes`` and ``failures``
+# on 2026-10-21 (dataflows refactor plan 2026-10-16, D4) and is re-exported
+# here, each name the same object, because the upstream modules and the
+# agents layer import from this path and are not edited. What is still
+# defined below fits none of the four.
 from .dates import (
     DATE_ARGUMENT_TAGS,
     DateKind,

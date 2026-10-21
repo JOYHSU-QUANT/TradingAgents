@@ -483,7 +483,8 @@ Breaking changes within the 0.x line are called out explicitly.
   yfinance modules, `date_window`, `market_data_validator`), the router, the
   graph and the agents layer import from `utils` and are not edited; nor is
   any of the fork's vendor modules, which read the same path. The 47
-  definitions besides the module logger are copied line for line (an `ast`
+  definitions besides the module logger (35 moved, 12 kept) are copied line
+  for line (an `ast`
   comparison of each against the old file finds no difference once
   docstrings are set aside and the two renames are mapped), with two
   cross-references repointed in prose (`normalize_iso_date`'s "`_parse_day`

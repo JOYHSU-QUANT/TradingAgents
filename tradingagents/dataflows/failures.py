@@ -10,7 +10,8 @@ in a fixed order (#142); and :func:`wiring_gap`, which says by type that a
 failure is this project's own and not the vendor's (#219).
 
 Moved out of ``utils`` on 2026-10-21 (dataflows refactor plan 2026-10-16,
-D4); ``utils`` re-exports every name here for its readers.
+D4); ``utils`` re-exports the names it imports from here for its legacy
+readers.
 """
 
 from __future__ import annotations

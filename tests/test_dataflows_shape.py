@@ -349,7 +349,7 @@ def _module_level_bindings(tree: ast.Module, *, imports: bool = True) -> set[str
     top-level bindings, and the table is equality, so a seam that moved
     under an ``if`` or ``try`` reads as retired here (loudly, for review)
     rather than as kept. ``imports=False`` leaves the import bindings out:
-    the names a module DEFINES, which is what a facade has to re-export.
+    the names a module DEFINES, which the facade test reads.
     """
     found: set[str] = set()
     for node in tree.body:
@@ -469,13 +469,15 @@ def test_the_kernel_imports_only_the_packages_floor():
 def _sibling_name_imports(
     tree: ast.Module, package_name: str = "tradingagents.dataflows"
 ) -> dict[str, tuple[str, str]]:
-    """``bound name: (sibling, name)`` for every name a top-level ``from .x import`` binds."""
+    """``bound name: (sibling, name)`` for every name a top-level sibling ``from`` import binds."""
     found: dict[str, tuple[str, str]] = {}
     for node in tree.body:
         if isinstance(node, ast.ImportFrom):
             source = _sibling_module(node, package_name)
             if source is not None:
-                found.update((a.asname or a.name, (source, a.name)) for a in node.names)
+                found.update(
+                    (alias.asname or alias.name, (source, alias.name)) for alias in node.names
+                )
     return found
 
 
@@ -504,9 +506,12 @@ def test_utils_re_exports_its_imports_from_the_homes_as_the_same_object():
             assert bound == "_" + name, (bound, home, name)
         else:
             assert bound in exported, bound
-    defined_in_homes = set().union(
-        *(_module_level_bindings(trees[home], imports=False) for home in _FACADE_HOMES)
-    ) - {"logger"}  # each home's own logger is not a name it offers
+    defined_in_homes = {
+        name
+        for home in _FACADE_HOMES
+        for name in _module_level_bindings(trees[home], imports=False)
+        if not name.startswith("_") and name != "logger"  # a home's logger is not on offer
+    }
     twins = sorted(
         n
         for n in _module_level_bindings(trees[_FACADE], imports=False)

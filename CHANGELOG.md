@@ -483,16 +483,16 @@ Breaking changes within the 0.x line are called out explicitly.
   yfinance modules, `date_window`, `market_data_validator`), the router, the
   graph and the agents layer import from `utils` and are not edited; nor is
   any of the fork's vendor modules, which read the same path. The 47
-  definitions besides the module logger are copied line for line (an `ast` comparison of each against the old file
-  finds no difference once docstrings are set aside and the two renames are
-  mapped), with two cross-references repointed in prose
-  (`normalize_iso_date`'s "`_parse_day` below", the shared sentences'
-  "`_OMIT_CLAUSE` above"). What changes
+  definitions besides the module logger are copied line for line (an `ast`
+  comparison of each against the old file finds no difference once
+  docstrings are set aside and the two renames are mapped), with two
+  cross-references repointed in prose (`normalize_iso_date`'s "`_parse_day`
+  below", the shared sentences' "`_OMIT_CLAUSE` above"). What changes
   observably is the logger two functions log under — `refuse_date`'s refusal
   line is `tradingagents.dataflows.dates` now and `parse_day`'s (formerly
   `_parse_day`) unparseable-date warning `tradingagents.dataflows.lag_notes`
-  (each module creates its own logger), where both
-  were `tradingagents.dataflows.utils` — and eight tests follow: three
+  (each module creates its own logger), where both were
+  `tradingagents.dataflows.utils` — and eight tests follow: three
   repoint a `caplog` logger name, three read `DATE_ARGUMENT_TAGS` from
   `dates`, one patches `quote_argument` on `dates` rather than `utils` (the
   module `refuse_date` reads it from now), and the one that pins where the
@@ -501,9 +501,10 @@ Breaking changes within the 0.x line are called out explicitly.
   no pins); the length table gains no row, the kernel's import floor stays
   `config`/`errors`/`utils` until the kernel reads a home, and one test pins
   the facade: every name `utils` imports from a home is the same object
-  there and listed in `__all__`, every entry of `__all__` is bound, an
-  underscore alias is its public name's own spelling, and `utils` defines no
-  underscore twin of a home's public name. **Upstream sync conflict point:
+  there and, unless it is an underscore alias, listed in `__all__`; every
+  entry of `__all__` is bound; an underscore alias is its public name's own
+  spelling; and `utils` defines no underscore twin of a public name a home
+  defines. **Upstream sync conflict point:
   the whole of `utils.py`, as a modify/delete** — upstream `c42a2f2c`
   (2026-09-23) deleted the file, moving `safe_ticker_component` to
   `dataflows/symbols.py` and `get_current_date` to `date_window.py`, so the

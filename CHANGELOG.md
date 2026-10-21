@@ -387,6 +387,72 @@ Breaking changes within the 0.x line are called out explicitly.
   One test pins what a thirty-seven-mutation probe found held by nothing: the
   whole out-of-range-timestamp body line. No behaviour change.
 
+- **The vendor router's loop body and verdict are split out of
+  `route_to_vendor`** (dataflows refactor plan 2026-10-16, D3; the one PR of
+  the plan that rebuilds an upstream function). `interface.route_to_vendor` drops
+  from 486 lines to 60: it resolves the chain as before, then hands a
+  `_ChainState` — the six slots the loop used to accumulate as locals
+  (`last_no_data`, `first_error`, `first_caller_error`, `unconfirmed`,
+  `first_library`, `first_wiring`), each with the comment it had — to
+  `_attempt_vendor` for each vendor in turn, which answers `_Served(result)`
+  when the vendor returned or the state with the failure kept in its slot,
+  and ends in `_resolve_outcome`, the verdict tree. The lanes stay one
+  `except` clause each inside `_attempt_vendor`, each typed lane now ending
+  in a `return state._replace(...)` of the slot it fills where it used to
+  assign and `continue`; the latch skip's log line and its `_Unconfirmed` come from
+  `_skipped_on_latch`, and the untyped `except Exception` lane — the
+  outage / library / wiring classification — is `_met_untyped_failure`,
+  which takes and returns the state as the lane read and wrote the locals.
+  Under the verdict, `_no_data_sentinel` builds the `NO_DATA_AVAILABLE`
+  sentinel and `_surfacing_failure` decides, with its two log lines, which
+  failure surfaces; the comment that opened the verdict is cut into its
+  three paragraphs, each above the check it explains. `_met_outage`,
+  `_met_library_failure` and `_note_unconfirmed` keep their slot-wise
+  signatures and their call sites (the routing tests call two of them
+  directly), so the four new helpers that keep or rank several slots take
+  the whole state where those take the slots. The moved bodies keep every rendered string, every log message and
+  every comment but eight spans repointed at the function or local that
+  now holds the code they describe (twenty-five lines becoming twenty-six;
+  one of them also drops a stale "RuntimeError" for the raise that ends the
+  verdict);
+  besides that glue they differ only in indentation, `if x is None: x = …`
+  becoming `state.x or …` wherever a lane fills a first-met slot
+  (`_met_outage`'s own idiom), the untyped lane's `if`/`else` pairs
+  becoming early returns and fall-through, the failure a lane keeps bound as `failed` rather than
+  `first_error` (so the library lane's optional binding of that name
+  type-checks beside it), and the locals re-bound from the state at
+  the top of the two verdict helpers that take the state. Of the
+  three pins behind the two type holes the plan's §5 lists as behaviour
+  candidates, the two on `first_library.error` move with their lines,
+  unfixed, and the one on `unconfirmed.vendor` goes: its guard, read
+  through the `was_down` local, is inlined into the `if` so mypy narrows
+  the slot — same truth table, and both tests are side-effect-free reads,
+  so the short-circuit changes nothing observable — which also answers the
+  §5 question (no path reads the slot outside the guard). No pin is
+  added. The old function and the new
+  ones, run over 80,000 generated chains (seeds 7, 11, 22 and 31:
+  configured strings including `default`, `none`, unknown names, duplicates
+  and blanks; vendors returning values, falsy ones included, or raising
+  each type of the taxonomy, HTTP statuses, transport failures and untyped
+  bugs; latches pre-armed live or lapsed and armed from inside a call, on a
+  stepped monotonic clock), produced identical results, identical
+  `interface` log records (level, message, traceback or not) and identical
+  latch state. One test pins what a thirty-three-mutation probe, one per
+  helper and lane, run against nine of the test modules that drive the
+  router, found held by nothing: among two wiring gaps met in one core chain the
+  first is the one raised. The length ratchet loses the `route_to_vendor`
+  row. **Upstream sync conflict point: the whole of
+  `route_to_vendor` and the six functions and two tuples above it**, from
+  `_ChainState` down — and since upstream `c42a2f2c` (2026-09-23) the file
+  itself: upstream renamed `interface.py` to `dataflows/router.py` (its
+  `route_to_vendor` is about 98 lines there) and, one commit later
+  (`6097b582`), moved the vendors under `dataflows/vendors/`. Git follows
+  the rename (72% similar), so the next sync lands the fork's `interface.py`
+  edits on `router.py` as a content conflict and drops `interface.py` from
+  the tree; the resolution is to restore the fork's `interface.py` (or port
+  it into `router.py`) and re-apply upstream's `router.route_to_vendor`
+  changes since that commit by hand. No behaviour change.
+
 ### Fixed
 
 - **`fred.get_macro_data` checks the caller's `look_back_days` the way the

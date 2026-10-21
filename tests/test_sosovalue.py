@@ -454,7 +454,7 @@ class TestRequest:
         assert not isinstance(e.value, sosovalue_common.VendorUnavailableError)
         assert "test-key" not in str(e.value)
 
-    def test_the_outage_sentences_are_authored_only_in_utils(self):
+    def test_the_outage_sentences_are_authored_only_in_failures(self):
         # #217-4: "answered HTTP N with a body that is not JSON" and "answered
         # HTTP N without data" are the shared helpers' sentences; a boundary
         # that hand-copies them drifts on its own (#172 found the copies).
@@ -489,7 +489,7 @@ class TestRequest:
             found = {m.group(1) for s in message_strings(tree) for m in [sentence.search(s)] if m}
             if found:
                 authors[source.name] = found
-        assert authors == {"utils.py": {"with a body that is not JSON", "without data"}}
+        assert authors == {"failures.py": {"with a body that is not JSON", "without data"}}
 
     def test_request_sends_the_stripped_key(self):
         # A key deployed through a Windows env file gains a trailing CRLF;

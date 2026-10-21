@@ -1,28 +1,112 @@
 from __future__ import annotations
 
-import contextlib
-import json
-import logging
 import math
 import re
-from collections.abc import Callable, Iterator
-from datetime import date, datetime
-from typing import TYPE_CHECKING, Annotated, Literal
+from datetime import date
+from typing import TYPE_CHECKING, Annotated
 
-import requests
-
-from .errors import (
-    UnsupportedIndicatorError,
-    VendorError,
-    VendorLibraryError,
-    VendorUnavailableError,
-    WiringGapError,
+# Upstream's file: the ticker guard and ``get_current_date``. The fork's
+# additions moved to ``dates``, ``untrusted``, ``lag_notes`` and ``failures``
+# on 2026-10-21 (dataflows refactor plan 2026-10-16, D4) and are re-exported
+# here, the same object, because the upstream modules and the agents layer
+# import from this path and are not edited. What is still defined below fits
+# none of the four.
+from .dates import (
+    DATE_ARGUMENT_TAGS,
+    DateKind,
+    date_range_refusal,
+    date_refusal,
+    date_sentinel_note,
+    invalid_date_sentinel,
+    normalize_iso_date,
+    refuse_date,
+)
+from .failures import (
+    failure_account,
+    generic_failure_words,
+    http_status,
+    is_unreached,
+    is_vendor_outage,
+    json_body_or_outage,
+    json_bytes_or_outage,
+    raise_for_http_status,
+    wiring_gap,
+)
+from .lag_notes import (
+    MAX_INSIDER_LAG_DAYS,
+    MAX_LIVE_SNAPSHOT_BEHIND_DAYS,
+    MAX_OHLCV_STALE_DAYS,
+    MAX_STATEMENT_LAG_DAYS,
+    data_lag_note,
+    live_snapshot_note,
+    parse_day,
+    parse_day as _parse_day,  # noqa: F401 - upstream's alpha_vantage_common reads it so
+    plural_days,
+    statement_lag_bound,
+)
+from .untrusted import (
+    EMPHASIS_UNDERSCORE,
+    MARKDOWN_CONTROL,
+    MAX_UNTRUSTED_CHARS,
+    echo_argument,
+    quote_argument,
+    sanitize_untrusted,
 )
 
 if TYPE_CHECKING:
     import pandas as pd
 
-logger = logging.getLogger(__name__)
+__all__ = [
+    # defined here
+    "INDICATOR_DESCRIPTIONS",
+    "SavePathType",
+    "finite_float",
+    "get_current_date",
+    "is_finite_number",
+    "no_insider_transactions",
+    "no_news_in_window",
+    "resolved_clause",
+    "safe_ticker_component",
+    "save_output",
+    "unsupported_indicator",
+    # dates
+    "DATE_ARGUMENT_TAGS",
+    "DateKind",
+    "date_range_refusal",
+    "date_refusal",
+    "date_sentinel_note",
+    "invalid_date_sentinel",
+    "normalize_iso_date",
+    "refuse_date",
+    # failures
+    "failure_account",
+    "generic_failure_words",
+    "http_status",
+    "is_unreached",
+    "is_vendor_outage",
+    "json_body_or_outage",
+    "json_bytes_or_outage",
+    "raise_for_http_status",
+    "wiring_gap",
+    # lag_notes
+    "MAX_INSIDER_LAG_DAYS",
+    "MAX_LIVE_SNAPSHOT_BEHIND_DAYS",
+    "MAX_OHLCV_STALE_DAYS",
+    "MAX_STATEMENT_LAG_DAYS",
+    "data_lag_note",
+    "live_snapshot_note",
+    "parse_day",
+    "plural_days",
+    "statement_lag_bound",
+    # untrusted
+    "EMPHASIS_UNDERSCORE",
+    "MARKDOWN_CONTROL",
+    "MAX_UNTRUSTED_CHARS",
+    "echo_argument",
+    "quote_argument",
+    "sanitize_untrusted",
+]
+
 
 SavePathType = Annotated[str, "File path to save data. If None, data is not saved."]
 
@@ -59,45 +143,6 @@ def safe_ticker_component(value: str, *, max_len: int = 32) -> str:
         raise ValueError(f"ticker cannot consist solely of dots: {value!r}")
     return value
 
-
-# How far the analysis date may sit behind the wall clock before a live-only
-# vendor that DISCLOSES says its values are today's, not that date's. One
-# shared bound (the default of live_snapshot_note) so those vendors agree on
-# what counts as "a backtest" within the same run (#30).
-#
-# Not every live-only vendor discloses: the options chain, whale positioning
-# and the fundamentals profile WITHHOLD instead, on the stricter family rule in
-# ``date_window.is_past_analysis_date`` (any date before today, because a prose
-# warning is not a guard). This bound governs the vendors that still render -
-# prediction markets and the live message streams - and a vendor moving to the
-# withholding rule leaves this one behind rather than tightening it.
-MAX_LIVE_SNAPSHOT_BEHIND_DAYS = 2
-
-# A vendor's latest OHLCV row this many calendar days before the requested date
-# is treated as stale. Generous enough to span long holiday weekends, tight
-# enough to catch the year-old frames yfinance occasionally returns (#1021).
-# One definition for both market-data paths — the stockstats/yfinance loader and
-# the Alpha Vantage daily getter reject the same gap, so a stalled feed cannot
-# short-circuit the vendor chain that could have served fresh bars (#30, #70).
-MAX_OHLCV_STALE_DAYS = 10
-
-# Maximum age (calendar days) of the newest insider filing before the report
-# carries a lag note. Insider activity is legitimately sparse, so the bound is
-# generous — the note flags a long-dead filing stream, not a quiet quarter.
-# Relative to the wall clock: no curr_date reaches the insider call path, and
-# the filings are fetched live either way (#30). Shared by both vendors serving
-# the insider tool so its honesty does not depend on which one ``data_vendors``
-# selected (#69).
-MAX_INSIDER_LAG_DAYS = 90
-
-# Maximum age (calendar days) of the newest financial-statement period relative
-# to curr_date before the report carries a data-lag note, keyed by the requested
-# freq. Statements file with a delay, so a period plus a filing window is normal
-# cadence — a quarter+~90d for quarterlies, a year+filing window for annuals;
-# beyond that the newest statement is genuinely old (#30). Shared rather than
-# per-vendor so a statement tool's honesty does not depend on which vendor
-# ``data_vendors`` happened to select (#58).
-MAX_STATEMENT_LAG_DAYS = {"quarterly": 180, "annual": 550}
 
 # The description each indicator report ends with — agent-facing prompt text,
 # so the sentence an analyst reads must not depend on which vendor
@@ -260,247 +305,12 @@ def is_finite_number(value) -> bool:
         return False
 
 
-def normalize_iso_date(value) -> str | None:
-    """Canonical ``YYYY-MM-DD`` for a date string, or None if it is not a date.
-
-    ``strptime`` accepts non-zero-padded input ("2026-6-5"), which then compares
-    WRONG lexically against zero-padded vendor date fields — ``"2024-12-31" <=
-    "2026-6-5"`` is True — so the raw string must be normalised before any
-    look-ahead filter rather than compared as text.
-
-    That lexical comparison is also why this parser is strict where
-    :func:`_parse_day` below is deliberately lenient: that one prefix-trims so an
-    annotation can read datetimes and ISO time suffixes, and relaxing this one to
-    match would drop the guarantee silently. They are not two spellings of one
-    idea — do not unify them.
-    """
-    try:
-        return datetime.strptime(value, "%Y-%m-%d").strftime("%Y-%m-%d")
-    except (ValueError, TypeError):
-        return None
-
-
-# The closed set of date arguments a refusal can name, and the tag each one
-# carries. Closed on purpose (the same reasoning as the disposition vocabulary,
-# #84): the tags are read by the model, so a new one must be a decision made
-# here, not minted by whatever a new call site happens to pass — an unknown
-# argument name raises at the call rather than inventing a tag.
-_DATE_ARGUMENT_TAGS = {
-    "curr_date": "INVALID_CURR_DATE",
-    "start_date": "INVALID_START_DATE",
-    "end_date": "INVALID_END_DATE",
-}
-
-# What a usable date would have done: bounded a single point in time (the
-# analysis date), bounded one end of a window, or — for the live-only sources
-# whose ``curr_date`` never bounds the data at all — gated the as-of
-# DISCLOSURE the report carries (#89: the date decides whether the report may
-# claim its live values are that date's). Stated by the caller, not inferred
-# from the argument's name — a future point-in-time tool whose argument is
-# called ``as_of_date`` must not silently be told it asked for a window, and a
-# disclosure-only tool must not claim its data could have been bounded (#144:
-# that claim invited the model to retry historical dates against a live
-# snapshot).
-DateKind = Literal["point", "window", "disclosure"]
-
-# Everything the vendor modules render — and every error they raise, since
-# ``route_to_vendor`` hands an optional category's failure to the model as
-# ``DATA_UNAVAILABLE: ... ({error})`` — is assembled into an LLM prompt, so a
-# fragment that survives verbatim from outside the module can forge report
-# structure rather than merely read oddly. The one definition of that
-# flattening (it used to be copied into deribit and sosovalue_common, and
-# those modules now import it under their old ``_sanitize`` name); the vendor
-# modules keep the reasoning for WHICH fragments they flatten.
-#
-# ``sanitize_untrusted`` and the three names it reads (``MARKDOWN_CONTROL``,
-# ``EMPHASIS_UNDERSCORE``, ``MAX_UNTRUSTED_CHARS``) are SUPPORTED API for
-# vendor modules (#140): a new vendor module calls them directly rather than
-# minting its own flattening or aliasing the cap under a private name — the
-# alias is one more site a cap change has to find (deribit's was the last).
-#
-# Collapsing whitespace is the load-bearing half: the reports are block-level
-# (sections joined by blank lines, headings and labels at the start of a line),
-# so a fragment with no line breaks cannot open a block however it is
-# punctuated. The character strip is the second line of defence, against what
-# still reads as a marker mid-line: "*" and "`" for bold and code spans, "#"
-# and "|" because a heading or a table row is worth denying even inert. "<"
-# and ">" are deliberately NOT stripped: both are block-level only, and both
-# carry real meaning in vendor diagnostics ("start_timestamp must be <
-# end_timestamp"). Translated to a SPACE rather than deleted: deletion joins
-# the fragments either side and can fuse two tokens into a third that reads as
-# legitimate ("BTC|USD" → "BTCUSD").
-MARKDOWN_CONTROL = str.maketrans(dict.fromkeys("#*`|", " "))
-
-# "_" is handled separately because it also occurs inside ordinary words (a
-# field name in a vendor diagnostic, an event or company name). Only underscores
-# in EMPHASIS position — at a word boundary, where "_caveat._" lines sit — are
-# removed; one between two alphanumerics stays.
-EMPHASIS_UNDERSCORE = re.compile(r"(?<![0-9A-Za-z])_|_(?![0-9A-Za-z])")
-
-# Long enough for any real vendor error message or caller argument, short
-# enough that a payload cannot bury the report's own sentences under its bulk.
-MAX_UNTRUSTED_CHARS = 200
-
-
-_WHITESPACE_RUN = re.compile(r"\s+")
-
-# The omission clause both the sentinel tail and the tool-description note
-# append for the disclosure-only tools — one literal, so a description cannot
-# promise a remedy the sentinel stopped offering, or vice versa (#140 review).
-_OMIT_CLAUSE = " or omit it"
-
-
-def sanitize_untrusted(text: object, *, limit: int | None = None, keep_edges: bool = False) -> str:
-    """Flatten a fragment the vendor did not author so it cannot forge structure.
-
-    The strip runs FIRST and whitespace is collapsed after it, so neither the
-    spaces the translation introduces nor the ones already in the fragment can
-    survive as a run or rebuild a line break inside a table cell. ``limit``
-    caps the result. Pass it where the fragment is ISOLATED (an echoed raw
-    row or argument in a raised message — not a vendor's whole reason, which
-    the router caps at its slot), and where a whole message is about
-    to enter text the MODEL reads (a sentinel slot, a leaf's degrade line):
-    there the vendor's share of the prompt has to be bounded, and what the
-    cap drops is the operator's to read in a log (#171, #172). Not when
-    flattening a whole message for its own raise or a log line, where the
-    module's own diagnostic carries the meaning.
-
-    ``keep_edges`` is for echoing a CALLER'S OWN value back to its author — a
-    refused date, or an argument a report quotes back (see
-    :func:`echo_argument`): markers become a space rather than vanishing, and
-    nothing is trimmed off the ends, so ``"_2026-08-18"`` cannot come back as
-    ``2026-08-18`` inside a sentence calling it invalid. A rendered vendor
-    fragment wants the default — there the marker is noise and a boundary
-    space would rebuild a table cell.
-    """
-    marker = " " if keep_edges else ""
-    flat = EMPHASIS_UNDERSCORE.sub(marker, str(text).translate(MARKDOWN_CONTROL))
-    flat = _WHITESPACE_RUN.sub(" ", flat) if keep_edges else " ".join(flat.split())
-    if limit is not None and len(flat) > limit:
-        flat = (flat[:limit] if keep_edges else flat[:limit].rstrip()) + "..."
-    return flat
-
-
-def echo_argument(value: object) -> str:
-    """The model's own argument, flattened and capped, for text it reads again.
-
-    A tool that quotes one of its arguments back — the symbol it could not
-    verify, the topic nothing matched, the alias it does not know, or simply
-    the one it names in the report it returns — is putting a fragment the
-    MODEL authored into the prompt, the same direction
-    :func:`quote_argument` guards for a refused date. Same FLATTENING and
-    cap, and ``keep_edges`` for the same reason: markers become a space
-    rather than vanishing, so ``_foo`` cannot come back as ``foo`` inside a
-    sentence calling it unusable.
-
-    Not the whole of that guard, though: this returns a BARE string, where
-    :func:`quote_argument` returns one already inside ``repr``'s own escaped
-    quotes. So control characters reach the prompt as themselves here, and a
-    caller that wraps this result in quotes of its own supplies them as
-    literal text — a value carrying that same quote character then ends the
-    span early. Only use this where the echo is named bare, as the snapshot
-    report's heading line does; every quoted site wants
-    :func:`quote_argument` (#232). The control characters that reach the
-    prompt as themselves are the NON-whitespace ones: the flattening above
-    collapses every whitespace run, a lone tab or line break included.
-
-    A clean value comes through byte for byte apart from whitespace, which
-    collapses to single spaces — a topic typed with two spaces renders with
-    one.
-
-    Not for a VENDOR's message — that one is not quoted back at its author and
-    wants the default edges (see :func:`sanitize_untrusted`).
-    """
-    return sanitize_untrusted(value, limit=MAX_UNTRUSTED_CHARS, keep_edges=True)
-
-
-def quote_argument(value: object) -> str:
-    """A model argument echoed back INSIDE ITS OWN QUOTES, flattened and capped.
-
-    Returns a STRING value already delimited — do not wrap the result in
-    quotes of your own. That is the whole point: the delimiters come from
-    ``repr``, which
-    escapes any quote character in the value and picks the other quote style
-    when it has to, so the value cannot end the quoted span early. A caller
-    that supplies its own literal quotes around :func:`echo_argument` instead
-    gets a span a value containing that quote character can close, and the
-    prose after it reads to the model as the tool's own words rather than the
-    caller's value (#232). Use this wherever the echo is quoted; use
-    :func:`echo_argument` only where it is named bare in running prose.
-
-    The value is the model's own text echoed back into a sentence it reads, so
-    it gets the vendor flattening with ``keep_edges`` (see there). The cap is
-    enforced on the ESCAPED form: the character cap runs first (bounding the
-    re-cap loop's work), ``repr`` then escapes control and non-printable
-    astral characters — 4-10x growth that used to carry a "capped" hostile
-    value far past the promise (#140) — and the re-cap below drops whole
-    characters until the quoted form fits, so an escape sequence stays whole
-    or vanishes and the quotes stay balanced. A clean value such as ``'abc'``
-    comes through byte for byte, quotes included; one containing whitespace
-    does not, since :func:`echo_argument` collapses every run to a single
-    space.
-
-    A NON-string is ``repr``'d too, so it is delimited only where its own
-    ``repr`` is: a number, ``None`` or a bool comes back bare. The tool
-    schemas send JSON strings, so only a direct caller can reach that lane.
-
-    One VENDOR value takes this guard, and takes it for the reason above rather
-    than in spite of it: ``stocktwits``' symbol-mismatch answer names the
-    requested spelling and the echoed one in a single sentence whose whole
-    content is that they DIFFER. A vendor spelling flattened with the default
-    edges comes back reading like the clean one there ("AAPL#" as "AAPL"), and
-    the sentence becomes a self-contradiction (#233). Two spellings contrasted
-    character for character both want the quoted form.
-    """
-    if isinstance(value, str):
-        flat = echo_argument(value)
-        quoted = repr(flat)
-        if len(quoted) > MAX_UNTRUSTED_CHARS + 2:
-            # Whole characters, not repr bytes, and repr is recomputed each
-            # step because dropping a character can flip repr's quote choice.
-            # O(cap^2) in the worst case, bounded by the character pre-cap
-            # above — rework this loop before ever growing
-            # MAX_UNTRUSTED_CHARS by orders of magnitude.
-            while len(repr(flat)) > MAX_UNTRUSTED_CHARS + 2:
-                flat = flat[:-1]
-            requoted = repr(flat)
-            quoted = requoted[:-1] + "..." + requoted[-1]
-        return quoted
-    try:
-        raw = repr(value)
-    except Exception:  # noqa: BLE001 — a refusal must not become an untyped raise
-        # Only a direct caller can hand over an object whose repr raises; the
-        # tool schemas send JSON values. Still, the refusal is what stands
-        # between that caller and the router's "vendor down" lane.
-        raw = f"<{type(value).__name__} value>"
-    # A non-string can only come from a direct caller (tool schemas send JSON
-    # strings), so this lane is best-effort by design: bound the work up front
-    # (a buggy caller can hand over a million-element repr), keep the
-    # truncation boundary in the shared helper, and re-close the OUTERMOST
-    # delimiter when the echo was cut so it reads as a cut value rather than a
-    # broken one (#140). No whole-escape promise here — that promise above is
-    # for model input, which is always a string.
-    closer = raw[-1] if raw and raw[-1] in "'\")]}" else ""
-    sliced = len(raw) > MAX_UNTRUSTED_CHARS * 4
-    raw = raw[: MAX_UNTRUSTED_CHARS * 4]
-    flat = sanitize_untrusted(raw, keep_edges=True)
-    if sliced or len(flat) > MAX_UNTRUSTED_CHARS:
-        # ``sliced`` forces the cut MARKING even when whitespace collapse
-        # brought the prefix under the cap — a cut without an ellipsis reads
-        # as the whole value.
-        capped = sanitize_untrusted(raw, limit=MAX_UNTRUSTED_CHARS, keep_edges=True)
-        if not capped.endswith("..."):
-            capped += "..."
-        return capped + closer
-    return flat
-
-
 # The sentences the vendors of one routed tool must agree on, defined once
 # each. Each used to be a literal in the yfinance module and a second literal
 # in the Alpha Vantage one, each under a comment promising the other copy said
 # the same thing — and the promise was pinned only by a cross-vendor equality
 # test spelling one canonical symbol, so the two could diverge the moment a
-# value stopped being canonical. Same reasoning as ``_OMIT_CLAUSE`` above: one
+# value stopped being canonical. Same reasoning as ``dates._OMIT_CLAUSE``: one
 # literal, so one vendor cannot start saying something the other stopped
 # saying (#140 review, #219, #233).
 #
@@ -599,609 +409,6 @@ def unsupported_indicator(indicator: object, supported) -> str:
     return (
         f"Indicator {echo_argument(indicator)} is not supported. "
         f"Please choose from: {list(supported)}"
-    )
-
-
-def invalid_date_sentinel(
-    value,
-    *,
-    what: str,
-    kind: DateKind,
-    param: str = "curr_date",
-    _echo: str | None = None,
-) -> str:
-    """The sentinel served when a supplied date argument is not a usable date.
-
-    Loud to the LLM (it can retry with a valid date), leaks no data, and is
-    RETURNED, never raised, by every date-taking routed tool, core or optional:
-    the router serves any returned string as the tool's answer, whereas a raise
-    is judged by the category — a core one crashes the ToolNode-wrapped run
-    (``raise first_error``), and an optional one is rendered as "this source is
-    down, proceed without it" (#119), a verdict the model cannot fix by
-    retrying with a better argument.
-
-    Shared by both vendors serving each routed tool so the agent reads the same
-    sentence either way (#89) — which vendor ``data_vendors`` selected is not
-    something the agent can see, so an answer that differs by vendor is one it
-    has no way to interpret. ``what`` names the data the date was meant to
-    bound and ``kind`` says how (see :data:`DateKind`); both are required, so a
-    caller that forgot either cannot emit a confident sentence about the wrong
-    thing. ``param`` names the argument being refused (#111) — the OHLCV and
-    ticker-news tools take ``start_date``/``end_date`` — and must be one of
-    :data:`_DATE_ARGUMENT_TAGS`.
-
-    The retry tail offers omission exactly for ``kind="disclosure"`` (#144 —
-    the model failing RIGHT NOW reads this sentence, not the tool
-    description, so a legal exit stated only there kept it resubmitting
-    reformatted dates). Derived from ``kind`` rather than carried as a second
-    flag, so "these values are live" and "or omit it" cannot ship separately:
-    a BOUNDED tool must never invite the omission that would switch its
-    look-ahead filtering off, even where omission is technically legal (the
-    statement getters' #73 lane — their ``date_refusal`` gate stays
-    ``omitted_ok=True``, their sentence stays a bounding one). ``_echo`` lets
-    :func:`refuse_date` pass the echo it already computed for its log line;
-    anyone else leaves it to be computed here.
-
-    The echoed value is flattened and capped (see :func:`quote_argument`):
-    the optional-category getters used to carry that guard in their own
-    vendor-error messages (#119 moved them onto this sentinel), and the core
-    tools never had it.
-    """
-    # Both of this module's own tables below — the tag lookup here and the
-    # ``kind`` branch under it — are keyed by literals the getters write, so
-    # a miss is a typo or a parameter added without a row —
-    # ours, and reachable only on a call the model already spoiled with a bad
-    # date. Said by type, since the router cannot otherwise tell it from the
-    # vendor's library failing and would hand the analyst the miss as its
-    # report (#219).
-    with wiring_gap("date-refusal argument tag"):
-        tag = _DATE_ARGUMENT_TAGS[param]
-    retry = "retry with a valid yyyy-mm-dd date"
-    if kind == "point":
-        consequence = f"{what} cannot be bounded to a point in time"
-    elif kind == "window":
-        consequence = f"the {what} window cannot be resolved"
-    elif kind == "disclosure":
-        # Disclosure-only tools serve LIVE values whatever the date; the date
-        # only gates the as-of disclosure. "Cannot be bounded" here claimed
-        # the opposite and invited a historical-date retry (#144). The
-        # template conjugates for a PLURAL ``what`` ("are") — both current
-        # disclosure whats are plural; a singular one needs a decision here.
-        consequence = f"the report cannot say whether the live {what} are as of that date"
-        retry += _OMIT_CLAUSE
-    else:
-        # Mirror _DATE_ARGUMENT_TAGS: an unknown kind fails at the call
-        # rather than falling into whichever branch is last — which would
-        # hand a typo the strongest wrong claim (#140 review).
-        raise WiringGapError(f"unknown DateKind {kind!r}")
-    echo = _echo if _echo is not None else quote_argument(value)
-    return (
-        f"{tag}: {param} {echo} is not a valid yyyy-mm-dd date, "
-        f"so {consequence}. "
-        f"No data returned; {retry}. Do not fabricate values."
-    )
-
-
-def date_refusal(
-    value,
-    *,
-    what: str,
-    kind: DateKind,
-    param: str = "curr_date",
-    omitted_ok: bool = False,
-) -> str | None:
-    """The sentinel refusing a SUPPLIED-but-unusable date, or None to proceed.
-
-    ``None`` is refused by default: the routed tools declare their dates as
-    required ``str`` arguments, so the model cannot send it (the tool schema
-    rejects a null before the getter runs) and a ``None`` that arrives came
-    from a direct caller — passed on, it reached a ``strptime`` as a TypeError
-    outside every vendor lane. The fundamentals getters and the
-    prediction-market getter are the stated exceptions: they pass
-    ``omitted_ok=True`` because there ``None`` means the model omitted the
-    argument, which keeps the date-less fallback lane (#73, #139).
-    Any other value was supplied, so one that will not parse — the empty string
-    included — is a request that cannot be answered, not a request for no bound.
-
-    Both halves are one judgement, so it lives here rather than in either vendor:
-    a later refinement (say, also refusing a future-dated curr_date) applied to a
-    vendor-local copy would reach that vendor's getters and silently miss the
-    other's, which is the drift this whole change exists to close. The three
-    inputs that used to be answered differently per vendor are in the CHANGELOG.
-
-    The half that ACTS on the judgement is :func:`refuse_date`, which this
-    delegates to. Prefer this function: reach for that one only where the
-    caller owns a different parse rule on purpose (#112), and read its
-    docstring first — it does not judge.
-    """
-    if value is None and omitted_ok:
-        return None
-    if value is not None and normalize_iso_date(value) is not None:
-        return None
-    return refuse_date(value, what=what, kind=kind, param=param)
-
-
-def refuse_date(
-    value,
-    *,
-    what: str,
-    kind: DateKind,
-    param: str = "curr_date",
-) -> str:
-    """Refuse a date already judged unusable: log the one operator line, serve the sentinel.
-
-    The refusal is RETURNED, so it never reaches the router's warning lane;
-    without this line an operator's log shows nothing for a model that keeps
-    sending a date no tool can use (#119). Info, not warning: the model is
-    told to retry, and the echo is the flattened one the sentence carries —
-    computed once here and handed to the sentinel (#140).
-
-    Split out of :func:`date_refusal` — which judges the value first — so a
-    tool that keeps its own parse rule (the verification snapshot's looser
-    pandas gate is a decision, #112) can refuse with the same log line and
-    the same sentence rather than a hand-written copy of either (#230).
-    """
-    echo = quote_argument(value)
-    logger.info("Refusing unusable %s %s for %s", param, echo, what)
-    return invalid_date_sentinel(value, what=what, kind=kind, param=param, _echo=echo)
-
-
-def date_sentinel_note(*params: str, omitted_ok: bool = False, disclosure: bool = False) -> str:
-    """The tool-description sentence for a tool that answers with the date sentinel.
-
-    Appended to ``tool.description`` by
-    ``agents.utils.tool_notes.notes_date_sentinel`` — one wording, owned here
-    beside the sentinel it describes, so a wrapper cannot hand-write a variant
-    or describe itself as returning only "a formatted report" while its getter
-    answers a bad date with :func:`invalid_date_sentinel` (#140: eleven
-    wrappers did exactly that, and the model reads the description when
-    CHOOSING arguments). ``params`` are the tool's date arguments (a typo
-    raises through :data:`_DATE_ARGUMENT_TAGS` as a bare ``KeyError``: this
-    runs while a tool description is built, never inside the router's call,
-    so it has no ending to be told apart from a vendor's — which is why the
-    sentinel's own lookup of that table wears ``WiringGapError`` and this
-    one does not).
-
-    Two knobs because they answer different questions: ``omitted_ok`` matches
-    the getter's None-gate and shapes the trigger ("is supplied but ..."),
-    while ``disclosure`` matches the getter's ``kind="disclosure"`` and adds
-    the omission remedy. The statement tools legally accept omission (#73)
-    yet must not ADVERTISE it — their date bounds the data, and inviting
-    omission invites switching look-ahead filtering off (#140 review).
-    """
-    if not params:
-        raise ValueError("date_sentinel_note needs at least one date parameter")
-    if disclosure and not omitted_ok:
-        raise ValueError("a disclosure-only date is omittable by construction")
-    tags = " or ".join(_DATE_ARGUMENT_TAGS[p] for p in params)
-    names = " or ".join(params)
-    supplied = "is supplied but " if omitted_ok else "is "
-    remedy = "retry with a valid date" + (_OMIT_CLAUSE if disclosure else "")
-    # Own paragraph ("\n\n"): appended to docstrings whose last line rarely
-    # ends with a period, a same-line note read as a run-on sentence in 14 of
-    # the 16 rendered descriptions.
-    return (
-        f"\n\nReturns an {tags} sentinel instead of data when {names} {supplied}"
-        f"not a usable yyyy-mm-dd date ({remedy}; do not fabricate values)."
-    )
-
-
-def date_range_refusal(start_date, end_date, *, what: str) -> str | None:
-    """:func:`date_refusal` over a required ``start_date``/``end_date`` pair.
-
-    The OHLCV and ticker-news tools bound a window rather than a point, so they
-    have two arguments to refuse and no date-less lane. Start is judged first
-    and only the first unusable one is named: one sentence asks for one fix (a
-    preference, not a measured claim about how the model retries).
-    """
-    refusal = date_refusal(start_date, what=what, kind="window", param="start_date")
-    if refusal is not None:
-        return refusal
-    return date_refusal(end_date, what=what, kind="window", param="end_date")
-
-
-def statement_lag_bound(freq) -> int:
-    """Days the newest fiscal period may lag curr_date before it is flagged.
-
-    An unknown or missing freq falls back to the annual bound — the looser one,
-    because an annotation must not false-alarm. Shared by every vendor serving
-    the statement tools so that fallback rule cannot drift between them (#58).
-    """
-    key = freq.lower() if isinstance(freq, str) else ""
-    return MAX_STATEMENT_LAG_DAYS.get(key, MAX_STATEMENT_LAG_DAYS["annual"])
-
-
-def plural_days(n: int) -> str:
-    return "day" if n == 1 else "days"
-
-
-def _parse_day(value, label: str) -> datetime | None:
-    """Parse a date-ish value's ``yyyy-mm-dd`` prefix, or ``None``.
-
-    Accepts strings, datetimes, and pandas Timestamps (anything whose ``str``
-    starts with the date). An unparseable non-empty value is logged: the
-    freshness annotations degrade to silence on bad input, and without a log
-    line a vendor-side date-format change would turn every future disclosure
-    off invisibly.
-    """
-    try:
-        return datetime.strptime(str(value)[:10], "%Y-%m-%d")
-    except (TypeError, ValueError):
-        if value:
-            # Context-neutral wording: single-value callers suppress their
-            # note on this, but row-reduction callers may still note from the
-            # other rows — so the log claims only what is true everywhere.
-            logger.warning("freshness note: unparseable %s %r; ignored", label, value)
-        return None
-
-
-def data_lag_note(
-    latest_date,
-    curr_date,
-    max_lag_days: int,
-    source_phrase: str,
-) -> str:
-    """Return a one-line staleness disclosure when the newest data row lags curr_date.
-
-    Opt-in freshness annotation (#30): a vendor that renders a "latest" value
-    compares that row's date against the date being analysed and discloses the
-    gap instead of letting an old value read as current. Annotation, not a
-    raise (PR #16 route): these vendors have no fresher fallback and a lag
-    usually means the upstream has not published yet, so the honest output is
-    the stale value plus this disclosure.
-
-    Both dates accept ``yyyy-mm-dd`` strings (extra ISO time suffixes are
-    ignored) or date-like objects. Returns ``""`` when the data is fresh
-    enough or when either date is unparseable — an annotation helper must
-    degrade, never raise.
-    """
-    latest_dt = _parse_day(latest_date, "latest_date")
-    curr_dt = _parse_day(curr_date, "curr_date")
-    if latest_dt is None or curr_dt is None:
-        return ""
-    lag_days = (curr_dt - latest_dt).days
-    if lag_days <= max_lag_days:
-        return ""
-    return (
-        f"_Data lag: the newest {source_phrase} is {latest_dt.strftime('%Y-%m-%d')}, "
-        f"{lag_days} {plural_days(lag_days)} before {str(curr_date)[:10]}; "
-        f"treat the latest value as stale._"
-    )
-
-
-def live_snapshot_note(
-    curr_date,
-    source_phrase: str,
-    max_behind_days: int = MAX_LIVE_SNAPSHOT_BEHIND_DAYS,
-    today: str | None = None,
-) -> str:
-    """Return a disclosure when live-only data is rendered for a past analysis date.
-
-    Some vendors (prediction markets, live message streams) can only serve
-    *today's* values — there is no historical snapshot to fetch. The vendors
-    that WITHHOLD instead of disclosing do not call this: see
-    ``date_window.is_past_analysis_date``. When the date being analysed sits meaningfully behind the wall
-    clock (a backtest), the report must say the numbers are live as of the
-    fetch, not as of ``curr_date``, or the agent will read today's state as
-    history (#30).
-
-    Returns ``""`` when curr_date is close enough to today or unparseable —
-    same degrade-never-raise contract as :func:`data_lag_note`. That silence
-    is only honest when the date came from inside the program (the graph's
-    own ``end_date``, as the StockTwits block receives it): a getter whose
-    ``curr_date`` the model supplies must judge it with :func:`date_refusal`
-    first, or a string no sibling tool accepts is served here as an
-    undisclosed live report (#139).
-    """
-    today_str = today or date.today().strftime("%Y-%m-%d")
-    curr_dt = _parse_day(curr_date, "curr_date")
-    today_dt = _parse_day(today_str, "today")
-    if curr_dt is None or today_dt is None:
-        return ""
-    behind_days = (today_dt - curr_dt).days
-    if behind_days <= max_behind_days:
-        return ""
-    return (
-        f"_Note: {source_phrase} live values as of the fetch ({today_str}), not a "
-        f"snapshot as of {str(curr_date)[:10]} ({behind_days} {plural_days(behind_days)} "
-        f"earlier); do not read them as that date's state._"
-    )
-
-
-def http_status(exc: BaseException) -> int | None:
-    """The HTTP status an ``HTTPError`` carries, or ``None`` for any other error.
-
-    Both transport libraries attach the response: curl_cffi's
-    ``raise_for_status`` builds ``HTTPError(msg, 0, response)`` and requests'
-    sets ``.response`` the same way (measured, curl_cffi 0.15.0). The one
-    library-neutral way to read a status off an exception — the two
-    ``HTTPError`` classes share no base below ``OSError``. ``None`` too for
-    a status of 0: curl_cffi attaches a ``Response`` to its transport
-    failures as well (a ``Timeout``, a ``ConnectionError``), with
-    ``status_code == 0`` because nothing answered (measured), and a caller
-    asking "did the vendor answer a status?" must hear no.
-    """
-    return getattr(getattr(exc, "response", None), "status_code", None) or None
-
-
-def is_unreached(e: BaseException) -> bool:
-    """Whether an untyped failure means the vendor was never reached at all.
-
-    A transport exception with no status to read: every ``requests`` and
-    curl_cffi failure is an ``OSError`` (curl_cffi attaches a status-0
-    response to its transport failures, which ``http_status`` reads as
-    none). The ``ValueError``-flavoured requests exceptions (MissingSchema,
-    InvalidURL, a JSONDecodeError) are a bug or an answer, and a
-    ``requests.HTTPError`` is an answer even with its response missing.
-    ``TooManyRedirects`` and ``RetryError`` read as unreached too, although
-    the vendor did answer (#172): a redirect loop or a spent retry is an
-    endpoint that has moved or is blocked, closer to down than to an
-    answer about this request, and no third class is drawn for them — so
-    every caller below, the router's verdict included, reads them as
-    down (#217). ``RetryError`` carries no
-    response and reads so on its own; ``TooManyRedirects`` carries the last
-    3xx it followed (measured, requests 2.34), so it is named here — read
-    off its status it would be an answer, and a redirect loop would land
-    on a boundary's structural lane (#217). The one definition behind
-    ``is_vendor_outage``'s unreached branch, ``generic_failure_words``'
-    "could not be reached", and the boundaries that classify their own
-    transport failures (Farside, Fear & Greed, SoSoValue's ``_request``).
-    """
-    if isinstance(e, requests.TooManyRedirects):
-        return True
-    return (
-        isinstance(e, OSError)
-        and not isinstance(e, (ValueError, requests.HTTPError))
-        and http_status(e) is None
-    )
-
-
-def is_vendor_outage(e: BaseException) -> bool:
-    """Whether an untyped failure means the vendor was DOWN, not answering about the request.
-
-    The one predicate behind the router's no-data verdict — a fallback's
-    "no data" is unconfirmed when a vendor in the chain was down (#142).
-    Judged by the status the exception carries, not by its library: an
-    unreached vendor (``is_unreached``, which names the one exception that
-    carries a status yet reads as unreached, a redirect loop's) is down,
-    and an answered status can
-    say as much — a 5xx, or a 401/403 refusing this client (what the
-    yfinance window lets out raw for exactly that reason). Any other
-    status is the vendor answering about this request (the 404 a boundary
-    leaves alone), as is a ``requests.HTTPError`` with no status to read.
-    A typed ``VendorError`` is never judged here — its type already says
-    what it is — so it reads as ``False``. The boundaries that classify
-    their own transport failures use ``is_unreached`` rather than this:
-    they type a 5xx themselves through ``raise_for_http_status``, and a
-    4xx they left alone — Farside's Cloudflare 403 — is by their decision
-    the vendor answering, not an outage (#170).
-    """
-    if is_unreached(e):
-        return True
-    if not isinstance(e, OSError) or isinstance(e, ValueError):
-        return False
-    status = http_status(e)
-    return status is not None and (status >= 500 or status in (401, 403))
-
-
-def generic_failure_words(e: BaseException) -> str:
-    """The words for an untyped vendor failure, by status and class — never its text.
-
-    One vocabulary for every slot the model reads — the router's no-data
-    outage clause and optional parenthesis, and the typed messages the
-    boundaries that own their transport handling build when a request
-    fails below their own taxonomy — so one 503 reads "answered HTTP 503"
-    everywhere rather than one site saying ``HTTPError: HTTP 503``. The
-    wire first (``is_unreached``, which also names the one exception that
-    carries a status yet reads as unreached, a redirect loop's), then the
-    status read off the exception the library-neutral way
-    (``http_status``): a 401/403 is the vendor refusing this client, any
-    other status is its answer; anything else — a library bug — is its
-    class name. Never the message: a ``requests`` message quotes the
-    request URL, API key included (#171). Which of these count as an
-    OUTAGE is ``is_vendor_outage``'s decision, not this function's.
-    """
-    if is_unreached(e):
-        return f"could not be reached: {type(e).__name__}"
-    status = http_status(e)
-    if status is not None:
-        refused = ", refusing this client" if status in (401, 403) else ""
-        return f"answered HTTP {status}{refused}"
-    return type(e).__name__
-
-
-def failure_account(e: BaseException, *, limit: int | None = MAX_UNTRUSTED_CHARS) -> str:
-    """The words a failed vendor call contributes to a sentinel the model reads.
-
-    Written into two slots of ``route_to_vendor`` — the optional category's
-    ``DATA_UNAVAILABLE`` parenthesis (where the router substitutes one fixed
-    phrase for a ``VendorNotConfiguredError``, whose message is the
-    operator's remedy: ``interface._optional_failure_words``) and the
-    no-data sentinel's unconfirmed clause — and by the boundaries that wrap
-    a lower failure into a typed message of their own (#203), where a
-    not-configured cause keeps its text for the log. A typed vendor error's message was
-    authored at the boundary, so it rides along — flattened and capped,
-    because not every boundary caps what it quotes (yfinance quotes the
-    library's exception, decoded error body included, #172); a remedy a
-    boundary appends after the vendor's text is the operator's, in the
-    log. So would the caller's own indicator mistake, whose message is the
-    remedy, should an optional category ever compute one. Anything else is
-    untyped and contributes ``generic_failure_words`` — never its text: a
-    ``requests`` message quotes the request URL, API key included (#171).
-    The caller's warning log has the full message either way. ``limit`` is
-    the cap on a typed message: the router's slots take the default; a
-    boundary wrapping a typed cause into a message the router will cap
-    again passes ``None``, so the cause's tail — a sweep verdict's
-    ``(...; last: ...)`` tally — survives into the boundary's own log line.
-    """
-    if isinstance(e, VendorLibraryError):
-        # Two parts, capped apart: the subject carries the caller's symbol,
-        # the detail the library's message, and capped together a long
-        # pandas message would swallow the subject (#187). One rule for both
-        # slots that render this type: the core chain's report line and the
-        # optional category's sentinel.
-        return f"{sanitize_untrusted(e.what, limit=limit)}: {sanitize_untrusted(e.detail, limit=limit)}"
-    if isinstance(e, (VendorError, UnsupportedIndicatorError, WiringGapError)):
-        # A typed error raised with no message would render as "()".
-        # ``WiringGapError`` for the same reason as the two above: its text is
-        # ours — the prologue's name and the key or table that was missing —
-        # and an optional category that degrades over one should say which,
-        # not "WiringGapError". Flattened and capped like the rest, since the
-        # value it echoes can be the caller's (#219).
-        return sanitize_untrusted(e, limit=limit) or type(e).__name__
-    return generic_failure_words(e)
-
-
-@contextlib.contextmanager
-def wiring_gap(what: str) -> Iterator[None]:
-    """Run a block whose failure is this project's own and not the vendor's.
-
-    The config a deployment did not set, the library attribute a version
-    bump moved, a correspondence we keep across two of our own functions
-    (Deribit's DVOL dates and readings): usually a getter's prologue, the
-    statements it runs before asking the vendor anything, but the test is
-    whose breakage it is rather than where it sits. Nine getters used to
-    say this by placement — their
-    fetch ran inside a ``with library_failure_lane(...)`` and the prologue
-    above it, so a yfinance that drops ``cache_get.cache_clear`` failed the
-    call rather than freezing global news behind a report (#111, #200),
-    while everything under the block left as ``VendorLibraryError``. The
-    conversion is the router's now, for every vendor of every routed tool
-    rather than the nine getters that happened to carry a broad handler
-    (#219) — and the router cannot see where in a getter a failure came
-    from. So the block says it by type: this one is never read as the
-    vendor's library and never becomes a line of report text — in a core
-    category it is raised ahead of one, since our breakage is the half
-    somebody can fix (``WiringGapError`` says which endings remain).
-
-    ``what`` names the block in the raise (``global news configuration``),
-    since the getter's own subject describes vendor work this failure is not
-    about.
-
-    Everything the router tells apart from an untyped failure passes through
-    untouched, as it did through the lane this replaces: a taxonomy verdict,
-    a transport failure, the caller's own indicator mistake, and a
-    ``WiringGapError`` a nested block already named. Nothing inside today's
-    blocks can raise any of them — they read dicts, coerce a configured
-    number, pair two lists and forget a cache — but this is the kind of
-    block that grows a statement, and relabelling a rate
-    limit as our wiring would abort the run where the next vendor was owed
-    its turn, while relabelling a bad indicator name would cost the whole
-    call what should cost one indicator (#117).
-    """
-    try:
-        yield
-    except (VendorError, UnsupportedIndicatorError, WiringGapError, OSError):
-        raise
-    except Exception as e:
-        raise WiringGapError(f"{what}: {e}") from e
-
-
-def raise_for_http_status(response, vendor: str, *, rate_limit: Callable | None = None) -> None:
-    """Raise ``VendorUnavailableError`` for a 5xx; otherwise ``response.raise_for_status()``.
-
-    ``rate_limit``, when given, is the boundary's own 429 policy: a callable
-    taking the response and RAISING its vendor's rate-limit type. It is
-    consulted first, which is the whole point of passing it here rather than
-    writing the check above the call - this function types only a 5xx, and
-    ``is_unreached`` excludes ``requests.HTTPError``, so a 429 left to the
-    ``raise_for_status()`` below reaches a boundary's generic lane and is filed
-    as that module's own breakage: an ERROR with a traceback saying the parser
-    changed, and a router verdict of "the client needs a fix" for a routine
-    throttle no code change heals (#278 shipped exactly that).
-
-    A boundary passing NOTHING keeps today's behaviour exactly, and that is
-    deliberate rather than an oversight: several vendors absorb a throttle in
-    their own retry or stale-cache lane, and a typed raise from here would walk
-    straight past it - the same shape as the bug above, in the other direction.
-    Which boundaries decline, and why, is declared and locked in
-    ``tests/test_vendor_routing.py`` rather than left to be rediscovered.
-
-    The one status decision at a vendor's request boundary — the 5xx check
-    and the library's own raise in one call, in a fixed order, so a boundary
-    has nothing of its own to sequence (a bare ``raise_for_status()`` ahead
-    of the 5xx check would silently restore what this exists for).
-    A 5xx is the vendor being down, and ``route_to_vendor`` reacts to that
-    by behaviour — the chain goes on, logged without the traceback its
-    generic lane reserves for a bug, and a fallback's "no data" is then
-    reported as unconfirmed rather than as a verdict on the symbol — only
-    when the type says so. Left to ``raise_for_status()`` the same event is
-    a ``requests.HTTPError``, which that generic lane logs as a bug and the
-    no-data verdict then hides (#142). Every other status keeps the vendor's
-    own handling: a 4xx is the vendor's answer about this client or this
-    request (a 401/403 refusal, a 404), which is the vendor's boundary to
-    judge, not this helper's, so it leaves as the ``requests.HTTPError`` it
-    always did; a status the vendor classifies itself (FRED's 400 with the
-    reason in its body, Alpha Vantage's 429) is checked before this is
-    called. (The router reads the status off an exception that carries one
-    and counts a 401/403 — the vendor refusing this client — as an outage
-    for its verdict; see ``route_to_vendor``.)
-
-    The message carries the status code only, never the body: a 5xx body is
-    the vendor's error page, and this message travels into a sentinel the
-    model reads.
-    """
-    status = response.status_code
-    if status == 429 and rate_limit is not None:
-        rate_limit(response)
-        # A policy that returns instead of raising would leave the throttle to
-        # fall through to ``raise_for_status()`` below - the exact
-        # misclassification the parameter exists to prevent, and silently.
-        raise WiringGapError(
-            f"the {vendor} rate-limit policy returned instead of raising on HTTP 429"
-        )
-    if status >= 500:
-        raise VendorUnavailableError(f"{vendor} answered HTTP {status} without data")
-    response.raise_for_status()
-
-
-def json_body_or_outage(response, vendor: str):
-    """Decode ``response`` as JSON, or raise ``VendorUnavailableError`` when it is not.
-
-    For a vendor whose every data answer is JSON: a body that does not decode
-    is an error page served with a 2xx (a CDN or WAF interstitial), so the
-    vendor answered without data — the same reaction as a 5xx above, where a
-    bare ``.json()`` raised a ``ValueError`` into the router's generic lane.
-    Not for a vendor that serves data in another shape (Alpha Vantage's CSV,
-    Farside's HTML), where a non-JSON body is the data. A body that fails
-    below the decoder — ``requests``' ``ContentDecodingError`` on a broken
-    gzip stream — is a transport failure by the library's own taxonomy and
-    is left to the caller's transport handling.
-
-    :func:`json_bytes_or_outage` is the twin for a boundary that has already
-    read the body itself; both raise through :func:`_not_json_outage`, so the
-    sentence cannot drift between them.
-    """
-    try:
-        return response.json()
-    except ValueError as e:  # json.JSONDecodeError is a ValueError
-        raise _not_json_outage(vendor, response.status_code) from e
-
-
-def json_bytes_or_outage(body: bytes | bytearray, vendor: str, status: int):
-    """The streamed twin of :func:`json_body_or_outage`, for a body read by hand.
-
-    A vendor whose body is too large to hand to ``response.json()`` unbounded
-    (the Hyperliquid leaderboard is tens of megabytes) reads it in chunks under
-    a cap and decodes the bytes itself — but the EVENT is the same one, so the
-    verdict and the sentence must be too. A ``bytearray`` is accepted as well as
-    ``bytes``: that is what a chunked read accumulates into, and ``json.loads``
-    takes it directly, so the caller need not copy the whole buffer to hand it
-    over. Split out rather than copied: the
-    "answered HTTP N with a body that is not JSON" wording is authored in this
-    module alone, and a boundary that hand-copies it drifts on its own (#172
-    found the copies, #217-4 locked it).
-    """
-    try:
-        return json.loads(body)
-    except ValueError as e:  # json.JSONDecodeError is a ValueError
-        raise _not_json_outage(vendor, status) from e
-
-
-def _not_json_outage(vendor: str, status: int) -> VendorUnavailableError:
-    """The one authoring of the not-JSON outage, shared by the two decoders above."""
-    return VendorUnavailableError(
-        f"{vendor} answered HTTP {status} with a body that is not JSON"
     )
 
 

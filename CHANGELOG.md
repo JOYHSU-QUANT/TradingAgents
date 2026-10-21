@@ -453,6 +453,58 @@ Breaking changes within the 0.x line are called out explicitly.
   it into `router.py`) and re-apply upstream's `router.route_to_vendor`
   changes since that commit by hand. No behaviour change.
 
+- **The fork's additions to `dataflows/utils.py` move to four modules of their
+  own** (dataflows refactor plan 2026-10-16, D4, the plan's optional PR;
+  `utils.py` is upstream's file). Upstream's `utils` is some forty lines — the
+  ticker path guard and `get_current_date` — and the fork had grown it to 1,215
+  by adding four unrelated concepts beside them. Each now has a module:
+  `dates` (the refused date argument: `normalize_iso_date`,
+  `DATE_ARGUMENT_TAGS`, `DateKind`, `invalid_date_sentinel`, `date_refusal`,
+  `refuse_date`, `date_range_refusal`, `date_sentinel_note` and the
+  `_OMIT_CLAUSE` two of them share), `untrusted` (the prompt-injection
+  flattening: `sanitize_untrusted`, `echo_argument`, `quote_argument` and the
+  three constants they read), `lag_notes` (the freshness disclosures:
+  `data_lag_note`, `live_snapshot_note`, `parse_day`, `plural_days`,
+  `statement_lag_bound` and the four `MAX_*` bounds) and `failures` (what a
+  failed vendor call was and the words it gets: `http_status`, `is_unreached`,
+  `is_vendor_outage`, `generic_failure_words`, `failure_account`, `wiring_gap`,
+  `raise_for_http_status`, `json_body_or_outage`, `json_bytes_or_outage`; the
+  plan's table called this one `http_errors`, and it is named for what it
+  holds, since `wiring_gap` and `failure_account` are not HTTP). `utils` keeps
+  what fits none of the four — the ticker guard, `INDICATOR_DESCRIPTIONS`,
+  `finite_float`, `is_finite_number`, the four sentences the vendors of one
+  routed tool share, `save_output`, `get_current_date` — and re-exports every
+  moved name, the same object, under an `__all__` — the two names read across
+  modules go public in their new homes (`DATE_ARGUMENT_TAGS`, `parse_day`,
+  as D1-a's moved names did), and `utils` keeps `_parse_day` as an alias for
+  the one reader the plan does not edit: the upstream modules (the
+  Alpha Vantage family, `fred`, `polymarket`, `stocktwits`, the yfinance
+  modules, `date_window`, `market_data_validator`), the router and the agents
+  layer import from `utils` and are not edited; nor is any of the fork's
+  vendor modules, which read the same path. The 47 moved and kept definitions
+  are copied line for line (an `ast` comparison of each against the old file
+  finds no difference once docstrings are set aside and the two renames are
+  mapped), with two cross-references repointed in prose
+  (`normalize_iso_date`'s "`_parse_day` below", the shared sentences'
+  "`_OMIT_CLAUSE` above"). What changes
+  observably is the logger two functions log under — `refuse_date`'s refusal
+  line is `tradingagents.dataflows.dates` now and `_parse_day`'s
+  unparseable-date warning `tradingagents.dataflows.lag_notes`, where both
+  were `tradingagents.dataflows.utils` — and eight tests follow: three
+  repoint a `caplog` logger name, three read `DATE_ARGUMENT_TAGS` from
+  `dates`, one patches `quote_argument` on `dates` rather than `utils` (the
+  module `refuse_date` reads it from now), and the one that pins where the
+  two outage sentences are authored names `failures.py`. The four
+  modules join the shape ratchets' scope, the kernel's import floor and the
+  mypy file list (152 files, no pins); the length table gains no row, and one
+  test pins the facade: every public name a home module defines is the same
+  object under `utils` and listed in its `__all__`, and every underscore
+  alias `utils` binds is a home's public name. **Upstream sync conflict point:
+  `utils.py`'s import block and the re-export block under it** — upstream's
+  own lines are unchanged and sit where they sat, so an upstream edit to
+  `safe_ticker_component` or `get_current_date` merges clean, while one that
+  adds to the file lands beside the fork's imports. No behaviour change.
+
 ### Fixed
 
 - **`fred.get_macro_data` checks the caller's `look_back_days` the way the

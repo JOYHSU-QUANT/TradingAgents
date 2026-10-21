@@ -386,11 +386,11 @@ class TestTool:
             raise AssertionError("load_ohlcv must not be called for a bad date")
 
         monkeypatch.setattr(validator, "load_ohlcv", _must_not_be_called)
-        with caplog.at_level(logging.INFO, logger="tradingagents.dataflows.utils"):
+        with caplog.at_level(logging.INFO, logger="tradingagents.dataflows.dates"):
             out = get_verified_market_snapshot.invoke({"symbol": "COF", "curr_date": "not-a-date"})
         assert out.startswith("INVALID_CURR_DATE")
         assert [
-            r.getMessage() for r in caplog.records if r.name == "tradingagents.dataflows.utils"
+            r.getMessage() for r in caplog.records if r.name == "tradingagents.dataflows.dates"
         ] == ["Refusing unusable curr_date 'not-a-date' for verification snapshot data"]
 
 

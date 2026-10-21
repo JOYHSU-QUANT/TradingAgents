@@ -222,7 +222,7 @@ class TestFreshness:
         # INVALID_END_DATE, so a second sentinel would add nothing.
         payload = {"messages": [_message(created_at=f"{_day(0)}T09:00:00Z")]}
         with (
-            caplog.at_level("WARNING", logger="tradingagents.dataflows.utils"),
+            caplog.at_level("WARNING", logger="tradingagents.dataflows.lag_notes"),
             patch.object(stocktwits, "urlopen", return_value=_json_resp(payload)),
         ):
             out = stocktwits.fetch_stocktwits_messages("NVDA", curr_date="2026/08/18")

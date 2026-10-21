@@ -106,7 +106,7 @@ class TestTheEchoIsFlattenedAndCapped:
         # sending a date no tool can use.
         import logging
 
-        with caplog.at_level(logging.INFO, logger="tradingagents.dataflows.utils"):
+        with caplog.at_level(logging.INFO, logger="tradingagents.dataflows.dates"):
             date_refusal("2026/08/18", what="x", kind="point")
         assert [r.getMessage() for r in caplog.records] == [
             "Refusing unusable curr_date '2026/08/18' for x"
@@ -186,17 +186,17 @@ class TestTheEchoIsFlattenedAndCapped:
     def test_the_echo_is_computed_once_per_refusal(self, monkeypatch):
         # #140: the refusal's log line and its sentinel each flattened the
         # value; one echo, two consumers.
-        from tradingagents.dataflows import utils as utils_module
+        from tradingagents.dataflows import dates as dates_module
 
         calls = []
-        real = utils_module.quote_argument
+        real = dates_module.quote_argument
 
         def counting(value):
             calls.append(value)
             return real(value)
 
-        monkeypatch.setattr(utils_module, "quote_argument", counting)
-        out = utils_module.date_refusal("abc", what="x", kind="point")
+        monkeypatch.setattr(dates_module, "quote_argument", counting)
+        out = dates_module.date_refusal("abc", what="x", kind="point")
         assert out is not None
         assert len(calls) == 1
 

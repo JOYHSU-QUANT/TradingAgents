@@ -121,7 +121,7 @@ funding 歷史 → 一條規則（z-score 進出場）→ 日線邊界前寫交�
 2. **下單與簽單只在兩個引擎裡。** `autoresearch`、`replay`、`carry`、`dashboard` 不簽任何交易、不送單（carry 決定兩腿該持有什麼、guardrail 進 RiskGate，但送單的永遠是引擎）。`autoresearch`、`replay`、`carry` 的 README 開頭都把「不下單」寫成 scope 判準，要放寬就是 scope creep；`dashboard` 只讀三條線的 `--json`。這條靠慣例，沒有測試擋住生產者去碰引擎的下單模組。
 3. **交接文件的契約。** 引擎與生產者之間只走 JSON、CLI、SQLite 三種管道，方向規則見 §2 末與 §3。每份交接文件有自己的契約與版本欄位，目前有兩種做法：讀方宣告形狀、寫方 borrow 進來（`ResearchSignal` 住在 perp 的 schema，autoresearch 借它；只傳定性的帶，不傳研究 Sharpe 與策略門檻）；或兩邊各持一份版本常數、各自在自己的測試釘死同一個數字、沒有跨套件比對（carry 交接檔，因為讀方之一 `uniswap_v3` 不能 import 任何 contrib 套件）。`status --json`、`report --json` 各依自己的契約，裡面有數值。
 4. **`core` 只放不含策略、只依賴標準庫的東西。** 「只依賴標準庫」有測試，多一個第三方套件就紅；「不含策略」是慣例。
-5. **新增套件至少要改兩處，有借才加。** 一定要：`tests/test_package_graph.py` 的 `ALLOWED` 加一列（少一列測試會點名）；本檔 §1 的表、§2 的圖、§3 的圖。有借鄰居再加自己的 `upstream.py`＋`tests/test_upstream.py` 列明借了誰；有借 perp 再改 `_PERP_REACH`。
+5. **新增套件至少要改兩個檔案，有借才加。** 一定要：`tests/test_package_graph.py` 的 `ALLOWED` 加一列（少一列測試會點名）；本檔 §1 的表、§2 的圖、§3 的圖。有借鄰居再加自己的 `upstream.py`＋`tests/test_upstream.py` 列明借了誰；有借 perp 再改 `_PERP_REACH`。
 6. **引擎套件整個不 import 生產者；生產者在引擎程序外，可以 import 引擎的詞彙。** 生產者（autoresearch 的兩個 signal 指令、`carry signal`、`replay`）有的排程、有的離線，都不在送單的程序裡，交接只走 §2 的三種管道。`replay` 會重用 perp 的 prompt 組裝程式碼來重建自己的模型輸入，但那是離線、不進線上交易員的 prompt 路徑，所以不違反這條。
 
 ## 6. 閱讀入口

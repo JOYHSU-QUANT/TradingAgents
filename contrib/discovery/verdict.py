@@ -419,14 +419,24 @@ class ArmVerdict:
                 _read.sequence(self.final_eligible, "verdict.final_eligible")
             )
         )
-        if len(set(eligible)) != len(eligible) or len(eligible) > self.distinct_rules:
+        # Bounded by the answers, as the snapshot's trials are: every trial
+        # came from one answer, and the count of rules on the coin may be
+        # larger than this arm's answers.
+        if len(set(eligible)) != len(eligible) or len(eligible) > min(
+            self.distinct_rules, self.answers
+        ):
             raise VerdictError(
                 f"verdict.final_eligible: {eligible!r} lists a trial twice or more trials than "
-                f"the {self.distinct_rules} rule(s) tried"
+                f"the {self.distinct_rules} rule(s) tried or the {self.answers} answer(s) spent"
             )
         object.__setattr__(self, "final_eligible", eligible)
         if self.first_eligible_round is not None:
             _read.whole(self.first_eligible_round, "verdict.first_eligible_round", minimum=1)
+            if self.first_eligible_round > self.answers:
+                raise VerdictError(
+                    f"verdict.first_eligible_round: round {self.first_eligible_round} of "
+                    f"{self.answers} answer(s)"
+                )
 
     @property
     def selected(self) -> int | None:

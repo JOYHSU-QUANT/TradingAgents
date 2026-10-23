@@ -422,6 +422,27 @@ def test_a_verdict_built_by_hand_is_held_to_its_own_correlations():
             final_eligible=(1, 2),
             first_eligible_round=None,
         )
+    # The other direction of "None exactly when no rule was tried".
+    with pytest.raises(VerdictError, match="verdict.threshold"):
+        ArmVerdict(
+            ended=Ended.BUDGET_SPENT,
+            answers=0,
+            distinct_rules=0,
+            threshold=1.0,
+            final_eligible=(),
+            first_eligible_round=None,
+        )
+    # Bounded by the answers spent, not only by the rules tried on the coin.
+    for eligible, first in (((1, 2), None), ((), 3)):
+        with pytest.raises(VerdictError, match="answer"):
+            ArmVerdict(
+                ended=Ended.BUDGET_SPENT,
+                answers=1,
+                distinct_rules=9,
+                threshold=1.5,
+                final_eligible=eligible,
+                first_eligible_round=first,
+            )
 
 
 @pytest.mark.parametrize(

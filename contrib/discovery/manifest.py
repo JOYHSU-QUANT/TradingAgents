@@ -577,8 +577,8 @@ class SearchSpace:
     it is doing something. Which features take a label and which a number
     is the parser's call, made when the pool is written out (plan PR 3).
     ``pool_size`` is filled in then, after ``spec_hash`` deduplication, and
-    is ``None`` until it is: a pool that was enumerated and came out empty
-    is a different fact from one not yet enumerated.
+    is ``None`` until it is — not 0, which would read as a pool enumerated
+    and found empty, a manifest that cannot be run and is refused.
 
     The grid is held as a tuple of ``(feature, values)`` pairs, sorted by
     feature — immutable, as the rest of a frozen record is, and hashable —
@@ -887,7 +887,8 @@ class Manifest:
         # would otherwise be refused as an unknown key, and the sentence that
         # names the real reason — another build wrote this — never reached.
         version = _read.mapping(payload, "manifest").get("manifest_version")
-        if isinstance(version, bool) or version != MANIFEST_VERSION:
+        # ``type`` rather than ``==``: ``True`` and ``1.0`` both equal 1.
+        if type(version) is not int or version != MANIFEST_VERSION:
             raise ManifestError(
                 f"manifest_version: this build reads version {MANIFEST_VERSION}, got {version!r}"
             )

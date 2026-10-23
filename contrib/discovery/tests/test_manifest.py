@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 import re
+from dataclasses import replace
 
 import pytest
 
@@ -103,6 +104,7 @@ def _edited(**changes):
         ({"penalty.k": -1}, "Penalty.k"),
         ({"search_space.pool_size": 0}, "search_space.pool_size"),
         ({"manifest_version": True}, "manifest_version"),
+        ({"manifest_version": 1.0}, "manifest_version"),
         ({"manifest_version": 2, "later": 1}, "this build reads version 1, got 2"),
         ({"search_space.threshold_grid.realized_vol_20": [0.002, ""]}, "realized_vol_20"),
         ({"arms.random.search_seeds": []}, "arms.random.search_seeds"),
@@ -189,6 +191,13 @@ def test_the_grid_is_immutable_and_read_by_feature():
     space = example_manifest().search_space
     assert space.grid("realized_vol_20") == (0.002, 0.004)
     assert isinstance(space.threshold_grid, tuple)
+    # Built from pairs as well as from a mapping, and held to the same rules.
+    assert replace(space, threshold_grid=space.threshold_grid) == space
+    doubled = (*space.threshold_grid, ("realized_vol_20", (0.5,)))
+    with pytest.raises(ManifestError, match="listed twice"):
+        replace(space, threshold_grid=doubled)
+    with pytest.raises(ManifestError, match=r"a \(feature, values\) pair"):
+        replace(space, threshold_grid=(("realized_vol_20",),))
     # Enumerated and filled in: the size is a count of at least one.
     filled = Manifest.from_dict(_edited(**{"search_space.pool_size": 7}))
     assert filled.search_space.pool_size == 7

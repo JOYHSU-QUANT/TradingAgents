@@ -58,18 +58,30 @@ def test_the_oracle_path_leaves_the_arm_s_store_byte_identical(history, tmp_path
 
 
 def test_the_oracle_reads_under_the_lock_and_checks_the_holdout_s_tail(history, tmp_path, monkeypatch):
-    # Without the holdout named, the result holds the two windows a trial
-    # sees and the tail check is not made; with it, ``promote``'s check runs.
+    # Without the holdout named, the bundle is bound at validation's end, the
+    # result holds the two windows a trial sees and the tail check is not
+    # made; with it, the bound moves to the holdout's end and ``promote``'s
+    # check runs.
     calls: list[int] = []
+    bounds: list[int | None] = []
     monkeypatch.setattr(oracle, "require_measurable_tail", lambda frame: calls.append(1))
+    real_load = oracle.load_bundle
+
+    def spying_load(store, **kwargs):
+        bounds.append(kwargs.get("until_ms"))
+        return real_load(store, **kwargs)
+
+    monkeypatch.setattr(oracle, "load_bundle", spying_load)
     with arm_store(history, tmp_path / "arm.sqlite") as store:
         ledger = Ledger(store)
         experiment = open_arm(ledger)
         result = evaluate_unfiled(ledger, experiment, parse_spec(BUY), holdout=False)
         assert [r.segment.name.value for r in result.results] == ["train", "validation"]
         assert calls == []
+        assert bounds == [experiment.split.loadable_until(holdout=False)]
         evaluate_unfiled(ledger, experiment, parse_spec(BUY), holdout=True)
         assert calls == [1]
+        assert bounds[1] == experiment.split.loadable_until(holdout=True) > bounds[0]
         # And only a stored experiment: the split it carries is what makes the
         # figure comparable with the arm's trials.
         unstored = replace(experiment, experiment_id="elsewhere")

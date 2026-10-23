@@ -21,6 +21,7 @@ replay 拿它把同一題重問別的模型（考古題）；**sidecar**＝寫�
 | [`replay`](./replay/README.md) | 事後評估：已記錄決策的成績單、同一題重問別的模型（考古題）、配對比較 | 讀 `paper_trading.db`＋payload＋`autoresearch.sqlite` → 報表、`replay.sqlite` | README 內 |
 | [`carry`](./carry/README.md) | funding carry 的協調者：讀 funding 歷史、套一條規則、寫一份交接檔說兩條腿該持有什麼；`report` 唯讀對帳 | `autoresearch.sqlite`（`signal` 預設先經 autoresearch 的回補介面補 funding，`--no-fetch` 才純讀；可選讀兩腿 store 的 equity）→ 交接檔 JSON；`report` 唯讀兩顆交易帳本，`--json` | [RUNBOOK](./carry/RUNBOOK.md) |
 | [`dashboard`](./dashboard/README.md) | 狀態匯出、告警、唯讀網頁 | 三條線的 `--json` CLI 輸出＋主機狀態 → status 目錄的 JSON、email、網頁 | README 內 |
+| [`discovery`](./discovery/README.md) | 研究迴圈的 benchmark：造有標準答案的合成世界，用 autoresearch 自己的 port 與 `search()` 考它找不找得到埋的規律、會不會在雜訊裡硬掰。離線、不下單、不碰任何交易或研究 store；**骨架（PR 1）已落地：manifest、最終判定、隔離棘輪；生成器與各臂在後續 PR** | 合成世界（自造）→ 每臂一顆自己的 `autoresearch.sqlite`、manifest／verdicts JSON | README 內 |
 | [`core`](./core/) | 共用地板：instants、decimal context、digest、enum guard、atomic io。只依賴標準庫（有測試）、不含策略（慣例） | | |
 | [`tests/`](./tests/) | 跨套件的架構限制：套件圖 `test_package_graph.py` | | |
 
@@ -58,6 +59,9 @@ replay 拿它把同一題重問別的模型（考古題）；**sidecar**＝寫�
                     ──► status 目錄 JSON（<line>.json、host.json、alerts.json）──► email 告警、唯讀網頁
 ```
 
+`discovery` 不在圖裡：它只在離線的合成世界上跑 autoresearch 的搜尋，每臂一顆自己的 sqlite（經 autoresearch 的寫入介面回補），
+不讀也不寫上面任何一個 store。
+
 兩份進 perp 的 JSON（research signal、guardrail signal）都藏在 perp config 的開關後面，預設關。
 「讀」交易帳本：carry 以 `mode=ro` 開檔；replay 走 perp 的 `Database(migrate=False)`，不 migrate、不寫，但不是唯讀開檔。
 「讀」研究 store 則仍走 autoresearch 自己的 store 建構（會做 schema migrate），
@@ -88,13 +92,15 @@ graph TD
   carry --> hyperliquid_perp
   carry --> autoresearch
   dashboard --> core
+  discovery --> core
+  discovery --> autoresearch
 ```
 
 上游 `tradingagents/` 不在 `ALLOWED` 的管理範圍：`hyperliquid_perp`、`autoresearch`、`replay` 的 src 會 import 它，`uniswap_v3` 只有 `agent/`（`verdict` 指令）那一支會。
 
 - `core` 是地板：只依賴標準庫（`test_package_graph.py` 另外掃它），它不 import 任何人。`uniswap_v3` 今天實際**沒有** import `core`：它自己的 `tests/test_isolation.py` 擋掉所有 contrib import，`core` 也在內，`ALLOWED` 那條邊只是預留。
 - `hyperliquid_perp` 與 `uniswap_v3` 彼此完全隔離；`dashboard` 只 import `core`，三條線都透過 CLI 讀。
-- `autoresearch` 借 perp 的詞彙（regime、funding z-score、Candle）；`replay` 與 `carry` 同時借兩個鄰居（perp 與 autoresearch）。有借鄰居的套件把借的東西（含 `core`）一律列在自己的 `upstream.py`，其他模組只從那裡 import；沒借鄰居的 perp 與 dashboard 直接 import `core`，沒有這層漏斗；`uniswap_v3` 連 `core` 都不 import（見上）。
+- `autoresearch` 借 perp 的詞彙（regime、funding z-score、Candle）；`replay` 與 `carry` 同時借兩個鄰居（perp 與 autoresearch）；`discovery` 只借 `autoresearch`（port、`search()`、ledger 的閘門、評估器）與 `core`，它的 `tests/test_upstream.py` 連 tests 都擋住其他套件、`tradingagents` 與 venue SDK。有借鄰居的套件把借的東西（含 `core`）一律列在自己的 `upstream.py`，其他模組只從那裡 import；沒借鄰居的 perp 與 dashboard 直接 import `core`，沒有這層漏斗；`uniswap_v3` 連 `core` 都不 import（見上）。
 - 邊是單向的：`ALLOWED` 本身有無環測試，`replay`／`carry` 各自的 `tests/test_upstream.py` 再守住「被借的套件不得 import 借它的套件」。
 
 ## 4. 主要 loop
@@ -134,7 +140,4 @@ funding 歷史 → 一條規則（z-score 進出場）→ 日線邊界前寫交�
 | 看部署狀態與告警 | [dashboard README](./dashboard/README.md) |
 | 加一個現貨策略 | [uniswap_v3 README「加一個策略」](./uniswap_v3/README.md#加一個策略) |
 | 改套件之間的邊 | [tests/test_package_graph.py](./tests/test_package_graph.py) 的 `ALLOWED`、`_PERP_REACH` 與註解 |
-
-**規劃中（尚未實作，不在上面的圖裡）**
-
-- `discovery`：用有標準答案的合成世界評測 `autoresearch` 的研究能力（找不找得到埋的規律、會不會在雜訊裡硬掰）。只會 import `autoresearch` 與 `core`，不碰任何交易 store。落地後再納入 §1–§3。
+| 考研究迴圈找不找得到埋的規律 | [discovery README](./discovery/README.md)：scope statement、manifest 格式、最終判定；生成器與各臂的指令隨後續 PR 補上 |

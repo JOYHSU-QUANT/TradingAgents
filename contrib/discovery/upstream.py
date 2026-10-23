@@ -45,6 +45,8 @@ What is borrowed and why:
   its default shares, ``SegmentMetrics``), serialised through their own
   ``to_dict``/``from_dict`` so the manifest and the verdict snapshot write
   the records the ledger writes, not copies of them;
+- the engine's indicator floor (``MIN_INDICATOR_LOOKBACK``), so a manifest
+  names a window the frame would refuse where it is written;
 - the evaluator's read path (``FeatureFrame``, ``evaluate_split`` and its
   ``SplitResult``, ``load_bundle``, ``require_clean_history``,
   ``require_measurable_tail``): the oracle scores the planted rule through
@@ -72,7 +74,7 @@ from contrib.autoresearch.dsl import (
     spec_to_document,
 )
 from contrib.autoresearch.evaluator import SplitResult, evaluate_split, load_bundle
-from contrib.autoresearch.features import FeatureFrame
+from contrib.autoresearch.features import MIN_INDICATOR_LOOKBACK, FeatureFrame
 from contrib.autoresearch.hypothesis import INTERRUPTED, SearchReport
 from contrib.autoresearch.ledger import (
     Experiment,
@@ -99,6 +101,7 @@ __all__ = [
     "DEFAULT_VALIDATION_SHARE",
     "INTERRUPTED",
     "MAX_HOLD_BARS",
+    "MIN_INDICATOR_LOOKBACK",
     "MS_PER_DAY",
     "UPSTREAM_PACKAGES",
     "CostModel",
@@ -153,6 +156,7 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.evaluator", "evaluate_split"),
     ("contrib.autoresearch.evaluator", "load_bundle"),
     ("contrib.autoresearch.features", "FeatureFrame"),
+    ("contrib.autoresearch.features", "MIN_INDICATOR_LOOKBACK"),
     ("contrib.autoresearch.hypothesis", "INTERRUPTED"),
     ("contrib.autoresearch.hypothesis", "SearchReport"),
     ("contrib.autoresearch.ledger", "Experiment"),

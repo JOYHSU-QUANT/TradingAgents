@@ -4,8 +4,10 @@ Two kinds of test. The ones on a store run the research package's real
 ``search()`` with a scripted hypothesist and compare the verdict with what
 ``Ledger.verdict`` says of every trial — acceptance (d) — then promote the
 selected trial and rebuild the verdict from the persisted snapshot —
-acceptance (e). The hand-built ones hold the pure function's own rules
-(the selection order, the empty case, the refusals) without a store.
+acceptance (e); the zero-trial case runs there too, since it is a search
+that filed nothing. The hand-built ones hold the pure function's own rules
+(the selection order, the count from elsewhere on the coin, the refusals)
+without a store.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from contrib.autoresearch.dsl import parse_spec, spec_hash
 from contrib.autoresearch.hypothesis import SearchReport, search
 from contrib.autoresearch.ledger import Experiment, Ledger, Penalty
 from contrib.autoresearch.metrics import RegimeBucket, SegmentMetrics, Tally
-from contrib.autoresearch.research import promote
+from contrib.autoresearch.research import measure, promote
 from contrib.autoresearch.split import Segment, Split
 from contrib.discovery.oracle import evaluate_unfiled
 from contrib.discovery.verdict import (
@@ -103,7 +105,9 @@ def test_the_verdict_is_the_ledger_s_gate_at_the_final_rule_count(arm, buy_sharp
     # trades, no gain) are what decide: the flat rule and the short rule on
     # a rising walk must be out, buy-and-hold in.
     penalty = Penalty(sharpe_base=buy_sharpe - 2.0, k=0.0)
-    answers = [_json(BUY), "not a rule", _json(FLAT), _json(BUY), _json(SHORT), _json(BUY_12)]
+    # The flat rule first: measured, filed, and ineligible (no trades), so
+    # the first round that PASSES is the third, not the first measured one.
+    answers = [_json(FLAT), "not a rule", _json(BUY), _json(BUY), _json(SHORT), _json(BUY_12)]
     experiment, hypothesist, report = _run(arm, answers, penalty=penalty, max_trials=6)
     snapshot = snapshot_arm(arm, experiment, report, exhausted=hypothesist.exhausted)
     verdict = final_verdict(snapshot)
@@ -111,6 +115,8 @@ def test_the_verdict_is_the_ledger_s_gate_at_the_final_rule_count(arm, buy_sharp
     assert snapshot.ended is Ended.BUDGET_SPENT
     assert snapshot.answers == 6  # a refusal and a duplicate both spent a round
     assert snapshot.distinct_rules == 4
+    assert snapshot.first_eligible_round == 3 == verdict.first_eligible_round
+    assert ArmSnapshot.loads(snapshot.dumps()) == snapshot
     trials = arm.trials(experiment.experiment_id)
     by_rule = {trial.spec_hash: trial for trial in trials}
     expected = {trial.trial_id for trial in trials if arm.verdict(experiment, trial).eligible}
@@ -238,6 +244,18 @@ def test_a_report_for_another_experiment_is_refused(opened):
         snapshot_arm(ledger, experiment, other, exhausted=False)
 
 
+def test_the_rule_count_is_the_coin_s_not_the_experiment_s(arm):
+    # Another experiment on the same coin filed a second rule: the ledger's
+    # ``rules_tried`` counts it, and the snapshot carries that count beside
+    # its own single trial (plan §1 #6).
+    experiment, _hypothesist, report = _run(arm, [_json(BUY)], penalty=Penalty(), max_trials=1)
+    other = open_arm(arm, name="other")
+    measure(arm, other, parse_spec(FLAT))
+    snapshot = snapshot_arm(arm, experiment, report, exhausted=False)
+    assert len(snapshot.trials) == 1 and snapshot.distinct_rules == 2
+    assert final_verdict(snapshot).threshold == experiment.penalty.threshold(2)
+
+
 def test_a_report_that_does_not_account_for_the_ledger_s_answers_is_refused(one_buy):
     ledger, experiment, report = one_buy
     # A second invocation's report would number its rounds from one again.
@@ -305,13 +323,19 @@ def _record(
     )
 
 
-def _snapshot(experiment: Experiment, *records: TrialRecord, distinct_rules: int | None = None):
+def _snapshot(
+    experiment: Experiment,
+    *records: TrialRecord,
+    distinct_rules: int | None = None,
+    answers: int | None = None,
+    first_eligible_round: int | None = None,
+):
     return ArmSnapshot(
         experiment=experiment,
         ended=Ended.BUDGET_SPENT,
-        answers=len(records),
+        answers=len(records) if answers is None else answers,
         distinct_rules=len(records) if distinct_rules is None else distinct_rules,
-        first_eligible_round=None,
+        first_eligible_round=first_eligible_round,
         trials=records,
     )
 
@@ -346,8 +370,58 @@ def test_the_count_the_gate_divides_by_is_the_snapshot_s_not_the_record_count():
 
 def test_a_snapshot_round_trips_through_its_record():
     experiment = _experiment()
-    snapshot = _snapshot(experiment, _record(experiment, 1, sharpe=2.0))
+    snapshot = _snapshot(
+        experiment, _record(experiment, 1, sharpe=2.0), answers=3, first_eligible_round=2
+    )
     assert ArmSnapshot.from_dict(json.loads(snapshot.dumps())) == snapshot
+
+
+@pytest.mark.parametrize(
+    ("build", "fragment"),
+    [
+        (lambda e: _snapshot(e, _record(e, 1, sharpe=2.0), _record(e, 1, sharpe=3.0, threshold=20)), "share a trial_id"),
+        (lambda e: _snapshot(e, _record(e, 1, sharpe=2.0), answers=0), "from 0 answer"),
+        (lambda e: _snapshot(e, _record(e, 1, sharpe=2.0), first_eligible_round=2), "round 2 of 1 answer"),
+        (lambda e: _snapshot(e, first_eligible_round=1, answers=1), "no trial is held"),
+        (lambda e: _snapshot(e, first_eligible_round=0, answers=1), "first_eligible_round"),
+    ],
+)
+def test_a_snapshot_that_contradicts_itself_is_refused(build, fragment):
+    with pytest.raises(VerdictError, match=fragment):
+        build(_experiment())
+
+
+def test_a_record_whose_figures_are_for_another_window_is_refused():
+    experiment = _experiment()
+    swapped = TrialRecord(
+        trial_id=1,
+        spec=_record(experiment, 1, sharpe=2.0).spec,
+        train=_metrics(experiment.split.validation, sharpe=2.0),
+        validation=_metrics(experiment.split.train, sharpe=2.0),
+    )
+    with pytest.raises(VerdictError, match="its train figures are for validation"):
+        _snapshot(experiment, swapped)
+
+
+def test_a_verdict_built_by_hand_is_held_to_its_own_correlations():
+    with pytest.raises(VerdictError, match="verdict.threshold"):
+        ArmVerdict(
+            ended=Ended.BUDGET_SPENT,
+            answers=1,
+            distinct_rules=1,
+            threshold=None,
+            final_eligible=(),
+            first_eligible_round=None,
+        )
+    with pytest.raises(VerdictError, match="verdict.final_eligible"):
+        ArmVerdict(
+            ended=Ended.BUDGET_SPENT,
+            answers=1,
+            distinct_rules=1,
+            threshold=1.0,
+            final_eligible=(1, 2),
+            first_eligible_round=None,
+        )
 
 
 @pytest.mark.parametrize(
@@ -360,6 +434,9 @@ def test_a_snapshot_round_trips_through_its_record():
         (lambda r: r["trials"][0].__setitem__("spec_hash", "0" * 64), "not the hash of its spec"),
         (lambda r: r["trials"][0]["spec"].__setitem__("family", "momentum"), "trial:"),
         (lambda r: r["trials"][0].__setitem__("trial_id", -1), "trial.trial_id"),
+        (lambda r: r["experiment"].__setitem__("coin", 5), "snapshot.experiment.coin"),
+        (lambda r: r["experiment"].__setitem__("created_at", 5), "snapshot.experiment.created_at"),
+        (lambda r: r["experiment"]["costs"].__setitem__("taker_fee_rate", -1), "snapshot.experiment: CostModel"),
     ],
 )
 def test_a_record_that_cannot_be_read_is_refused_naming_where(edit, fragment):

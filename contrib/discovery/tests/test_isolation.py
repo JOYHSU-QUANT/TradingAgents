@@ -3,21 +3,26 @@
 Each is a fact about the research package this package relies on and does
 not control — that the oracle's read path writes nothing, that two arms
 over one coin share no ledger state, that a prompt carries the opaque id
-and nothing else of the manifest — so each is held HERE, where a change
-upstream that quietly broke it would be read as a benchmark result.
+and none of the words that would name the world's kind — so each is held
+HERE, where a change upstream that quietly broke it would be read as a
+benchmark result.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
-from contrib.autoresearch.dsl import parse_spec, spec_to_document
+import pytest
+
+from contrib.autoresearch.dsl import parse_spec
 from contrib.autoresearch.hypothesis import build_system_prompt, build_user_prompt, search
-from contrib.autoresearch.ledger import Ledger, Penalty
+from contrib.autoresearch.ledger import Ledger, LedgerError, Penalty
 from contrib.autoresearch.research import measure
 from contrib.autoresearch.store import ResearchStore
+from contrib.discovery import oracle
 from contrib.discovery.manifest import WorldKind
 from contrib.discovery.oracle import evaluate_unfiled
 
@@ -52,6 +57,26 @@ def test_the_oracle_path_leaves_the_arm_s_store_byte_identical(history, tmp_path
     assert _digest(path) != before
 
 
+def test_the_oracle_reads_under_the_lock_and_checks_the_holdout_s_tail(history, tmp_path, monkeypatch):
+    # Without the holdout named, the result holds the two windows a trial
+    # sees and the tail check is not made; with it, ``promote``'s check runs.
+    calls: list[int] = []
+    monkeypatch.setattr(oracle, "require_measurable_tail", lambda frame: calls.append(1))
+    with arm_store(history, tmp_path / "arm.sqlite") as store:
+        ledger = Ledger(store)
+        experiment = open_arm(ledger)
+        result = evaluate_unfiled(ledger, experiment, parse_spec(BUY), holdout=False)
+        assert [r.segment.name.value for r in result.results] == ["train", "validation"]
+        assert calls == []
+        evaluate_unfiled(ledger, experiment, parse_spec(BUY), holdout=True)
+        assert calls == [1]
+        # And only a stored experiment: the split it carries is what makes the
+        # figure comparable with the arm's trials.
+        unstored = replace(experiment, experiment_id="elsewhere")
+        with pytest.raises(LedgerError):
+            evaluate_unfiled(ledger, unstored, parse_spec(BUY), holdout=False)
+
+
 # -- (b) one coin, one sqlite per arm, no shared state --------------------------------------
 
 
@@ -78,17 +103,21 @@ def test_two_arms_on_one_world_share_the_coin_name_and_nothing_else(history, tmp
     assert _digest(history) == world_before
 
 
-# -- (c) the prompts carry the id and nothing else of the manifest ----------------------------
+# -- (c) the prompts carry the id and none of the kind words ---------------------------------
 
 
-def test_nothing_a_model_is_shown_names_the_world_s_kind_or_its_rule(history, tmp_path):
+def test_nothing_a_model_is_shown_names_the_world_s_kind(history, tmp_path):
+    # The manifest has no path into a prompt at all — the coin is the only
+    # thing of it an experiment carries — so what is checked is that the
+    # words the prompt is built from (the language's fixed text, the
+    # experiment's conditions, the ledger's rows) never spell the kind.
     manifest = example_manifest(kind=WorldKind.CONDITIONAL_V1)
     assert manifest.world.id == COIN
     with arm_store(history, tmp_path / "llm.sqlite") as store:
         ledger = Ledger(store)
         experiment = open_arm(ledger, coin=manifest.world.id)
         # A round that filed a trial and one that was refused, so the prompt
-        # has every section it can have.
+        # shows both the scored-rules section and the refused-answers section.
         hypothesist = ScriptedHypothesist([json.dumps(BUY), "not a rule"])
         search(ledger, experiment, hypothesist, model="scripted", max_trials=2)
         shown = build_system_prompt() + "\n" + build_user_prompt(ledger, experiment)
@@ -100,5 +129,3 @@ def test_nothing_a_model_is_shown_names_the_world_s_kind_or_its_rule(history, tm
     lowered = shown.lower()
     for word in ("null", "planted", *(kind.value for kind in WorldKind)):
         assert word not in lowered, word
-    planted = json.dumps(spec_to_document(manifest.world.planted.spec), sort_keys=True)
-    assert planted not in shown

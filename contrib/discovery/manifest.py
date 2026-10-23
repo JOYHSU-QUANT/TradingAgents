@@ -39,7 +39,8 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Final
 
 from .records import Reader, dumps
@@ -47,6 +48,7 @@ from .upstream import (
     DEFAULT_TRAIN_SHARE,
     DEFAULT_VALIDATION_SHARE,
     MAX_HOLD_BARS,
+    MIN_INDICATOR_LOOKBACK,
     MS_PER_DAY,
     CostModel,
     Op,
@@ -241,8 +243,12 @@ class FundingModel:
 class Planted:
     """The rule a conditional world carries, and the effect it adds when it fires.
 
-    ``beta`` is the per-bar drift added to the bars a position opened on
-    the rule would hold (plan §4.1); its band (``difficulty``) is decided on
+    ``beta`` is the per-bar drift added, IN FAVOUR OF THE PLANTED SIDE'S
+    POSITION, to the bars a position opened on the rule would hold (plan
+    §4.1): a short-side plant adds a negative price drift. Strictly
+    positive, because a conditional world with nothing to find is a null
+    world filed under the wrong kind — the cross-field rule ``World``
+    holds, one level down. Its band (``difficulty``) is decided on
     development seeds and recorded so a report can group worlds by it.
     """
 
@@ -270,7 +276,9 @@ class Planted:
                 f"closes a position only through those (or a reversal), so a rule without one "
                 f"holds forever and measures nothing about timing"
             )
-        object.__setattr__(self, "beta", _read.number(self.beta, "world.planted.beta"))
+        object.__setattr__(
+            self, "beta", _read.amount(self.beta, "world.planted.beta", positive=True)
+        )
         object.__setattr__(
             self,
             "difficulty",
@@ -569,16 +577,19 @@ class SearchSpace:
     it is doing something. Which features take a label and which a number
     is the parser's call, made when the pool is written out (plan PR 3).
     ``pool_size`` is filled in then, after ``spec_hash`` deduplication, and
-    is 0 until it is.
+    is ``None`` until it is: a pool that was enumerated and came out empty
+    is a different fact from one not yet enumerated.
+
+    The grid is held as a tuple of ``(feature, values)`` pairs, sorted by
+    feature — immutable, as the rest of a frozen record is, and hashable —
+    and accepted as a mapping at construction; :meth:`grid` reads it by
+    name.
     """
 
     templates: tuple[Template, ...]
-    # A dict, so a grid is read by feature name; left out of the hash (a
-    # frozen dataclass with a dict field would otherwise raise on ``hash``),
-    # which equality does not need and is still consistent with.
-    threshold_grid: dict[str, tuple[float | str, ...]] = field(hash=False)
+    threshold_grid: tuple[tuple[str, tuple[float | str, ...]], ...]
     candidate_order: str
-    pool_size: int = 0
+    pool_size: int | None = None
 
     def __post_init__(self) -> None:
         templates = tuple(_read.sequence(self.templates, "search_space.templates"))
@@ -587,15 +598,29 @@ class SearchSpace:
                 f"search_space.templates: at least one Template, got {self.templates!r}"
             )
         object.__setattr__(self, "templates", templates)
+        given = self.threshold_grid
+        pairs = (
+            list(given.items())
+            if isinstance(given, Mapping)
+            else [
+                tuple(_read.sequence(pair, f"search_space.threshold_grid[{index}]"))
+                for index, pair in enumerate(_read.sequence(given, "search_space.threshold_grid"))
+            ]
+        )
         grid: dict[str, tuple[float | str, ...]] = {}
-        for feature, values in _read.mapping(
-            self.threshold_grid, "search_space.threshold_grid"
-        ).items():
+        for pair in pairs:
+            if len(pair) != 2 or not isinstance(pair[0], str):
+                raise ManifestError(
+                    f"search_space.threshold_grid: a (feature, values) pair, got {pair!r}"
+                )
+            feature, values = pair
             path = f"search_space.threshold_grid[{feature!r}]"
             try:
                 parse_feature_name(feature, path=path)
             except SpecError as exc:
                 raise ManifestError(str(exc)) from exc
+            if feature in grid:
+                raise ManifestError(f"{path}: listed twice")
             grid[feature] = _read.distinct(values, path, _grid_value)
         compared = {feature for template in templates for feature in template.features}
         if set(grid) != compared:
@@ -604,16 +629,19 @@ class SearchSpace:
                 f"and no other — templates compare {sorted(compared)}, grids are for "
                 f"{sorted(grid)}"
             )
-        object.__setattr__(self, "threshold_grid", grid)
+        object.__setattr__(self, "threshold_grid", tuple(sorted(grid.items())))
         _read.text(self.candidate_order, "search_space.candidate_order")
-        _read.whole(self.pool_size, "search_space.pool_size", minimum=0)
+        if self.pool_size is not None:
+            _read.whole(self.pool_size, "search_space.pool_size", minimum=1)
+
+    def grid(self, feature: str) -> tuple[float | str, ...]:
+        """The thresholds for ``feature``; the templates name only features that have one."""
+        return dict(self.threshold_grid)[feature]
 
     def to_dict(self) -> dict[str, object]:
         return {
             "templates": [template.to_dict() for template in self.templates],
-            "threshold_grid": {
-                feature: list(values) for feature, values in self.threshold_grid.items()
-            },
+            "threshold_grid": {feature: list(values) for feature, values in self.threshold_grid},
             "candidate_order": self.candidate_order,
             "pool_size": self.pool_size,
         }
@@ -833,7 +861,9 @@ class Manifest:
                 raise ManifestError(
                     f"{name}: expected a {kind.__name__}, got {getattr(self, name)!r}"
                 )
-        _read.whole(self.indicator_lookback, "indicator_lookback", minimum=1)
+        # The engine's own floor, not 1: a smaller window is refused by the
+        # frame at the first measurement, which is the wrong place to learn it.
+        _read.whole(self.indicator_lookback, "indicator_lookback", minimum=MIN_INDICATOR_LOOKBACK)
         _read.text(self.null_definition_version, "null_definition_version")
 
     def to_dict(self) -> dict[str, object]:
@@ -853,6 +883,14 @@ class Manifest:
 
     @classmethod
     def from_dict(cls, payload: object) -> Manifest:
+        # The version first, before the key set: a later version's extra key
+        # would otherwise be refused as an unknown key, and the sentence that
+        # names the real reason — another build wrote this — never reached.
+        version = _read.mapping(payload, "manifest").get("manifest_version")
+        if isinstance(version, bool) or version != MANIFEST_VERSION:
+            raise ManifestError(
+                f"manifest_version: this build reads version {MANIFEST_VERSION}, got {version!r}"
+            )
         body = _read.exact(
             payload,
             (
@@ -870,11 +908,6 @@ class Manifest:
             ),
             "manifest",
         )
-        if body["manifest_version"] != MANIFEST_VERSION:
-            raise ManifestError(
-                f"manifest_version: this build reads version {MANIFEST_VERSION}, got "
-                f"{body['manifest_version']!r}"
-            )
         try:
             costs = CostModel.from_dict(dict(_read.mapping(body["costs"], "costs")))
             penalty = Penalty.from_dict(body["penalty"])

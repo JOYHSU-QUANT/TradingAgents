@@ -29,8 +29,10 @@ below threshold) are exactly the ledger's.
 How a search ENDED is read off the loop's report and the hypothesist's
 own flag, and kept apart: a spent budget, a candidate pool walked to its
 end (plan §4.3's exhausted protocol), an operator's interrupt, and a seam
-that failed are four different facts about a run, and a report that
-lumped the last two together would count a dead key as a search. Two
+that failed are four different facts about a run. The report alone tells
+the interrupt apart (``search()`` names it) but not the exhausted pool
+from the dead key — both arrive as the one error family — and reading
+them as one would count a dead key as a pool walked to its end. Two
 sources because ``search()`` keeps only the error's sentence; a report
 that carried the stop's kind would make the flag redundant (an upstream
 follow-up, not this package's to make).
@@ -73,12 +75,14 @@ __all__ = [
 
 
 class VerdictError(RuntimeError):
-    """The snapshot cannot be taken, or its record cannot be read, and the sentence says why.
+    """The snapshot cannot be taken, read or built, and the sentence says why.
 
-    A ``RuntimeError`` as the ledger's own refusals are: these are about
-    the STATE of a run — a promotion made before the snapshot, a report
-    for another experiment, a record on disk a later build cannot read —
-    not about an argument a caller computed.
+    A ``RuntimeError`` as the ledger's own refusals are, because the
+    refusals that matter most are about the STATE of a run — a promotion
+    made before the snapshot, a report for another experiment, a record on
+    disk a later build cannot read. The records' own gates raise it too, so
+    a caller has one class to catch for "this is not a usable snapshot"
+    whether the record came from a file or was built in code.
     """
 
 
@@ -242,6 +246,37 @@ class ArmSnapshot:
                 f"distinct_rules is {self.distinct_rules}, below the {len(hashes)} distinct "
                 f"rule(s) the snapshot itself holds"
             )
+        # The record is judged from alone, so the facts the ledger would have
+        # held are held here: one row per trial id, no trial without the answer
+        # it came from, a passing round only among the rounds spent, and every
+        # figure for the window the gate reads it as.
+        ids = [record.trial_id for record in trials]
+        if len(set(ids)) != len(ids):
+            raise VerdictError("a snapshot lists each trial once; two records share a trial_id")
+        if len(trials) > self.answers:
+            raise VerdictError(
+                f"snapshot.trials: {len(trials)} trial(s) from {self.answers} answer(s); every "
+                f"trial came from one answer"
+            )
+        if self.first_eligible_round is not None:
+            if not trials:
+                raise VerdictError(
+                    "snapshot.first_eligible_round: a round passed the gate, but no trial is held"
+                )
+            if self.first_eligible_round > self.answers:
+                raise VerdictError(
+                    f"snapshot.first_eligible_round: round {self.first_eligible_round} of "
+                    f"{self.answers} answer(s)"
+                )
+        split = self.experiment.split
+        for record in trials:
+            for name, segment in (("train", split.train), ("validation", split.validation)):
+                filed = getattr(record, name).segment
+                if filed != segment:
+                    raise VerdictError(
+                        f"trial #{record.trial_id}: its {name} figures are for {filed}, not the "
+                        f"experiment's {segment}"
+                    )
         object.__setattr__(self, "trials", trials)
 
     def to_dict(self) -> dict[str, object]:
@@ -364,6 +399,35 @@ class ArmVerdict:
     final_eligible: tuple[int, ...]
     first_eligible_round: int | None
 
+    def __post_init__(self) -> None:
+        # The correlations the docstring states, checked — a verdict built by
+        # hand (plan PR 4's report) must not be able to say what this one
+        # cannot (the rule ``Round`` and ``Trial`` follow upstream).
+        object.__setattr__(self, "ended", _read.enum(Ended, self.ended, "verdict.ended"))
+        _read.whole(self.answers, "verdict.answers", minimum=0)
+        _read.whole(self.distinct_rules, "verdict.distinct_rules", minimum=0)
+        if (self.threshold is None) != (self.distinct_rules == 0):
+            raise VerdictError(
+                f"verdict.threshold: {self.threshold!r} with {self.distinct_rules} rule(s) tried; "
+                f"the threshold is None exactly when no rule was tried"
+            )
+        if self.threshold is not None:
+            _read.number(self.threshold, "verdict.threshold")
+        eligible = tuple(
+            _read.whole(trial_id, f"verdict.final_eligible[{index}]", minimum=0)
+            for index, trial_id in enumerate(
+                _read.sequence(self.final_eligible, "verdict.final_eligible")
+            )
+        )
+        if len(set(eligible)) != len(eligible) or len(eligible) > self.distinct_rules:
+            raise VerdictError(
+                f"verdict.final_eligible: {eligible!r} lists a trial twice or more trials than "
+                f"the {self.distinct_rules} rule(s) tried"
+            )
+        object.__setattr__(self, "final_eligible", eligible)
+        if self.first_eligible_round is not None:
+            _read.whole(self.first_eligible_round, "verdict.first_eligible_round", minimum=1)
+
     @property
     def selected(self) -> int | None:
         """The trial the arm chose: the first of ``final_eligible``, or none."""
@@ -449,16 +513,25 @@ def _experiment_document(experiment: Experiment) -> dict[str, object]:
 
 def _experiment_from_document(payload: object) -> Experiment:
     body = _read.exact(payload, _EXPERIMENT_KEYS, "snapshot.experiment")
+    # The text fields first, by this reader: ``Experiment`` canonicalises the
+    # coin with ``str`` methods and keeps ``created_at`` unchecked, so a
+    # number there would escape the ``ValueError`` lane below as an
+    # ``AttributeError``, or be filed silently.
+    text = {name: _read.text(body[name], f"snapshot.experiment.{name}") for name in ("experiment_id", "coin")}
+    strings = {
+        name: _read.string(body[name], f"snapshot.experiment.{name}")
+        for name in ("notes", "created_at")
+    }
     try:
         return Experiment(
-            experiment_id=body["experiment_id"],
-            coin=body["coin"],
-            costs=CostModel.from_dict(dict(_read.mapping(body["costs"], "snapshot.experiment.costs"))),
+            costs=CostModel.from_dict(
+                dict(_read.mapping(body["costs"], "snapshot.experiment.costs"))
+            ),
             split=Split.from_dict(dict(_read.mapping(body["split"], "snapshot.experiment.split"))),
             indicator_lookback=body["indicator_lookback"],
             penalty=Penalty.from_dict(body["penalty"]),
-            notes=body["notes"],
-            created_at=body["created_at"],
+            **text,
+            **strings,
         )
     except ValueError as exc:
         raise VerdictError(f"snapshot.experiment: {exc}") from exc

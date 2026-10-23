@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 
 import pytest
 
@@ -96,6 +97,13 @@ def _edited(**changes):
         ({"scoring.recovery.theta_behavior": 1.5}, "theta_behavior"),
         ({"world.seed_set": "prod"}, "world.seed_set"),
         ({"world.bars.count": "400"}, "world.bars.count"),
+        ({"world.planted.beta": 0}, "world.planted.beta"),
+        ({"indicator_lookback": 10}, "indicator_lookback"),
+        ({"costs.taker_fee_rate": -1}, "CostModel.taker_fee_rate"),
+        ({"penalty.k": -1}, "Penalty.k"),
+        ({"search_space.pool_size": 0}, "search_space.pool_size"),
+        ({"manifest_version": True}, "manifest_version"),
+        ({"manifest_version": 2, "later": 1}, "this build reads version 1, got 2"),
         ({"search_space.threshold_grid.realized_vol_20": [0.002, ""]}, "realized_vol_20"),
         ({"arms.random.search_seeds": []}, "arms.random.search_seeds"),
         ({"arms.random.search_seeds": [0, 0]}, "arms.random.search_seeds"),
@@ -168,6 +176,24 @@ def test_text_that_is_not_json_is_refused_by_name():
         Manifest.loads("{")
 
 
+def test_a_repeated_key_is_refused_rather_than_resolved_to_the_last():
+    text = example_manifest().dumps()
+    budget = '"budget": {\n    "max_trials": 10,\n    "oracle_margin": 0.25\n  },'
+    assert budget in text
+    doubled = text.replace(budget, budget + ' "budget": {"max_trials": 1, "oracle_margin": 0},')
+    with pytest.raises(ManifestError, match="'budget' appears twice"):
+        Manifest.loads(doubled)
+
+
+def test_the_grid_is_immutable_and_read_by_feature():
+    space = example_manifest().search_space
+    assert space.grid("realized_vol_20") == (0.002, 0.004)
+    assert isinstance(space.threshold_grid, tuple)
+    # Enumerated and filled in: the size is a count of at least one.
+    filled = Manifest.from_dict(_edited(**{"search_space.pool_size": 7}))
+    assert filled.search_space.pool_size == 7
+
+
 # -- the opaque id -----------------------------------------------------------------
 
 
@@ -184,8 +210,9 @@ def test_the_id_is_a_function_of_the_seed_set_and_the_seed_alone():
 def test_the_id_is_spelled_as_the_store_files_it_and_spells_no_word(seed):
     world_id = opaque_world_id(SeedSet.TEST, seed)
     assert canonical_coin(world_id) == world_id
-    assert world_id.startswith("SYN-") and len(world_id) == 12
-    assert "NULL" not in world_id and "COND" not in world_id
+    # Upper-case hex after the prefix: the alphabet that cannot spell "NULL"
+    # or "COND", which is the whole of the no-word guarantee.
+    assert re.fullmatch(r"SYN-[0-9A-F]{8}", world_id)
 
 
 def test_a_seed_that_is_not_a_whole_number_is_refused():

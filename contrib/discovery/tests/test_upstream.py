@@ -51,6 +51,12 @@ def _sources(package_dir: Path, *, include_tests: bool) -> list[Path]:
     )
 
 
+# The one base a ``from X import name`` can hide a package behind: ``from
+# contrib import autoresearch`` names the package by its last component, and
+# a scan reading only ``X`` would record ``contrib`` and see no reach.
+_PARENT = "contrib"
+
+
 def _imported_modules(path: Path, package_dir: Path, package_name: str) -> set[str]:
     """Every module name ``path`` imports, relative imports resolved against its package."""
     package_parts = package_name.split(".") + list(path.relative_to(package_dir).parts[:-1])
@@ -60,10 +66,13 @@ def _imported_modules(path: Path, package_dir: Path, package_name: str) -> set[s
             found.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
             if node.level == 0:
-                found.add(node.module or "")
+                base = node.module or ""
             else:
-                base = package_parts[: len(package_parts) - (node.level - 1)]
-                found.add(".".join([*base, node.module] if node.module else base))
+                parts = package_parts[: len(package_parts) - (node.level - 1)]
+                base = ".".join([*parts, node.module] if node.module else parts)
+            found.add(base)
+            if base == _PARENT:
+                found.update(f"{base}.{alias.name}" for alias in node.names)
     return found
 
 
@@ -191,7 +200,8 @@ def test_the_scan_sees_an_absolute_and_a_relative_reach(tmp_path):
     package_dir = tmp_path / "pkg"
     (package_dir / "sub").mkdir(parents=True)
     (package_dir / "sub" / "a.py").write_text(
-        "import contrib.replay.score\nfrom ...replay import cli\n", encoding="utf-8"
+        "import contrib.replay.score\nfrom ...replay import cli\nfrom contrib import carry\n",
+        encoding="utf-8",
     )
     found = _imported_modules(package_dir / "sub" / "a.py", package_dir, "contrib.pkg")
-    assert found == {"contrib.replay.score", "contrib.replay"}
+    assert found == {"contrib.replay.score", "contrib.replay", "contrib", "contrib.carry"}

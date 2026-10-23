@@ -21,13 +21,17 @@ Breaking changes within the 0.x line are called out explicitly.
   digest of the seed set and the seed that the world's kind cannot reach.
   `verdict.py` takes a per-arm snapshot before any promotion and re-applies
   the research package's own promote gate at the final rule count, so a
-  verdict rebuilt from `verdicts.json` after the promotion is the verdict
-  that chose. `oracle.py` holds the unfiled read path. Five acceptance
-  facts are pinned: the oracle path leaves an arm's store byte-identical,
-  two arms over one coin share no ledger state, the prompts carry the
-  opaque id and nothing else of the manifest, the final verdict equals the
-  ledger's before promotion, and it is unchanged when rebuilt after it. No
-  command yet; nothing here touches a trading store.
+  verdict rebuilt from the persisted snapshot after the promotion is the
+  verdict that chose. `oracle.py` holds the unfiled read path. Five
+  acceptance facts are pinned: the oracle path leaves an arm's store
+  byte-identical, two arms over one coin share no ledger state, the
+  prompts carry the opaque id and none of the words that name a world's
+  kind, the final verdict equals the ledger's before promotion, and it is
+  unchanged when rebuilt after it. No command yet; nothing here touches a
+  store another package owns. The `contrib/README.md` overview now lists
+  the package (the "planned, not implemented" note from the entry below is
+  superseded). The four packages' `tests/test_upstream.py` scanners now
+  also read `from contrib import <package>` as a reach into that package.
 
 - **A `contrib/README.md` overview of the fork's packages.** One page answering
   what each of the seven packages does, how they hand data to each other (JSON

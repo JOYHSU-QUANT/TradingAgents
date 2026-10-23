@@ -10,11 +10,13 @@ helpers live here once, and each record module instantiates a
 :class:`Reader` with its own error class.
 
 The division of labour is the upstream pattern (``Penalty.from_dict``,
-``CostModel.from_dict``): a record's ``from_dict`` holds the KEY SET and
-hands raw values to the constructor, and ``__post_init__`` is the one gate
-every value passes, whether the record was read from a file or built in
-code. So the readers here are called from ``__post_init__``, not from
-``from_dict``, and a sentence about what a field accepts is written once.
+``CostModel.from_dict``): a record's ``from_dict`` reads the KEY SET and
+the few checks that need the raw document (the version, a written id or
+hash against the derived one, the parser call for a nested spec), then
+hands raw values to the constructor; ``__post_init__`` is the one gate
+each field's own value passes, whether the record was read from a file or
+built in code. So a sentence about what a field accepts is written once,
+in ``__post_init__``.
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ _T = TypeVar("_T")
 
 
 def dumps(document: object) -> str:
-    """The file: sorted keys, indented, no NaN — a record is diffed and hashed."""
+    """The file: sorted keys, indented, no NaN — a record is read and diffed by people."""
     return json.dumps(document, sort_keys=True, indent=2, allow_nan=False) + "\n"
 
 
@@ -45,10 +47,27 @@ class Reader:
     noun: str
 
     def loads(self, text: str) -> Any:
+        """The text as JSON, a repeated key refused rather than resolved to the last one.
+
+        ``json.loads`` keeps the last of two equal keys, so a pasted duplicate
+        block in a hand-written manifest would change a parameter with no
+        refusal — the research package's spec parser closes the same hole.
+        """
         try:
-            return json.loads(text)
+            return json.loads(text, object_pairs_hook=self._without_repeats)
         except json.JSONDecodeError as exc:
             raise self.error(f"{self.noun} is not valid JSON: {exc}") from exc
+
+    def _without_repeats(self, pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        seen: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in seen:
+                raise self.error(
+                    f"{self.noun}: the key {key!r} appears twice in one object; JSON keeps only "
+                    f"the last, so the record read would not be the one written"
+                )
+            seen[key] = value
+        return seen
 
     def mapping(self, payload: object, path: str) -> Mapping[str, Any]:
         if not isinstance(payload, Mapping):
@@ -68,6 +87,12 @@ class Reader:
         if not isinstance(value, Sequence) or isinstance(value, str):
             raise self.error(f"{path}: expected a list, got {value!r}")
         return list(value)
+
+    def string(self, value: object, path: str) -> str:
+        """Any string, the empty one included — a field whose emptiness means something."""
+        if not isinstance(value, str):
+            raise self.error(f"{path}: expected text, got {value!r}")
+        return value
 
     def text(self, value: object, path: str) -> str:
         if not isinstance(value, str) or not value.strip():

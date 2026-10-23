@@ -44,10 +44,15 @@ def _imported_modules(path: Path, package_dir: Path, package_name: str) -> set[s
             found.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
             if node.level == 0:
-                found.add(node.module or "")
+                base = node.module or ""
             else:
-                base = package_parts[: len(package_parts) - (node.level - 1)]
-                found.add(".".join([*base, node.module] if node.module else base))
+                parts = package_parts[: len(package_parts) - (node.level - 1)]
+                base = ".".join([*parts, node.module] if node.module else parts)
+            found.add(base)
+            # ``from contrib import autoresearch`` names a package by its last
+            # component; read only ``contrib``, the scan would see no reach.
+            if base == "contrib":
+                found.update(f"{base}.{alias.name}" for alias in node.names)
     return found
 
 

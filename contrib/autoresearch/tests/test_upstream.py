@@ -64,10 +64,15 @@ def _imported_modules(path: Path) -> set[str]:
             found.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
             if node.level == 0:
-                found.add(node.module or "")
+                base = node.module or ""
             else:
-                base = package_parts[: len(package_parts) - node.level + 1]
-                found.add(".".join([*base, node.module] if node.module else base))
+                parts = package_parts[: len(package_parts) - node.level + 1]
+                base = ".".join([*parts, node.module] if node.module else parts)
+            found.add(base)
+            # ``from contrib import hyperliquid_perp`` names a package by its
+            # last component; read only ``contrib``, the scan would see no reach.
+            if base == "contrib":
+                found.update(f"{base}.{alias.name}" for alias in node.names)
         elif isinstance(node, ast.Call):
             # A module name can also arrive as a STRING: importlib.import_module
             # and __import__ are imports that the import statements above cannot

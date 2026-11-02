@@ -116,11 +116,14 @@ __all__ = [
     "Scored",
     "Summary",
     "bar_open_ms",
+    "bars_per_year",
     "build_split",
     "csv_table",
     "paired_hits",
+    "rate",
     "score_run",
     "segment_of",
+    "sharpe",
     "sign_test",
 ]
 
@@ -465,6 +468,11 @@ class Scored:
 # -- the grid and the split ------------------------------------------------------
 
 
+def bars_per_year(step_ms: int) -> float:
+    """How many bars of ``step_ms`` a year holds: what a per-bar statistic is annualised by."""
+    return 365 * MS_PER_DAY / step_ms
+
+
 def bar_open_ms(at_ms: int, step_ms: int) -> int:
     """The open of the bar the instant falls in: ``at_ms`` floored to the grid.
 
@@ -654,7 +662,7 @@ class Scorecard:
 
     @property
     def bars_per_year(self) -> float:
-        return 365 * MS_PER_DAY / self.step_ms
+        return bars_per_year(self.step_ms)
 
     def horizon_label(self, bars: int) -> str:
         hours = bars * self.step_ms / 3_600_000
@@ -986,7 +994,7 @@ class ResearchFollow:
             f"research bias ({self.strategy_id}): {self.n + failed} answered question(s) "
             f"carried it; {table}; fail-closed {failed}" + (f" ({by_rule})" if by_rule else ""),
             f"research effect ({self.strategy_id}): readable claims {self.n}, agreement "
-            f"{_rate(self.agreed, self.n)}, by chance {_num(self.expected, '{:.1%}')}, "
+            f"{rate(self.agreed, self.n)}, by chance {_num(self.expected, '{:.1%}')}, "
             f"kappa {_num(self.kappa, '{:+.2f}')} -> {verdict}{needs}",
         ]
 
@@ -1048,12 +1056,12 @@ class Summary:
             # One run-id can span more than one prompt segment (RUNBOOK §4);
             # a card pooled over two regimes has to say so.
             f"regimes (prompt_version/model/context_shape): {regimes}",
-            f"fail-closed: {_rate(self.fail_closed, self.answered)}"
+            f"fail-closed: {rate(self.fail_closed, self.answered)}"
             + (f" ({reasons})" if reasons else ""),
             f"asked a target: {self.set_target} (set_target, or rejected), clamped "
-            f"{_rate(self.clamped, self.set_target)}, rejected "
-            f"{_rate(self.rejected, self.set_target)}; maintained: {self.maintain_current}",
-            f"flips: {_rate(self.flips, self.answered)}",
+            f"{rate(self.clamped, self.set_target)}, rejected "
+            f"{rate(self.rejected, self.set_target)}; maintained: {self.maintain_current}",
+            f"flips: {rate(self.flips, self.answered)}",
             # Spelled here rather than through ``CostModel.describe()``: its
             # tail ("funding settled hourly, leverage 1") describes the
             # evaluator's account, which the scorecard does not keep.
@@ -1061,7 +1069,7 @@ class Summary:
             f"{card.costs.slippage_bps:g} bps slippage; exposure = margin x configured leverage",
         ]
         if self.blocked:
-            lines.append(f"guardrail blocked: {_rate(self.blocked, self.answered)}")
+            lines.append(f"guardrail blocked: {rate(self.blocked, self.answered)}")
         if card.split is not None:
             lines.extend(card.split.describe())
             counted = ", ".join(f"{name} {n}" for name, n in self.segments.items())
@@ -1112,7 +1120,8 @@ class Summary:
         return lines
 
 
-def _rate(count: int, of: int) -> str:
+def rate(count: int, of: int) -> str:
+    """``count/of (pct)``: how every rate in a report is spelled."""
     return f"{count}/{of}" + ("" if of == 0 else f" ({count / of:.1%})")
 
 
@@ -1120,7 +1129,12 @@ def _num(value: float | None, form: str) -> str:
     return "n/a" if value is None else form.format(value)
 
 
-def _sharpe(values: Sequence[float], periods_per_year: float) -> float:
+def sharpe(values: Sequence[float], periods_per_year: float) -> float:
+    """The annualised Sharpe of per-decision returns: 0 with fewer than two values or no deviation.
+
+    The research evaluator's convention, shared with the account paths of
+    plan PR 3 (:mod:`.gate`) so one definition serves both.
+    """
     if len(values) < 2:
         return 0.0
     deviation = statistics.stdev(values)
@@ -1132,7 +1146,7 @@ def _sharpe(values: Sequence[float], periods_per_year: float) -> float:
 def _pnl_stats(values: Sequence[float], card: Scorecard, bars: int) -> PnlStats:
     total = sum(values)
     mean = total / len(values) if values else 0.0
-    return PnlStats(len(values), total, mean, _sharpe(values, card.bars_per_year / bars), bars > 1)
+    return PnlStats(len(values), total, mean, sharpe(values, card.bars_per_year / bars), bars > 1)
 
 
 def _hit_stats(flags: Iterable[bool | None]) -> HitStats:

@@ -429,11 +429,80 @@ python -m contrib.replay guardrail --db paper_trading.db --research-db autoresea
 `--out DIR` 寫 `<run-id>-guardrail-decisions.csv`（一題一列，含當時的 mark 與沒下單的原因）與
 `<run-id>-guardrail-summary.txt`。
 
+## 回測：帶模擬帳戶的路徑（PR 3a）
+
+```
+python -m contrib.replay backtest --db paper_trading.db --run-id paper-BTC-7 [--run-id paper-BTC-8 ...] \
+    --research-db data/autoresearch.sqlite [--tick 1] \
+    [--replay-db PATH [--variant NAME] [--include-pre-cutoff]] [--holdout] [--out DIR]
+```
+
+成績單把每一題各自拿去對答案（「這個主張抱一根會怎樣」）；回測是母計畫 §1 要的另一件事：**一個帳戶
+從頭走到尾**，每題的決策套在前面幾題留下的倉位上，最後那個數字才是一段的損益。這一張（3a）只做會計與
+門檻程式、**不叫任何模型**：輸入是 paper 自己的答案（`ai_outputs`）與 `replay.sqlite` 裡 variant 重放過的
+`answers`；從 `.reports.json` 起跑下半段 graph 是下一張（3b）。
+
+### 模擬帳戶（`account.py`）
+
+算術全部借 paper 這一邊的（列在 `upstream.py`）：
+
+- **sizing 照閘門**：target margin＝權益×approved margin%／100，名目＝margin×該題的 configured leverage，
+  下單量＝目標 signed 名目與現倉的**差額**，以該題的 mark 計。拿到的 target 是「閘門核准且有下單」的那個
+  （`order_created`）；maintain、被拒、fail-closed、沒答、deadband 內的核准都是「不動」。
+- **taker run**：立刻以 mark±slippage 成交（`fill_model.fill_price`）、付 taker fee。
+- **maker run**：掛在 mark∓assumed half spread、往被動側貼 tick（`maker_post_price`），**該題所在的那根 K 線**
+  （與 split 放題目用同一根：`bar_open_ms`）的 low（買）／high（賣）穿過掛價一個 tick 才算成交
+  （`maker_would_fill`，用極值代 mid；2026-11-02 拍板），以掛價成交、付 maker fee、無 slippage。
+  沒成交的掛單**留著**：下一題以新 mark 重掛、再判一次，直到成交或被新 target 取代；每一步記 `filled`
+  （None＝沒下單、True／False）與 `carried`。tick 不在 paper store 裡（來自交易所 asset metadata），
+  用 `--tick` 帶（預設 1＝BTC）、印在報表上。
+- **成交效果**＝`accounting.compute_fill_effect`（加權成本、減倉實現損益、fee 從錢包扣）。
+- **funding** 每小時從研究 store 的 `funding` 表結算（`funding_pnl`，收入為正），名目以結算當下最後一根已收
+  K 線的收盤價計；持倉期間研究 store **缺的結算具名計數**（`funding_missing`），不默默當 0。
+- **不帶停損／止盈**（2026-11-02 拍板；母計畫 §1 安全類閘門不在評分範圍），最後一題的倉位以該題 mark
+  估值、不平倉；權益≤0＝ruined，路徑在那一題停下並印出來。
+- **一題的報酬**＝權益從這題 mark 走到下一題 mark 的變化（`equity_{i+1}/equity_i − 1`，`equity_i` 在該題
+  下單**之前**讀），所以成交費與到下一題為止的 funding 都算在造成它們的那一題頭上；最後一題沒有報酬。
+
+### 四個對照組與 §5 門檻（`gate.py`）
+
+四個對照都走**同一個**帳戶：`buy_hold`（第一題以 cap 做多、之後抱著）、`flat`（永不下單）、
+`research_bias`（radar 方向變了就以 cap 跟上；沒方向的題不動）、`paper`（＝現行 variant：paper 自己記下的答案）。
+前三個是成績單 baseline 的「路徑版」，第四個是 §5 的現行 variant。沒成交的掛單對照組也照同一條規則留著重掛。
+
+母計畫 §5 四條寫成程式，每條印原料再印判定，四條全過才印 `eligible for --holdout`：
+
+1. validation 段淨 Sharpe 高於四個對照（嚴格大於）；Sharpe＝成績單同一個定義（`score.sharpe`）套在帳戶的
+   每題報酬上、以一年的根數年化，跨 run 把各 run 的 validation 報酬**串接**合併。
+2. 高於 `Penalty.threshold(n)`，n＝`replay.sqlite` 裡試過的 variant 數（`answers ∪ failures` 的
+   `(variant, repeat)` 各算一個，至少 1）。
+3. 與 paper 的配對命中（成績單 4h 的模型讀法 `ai_hit`）：跨 run 合併的 validation 題 ≥ 100、候選多命中、
+   McNemar 精確 p < 0.05（2026-09-24 拍板：validation 跨 run 合併、holdout 逐 run）。
+4. fail-closed 率（validation 有答案的題）不高於 paper。
+
+沒給 `--variant` 時，門檻程式拿 paper 對 paper 自己判一次＝**程式的煙霧測試**：(1)(3) 必不過、(4) 必過；
+報表印 `smoke test:` 那一行說明。給了 `--variant`，每個 repeat 各走一條路徑、各判一次。
+
+### store 與輸出
+
+- `replay.sqlite` 升 **v4**：多 `backtests`（誰、哪個 run、哪個 driver、成本模型、tick、起始權益、終值、ruined、
+  funding_missing）與 `backtest_steps`（一題一列）。v2／v3 的 store 由**可以建 store 的指令**（`replay`、`register`、
+  paper 的 `--holdout` 看一眼、以及 `backtest` 開既有 store）開檔時只加表、不動舊表；純讀取的指令照舊讀它。
+  每走一次都寫一列（走路徑是計算，不是花錢買答案，不去重）。
+- 給了 `--replay-db`：各 run 用釘住的 split（還沒釘的這時釘住——寫進 store 的路徑要有一個固定的切法，與第一次 replay
+  同一條規則）；`--holdout` 把 holdout 段也走完並記 ledger（與 `score --holdout` 同一條規則；ledger 在 variant 的答案
+  確認存在之後、開始走之前記）。variant 的門檻：(1)(2) 的 Sharpe 與 (3)(4) 一樣只算 model_cutoff 之後的題，
+  對照組只合併該 repeat 問過的那些 run。
+- `--out DIR` 寫 `<run-ids>[-variant]-backtest-decisions.csv`（每條路徑每題一列：target、成交、倉位、錢包、權益、
+  funding、報酬）與 `...-backtest-summary.txt`。
+- 幾個 run 一起跑要同一個 K 線週期；maker run 遇到研究 store 沒有該題那根 K 線＝具名拒絕（掛單無法判定），
+  不是默默當沒成交。
+
 ## 還沒有的
 
-- 帶模擬帳戶的回測（PR 3）：從 `.reports.json` 起跑下半段 graph，倉位一路帶下去。
-- plan §5 的驗收門檻（贏過四個對照組、`Penalty.threshold(n)`、配對 p < 0.05 且 ≥ 100 題、
-  fail-closed 不高於現行）：成績單印出每一個原料，但門檻本身還沒寫成程式、也還沒拍板。
+- 從 `.reports.json` 起跑下半段 graph（trader → 風險辯論 → PM）、倉位段換成模擬帳戶的（PR 3b）：
+  `backtest` 目前只走記錄下來的答案，不叫模型。
+- 停損／止盈不在回測裡（第一版拍板不帶）；paper 的 TWAP 分批也沒有（一題一單）。
 
 ## 測試
 
@@ -452,6 +521,12 @@ pytest -q contrib/replay/tests
 假模型 `Echo` 對每題說 paper 當時的模型說過的話，於是兩件事可以直接驗：重放的答案過閘門的結果
 與記錄的**逐欄相同**（`test_replay.py`），以及 echo variant 的每張 repeat 卡與 paper 自己的成績單
 **逐行相同**（`test_replay_score.py`）。模型那一層（`model.py`）用假的引擎介面測，不需要金鑰或網路。
+
+回測（`test_account.py`、`test_gate.py`、`test_backtest_cli.py`）：帳戶的每個數字（成交價、fee、實現損益、
+funding、ruin）寫成從 paper 公式推得出來的算式；對照組的 ask 序列與四條門檻在手做的路徑上逐條驗（含 paper
+對自己必不過 (1)(3)、必過 (4)）；指令用同一張 11 題的表加一個蓋住每題的研究 store，另外用 gate 夾具重放
+echo variant 兩個 repeat 再回測，釘住 echo 的路徑與 paper 的路徑逐單相同、store 寫了六條路徑、
+v3 store 被 `backtest` 升到 v4。
 
 護欄報表（`test_guardrail.py`）沿用那張 11 題的表，研究 store 放 12 根看收盤價就知道方向的 K 線
 （規則：高於 102 持多、低於 98 持空）：判定表每一格、每一題讀到的規則方向與判定、介入次數的算法、

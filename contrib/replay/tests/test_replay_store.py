@@ -9,7 +9,14 @@ from pathlib import Path
 
 import pytest
 
-from contrib.replay.replay_store import SCHEMA_VERSION, ReplayStore, ReplayStoreError, StoredAnswer
+from contrib.replay.account import Path as AccountPath
+from contrib.replay.replay_store import (
+    SCHEMA_VERSION,
+    BacktestRecord,
+    ReplayStore,
+    ReplayStoreError,
+    StoredAnswer,
+)
 from contrib.replay.upstream import (
     CurrentPositionState,
     DecisionConfig,
@@ -18,6 +25,7 @@ from contrib.replay.upstream import (
     parse_target_decision,
 )
 
+from .conftest import downgrade_to_v3, terms
 from .papers import decision_text, variant as make_variant
 
 NOW = datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc)
@@ -282,6 +290,35 @@ def test_an_unreadable_pin_is_refused_by_name(tmp_path):
         ReplayStoreError, match="the split pinned for run 'run' cannot be read"
     ):
         store.pinned_split("run")
+
+
+def test_a_v3_store_is_read_as_written_and_takes_no_backtest(tmp_path):
+    path = tmp_path / "r.sqlite"
+    with ReplayStore(path, create=True) as store:
+        store.register(make_variant(), now=NOW)
+    downgrade_to_v3(path)
+    record = BacktestRecord(NOW, "run", "flat", None, None, False)
+    with ReplayStore(path) as store:
+        assert store.probe_tables and not store.backtest_tables
+        assert store.backtests("run") == []
+        with pytest.raises(ReplayStoreError, match="before the backtest tables"):
+            store.write_backtest(record, AccountPath(terms(), (), ruined=False))
+    conn = sqlite3.connect(path)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone() == (3,)
+    finally:
+        conn.close()
+    with ReplayStore(path, create=True) as store:
+        assert store.backtest_tables
+        store.write_backtest(record, AccountPath(terms(), (), ruined=False))
+        (walked,) = store.backtests("run")
+        assert (walked.driver, walked.variant_name, walked.final_equity) == (
+            "flat",
+            None,
+            Decimal(1000),
+        )
+    with pytest.raises(ValueError, match="names a variant with its repeat, or neither"):
+        BacktestRecord(NOW, "run", "variant", "sha256:x", None, False)
 
 
 def test_a_store_from_the_earlier_schema_is_named_not_taken_for_a_foreign_file(tmp_path):

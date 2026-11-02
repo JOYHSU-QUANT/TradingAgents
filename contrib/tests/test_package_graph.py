@@ -90,6 +90,9 @@ _PERP_REACH = frozenset(
         ("replay", "src", "integration"),
         ("replay", "src", "paper"),
         ("replay", "src", "persistence"),
+        # The backtest's simulated account (replay plan PR 3a) borrows the
+        # paper lane's fill effect and funding formula.
+        ("replay", "src", "runtime"),
         ("replay", "tests", _ROOT_AREA),
         ("replay", "tests", "domains"),
         ("replay", "tests", "engine_bridge"),

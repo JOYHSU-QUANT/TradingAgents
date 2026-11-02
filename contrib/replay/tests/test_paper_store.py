@@ -289,6 +289,8 @@ def test_run_facts_fall_back_to_the_config_defaults_without_a_genesis_config(tmp
         costs=facts.costs,
         config_recorded=True,
         missing_blocks=("market_data", "coin"),
+        initial_balance=Decimal(1000),
+        half_spread_bps=Decimal("0.5"),
     )
     assert named.describe_source() == (
         "the run's recorded config, except market_data absent from the genesis: defaults used; "

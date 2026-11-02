@@ -1,6 +1,6 @@
 """``python -m contrib.replay`` — the offline exam's commands.
 
-Five commands:
+Six commands:
 
 - ``score --db paper_trading.db --run-id paper-BTC-7`` — the scorecard
   (plan PR 1): read the run's decisions, mark each against the price that
@@ -44,6 +44,22 @@ Five commands:
   the paper book held once the decision was applied, and what the guardrail
   would have done about it. Scores nothing and reads no later price; with
   ``--out DIR`` it writes one CSV row per question beside the summary.
+- ``backtest --run-id A [--run-id B ...] --research-db PATH`` — the
+  simulated account (replay plan PR 3a, :mod:`.account`): every finished
+  question of each run walked in order by one account that carries its
+  position, under the run's own fill model (a maker post judged against
+  the bar it falls in, ``--tick`` the venue's price tick) and the research
+  store's hourly funding, for the paper trader's own answers and the three
+  price controls (:mod:`.gate`), and with ``--replay-db ... --variant NAME``
+  for every repeat of that variant's replayed answers too; then the mother
+  plan's section 5 bar on the validation segment, pooled across the runs
+  (a repeat's controls pooled over the runs it was asked on, the Sharpe
+  over the questions past the model cutoff). With a replay store the run is
+  pinned if it was not, as a replay pins it.
+  Without a variant the bar judges the paper trader against itself — the
+  program's smoke test (checks 1 and 3 cannot pass). Each walked path is
+  written to the replay store when one is given. ``--holdout`` walks the
+  holdout too and spends its look, as ``score --holdout`` does.
 
 Exit codes, kept in step with the two neighbouring packages' CLIs: ``0`` the
 command did what it says, ``1`` a named operator, store, config, split,
@@ -62,9 +78,21 @@ import time
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-from .compare import Table, compare, cutoff_scope
+from .account import STEP_COLUMNS, AccountError, Path as AccountPath, Series, Terms, simulate
+from .compare import Scope, Table, compare, cutoff_scope
+from .gate import (
+    CONTROLS,
+    Readings,
+    Verdict,
+    answer_targets,
+    control_targets,
+    decisions as account_decisions,
+    describe_paths,
+    judge,
+)
 from .guardrail import describe_shadow, shadow, shadow_table
 from .model import engine_model
 from .paper_store import (
@@ -72,7 +100,9 @@ from .paper_store import (
     RunFacts,
     gate_config,
     load_decisions,
+    load_research_bars,
     load_research_closes,
+    load_research_funding,
     run_facts,
 )
 from .pool import BLOCK, DRAWS, JUDGED_KEY, RunScores, describe_pool
@@ -95,11 +125,12 @@ from .replay import (
     prepare,
     select,
 )
-from .replay_store import HoldoutLook, ReplayStore, ReplayStoreError
+from .replay_store import BacktestRecord, HoldoutLook, ReplayStore, ReplayStoreError
 from .score import (
     Answer,
     Scorecard,
     ScoreError,
+    bars_per_year,
     build_split,
     csv_table,
     score_run,
@@ -438,6 +469,89 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     guardrail.set_defaults(func=_cmd_guardrail)
+
+    backtest = subparsers.add_parser(
+        "backtest",
+        help="walk one account through each run's decisions, and read the plan section 5 bar",
+        description=(
+            "Walk every finished question of each paper run, in order, with one simulated "
+            "account that carries its position (replay plan PR 3a): the paper trader's own "
+            "answers and three price controls (buy-and-hold at the cap, flat, the research "
+            "radar's bias at the cap), and with --replay-db and --variant every repeat of that "
+            "variant's replayed answers. Fills follow the run's own fill model (a maker post "
+            "is judged against the bar the decision falls in, on the research store's candles), "
+            "funding is settled hourly from the research store, there is no stop-loss and no "
+            "take-profit. Then the mother plan's section 5 bar on the validation segment, "
+            "pooled across the runs; without a variant the paper trader is judged against "
+            "itself, which is the program's smoke test. Never writes to the paper store; writes "
+            "each walked path to the replay store when one is given."
+        ),
+    )
+    backtest.add_argument("--db", default="paper_trading.db", help="the paper store (SQLite path)")
+    backtest.add_argument(
+        "--run-id",
+        action="append",
+        required=True,
+        help="a run to walk; give it once per run (all on the same candle interval)",
+    )
+    backtest.add_argument(
+        "--research-db",
+        required=True,
+        metavar="PATH",
+        help=(
+            "an existing autoresearch.sqlite: its candles judge the maker posts and fill a "
+            "missing cycle's later mark, its funding series settles the account hourly"
+        ),
+    )
+    backtest.add_argument(
+        "--tick",
+        default="1",
+        metavar="PRICE",
+        help=(
+            "the venue's price tick for the run's coin, which the paper store does not record "
+            "(default: 1, BTC's); a maker post rests on the passive side of the assumed "
+            "spread, rounded to the tick, and fills when the bar trades through it by a tick"
+        ),
+    )
+    backtest.add_argument(
+        "--replay-db",
+        metavar="PATH",
+        help=(
+            "a replay.sqlite: each run is walked under the split pinned there, every walked "
+            "path is written to it, and --variant names a variant whose replayed answers are "
+            "walked too; an existing store older than this build's schema gains the backtest "
+            "tables"
+        ),
+    )
+    backtest.add_argument("--variant", metavar="NAME", help="with --replay-db: the variant to walk")
+    backtest.add_argument(
+        "--include-pre-cutoff",
+        action="store_true",
+        help=(
+            "with --variant: also count the validation questions decided on or before the "
+            "variant's model_cutoff day in the bar's pooled comparisons (plan section 6); "
+            "left out by default, and a variant with no model_cutoff is refused without it"
+        ),
+    )
+    backtest.add_argument(
+        "--holdout",
+        action="store_true",
+        help=(
+            "walk the holdout segment too and print its figures; a look at the holdout, "
+            "recorded in the replay store's ledger (so it needs --replay-db; the store is "
+            "created there for a look at the paper trader's own answers)"
+        ),
+    )
+    backtest.add_argument(
+        "--out",
+        metavar="DIR",
+        help=(
+            "write <stem>-backtest-decisions.csv (one row per walked question per path) and "
+            "<stem>-backtest-summary.txt here; the stem is the run ids joined by '+', then "
+            "-<variant> with one"
+        ),
+    )
+    backtest.set_defaults(func=_cmd_backtest)
     return parser
 
 
@@ -448,6 +562,50 @@ def _progress(line: str) -> None:
 def _fail(message: str) -> int:
     print(f"error: {message}", file=sys.stderr)
     return 1
+
+
+def _repeated_run_ids(run_ids: Sequence[str]) -> None:
+    """Refuse a ``--run-id`` given twice, by name."""
+    repeated = sorted({r for r in run_ids if run_ids.count(r) > 1})
+    if repeated:
+        raise _Refused(f"--run-id names {', '.join(repeated)} more than once")
+
+
+def _replay_db_flags(
+    args: argparse.Namespace,
+    *,
+    without_store: Sequence[tuple[str, bool]],
+    without_variant: Sequence[tuple[str, bool]],
+) -> Path | None:
+    """The validated ``--replay-db`` path (``None`` when none was given); every refusal is a :class:`_Refused`.
+
+    ``without_store`` names the flags that only apply with ``--replay-db``
+    and ``without_variant`` those that only apply with ``--variant``, each as
+    ``(flag, given)``. Only a look at the paper trader's own holdout may
+    create the store (it has a look to record); any other reader is refused
+    rather than left an empty store behind a typo.
+    """
+    if args.replay_db is None:
+        stray = [flag for flag, given in without_store if given]
+        if stray:
+            raise _Refused(f"{', '.join(stray)} only apply with --replay-db")
+        if args.holdout:
+            raise _Refused(
+                "--holdout needs --replay-db PATH: every look at the holdout is recorded in "
+                "its ledger (plan section 5); the store is created there if it does not exist"
+            )
+        return None
+    if not args.replay_db:
+        raise _Refused("--replay-db needs a path, got ''")
+    if args.variant is None:
+        stray = [flag for flag, given in without_variant if given]
+        if stray:
+            raise _Refused(f"{', '.join(stray)} only apply with --variant")
+    path = Path(args.replay_db)
+    creates = args.holdout and args.variant is None
+    if not path.is_file() and not creates:
+        raise _Refused(f"--replay-db {args.replay_db!r} does not exist")
+    return path
 
 
 @dataclass(frozen=True)
@@ -612,46 +770,20 @@ def _cmd_score(args: argparse.Namespace) -> int:
             # Checked before the store is opened: opening a path that does not
             # exist would CREATE an empty research store there.
             return _fail(f"--research-db {args.research_db!r} does not exist")
-    replay_path: Path | None = None
-    if args.replay_db is None:
-        stray = [
-            flag
-            for flag, given in (
-                ("--variant", args.variant is not None),
-                ("--against", args.against is not None),
-                ("--include-pre-cutoff", args.include_pre_cutoff),
-            )
-            if given
-        ]
-        if stray:
-            return _fail(f"{', '.join(stray)} only apply with --replay-db")
-        if args.holdout:
-            return _fail(
-                "--holdout needs --replay-db PATH: every look at the holdout is recorded in "
-                "its ledger (plan section 5); the store is created there if it does not exist"
-            )
-    else:
-        if not args.replay_db:
-            return _fail("--replay-db needs a path, got ''")
-        replay_path = Path(args.replay_db)
-        if args.variant is None:
-            stray = [
-                flag
-                for flag, given in (
-                    ("--against", args.against is not None),
-                    ("--include-pre-cutoff", args.include_pre_cutoff),
-                )
-                if given
-            ]
-            if stray:
-                return _fail(f"{', '.join(stray)} only apply with --variant")
-        elif args.against == args.variant:
-            return _fail("--against names the variant being scored; compare it with another")
-        # Only a look at the paper trader's own holdout may create the store:
-        # it has a look to record. A reader never creates one behind a typo.
-        creates = args.holdout and args.variant is None
-        if not replay_path.is_file() and not creates:
-            return _fail(f"--replay-db {args.replay_db!r} does not exist")
+    if args.replay_db and args.variant is not None and args.against == args.variant:
+        return _fail("--against names the variant being scored; compare it with another")
+    replay_path = _replay_db_flags(
+        args,
+        without_store=(
+            ("--variant", args.variant is not None),
+            ("--against", args.against is not None),
+            ("--include-pre-cutoff", args.include_pre_cutoff),
+        ),
+        without_variant=(
+            ("--against", args.against is not None),
+            ("--include-pre-cutoff", args.include_pre_cutoff),
+        ),
+    )
     run = _open_run(db_path, args.db, args.run_id, reports_root=reports_root)
     replayed: _Replayed | None = None
     if replay_path is not None:
@@ -1127,9 +1259,7 @@ def _cmd_pool(args: argparse.Namespace) -> int:
         return _fail(f"--block must be at least 1, got {args.block}")
     if args.draws < 1:
         return _fail(f"--draws must be at least 1, got {args.draws}")
-    repeated = sorted({r for r in args.run_id if args.run_id.count(r) > 1})
-    if repeated:
-        return _fail(f"--run-id names {', '.join(repeated)} more than once")
+    _repeated_run_ids(args.run_id)
     replay_path = Path(args.replay_db)
     if not replay_path.is_file():
         # A reader never creates the store behind a typo.
@@ -1312,9 +1442,7 @@ def _cmd_guardrail(args: argparse.Namespace) -> int:
         return _fail(f"--research-db {args.research_db!r} does not exist")
     if args.out is not None and not args.out:
         return _fail("--out needs a directory, got ''")
-    repeated = sorted({r for r in args.run_id if args.run_id.count(r) > 1})
-    if repeated:
-        return _fail(f"--run-id names {', '.join(repeated)} more than once")
+    _repeated_run_ids(args.run_id)
     runs = [_guardrail_run(db_path, args.db, run_id) for run_id in args.run_id]
     # One replay per coin: the timeline is the store's whole history, so every
     # run on that coin reads the same one.
@@ -1379,6 +1507,371 @@ def _cmd_guardrail(args: argparse.Namespace) -> int:
             written = _write_out(Path(args.out), args.out, f"{run_id}-guardrail", lines, table)
             status = max(status, written)
     return status
+
+
+# -- backtest (plan PR 3a) -----------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Walked:
+    """One run's paths, and what the bar reads off them.
+
+    ``controls`` are the four controls' paths, ``candidate`` the variant's
+    by repeat; ``paper`` and ``candidate_readings`` the validation rows the
+    bar's checks (3) and (4) read, reduced. ``scope`` is the variant's
+    cutoff scope over the run's questions (plan §6), ``None`` without a
+    variant, when every question counts. ``walked_before`` counts the paths
+    the store already held for the run (``None`` without a store).
+    """
+
+    run: _Run
+    controls: dict[str, AccountPath]
+    candidate: dict[int, AccountPath]
+    paper: Readings
+    candidate_readings: dict[int, Readings]
+    scope: Scope | None
+    walked_before: int | None
+
+
+def _cmd_backtest(args: argparse.Namespace) -> int:
+    db_path = Path(args.db)
+    if not db_path.is_file():
+        return _fail(f"database {args.db!r} does not exist")
+    research_path = Path(args.research_db)
+    if not research_path.is_file():
+        # Checked before the store is opened: opening a path that does not
+        # exist would CREATE an empty research store there.
+        return _fail(f"--research-db {args.research_db!r} does not exist")
+    _repeated_run_ids(args.run_id)
+    try:
+        tick = Decimal(args.tick)
+    except InvalidOperation:
+        return _fail(f"--tick is a price, got {args.tick!r}")
+    if not tick.is_finite() or tick <= 0:
+        return _fail(f"--tick must be > 0, got {args.tick!r}")
+    if args.out is not None and not args.out:
+        return _fail("--out needs a directory, got ''")
+    replay_path = _replay_db_flags(
+        args,
+        without_store=(
+            ("--variant", args.variant is not None),
+            ("--include-pre-cutoff", args.include_pre_cutoff),
+        ),
+        without_variant=(("--include-pre-cutoff", args.include_pre_cutoff),),
+    )
+    runs = [
+        _open_run(db_path, args.db, run_id, reports_root=None, count_reports=False, noun="backtest")
+        for run_id in args.run_id
+    ]
+    intervals = sorted({run.facts.interval for run in runs})
+    if len(intervals) > 1:
+        return _fail(
+            f"--run-id names runs on {' and '.join(intervals)} candles; the pooled bar reads "
+            "runs on one interval"
+        )
+    variant: Variant | None = None
+    trials = 1
+    store: ReplayStore | None = None
+    walked: list[_Walked] = []
+    try:
+        if replay_path is not None:
+            store = ReplayStore(replay_path, create=True)
+            if args.variant is not None:
+                variant = store.variant(args.variant)
+                if variant.model_cutoff is None and not args.include_pre_cutoff:
+                    raise _Refused(
+                        f"{variant.name!r} records no model_cutoff, so the validation questions "
+                        "the model may have been trained on cannot be left out of the bar (plan "
+                        "section 6): set model_cutoff in the variant file and run `register`, "
+                        "or pass --include-pre-cutoff"
+                    )
+            trials = max(store.trials(), 1)
+        for run in runs:
+            answers: Mapping[int, Sequence[Answer]] = {}
+            failed: Mapping[int, Collection[str]] = {}
+            before: int | None = None
+            if store is not None:
+                run_id = run.facts.run_id
+                # A walk written to the store fixes the exam as a replay
+                # does: the run is pinned now if it was not, so every stored
+                # path of the run is cut by one split.
+                pinned = store.pinned_split(run_id)
+                if pinned is None:
+                    pinned = store.pin_split(run_id, run.split, now=_now())
+                run = _pinned(run, *pinned)
+                if variant is not None:
+                    answers = store.answers(variant.sha, run_id)
+                    failed = store.failed(variant.sha, run_id)
+                    if not answers and not failed:
+                        raise _Refused(
+                            f"variant {variant.name!r} has no answers for run {run_id!r} in "
+                            f"{replay_path}"
+                        )
+                before = len(store.backtests(run_id))
+                if args.holdout:
+                    # After the checks that read nothing of the holdout, and
+                    # before the walk, which does: the look is spent by the
+                    # walk, however the walk ends (plan section 3-9).
+                    store.record_look(
+                        action="score",
+                        run_id=run_id,
+                        variant_sha=None if variant is None else variant.sha,
+                        questions=_holdout_questions(run),
+                        who=_who(),
+                        now=_now(),
+                    )
+            paths = _walk(run, research_path, args.research_db, tick, variant, answers, failed, args)
+            walked.append(replace(paths, walked_before=before))
+        if store is not None:
+            _record_paths(store, walked, variant, holdout=args.holdout)
+    except (ReplayStoreError, StoreError, AccountError) as exc:
+        return _fail(str(exc))
+    finally:
+        if store is not None:
+            store.close()
+    lines = _backtest_report(walked, variant, trials, replay_path, args)
+    for line in lines:
+        print(line)
+    if args.out is not None:
+        stem = "+".join(args.run_id) + ("" if variant is None else f"-{variant.name}")
+        return _write_out(
+            Path(args.out), args.out, f"{stem}-backtest", lines, _backtest_table(walked)
+        )
+    return 0
+
+
+def _walk(
+    run: _Run,
+    research_path: Path,
+    research_arg: str,
+    tick: Decimal,
+    variant: Variant | None,
+    answers: Mapping[int, Sequence[Answer]],
+    failed: Mapping[int, Collection[str]],
+    args: argparse.Namespace,
+) -> _Walked:
+    """One run: its bars and funding read once under the lock, every driver walked, the bar's inputs reduced."""
+    facts, split = run.facts, run.split
+    questions = run.decisions.questions
+    until = split.loadable_until(holdout=args.holdout)
+    with ResearchStore(research_path) as research:
+        series = Series.of(
+            load_research_bars(
+                research,
+                coin=facts.coin,
+                interval=facts.interval,
+                since_ms=split.train.start_ms,
+                until_ms=until,
+            ),
+            load_research_funding(
+                research, coin=facts.coin, since_ms=split.train.start_ms, until_ms=until
+            ),
+        )
+    # The scorecard's later marks come from the same bars, keyed as
+    # ``load_research_closes`` keys them, so the store is read once.
+    closes = {bar.close_time: float(bar.close) for bar in series.bars}
+    if not closes:
+        print(
+            f"warning: --research-db {research_arg} holds no {facts.coin} {facts.interval} "
+            f"candles opening between {from_epoch_ms(split.train.start_ms):%Y-%m-%d %H:%M} and "
+            f"{from_epoch_ms(until):%Y-%m-%d %H:%M}; no missing cycle of run {facts.run_id} "
+            "can be filled from it, and no maker post can be judged",
+            file=sys.stderr,
+        )
+    terms = Terms(
+        coin=facts.coin,
+        costs=facts.costs,
+        half_spread_bps=facts.half_spread_bps,
+        tick=tick,
+        initial_balance=facts.initial_balance,
+    )
+
+    def walk(targets: Sequence) -> AccountPath:
+        return simulate(
+            account_decisions(
+                questions,
+                run.decisions.inputs,
+                targets,
+                split=split,
+                step_ms=facts.step_ms,
+                holdout=args.holdout,
+            ),
+            terms=terms,
+            series=series,
+        )
+
+    def readings(given: Sequence[Answer], only: Collection[str] | None = None) -> Readings:
+        return Readings.of(
+            score_run(
+                questions,
+                given,
+                step_ms=facts.step_ms,
+                costs=facts.costs,
+                research_closes=closes,
+                split=split,
+                holdout=args.holdout,
+                only=only,
+            )
+        )
+
+    paper_answers = {a.input_id: a for a in run.decisions.answers}
+    controls = {
+        name: walk(
+            answer_targets(questions, paper_answers)
+            if name == "paper"
+            else control_targets(name, questions)
+        )
+        for name in CONTROLS
+    }
+    candidate: dict[int, AccountPath] = {}
+    candidate_readings: dict[int, Readings] = {}
+    scope: Scope | None = None
+    if variant is not None:
+        scope = cutoff_scope(questions, variant, include_pre_cutoff=args.include_pre_cutoff)
+        for repeat in sorted(set(answers) | set(failed)):
+            theirs = {a.input_id: a for a in answers.get(repeat, ())}
+            candidate[repeat] = walk(answer_targets(questions, theirs))
+            candidate_readings[repeat] = readings(
+                list(theirs.values()), (set(theirs) | set(failed.get(repeat, ()))) & scope.eligible
+            )
+    return _Walked(
+        run=run,
+        controls=controls,
+        candidate=candidate,
+        paper=readings(run.decisions.answers),
+        candidate_readings=candidate_readings,
+        scope=scope,
+        walked_before=None,
+    )
+
+
+def _record_paths(
+    store: ReplayStore, walked: Sequence[_Walked], variant: Variant | None, *, holdout: bool
+) -> None:
+    """Every path of this command into the store, in one transaction."""
+    now = _now()
+    walks: list[tuple[BacktestRecord, AccountPath]] = []
+    for paths in walked:
+        run_id = paths.run.facts.run_id
+        walks.extend(
+            (BacktestRecord(now, run_id, name, None, None, holdout), path)
+            for name, path in paths.controls.items()
+        )
+        for repeat, path in paths.candidate.items():
+            assert variant is not None
+            walks.append(
+                (BacktestRecord(now, run_id, "variant", variant.sha, repeat, holdout), path)
+            )
+    store.write_backtests(walks)
+
+
+def _backtest_report(
+    walked: Sequence[_Walked],
+    variant: Variant | None,
+    trials: int,
+    replay_path: Path | None,
+    args: argparse.Namespace,
+) -> list[str]:
+    lines: list[str] = []
+    for w in walked:
+        run, facts = w.run, w.run.facts
+        lines.append(
+            f"backtest: run {facts.run_id} ({facts.coin}, {facts.interval} cycle; costs and "
+            f"interval from {facts.describe_source()})"
+        )
+        lines.append(w.controls["paper"].terms.describe())
+        if replay_path is not None:
+            lines.append(run.split_line(replay_path))
+            lines.append(f"paths walked on this run before this one: {w.walked_before}")
+        lines.extend(run.split.describe())
+        if args.holdout:
+            lines.append("HOLDOUT WALKED: this look is recorded in the ledger")
+        lines.extend(run.decisions.describe_left_out())
+    per_year = bars_per_year(walked[0].run.facts.step_ms)
+    for name in CONTROLS:
+        lines.extend(
+            describe_paths(
+                name,
+                {w.run.facts.run_id: w.controls[name] for w in walked},
+                bars_per_year=per_year,
+                holdout=args.holdout,
+            )
+        )
+    verdicts: list[Verdict] = []
+    if variant is None:
+        papers = [w.paper for w in walked]
+        verdicts.append(
+            judge(
+                candidate="paper",
+                candidate_paths=[w.controls["paper"] for w in walked],
+                control_paths={name: [w.controls[name] for w in walked] for name in CONTROLS},
+                trials=trials,
+                candidate_readings=papers,
+                paper_readings=papers,
+                bars_per_year=per_year,
+            )
+        )
+        lines.append(
+            "smoke test: no --variant, so the bar judges the paper trader against itself; "
+            "checks (1) and (3) cannot pass and (4) cannot fail"
+        )
+    else:
+        lines.append(variant.describe())
+        for w in walked:
+            # One cutoff line per run: the bar pools them all, and a reader
+            # re-deriving its n needs each run's count.
+            assert w.scope is not None
+            prefix = f"run {w.run.facts.run_id}: " if len(walked) > 1 else ""
+            lines.extend(prefix + line for line in w.scope.preamble[1:])
+        repeats = sorted({repeat for w in walked for repeat in w.candidate})
+        for repeat in repeats:
+            name = f"{variant.name} repeat {repeat}"
+            # The runs this repeat was asked on: the controls and the paper
+            # readings are pooled over the same runs, so both sides of every
+            # check cover one set of questions.
+            present = [w for w in walked if repeat in w.candidate]
+            lines.extend(
+                describe_paths(
+                    name,
+                    {w.run.facts.run_id: w.candidate[repeat] for w in present},
+                    bars_per_year=per_year,
+                    holdout=args.holdout,
+                )
+            )
+            eligible: frozenset[str] = frozenset()
+            for w in present:
+                assert w.scope is not None
+                eligible |= w.scope.eligible
+            verdicts.append(
+                judge(
+                    candidate=name,
+                    candidate_paths=[w.candidate[repeat] for w in present],
+                    control_paths={
+                        control: [w.controls[control] for w in present] for control in CONTROLS
+                    },
+                    trials=trials,
+                    candidate_readings=[w.candidate_readings[repeat] for w in present],
+                    paper_readings=[w.paper for w in present],
+                    bars_per_year=per_year,
+                    eligible=eligible,
+                )
+            )
+    for verdict in verdicts:
+        lines.extend(verdict.describe())
+    return lines
+
+
+def _backtest_table(walked: Sequence[_Walked]) -> Table:
+    rows: list[list[object]] = []
+    for paths in walked:
+        run_id = paths.run.facts.run_id
+        drivers: list[tuple[str, int | None, AccountPath]] = [
+            (name, None, path) for name, path in paths.controls.items()
+        ]
+        drivers.extend(("variant", repeat, path) for repeat, path in paths.candidate.items())
+        for driver, repeat, path in drivers:
+            rows.extend([run_id, driver, repeat, *step.values()] for step in path.steps)
+    return ["run_id", "driver", "repeat", *STEP_COLUMNS], rows
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -65,6 +65,7 @@ from .score import Answer, Question
 from .upstream import (
     CurrentPositionState,
     DecisionConfig,
+    FillRole,
     GuardrailSide,
     RiskAction,
     RiskConfig,
@@ -195,11 +196,15 @@ def preflight(exam: Exam) -> None:
 
     Every askable question must carry a position section the account's can
     replace, a candle end for that section's as-of, and a funding rate in
-    force in the research store. The walk reads the same things again on
-    the way; checking them here is what lets a dry run promise what the
-    live run will do.
+    force in the research store; on a maker run every prepared question
+    (a hold can re-price a resting post) needs the bar the account judges
+    fills on. The walk reads the same things again on the way; checking
+    them here is what lets a dry run promise what the live run will do.
     """
+    maker = exam.terms.costs.fill_role is FillRole.MAKER
     for item in exam.prepared:
+        if maker:
+            _bar(exam, item)
         if item.input_id in exam.reports:
             replace_position_section(
                 item.context_text, item.context_shape, (), input_id=item.input_id
@@ -222,6 +227,15 @@ def _as_of_ms(item: Prepared) -> int:
             "section is rendered against is unknown; the question cannot be asked"
         )
     return candle_end
+
+
+def _bar(exam: Exam, item: Prepared) -> None:
+    if exam.series.bar_at(item.paper.question.at_ms) is None:
+        raise ReplayError(
+            f"{item.input_id}: no bar in the research store covers "
+            f"{from_epoch_ms(item.paper.question.at_ms):%Y-%m-%d %H:%M} UTC, so whether a maker "
+            "post fills there cannot be judged; fetch the store so that its bars cover the run"
+        )
 
 
 def _rate(exam: Exam, item: Prepared) -> Decimal:
@@ -702,9 +716,15 @@ def ask_walks(
             tally.unreported += not completion.usage_reported
             if progress is not None:
                 shown = "" if gate.target_side is None else f" {gate.target_side.value}"
+                retried = (
+                    f", of which {lost_in} in / {lost_out} out on failed runs"
+                    if lost_in or lost_out
+                    else ""
+                )
                 progress(
                     f"{label}: {gate.decision_mode.value}{shown} -> {gate.risk_action.value} "
-                    f"(book size {walker.position.size:.8f}, equity {equity:.2f}; graph "
-                    f"{completion.graph_input_tokens} in / {completion.graph_output_tokens} out)"
+                    f"(equity before {equity:.2f}, size after {walker.position.size:.8f}; graph "
+                    f"{completion.graph_input_tokens + lost_in} in / "
+                    f"{completion.graph_output_tokens + lost_out} out{retried})"
                 )
     return tally.report(False)

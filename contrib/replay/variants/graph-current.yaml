@@ -1,4 +1,4 @@
-# The paper trader's current brain, asked the full way (replay plan PR 3b):
+# paper-BTC-7's brain, asked the full way (replay plan PR 3b):
 # the lower half of the graph (trader, three risk debators, portfolio
 # manager) re-run from each cycle's recorded reports, question by question
 # from a simulated account's own book, on the models paper-BTC-7 recorded

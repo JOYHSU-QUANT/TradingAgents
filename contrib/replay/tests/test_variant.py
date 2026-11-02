@@ -177,7 +177,9 @@ def test_a_graph_variant_file_loads_its_quick_model_and_guardrail_without_a_prom
     assert (variant.mode, variant.system_prompt) == ("graph", "")
     assert (variant.quick_provider, variant.quick_model) == ("openrouter", "fixture/g-quick")
     assert variant.guardrail == "off"
-    assert "graph mode: trader and risk debators on openrouter/fixture/g-quick" in variant.describe()
+    assert (
+        "graph mode: trader and risk debators on openrouter/fixture/g-quick" in variant.describe()
+    )
     assert "the engine's own portfolio manager prompt, guardrail off" in variant.describe()
     # A prompt given is read and said; a quick model left out means the same model throughout.
     variant = load_variant(write_graph_variant(tmp_path, "h", quick=False, prompt=True))
@@ -240,7 +242,11 @@ def test_in_memory_a_simple_variant_takes_no_graph_keys_and_a_graph_one_pairs_it
 
 @pytest.mark.parametrize(
     "change",
-    [{"quick_provider": "p", "quick_model": "q"}, {"guardrail": "off"}, {"system_prompt": "Decide."}],
+    [
+        {"quick_provider": "p", "quick_model": "q"},
+        {"guardrail": "off"},
+        {"system_prompt": "Decide."},
+    ],
     ids=["quick", "guardrail", "prompt"],
 )
 def test_what_reaches_the_graph_changes_a_graph_variants_sha(change):
@@ -271,3 +277,11 @@ def test_a_graph_prompt_is_text_or_nothing(tmp_path):
     (tmp_path / "system.md").write_text("  \n", encoding="utf-8")
     with pytest.raises(VariantError, match=r"system prompt .*system\.md.* is empty"):
         load_variant(path)
+
+
+def test_the_shipped_graph_variant_loads():
+    variant = load_variant(Path(__file__).resolve().parents[1] / "variants" / "graph-current.yaml")
+    assert (variant.mode, variant.guardrail, variant.max_tokens) == ("graph", "recorded", 8192)
+    assert variant.quick_model == "qwen/qwen3-235b-a22b-2507"
+    assert variant.model == "anthropic/claude-sonnet-4-6" and not variant.has_prompt
+    assert variant.model_cutoff == date(2026, 1, 31)

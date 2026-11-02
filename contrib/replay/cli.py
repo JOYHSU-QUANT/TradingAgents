@@ -2081,15 +2081,13 @@ def _ask(
             if remaining is not None:
                 remaining -= report.asked + report.refused
     except (ReplayError, LowerGraphError, ReplayStoreError, StoreError, AccountError, _Refused) as exc:
-        if graph is not None and (graph.lost_input_tokens or graph.lost_output_tokens):
-            # The walk stopped before its report: what its failed graph runs
-            # cost is said here, or it is said nowhere.
-            print(
-                f"tokens spent on graph runs that failed, since this command started: "
-                f"{graph.lost_input_tokens} in, {graph.lost_output_tokens} out (paid for)",
-                file=sys.stderr,
-            )
+        _say_lost(graph)
         return _fail(str(exc))
+    except KeyboardInterrupt:
+        # The interrupted run's completions are paid for too; said before the
+        # usual exit, or they are said nowhere.
+        _say_lost(graph)
+        raise
     finally:
         if store is not None:
             store.close()
@@ -2097,6 +2095,16 @@ def _ask(
         return 0
     args.variant = variant.name
     return None
+
+
+def _say_lost(graph: LowerGraph | None) -> None:
+    """What the graph runs that produced no stored answer cost, when the walk stops before its report."""
+    if graph is not None and (graph.lost_input_tokens or graph.lost_output_tokens):
+        print(
+            f"tokens spent on graph runs that failed, since this command started: "
+            f"{graph.lost_input_tokens} in, {graph.lost_output_tokens} out (paid for)",
+            file=sys.stderr,
+        )
 
 
 def _require_holdout_asked(

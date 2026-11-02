@@ -175,7 +175,7 @@ variant 是資料不是程式，一個 YAML（範例：`variants/current-sonnet.
 | `model.provider`／`model.id` | 是 | 走 `tradingagents` 的 `create_llm_client`，不自己接 SDK |
 | `mode` | 否 | `simple`（預設）＝一次 completion 的重放（`replay`）；`graph`＝`backtest --ask` 走的下半段 graph（PR 3b） |
 | `quick_model.provider`／`quick_model.id` | 否（只在 `mode: graph`） | trader 與三個 risk debator 用的模型；沒給＝與 `model` 同一個（PM 永遠用 `model`） |
-| `guardrail` | 否（只在 `mode: graph`） | 閘門讀的護欄：`recorded`（預設；input 列記下的讀數，護欄關著就是沒有）、`off`、`rule`（用 `--research-db` 重放研究規則）；YAML 把裸的 `off` 讀成 False，照 `off` 收 |
+| `guardrail` | 否（只在 `mode: graph`） | 閘門讀的護欄：`recorded`（預設；input 列記下的讀數，護欄關著就是沒有）、`off`、`rule`（用 `--research-db` 重放研究規則；只讀 4h 的 run）；YAML 把裸的 `off` 讀成 False，照 `off` 收 |
 | `system_prompt_path` | simple 是；graph 否 | 相對於 YAML 檔；graph variant 給了就是 PM 那次 completion 的 system message，沒給＝上游 PM 自己的 prompt |
 | `temperature` | 否 | 沒給＝provider 預設（跟 graph 一樣只在有設時才送） |
 | `max_tokens` | 否 | 預設 16384＝paper daemon 的 completion cap（2026-10-07 起；重放 run 6／7 的 `current-sonnet` 自己釘 8192＝當時的 cap。**沒寫這個鍵的自訂 variant 在那天之後 sha 會變**：換新名字註冊，或把舊 cap 寫進檔裡）；Gemini 自動換成 `max_output_tokens` |
@@ -518,26 +518,27 @@ train＋validation 每一題（holdout 不問；那是一次 look，由別的指
    的形狀仍具名拒絕；
 4. PM 的文字走 PR 2 同一條 `parse_target_decision` → `risk_gate.evaluate`，帳戶狀態是自己的倉位與權益，護欄照 variant 的
    `guardrail`（`recorded`＝input 列記下的那個讀數、`off`、`rule`＝用 `--research-db` 重放研究規則，與 `guardrail` 報表
-   同一條 timeline；`--rule FILE` 換規則檔）；
+   同一條 timeline、只讀 4h 的 run；`--rule FILE` 換規則檔）；
 5. 答案寫進 `answers`（與 simple variant 同一張表，所以 `score --replay-db`、`compare`、`backtest --variant` 都讀得到），
    旁邊 `graph_books` 記該題問的時候帳戶的 mark／倉位／錢包／權益／最後成交／護欄讀數／整個 graph 的 token；然後把
    核准的 target 套進帳戶、走下一題。
 
-每題先套進帳戶、再存（答案＋book 同一個 transaction；帳戶吃不下的答案——tick 太粗把單湊成零——付了錢但不存、
+`--ask` 需要 `--replay-db`（不存在就建）；variant 沒有 `model_cutoff` 又沒帶 `--include-pre-cutoff`，在花錢前就拒絕
+（§5 門檻只讀 cutoff 之後的題）。每題先套進帳戶、再存（答案＋book 同一個 transaction；帳戶吃不下的答案——tick 太粗把單湊成零——付了錢但不存、
 指令具名停下，所以 store 裡的答案一定重建得出來），`--limit N` 停了再跑同一個指令就**接著走**：先把 store 裡的答案
-依序套回一個新帳戶，每一題的 book（倉位、進場價、錢包、權益、最後成交、護欄讀數）都要與存的那列**完全相同**
+依序套回一個新帳戶，每一題的 book（mark、倉位、進場價、錢包、權益、最後成交、護欄讀數）都要與存的那列**完全相同**
 （研究 store、`--tick`、run 的 terms、護欄規則換了就具名拒絕，不在不同的帳本上接著問），問在沒問過的題之後的答案
 也拒絕（一次 walk 是一段前綴）。開跑前先做 preflight：每一題的倉位段找得到、`candle_end` 在、研究 store 有該題生效
-的 funding rate，任一不成立就在花錢、釘 split 之前具名拒絕；`--dry-run` 跑同一份 preflight、也把 store 裡的答案重建
-一遍（book 對不上同樣拒絕）、也查 variant 名字有沒有已經指向別的 sha，所以 dry run 說會問 N 題就是會問 N 題。所有 repeat 都走完才接回一般流程：用存下來的答案判
+的 funding rate（maker run 還要有判成交用的那根 K 線），任一不成立就在花錢、釘 split 之前具名拒絕；`--dry-run` 跑同一份 preflight、也把 store 裡的答案重建
+一遍（book 對不上同樣拒絕）、也查 variant 名字有沒有已經指向別的 sha，所以 dry run 說會問 N 題就是會問 N 題（N 是上限：某個 repeat 中途破產就不再問）。所有 repeat 都走完才接回一般流程：用存下來的答案判
 §5 四條（與 `--variant` 完全相同，報表也相同）。呼叫紀律同 `replay`（401／403／404 停、其他 4xx 記 refused、帳戶抱著不
-動、其餘退避重試）；權益≤0 的 repeat 不再問。`--dry-run` 讀完所有 payload 與 sidecar、印要問幾題，不建 client、不寫。
+動、其餘退避重試；graph 自己的錯誤 `LowerGraphError` 不重試、具名停下）；權益≤0 的 repeat 不再問。`--dry-run` 讀完所有 payload 與 sidecar、印要問幾題，不建 client、不寫。
 報表印 PM 與整個 graph 的 token（＝這次**付了錢的**全部，失敗或被拒那幾次 graph 跑掉的也算進去，另印「其中多少花在
 失敗／被拒那幾次」），每題的 book 也記該題全部花掉的 token（被拒的題記失敗那幾次的）；持倉期間研究 store 缺的 funding
 結算數；store 裡若已有 `--repeats` 以外的 repeat，stderr 印一行說門檻會連它們一起讀；header 印 run 自己答案記錄的
 模型（與 variant 的 PM 模型不同就標出來）與 `rule` 模式用的規則檔。被拒的題在這條 walk 裡是永久的 hold（沒有
 `--retry-failed`：中途重問會改掉後面每一題的 book）；要重問就換 variant 名字重走。**研究 store 的快照在 variant 走完前
-不要換**：補一筆 funding 都會讓 book 對不上、walk 接不下去。`rule` 模式的規則檔是 CLI 旗標、不進 variant 的 sha（2026-11-02
+不要換**：持倉跨過的那筆結算一補，book 就對不上、walk 接不下去。`rule` 模式的規則檔是 CLI 旗標、不進 variant 的 sha（2026-11-02
 拍板：3c 只用預設規則），所以**同一個 variant 名字不要換規則檔**；header 印的那個檔就是這條 walk 用的。graph variant 的
 `system_prompt_path` 是**加在 PM 那次
 completion 前面的 system message**，上游 PM 自己的 prompt 仍在 human message 裡；不要把 `current_system.md` 指給 graph

@@ -208,8 +208,9 @@ def test_a_variant_row_edited_after_it_was_stored_is_refused(tmp_path):
     conn.execute("UPDATE variants SET system_prompt = 'Decide differently.'")
     conn.commit()
     conn.close()
-    with ReplayStore(path) as store, pytest.raises(
-        ReplayStoreError, match="the row was changed after it was stored"
+    with (
+        ReplayStore(path) as store,
+        pytest.raises(ReplayStoreError, match="the row was changed after it was stored"),
     ):
         store.variant("v")
 
@@ -289,8 +290,9 @@ def test_an_unreadable_pin_is_refused_by_name(tmp_path):
     conn.execute("INSERT INTO splits VALUES ('run', '{not json', 't')")
     conn.commit()
     conn.close()
-    with ReplayStore(path) as store, pytest.raises(
-        ReplayStoreError, match="the split pinned for run 'run' cannot be read"
+    with (
+        ReplayStore(path) as store,
+        pytest.raises(ReplayStoreError, match="the split pinned for run 'run' cannot be read"),
     ):
         store.pinned_split("run")
 
@@ -337,8 +339,12 @@ def _walked_path():
         Bar(at_ms(1) - STEP_MS + 1, at_ms(1), Decimal(101), Decimal(99), Decimal(100)),
     ]
     decisions = [
-        Decision("q0", at_ms(0), None, Decimal(100), Decimal(1), Target(TargetSide.LONG, Decimal(50))),
-        Decision("q1", at_ms(1), None, Decimal(100), Decimal(1), Target(TargetSide.FLAT, Decimal(0))),
+        Decision(
+            "q0", at_ms(0), None, Decimal(100), Decimal(1), Target(TargetSide.LONG, Decimal(50))
+        ),
+        Decision(
+            "q1", at_ms(1), None, Decimal(100), Decimal(1), Target(TargetSide.FLAT, Decimal(0))
+        ),
     ]
     return simulate(decisions, terms=maker, series=Series.of(bars, []))
 
@@ -589,3 +595,19 @@ def test_clearing_failures_takes_the_refused_questions_books_with_them(tmp_path)
         _book(graph_input_tokens=1, graph_output_tokens=None)
     assert _book().identity == _book(graph_input_tokens=9, graph_output_tokens=9).identity
     assert _book().describe().startswith("mark 100, size 3, entry 99, wallet 999.95545, equity")
+
+
+def test_an_answer_and_its_book_are_one_write_or_none(tmp_path):
+    variant = graph_variant()
+    text = decision_text("set_target", "long", 30, 0.8)
+    answer = StoredAnswer("run", "q1", 0, NOW, "train", text, False, None, _gate(text), "m", 1, 1)
+    with ReplayStore(tmp_path / "r.sqlite", create=True) as store:
+        store.register(variant, now=NOW)
+        # A book already stands for q1 (a refusal), so the book insert fails
+        # after the answer insert succeeded: the answer must not stay behind.
+        store.record_graph_failure(
+            variant.sha, run_id="run", input_id="q1", repeat=0, error="422", now=NOW, book=_book()
+        )
+        with pytest.raises(ReplayStoreError, match="write failed"):
+            store.write_graph_answer(variant.sha, answer, _book())
+        assert store.answers(variant.sha, "run") == {}

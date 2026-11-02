@@ -673,6 +673,15 @@ def test_ask_walks_the_graph_variant_from_its_own_book_and_reads_the_bar_on_its_
         assert books[0][gate_input_id(1)].last_fill_ms == at_ms(0)
         assert books[1][gate_input_id(1)].graph_input_tokens == 500
         assert replay.trials() == 2
+        # The bar re-simulates the stored answers: its path's equity at each
+        # question is the equity the question was asked from.
+        rows = replay.conn.execute(
+            "SELECT s.input_id, s.equity FROM backtest_steps AS s JOIN backtests AS b USING "
+            "(backtest_id) WHERE b.driver = 'variant' AND b.repeat = 0"
+        ).fetchall()
+        assert len(rows) == 8
+        for input_id, equity in rows:
+            assert Decimal(equity) == books[0][input_id].equity
 
 
 def test_ask_stops_at_the_limit_and_resumes_against_the_book_it_left(
@@ -775,6 +784,9 @@ def test_a_question_the_provider_refuses_holds_the_book_and_is_recorded(
         # Slot 1 was asked from a flat book: the refused slot 0 opened nothing.
         assert books[gate_input_id(1)].size == 0
         assert len(replay.answers(sha, GATE_RUN_ID)[0]) == 7
+    # Resumed, the refusal stays a hold: nothing is asked again.
+    assert cli.main(_ask_argv(graph_store, gate_research, variant_file, "--repeats", "1")) == 0
+    assert "asked: 0 new answer(s); already stored, skipped: 8" in capsys.readouterr().out
 
 
 def test_a_failed_graph_call_is_tried_again_after_the_pause_and_its_cost_is_counted(
@@ -839,9 +851,7 @@ def test_preflight_refuses_before_anything_is_registered_or_pinned(
     # A row without a candle end cannot say what its section is as of.
     again = write_research(gate_research.parent / "again.sqlite", GATE_MARKS, slots=12)
     conn = sqlite3.connect(graph_store)
-    conn.execute(
-        "UPDATE ai_inputs SET candle_end = NULL WHERE input_id = ?", (gate_input_id(2),)
-    )
+    conn.execute("UPDATE ai_inputs SET candle_end = NULL WHERE input_id = ?", (gate_input_id(2),))
     conn.commit()
     conn.close()
     assert cli.main([*_ask_argv(graph_store, again, variant_file), "--dry-run"]) == 1
@@ -872,7 +882,9 @@ def test_an_answer_the_account_cannot_take_is_not_stored_and_the_walk_stops_by_n
     assert "gate-in-00 repeat 0: the account cannot take the answer it was given" in err
     assert "out graph tokens) was paid for and not stored, so the next run asks it again" in err
     # The cost of that unstored answer is said on the way out.
-    assert "tokens spent on graph runs that failed, since this command started: 500 in, 50 out" in err
+    assert (
+        "tokens spent on graph runs that failed, since this command started: 500 in, 50 out" in err
+    )
     with ReplayStore(_replay_db(graph_store)) as replay:
         assert replay.answers(replay.variant("g").sha, GATE_RUN_ID) == {}
 
@@ -1021,4 +1033,220 @@ def test_a_walk_that_stops_on_a_provider_error_says_what_its_failed_runs_cost(
     assert cli.main(_ask_argv(graph_store, gate_research, variant_file, "--repeats", "1")) == 1
     err = capsys.readouterr().err
     assert "gate-in-00 repeat 0: the provider refused the call with 401" in err
-    assert "tokens spent on graph runs that failed, since this command started: 300 in, 30 out" in err
+    assert (
+        "tokens spent on graph runs that failed, since this command started: 300 in, 30 out" in err
+    )
+
+
+def test_a_ruined_repeat_is_held_counted_and_found_finished_on_resume(
+    graph_store, gate_research, tmp_path, monkeypatch, capsys
+):
+    from contrib.replay import walk
+    from contrib.replay.account import Walker
+
+    variant_file = write_graph_variant(tmp_path, "g")
+    _install_echo_graph(monkeypatch)
+    original = Walker.equity
+
+    def equity(self, mark):
+        # The account is wiped out once it has taken one question.
+        return Decimal(0) if self.finish().steps else original(self, mark)
+
+    monkeypatch.setattr(walk.Walker, "equity", equity)
+    argv = _ask_argv(graph_store, gate_research, variant_file, "--repeats", "1")
+    assert cli.main(argv) == 0
+    captured = capsys.readouterr()
+    assert "asked: 1 new answer(s); already stored, skipped: 0" in captured.out
+    assert "repeat(s) ruined on the way: 1" in captured.out
+    assert "gate-in-01 repeat 0: equity 0 at the mark; the account is ruined" in captured.err
+    # Resumed: the ruin is found again before anything is asked, and the dry run
+    # does not promise the questions the ruined repeat will never ask.
+    assert cli.main([*argv, "--dry-run"]) == 0
+    assert "dry run: 1 answer(s) already stored, 0 to ask" in capsys.readouterr().out
+    assert cli.main(argv) == 0
+    captured = capsys.readouterr()
+    assert "asked: 0 new answer(s); already stored, skipped: 1" in captured.out
+    # The ruin is a hold the walk never stores, so the resumed walk finds it
+    # again at the same question and says so again, asking nothing.
+    assert "gate-in-01 repeat 0: equity 0 at the mark; the account is ruined" in captured.err
+    assert "repeat(s) ruined on the way: 1" in captured.out
+
+
+def test_the_gate_reads_the_recorded_guardrail_and_an_off_variant_reads_none(
+    graph_store, gate_research, tmp_path, monkeypatch, capsys
+):
+    from contrib.replay.upstream import GuardrailSide
+
+    _install_echo_graph(monkeypatch)
+    # The daemon recorded a short rule on slot 0's round (schema v14).
+    conn = sqlite3.connect(graph_store)
+    conn.execute("UPDATE ai_outputs SET guardrail_side = 'short' WHERE output_id = 'gate-out-00'")
+    conn.commit()
+    conn.close()
+    recorded = write_graph_variant(tmp_path, "g")
+    assert (
+        cli.main(_ask_argv(graph_store, gate_research, recorded, "--repeats", "1", "--limit", "1"))
+        == 0
+    )
+    off = write_graph_variant(tmp_path, "o", guardrail="off")
+    assert (
+        cli.main(_ask_argv(graph_store, gate_research, off, "--repeats", "1", "--limit", "1")) == 0
+    )
+    with ReplayStore(_replay_db(graph_store)) as replay:
+        under_rule = replay.answers(replay.variant("g").sha, GATE_RUN_ID)[0][0]
+        assert under_rule.risk_reason == "guardrail_against_rule"
+        assert replay.books(replay.variant("g").sha, GATE_RUN_ID)[0][
+            gate_input_id(0)
+        ].guardrail_side is (GuardrailSide.SHORT)
+        without = replay.answers(replay.variant("o").sha, GATE_RUN_ID)[0][0]
+        assert without.risk_reason is None and without.approved_margin_pct == 30
+        assert (
+            replay.books(replay.variant("o").sha, GATE_RUN_ID)[0][gate_input_id(0)].guardrail_side
+            is None
+        )
+
+
+@pytest.mark.parametrize(
+    "column, value",
+    [
+        ("mark", "101"),
+        ("entry", "98"),
+        ("wallet", "1"),
+        ("equity", "1"),
+        ("last_fill_at", "2027-01-01T00:00:00+00:00"),
+        ("guardrail_side", "short"),
+    ],
+)
+def test_every_field_of_a_stored_book_is_compared_on_resume(
+    graph_store, gate_research, tmp_path, monkeypatch, capsys, column, value
+):
+    variant_file = write_graph_variant(tmp_path, "g")
+    _install_echo_graph(monkeypatch)
+    argv = _ask_argv(graph_store, gate_research, variant_file, "--repeats", "1", "--limit", "2")
+    assert cli.main(argv) == 0
+    capsys.readouterr()
+    conn = sqlite3.connect(_replay_db(graph_store))
+    conn.execute(
+        f"UPDATE graph_books SET {column} = ? WHERE input_id = ?", (value, gate_input_id(1))
+    )
+    conn.commit()
+    conn.close()
+    assert cli.main(argv) == 1
+    assert "gate-in-01 repeat 0: the book it was asked from" in capsys.readouterr().err
+
+
+class _BrokenGraph(EchoGraph):
+    """A graph whose own check fails: not a provider failure, so never retried."""
+
+    def ask(self, **kwargs):
+        from contrib.replay.lower_graph import LowerGraphError
+
+        self.asked.append(kwargs)
+        self.lost_input_tokens += 300
+        self.lost_output_tokens += 30
+        raise LowerGraphError("the graph returned a list, not the state mapping")
+
+
+def test_the_graphs_own_error_stops_the_walk_without_a_retry(
+    graph_store, gate_research, tmp_path, monkeypatch, capsys
+):
+    variant_file = write_graph_variant(tmp_path, "g")
+    pauses: list[float] = []
+    monkeypatch.setattr(cli, "_sleep", pauses.append)
+    built: list[_BrokenGraph] = []
+    monkeypatch.setattr(
+        cli, "_build_graph", lambda variant: built.append(_BrokenGraph(variant)) or built[-1]
+    )
+    assert cli.main(_ask_argv(graph_store, gate_research, variant_file, "--repeats", "1")) == 1
+    err = capsys.readouterr().err
+    assert "the graph returned a list, not the state mapping" in err
+    assert (
+        "tokens spent on graph runs that failed, since this command started: 300 in, 30 out" in err
+    )
+    assert pauses == [] and len(built[0].asked) == 1
+
+
+def test_preflight_refuses_a_maker_run_whose_bars_the_research_store_lacks(
+    graph_store, gate_research, tmp_path, monkeypatch, capsys
+):
+    variant_file = write_graph_variant(tmp_path, "g")
+    built = _install_echo_graph(monkeypatch)
+    conn = sqlite3.connect(gate_research)
+    conn.execute("DELETE FROM candles")
+    conn.commit()
+    conn.close()
+    argv = _ask_argv(graph_store, gate_research, variant_file, "--repeats", "1")
+    assert cli.main([*argv, "--dry-run"]) == 1
+    err = capsys.readouterr().err
+    assert "gate-in-00: no bar in the research store covers" in err
+    assert cli.main(argv) == 1
+    assert "no bar in the research store" in capsys.readouterr().err
+    assert built and built[-1].asked == []
+    with ReplayStore(_replay_db(graph_store)) as replay:
+        assert replay.sha_of("g") is None
+
+
+def test_preflight_refuses_a_payload_without_a_position_section_before_any_ask(
+    graph_store, gate_research, tmp_path, monkeypatch, capsys
+):
+    import json
+
+    variant_file = write_graph_variant(tmp_path, "g")
+    built = _install_echo_graph(monkeypatch)
+    root = payload_dir(graph_store, GATE_RUN_ID)
+    payload = root / "BTC-gate-02.json"
+    document = json.loads(payload.read_text(encoding="utf-8"))
+    document["context_shape"] = "price"
+    payload.write_text(json.dumps(document), encoding="utf-8")
+    conn = sqlite3.connect(graph_store)
+    conn.execute(
+        "UPDATE ai_inputs SET input_payload_hash = NULL WHERE input_id = ?", (gate_input_id(2),)
+    )
+    conn.commit()
+    conn.close()
+    argv = _ask_argv(graph_store, gate_research, variant_file, "--repeats", "1")
+    assert cli.main([*argv, "--dry-run"]) == 1
+    assert "gate-in-02: the payload's context_shape 'price' names no position" in (
+        capsys.readouterr().err
+    )
+    assert cli.main(argv) == 1
+    capsys.readouterr()
+    assert built and built[-1].asked == []  # the graph was built, nothing was asked
+    with ReplayStore(_replay_db(graph_store)) as replay:
+        assert replay.sha_of("g") is None
+
+
+def test_a_graph_variant_without_a_cutoff_is_refused_before_paying_unless_told(
+    graph_store, gate_research, tmp_path, monkeypatch, capsys
+):
+    variant_file = write_graph_variant(tmp_path, "g", cutoff=None)
+    built = _install_echo_graph(monkeypatch)
+    argv = _ask_argv(graph_store, gate_research, variant_file, "--repeats", "1")
+    assert cli.main(argv) == 1
+    assert "'g' records no model_cutoff" in capsys.readouterr().err
+    assert built == []
+    with ReplayStore(_replay_db(graph_store)) as replay:
+        assert replay.sha_of("g") is None
+    assert cli.main([*argv, "--include-pre-cutoff"]) == 0
+    assert "-- g repeat 0 --" in capsys.readouterr().out
+
+
+class _TruncatedGraph(EchoGraph):
+    def ask(self, **kwargs):
+        from dataclasses import replace as dc_replace
+
+        # Cut off before the JSON block: the daemon files that as truncated_output.
+        return dc_replace(super().ask(**kwargs), text="I would go long because", truncated=True)
+
+
+def test_a_truncated_manager_completion_fails_closed(
+    graph_store, gate_research, tmp_path, monkeypatch, capsys
+):
+    variant_file = write_graph_variant(tmp_path, "g")
+    monkeypatch.setattr(cli, "_build_graph", lambda variant: _TruncatedGraph(variant))
+    argv = _ask_argv(graph_store, gate_research, variant_file, "--repeats", "1", "--limit", "1")
+    assert cli.main(argv) == 0
+    assert "fail-closed among the new answers: 1" in capsys.readouterr().out
+    with ReplayStore(_replay_db(graph_store)) as replay:
+        (answer,) = replay.answers(replay.variant("g").sha, GATE_RUN_ID)[0]
+        assert answer.fail_closed and answer.risk_reason == "truncated_output"

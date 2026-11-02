@@ -28,8 +28,11 @@ Breaking changes within the 0.x line are called out explicitly.
   `graph_books` (the book each answer was asked from), which is what lets a
   walk stopped by `--limit` resume where it left off and refuse a store whose
   books no longer rebuild. `--dry-run` prints the plan without a client,
-  `--rule` names the rule spec for the `rule` guardrail, and the shipped
-  `variants/graph-current.yaml` is paper-BTC-7's models. The account module
+  `--rule` names the rule spec for the `rule` guardrail (4h runs only), and the
+  shipped `variants/graph-current.yaml` is paper-BTC-7's models. `--ask` needs
+  `--replay-db` and refuses a variant without `model_cutoff` before anything
+  is paid for unless `--include-pre-cutoff` is given; `replay` refuses a graph
+  variant by name. The account module
   gained an incremental `Walker` for this; `simulate` is the same walk over
   asks known in advance.
 - **A `backtest` command for the replay package: one simulated account

@@ -186,7 +186,15 @@ class _Collector:
 class _LLM:
     """A fake chat model: answers with one text and reports one call to every collector it carries."""
 
-    def __init__(self, model: str, kwargs: dict, text: str, tokens: tuple[int, int] | None) -> None:
+    def __init__(
+        self,
+        model: str,
+        kwargs: dict,
+        text: str,
+        tokens: tuple[int, int] | None,
+        truncated: bool = False,
+    ) -> None:
+        self.truncated = truncated
         self.model = model
         self.kwargs = kwargs
         self.text = text
@@ -198,7 +206,9 @@ class _LLM:
         if self.tokens is not None:
             for collector in self.kwargs.get("callbacks", []):
                 collector.calls.append(
-                    _Call(collector.node, self.model, self.tokens[0], self.tokens[1], False)
+                    _Call(
+                        collector.node, self.model, self.tokens[0], self.tokens[1], self.truncated
+                    )
                 )
         return SimpleNamespace(content=self.text)
 
@@ -247,8 +257,13 @@ class _Fake:
     PATH_MAP = {node: node for node in (*RISK_NODES, PM)}
 
     def __init__(
-        self, *, deep_text: str = "Final decision", deep_tokens: tuple[int, int] | None = (300, 40)
+        self,
+        *,
+        deep_text: str = "Final decision",
+        deep_tokens: tuple[int, int] | None = (300, 40),
+        deep_truncated: bool = False,
     ) -> None:
+        self.deep_truncated = deep_truncated
         self.clients: list[tuple[str, str, dict]] = []
         self.llms: dict[str, _LLM] = {}
         self.graphs: list[_Graph] = []
@@ -266,6 +281,7 @@ class _Fake:
             kwargs,
             self.deep_text if deep else "the plan",
             self.deep_tokens if deep else (100, 20),
+            deep and self.deep_truncated,
         )
         self.llms[model] = llm
         return SimpleNamespace(get_llm=lambda: llm)
@@ -476,3 +492,9 @@ def test_the_system_message_wrapper_refuses_the_calls_that_would_skip_it():
     for name in ("batch", "with_structured_output", "bind_tools", "stream"):
         with pytest.raises(LowerGraphError, match=rf"called {name}\(\), which would run the model"):
             getattr(wrapped, name)
+
+
+def test_the_managers_truncation_is_the_completions():
+    fake = _Fake(deep_truncated=True)
+    completion = _ask(LowerGraph(graph_variant(**_QUICK), engine=fake.engine()))
+    assert completion.truncated is True and completion.usage_reported

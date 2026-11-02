@@ -364,9 +364,9 @@ class StoredBook:
 
     ``equity`` is the book marked at ``mark`` with the funding owed up to the
     question already settled; ``guardrail_side`` what the gate read from the
-    trend guardrail; the ``graph_*`` tokens what every completion of the
-    graph cost for this question, ``None`` for a question the provider
-    refused.
+    trend guardrail; the ``graph_*`` tokens what every graph run for this
+    question cost, the runs that failed included (for a refused question,
+    only those); ``None`` on a row written without the figure.
     """
 
     mark: Decimal

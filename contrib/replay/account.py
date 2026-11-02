@@ -53,6 +53,12 @@ funding paid up to the next question land on the decision that caused
 them. The last question has none; the path's final equity is read after
 its order. An account whose equity reaches zero is ruined: the path stops
 there and says so.
+
+The walk is a :class:`Walker`, one question at a time, so a caller that
+has to ask a model at each question with the account's own book in front
+of it (plan PR 3b, :mod:`.lower_graph`) can settle, read the book, ask,
+and then advance; :func:`simulate` is the same walk over asks known in
+advance.
 """
 
 from __future__ import annotations
@@ -92,6 +98,7 @@ __all__ = [
     "Step",
     "Target",
     "Terms",
+    "Walker",
     "simulate",
 ]
 
@@ -503,9 +510,153 @@ class Series:
         hi = bisect_right(self.funding, until_ms, key=lambda f: f.time)
         return self.funding[lo:hi]
 
+    def rate_at(self, at_ms: int) -> Decimal | None:
+        """The rate of the last settlement stamped at or before ``at_ms``: the funding in force."""
+        index = bisect_right(self.funding, at_ms, key=lambda f: f.time) - 1
+        return self.funding[index].rate if index >= 0 else None
+
+
+class Walker:
+    """The account mid-walk: one question at a time, forward in time.
+
+    A caller :meth:`settle`\\ s to a question's instant, reads the book it is
+    decided from (:attr:`position`, :attr:`wallet`, :meth:`equity`,
+    :attr:`last_fill_ms`), asks whatever it asks, and :meth:`advance`\\ s
+    with the decision; :meth:`finish` is the :class:`Path` so far.
+    :func:`simulate` is this walk over asks known in advance. A ruined
+    account takes no further question.
+    """
+
+    def __init__(self, terms: Terms, series: Series) -> None:
+        self.terms = terms
+        self.series = series
+        self.position = PositionState(coin=terms.coin, size=Decimal(0), entry_price=None)
+        self.wallet = terms.initial_balance
+        self.ruined = False
+        self.last_fill_ms: int | None = None
+        self._steps: list[Step] = []
+        self._previous: Decision | None = None
+        self._resting: Target | None = None
+        self._settled_to: int | None = None
+        self._pending: tuple[Decimal, int] = (Decimal(0), 0)
+
+    def settle(self, at_ms: int) -> None:
+        """Bring the wallet to ``at_ms``: the funding owed since the previous question, once.
+
+        Idempotent for one instant, so a caller may settle to read the book
+        before asking and :meth:`advance` does not settle again.
+        """
+        if self._settled_to == at_ms:
+            return
+        if self._previous is not None and self._previous.at_ms >= at_ms:
+            raise AccountError(
+                f"a question at {at_ms} does not follow the previous one at "
+                f"{self._previous.at_ms}; the walk goes forward in time"
+            )
+        paid = Decimal(0)
+        missing = 0
+        if self._previous is not None:
+            with localcontext(DECIMAL_CONTEXT):
+                paid, missing = _settle(
+                    self.series, self.position, self._previous.at_ms, at_ms, self._previous.mark
+                )
+                self.wallet += paid
+        self._pending = (paid, missing)
+        self._settled_to = at_ms
+
+    def equity(self, mark: Decimal) -> Decimal:
+        """The book marked at ``mark``, after :meth:`settle`."""
+        with localcontext(DECIMAL_CONTEXT):
+            return self.wallet + _unrealized(self.position, mark)
+
+    def advance(self, decision: Decision) -> Step:
+        """Apply ``decision`` to the book and record its step."""
+        if self.ruined:
+            raise AccountError(f"{decision.input_id}: the account is ruined; the walk has ended")
+        if self._previous is not None and self._previous.input_id == decision.input_id:
+            raise AccountError(f"{decision.input_id}: decided twice")
+        if self._previous is not None and self._previous.at_ms == decision.at_ms:
+            raise AccountError(
+                f"{self._previous.input_id} and {decision.input_id}: decided at the same instant"
+            )
+        self.settle(decision.at_ms)
+        funding_paid, missing = self._pending
+        equity = self.equity(decision.mark)
+        with localcontext(DECIMAL_CONTEXT):
+            target: Target | None = None
+            carried = False
+            filled: bool | None = None
+            price: Decimal | None = None
+            fee = Decimal(0)
+            if equity <= 0:
+                self.ruined = True
+            else:
+                carried = decision.target is None and self._resting is not None
+                target = self._resting if decision.target is None else decision.target
+                self._resting = None
+                if target is not None:
+                    try:
+                        order = _order(target, decision, self.position, equity, self.terms)
+                        if order is not None:
+                            side, qty = order
+                            filled, price = _fill(self.terms, self.series, decision, side)
+                            if filled:
+                                effect = compute_fill_effect(
+                                    self.position,
+                                    side=side,
+                                    qty=qty,
+                                    price=price,
+                                    fee_rate=self.terms.fee_rate,
+                                )
+                                self.position = effect.position
+                                self.wallet += effect.wallet_delta
+                                fee = effect.fee
+                                self.last_fill_ms = decision.at_ms
+                            else:
+                                self._resting = target
+                    except AccountError:
+                        raise
+                    except (ValueError, InvalidOperation) as exc:
+                        # The fill model's and the books' own refusals (a post
+                        # rounded to nothing on a coarse tick, a zero quantity),
+                        # named by the question that hit them.
+                        raise AccountError(f"{decision.input_id}: {exc}") from exc
+        step = Step(
+            input_id=decision.input_id,
+            at_ms=decision.at_ms,
+            segment=decision.segment,
+            mark=decision.mark,
+            target=target,
+            carried=carried,
+            filled=filled,
+            fill_price=price,
+            fee=fee,
+            funding=funding_paid,
+            funding_missing=missing,
+            size=self.position.size,
+            entry=self.position.entry_price,
+            wallet=self.wallet,
+            equity=equity,
+        )
+        self._steps.append(step)
+        self._previous = decision
+        return step
+
+    def finish(self) -> Path:
+        """The path so far: each decision's return is the equity move to the next question."""
+        steps = self._steps
+        # The ruin step, if any, is last and has no return.
+        finished = [
+            step
+            if index + 1 == len(steps)
+            else replace(step, ret=float(steps[index + 1].equity / step.equity) - 1.0)
+            for index, step in enumerate(steps)
+        ]
+        return Path(terms=self.terms, steps=tuple(finished))
+
 
 def simulate(decisions: Sequence[Decision], *, terms: Terms, series: Series) -> Path:
-    """Walk the account through ``decisions`` in time order. The one entry point.
+    """Walk the account through ``decisions`` in time order. The entry point for known asks.
 
     ``series`` holds the run's bars from the research store (the fill model
     reads the one each decision falls in; the funding values the position at
@@ -526,87 +677,12 @@ def simulate(decisions: Sequence[Decision], *, terms: Terms, series: Series) -> 
             raise AccountError(
                 f"{earlier.input_id} and {later.input_id}: decided at the same instant"
             )
-    steps: list[Step] = []
-    position = PositionState(coin=terms.coin, size=Decimal(0), entry_price=None)
-    wallet = terms.initial_balance
-    resting: Target | None = None
-    with localcontext(DECIMAL_CONTEXT):
-        for index, decision in enumerate(ordered):
-            funding_paid = Decimal(0)
-            missing = 0
-            if index:
-                previous = ordered[index - 1]
-                funding_paid, missing = _settle(
-                    series, position, previous.at_ms, decision.at_ms, previous.mark
-                )
-                wallet += funding_paid
-            equity = wallet + _unrealized(position, decision.mark)
-            target: Target | None = None
-            carried = False
-            filled: bool | None = None
-            price: Decimal | None = None
-            fee = Decimal(0)
-            ruined = equity <= 0
-            if not ruined:
-                carried = decision.target is None and resting is not None
-                target = resting if decision.target is None else decision.target
-                resting = None
-                if target is not None:
-                    try:
-                        order = _order(target, decision, position, equity, terms)
-                        if order is not None:
-                            side, qty = order
-                            filled, price = _fill(terms, series, decision, side)
-                            if filled:
-                                effect = compute_fill_effect(
-                                    position,
-                                    side=side,
-                                    qty=qty,
-                                    price=price,
-                                    fee_rate=terms.fee_rate,
-                                )
-                                position = effect.position
-                                wallet += effect.wallet_delta
-                                fee = effect.fee
-                            else:
-                                resting = target
-                    except AccountError:
-                        raise
-                    except (ValueError, InvalidOperation) as exc:
-                        # The fill model's and the books' own refusals (a post
-                        # rounded to nothing on a coarse tick, a zero quantity),
-                        # named by the question that hit them.
-                        raise AccountError(f"{decision.input_id}: {exc}") from exc
-            steps.append(
-                Step(
-                    input_id=decision.input_id,
-                    at_ms=decision.at_ms,
-                    segment=decision.segment,
-                    mark=decision.mark,
-                    target=target,
-                    carried=carried,
-                    filled=filled,
-                    fill_price=price,
-                    fee=fee,
-                    funding=funding_paid,
-                    funding_missing=missing,
-                    size=position.size,
-                    entry=position.entry_price,
-                    wallet=wallet,
-                    equity=equity,
-                )
-            )
-            if ruined:
-                break
-    # Each decision's return is the equity move to the next question; the
-    # ruin step, if any, is last and has none.
-    finished = [
-        step
-        if index + 1 == len(steps)
-        else replace(step, ret=float(steps[index + 1].equity / step.equity) - 1.0)
-        for index, step in enumerate(steps)
-    ]
-    return Path(terms=terms, steps=tuple(finished))
+    walker = Walker(terms, series)
+    for decision in ordered:
+        walker.advance(decision)
+        if walker.ruined:
+            break
+    return walker.finish()
 
 
 def _unrealized(position: PositionState, mark: Decimal) -> Decimal:

@@ -156,7 +156,7 @@ ignore_missing_imports = true
 # import too, so the lazy borrow needs the override as much as a top-level
 # one would.)
 [[tool.mypy.overrides]]
-module = ["yaml", "yaml.*", "langchain_core", "langchain_core.*"]
+module = ["yaml", "yaml.*", "langchain_core", "langchain_core.*", "langgraph", "langgraph.*"]
 ignore_missing_imports = true
 
 # The dashboard's page (``contrib/dashboard/app``, dashboard plan PR 4) is

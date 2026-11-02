@@ -1,6 +1,6 @@
 """``replay.sqlite``: the past papers' own store (replay plan PR 2).
 
-Nine tables, and nothing here ever writes the paper store:
+Eleven tables, and nothing here ever writes the paper store:
 
 - ``variants``: one row per variant this store has asked with, keyed by its
   :attr:`~.variant.Variant.sha`. The name is UNIQUE too, so a name means
@@ -46,6 +46,14 @@ Nine tables, and nothing here ever writes the paper store:
   the account's own figures as text decimals. Written on every walk, so a
   path can be re-read beside the terms it was walked under; nothing here
   is ever asked for twice (a walk is a computation, not a purchase).
+- ``graph_variants`` / ``graph_books`` (plan PR 3b): a graph variant's
+  extra identity (its quick model and its guardrail setting; its answers
+  are ordinary ``answers`` rows, so every reader of answers reads them),
+  and the simulated account's book each of those answers was asked from
+  — the mark, the position, the wallet, the equity, the last fill, what
+  the gate read from the guardrail, and what the whole graph's completions
+  cost — keyed like the answer, so an asking walk stopped by ``--limit``
+  resumes against the book it left and refuses one that no longer rebuilds.
 - ``probe_answers``: one row per question, variant, probe and repeat; the
   key is ``(variant_sha, probe_sha, run_id, input_id, repeat)``, so a probe
   run resumes as a replay does. A row keeps the raw text and the
@@ -58,12 +66,13 @@ The schema is versioned by ``PRAGMA user_version``. A file that holds
 tables but not ours is refused before anything writes to it, a store a
 newer build wrote is refused rather than written through, and a reader
 never creates the tables: an empty file opened to be read is refused. A
-store written at v2 (before the probe) or v3 (before the backtest) is
-brought to v4 by a command that may create a store (``replay``,
+store written at v2 (before the probe), v3 (before the backtest) or v4
+(before the graph variants) is brought to v5 by a command that may create a store (``replay``,
 ``register``, ``score --holdout`` on the paper trader's own answers, and
 ``backtest`` on a store that exists), which adds the missing tables in one
 transaction and changes nothing already there; any other command reads it
-as written, as a store with no probe answers or no backtests. A v1 store
+as written, as a store with no probe answers, no backtests or no graph
+variants. A v1 store
 is refused: v1
 never left its pull request, so there is no migration from it. A write
 that fails raises :class:`ReplayStoreError` naming the store, after
@@ -78,7 +87,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Final
 
@@ -86,8 +95,23 @@ from .account import Path as AccountPath, Step
 from .paper_store import answer_from_row
 from .probe import REFUSED, Forecast, Probe, ProbeAnswer, ProbeError
 from .score import Answer
-from .upstream import RiskGateResult, Split, SplitError
-from .variant import Variant, short_sha
+from .upstream import (
+    GuardrailSide,
+    RiskGateResult,
+    Split,
+    SplitError,
+    epoch_ms,
+    from_epoch_ms,
+    parse_instant,
+)
+from .variant import (
+    GRAPH_MODE,
+    GUARDRAIL_RECORDED,
+    SIMPLE_MODE,
+    Variant,
+    VariantError,
+    short_sha,
+)
 
 __all__ = [
     "SCHEMA_VERSION",
@@ -97,17 +121,19 @@ __all__ = [
     "ReplayStore",
     "ReplayStoreError",
     "StoredAnswer",
+    "StoredBook",
     "StoredProbeAnswer",
     "WalkedPath",
 ]
 
 # v2 added ``failures`` and ``splits`` and let a ledger row name no variant;
 # v3 added ``probes`` and ``probe_answers``; v4 added ``backtests`` and
-# ``backtest_steps``. v1 never left its pull request, so there is no
-# migration from it: a v1 file is named and refused, not taken for someone
-# else's database. A v2 or v3 file gains the later tables when a command
-# that may create a store opens it.
-SCHEMA_VERSION: Final = 4
+# ``backtest_steps``; v5 added ``graph_variants`` and ``graph_books``. v1
+# never left its pull request, so there is no migration from it: a v1 file
+# is named and refused, not taken for someone else's database. A v2, v3 or
+# v4 file gains the later tables when a command that may create a store
+# opens it.
+SCHEMA_VERSION: Final = 5
 
 _DDL: Final = (
     """
@@ -261,12 +287,50 @@ _BACKTEST_DDL: Final = (
     )
     """,
 )
+# The tables v5 added (plan PR 3b): a graph variant's extra identity, and
+# the book each of its answers was asked from. ``last_fill_at`` is an ISO
+# stamp as every other instant here; the decimals are text, as the
+# account's are in ``backtest_steps``.
+_GRAPH_DDL: Final = (
+    """
+    CREATE TABLE graph_variants (
+        variant_sha    TEXT PRIMARY KEY REFERENCES variants (variant_sha),
+        quick_provider TEXT,
+        quick_model    TEXT,
+        guardrail      TEXT NOT NULL,
+        CHECK ((quick_provider IS NULL) = (quick_model IS NULL))
+    )
+    """,
+    """
+    CREATE TABLE graph_books (
+        variant_sha         TEXT NOT NULL REFERENCES variants (variant_sha),
+        run_id              TEXT NOT NULL,
+        input_id            TEXT NOT NULL,
+        repeat              INTEGER NOT NULL CHECK (repeat >= 0),
+        mark                TEXT NOT NULL,
+        size                TEXT NOT NULL,
+        entry               TEXT,
+        wallet              TEXT NOT NULL,
+        equity              TEXT NOT NULL,
+        last_fill_at        TEXT,
+        guardrail_side      TEXT,
+        graph_input_tokens  INTEGER,
+        graph_output_tokens INTEGER,
+        PRIMARY KEY (variant_sha, run_id, input_id, repeat)
+    )
+    """,
+)
 _PROBE_TABLES: Final = frozenset({"probes", "probe_answers"})
 _BACKTEST_TABLES: Final = frozenset({"backtests", "backtest_steps"})
+_GRAPH_TABLES: Final = frozenset({"graph_variants", "graph_books"})
 _V2_TABLES: Final = frozenset({"variants", "answers", "failures", "splits", "ledger"})
 # What each version after v2 added: ``(last version without them, DDL, names)``.
 # The next schema bump adds a row here and moves ``SCHEMA_VERSION``.
-_LATER_TABLES: Final = ((2, _PROBE_DDL, _PROBE_TABLES), (3, _BACKTEST_DDL, _BACKTEST_TABLES))
+_LATER_TABLES: Final = (
+    (2, _PROBE_DDL, _PROBE_TABLES),
+    (3, _BACKTEST_DDL, _BACKTEST_TABLES),
+    (4, _GRAPH_DDL, _GRAPH_TABLES),
+)
 _TABLES: Final = _V2_TABLES.union(*(tables for _, _, tables in _LATER_TABLES))
 _ALL_DDL: Final = (*_DDL, *(ddl for _, ddls, _ in _LATER_TABLES for ddl in ddls))
 _BUSY_TIMEOUT_MS: Final = 5000
@@ -292,6 +356,28 @@ class StoredAnswer:
     model_reported: str | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
+
+
+@dataclass(frozen=True)
+class StoredBook:
+    """The simulated account's book one graph answer was asked from (plan PR 3b): a ``graph_books`` row.
+
+    ``equity`` is the book marked at ``mark`` with the funding owed up to the
+    question already settled; ``guardrail_side`` what the gate read from the
+    trend guardrail; the ``graph_*`` tokens what every completion of the
+    graph cost for this question, ``None`` for a question the provider
+    refused.
+    """
+
+    mark: Decimal
+    size: Decimal
+    entry: Decimal | None
+    wallet: Decimal
+    equity: Decimal
+    last_fill_ms: int | None
+    guardrail_side: GuardrailSide | None
+    graph_input_tokens: int | None = None
+    graph_output_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -387,6 +473,87 @@ def _enum_text(value: object) -> str | None:
     return None if value is None else str(getattr(value, "value", value))
 
 
+def _insert_answer(conn: sqlite3.Connection, variant_sha: str, answer: StoredAnswer) -> None:
+    gate = answer.gate
+    conn.execute(
+        "INSERT INTO answers (variant_sha, run_id, input_id, repeat, asked_at, segment, "
+        "raw_response, truncated, model_reported, input_tokens, output_tokens, "
+        "invalid_reason, decision_mode, target_side, requested_target_margin_pct, "
+        "approved_target_margin_pct, risk_action, risk_reason, confidence, "
+        "order_created, no_order_reason) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            variant_sha,
+            answer.run_id,
+            answer.input_id,
+            answer.repeat,
+            answer.asked_at.isoformat(),
+            answer.segment,
+            answer.raw_response,
+            int(answer.truncated),
+            answer.model_reported,
+            answer.input_tokens,
+            answer.output_tokens,
+            answer.invalid_reason,
+            _enum_text(gate.decision_mode),
+            _enum_text(gate.target_side),
+            _text(gate.requested_target_margin_pct),
+            _text(gate.approved_target_margin_pct),
+            _enum_text(gate.risk_action),
+            gate.risk_reason,
+            _text(gate.confidence),
+            int(gate.order_created),
+            gate.no_order_reason,
+        ),
+    )
+
+
+def _insert_failure(
+    conn: sqlite3.Connection,
+    variant_sha: str,
+    run_id: str,
+    input_id: str,
+    repeat: int,
+    error: str,
+    now: datetime,
+) -> None:
+    conn.execute(
+        "INSERT INTO failures (variant_sha, run_id, input_id, repeat, failed_at, error) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (variant_sha, run_id, input_id, repeat, now.isoformat(), error),
+    )
+
+
+def _insert_book(
+    conn: sqlite3.Connection,
+    variant_sha: str,
+    run_id: str,
+    input_id: str,
+    repeat: int,
+    book: StoredBook,
+) -> None:
+    conn.execute(
+        "INSERT INTO graph_books (variant_sha, run_id, input_id, repeat, mark, size, entry, "
+        "wallet, equity, last_fill_at, guardrail_side, graph_input_tokens, "
+        "graph_output_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            variant_sha,
+            run_id,
+            input_id,
+            repeat,
+            str(book.mark),
+            str(book.size),
+            _text(book.entry),
+            str(book.wallet),
+            str(book.equity),
+            None if book.last_fill_ms is None else from_epoch_ms(book.last_fill_ms).isoformat(),
+            _enum_text(book.guardrail_side),
+            book.graph_input_tokens,
+            book.graph_output_tokens,
+        ),
+    )
+
+
 class ReplayStore:
     """An open ``replay.sqlite``. Use as a context manager.
 
@@ -394,7 +561,7 @@ class ReplayStore:
     and ``score --holdout`` or ``backtest --holdout`` without a variant (they
     have a look to record) create it, and any other reader refuses rather
     than leave an empty store behind a typo. The same commands, and
-    ``backtest`` on a store that exists, bring a v2 or v3 store to v4; any
+    ``backtest`` on a store that exists, bring a v2, v3 or v4 store to v5; any
     other open reads it as written (module docstring).
     """
 
@@ -402,9 +569,11 @@ class ReplayStore:
         self.path = path
         self._create = create
         # False only for an older store opened by a reader (module docstring):
-        # a v2 store has no probe tables, a v2 or v3 store no backtest tables.
+        # a v2 store has no probe tables, a v2 or v3 store no backtest tables,
+        # a store before v5 no graph tables.
         self.probe_tables = True
         self.backtest_tables = True
+        self.graph_tables = True
         if path.exists() and not path.is_file():
             raise ReplayStoreError(f"{path} is not a regular file")
         if not path.exists() and not create:
@@ -448,6 +617,7 @@ class ReplayStore:
                 # finding none.
                 self.probe_tables = bool(names & _PROBE_TABLES)
                 self.backtest_tables = bool(names & _BACKTEST_TABLES)
+                self.graph_tables = bool(names & _GRAPH_TABLES)
                 return
             # The one kind of migration: a later version only added tables,
             # so an older store gains them and keeps everything it holds.
@@ -537,6 +707,8 @@ class ReplayStore:
         (it is not part of the sha, so the answers stand).
         """
         cutoff = None if variant.model_cutoff is None else variant.model_cutoff.isoformat()
+        if variant.mode == GRAPH_MODE:
+            self._require_graph_tables()
         with self.transaction() as conn:
             by_name = conn.execute(
                 "SELECT variant_sha FROM variants WHERE name = ?", (variant.name,)
@@ -545,8 +717,8 @@ class ReplayStore:
                 raise ReplayStoreError(
                     f"variant name {variant.name!r} already stands for "
                     f"{short_sha(by_name[0])} in {self.path}, and this file is "
-                    f"{variant.short_sha} (its model, prompt, temperature, cap or extra context "
-                    "changed); a changed variant needs a new name"
+                    f"{variant.short_sha} (its model, prompt, temperature, cap, extra context, "
+                    "mode, quick model or guardrail changed); a changed variant needs a new name"
                 )
             by_sha = conn.execute(
                 "SELECT name, model_cutoff FROM variants WHERE variant_sha = ?", (variant.sha,)
@@ -574,6 +746,17 @@ class ReplayStore:
                         now.isoformat(),
                     ),
                 )
+                if variant.mode == GRAPH_MODE:
+                    conn.execute(
+                        "INSERT INTO graph_variants (variant_sha, quick_provider, quick_model, "
+                        "guardrail) VALUES (?, ?, ?, ?)",
+                        (
+                            variant.sha,
+                            variant.quick_provider,
+                            variant.quick_model,
+                            variant.guardrail,
+                        ),
+                    )
                 return []
             if by_sha["model_cutoff"] != cutoff:
                 conn.execute(
@@ -601,16 +784,35 @@ class ReplayStore:
                 + (", ".join(repr(k) for k in known) if known else "none")
             )
         cutoff = row["model_cutoff"]
-        variant = Variant(
-            name=row["name"],
-            provider=row["provider"],
-            model=row["model"],
-            system_prompt=row["system_prompt"],
-            temperature=row["temperature"],
-            max_tokens=row["max_tokens"],
-            extra_context=row["extra_context"],
-            model_cutoff=None if cutoff is None else date.fromisoformat(cutoff),
+        graph = (
+            self.conn.execute(
+                "SELECT quick_provider, quick_model, guardrail FROM graph_variants "
+                "WHERE variant_sha = ?",
+                (row["variant_sha"],),
+            ).fetchone()
+            if self.graph_tables
+            else None
         )
+        try:
+            variant = Variant(
+                name=row["name"],
+                provider=row["provider"],
+                model=row["model"],
+                system_prompt=row["system_prompt"],
+                temperature=row["temperature"],
+                max_tokens=row["max_tokens"],
+                extra_context=row["extra_context"],
+                model_cutoff=None if cutoff is None else date.fromisoformat(cutoff),
+                mode=SIMPLE_MODE if graph is None else GRAPH_MODE,
+                quick_provider=None if graph is None else graph["quick_provider"],
+                quick_model=None if graph is None else graph["quick_model"],
+                guardrail=GUARDRAIL_RECORDED if graph is None else graph["guardrail"],
+            )
+        except VariantError as exc:
+            raise ReplayStoreError(
+                f"variant {name!r} in {self.path} describes no usable variant ({exc}); the row "
+                "was changed after it was stored"
+            ) from exc
         if variant.sha != row["variant_sha"]:
             raise ReplayStoreError(
                 f"variant {name!r} in {self.path} is keyed {short_sha(row['variant_sha'])} but its "
@@ -632,39 +834,8 @@ class ReplayStore:
 
     def write_answer(self, variant_sha: str, answer: StoredAnswer) -> None:
         """One answer in its own transaction, so an interrupted replay keeps what it paid for."""
-        gate = answer.gate
         with self.transaction() as conn:
-            conn.execute(
-                "INSERT INTO answers (variant_sha, run_id, input_id, repeat, asked_at, segment, "
-                "raw_response, truncated, model_reported, input_tokens, output_tokens, "
-                "invalid_reason, decision_mode, target_side, requested_target_margin_pct, "
-                "approved_target_margin_pct, risk_action, risk_reason, confidence, "
-                "order_created, no_order_reason) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    variant_sha,
-                    answer.run_id,
-                    answer.input_id,
-                    answer.repeat,
-                    answer.asked_at.isoformat(),
-                    answer.segment,
-                    answer.raw_response,
-                    int(answer.truncated),
-                    answer.model_reported,
-                    answer.input_tokens,
-                    answer.output_tokens,
-                    answer.invalid_reason,
-                    _enum_text(gate.decision_mode),
-                    _enum_text(gate.target_side),
-                    _text(gate.requested_target_margin_pct),
-                    _text(gate.approved_target_margin_pct),
-                    _enum_text(gate.risk_action),
-                    gate.risk_reason,
-                    _text(gate.confidence),
-                    int(gate.order_created),
-                    gate.no_order_reason,
-                ),
-            )
+            _insert_answer(conn, variant_sha, answer)
 
     def record_failure(
         self,
@@ -678,11 +849,7 @@ class ReplayStore:
     ) -> None:
         """One question the provider refused for its own sake: not asked again, scored unanswered."""
         with self.transaction() as conn:
-            conn.execute(
-                "INSERT INTO failures (variant_sha, run_id, input_id, repeat, failed_at, error) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (variant_sha, run_id, input_id, repeat, now.isoformat(), error),
-            )
+            _insert_failure(conn, variant_sha, run_id, input_id, repeat, error, now)
 
     def failed(self, variant_sha: str, run_id: str) -> Mapping[int, set[str]]:
         """The ``input_id`` of every recorded failure for this variant and run, keyed by repeat."""
@@ -714,6 +881,84 @@ class ReplayStore:
             (variant_sha, run_id),
         ):
             by_repeat.setdefault(row["repeat"], []).append(answer_from_row(row))
+        return by_repeat
+
+    # -- graph answers (plan PR 3b) -------------------------------------------
+
+    def _require_graph_tables(self) -> None:
+        if not self.graph_tables:
+            raise ReplayStoreError(
+                f"{self.path} was written before the graph tables (replay schema v5) and was "
+                "opened to read; a command that may create a store brings it to v5"
+            )
+
+    def sha_of(self, name: str) -> str | None:
+        """The sha ``name`` stands for in this store, or ``None`` when it stands for none yet."""
+        row = self.conn.execute(
+            "SELECT variant_sha FROM variants WHERE name = ?", (name,)
+        ).fetchone()
+        return None if row is None else row[0]
+
+    def write_graph_answer(self, variant_sha: str, answer: StoredAnswer, book: StoredBook) -> None:
+        """One graph answer and the book it was asked from, in ONE transaction."""
+        self._require_graph_tables()
+        with self.transaction() as conn:
+            _insert_answer(conn, variant_sha, answer)
+            _insert_book(conn, variant_sha, answer.run_id, answer.input_id, answer.repeat, book)
+
+    def record_graph_failure(
+        self,
+        variant_sha: str,
+        *,
+        run_id: str,
+        input_id: str,
+        repeat: int,
+        error: str,
+        now: datetime,
+        book: StoredBook,
+    ) -> None:
+        """A question the provider refused on the walk, with the book it was asked from."""
+        self._require_graph_tables()
+        with self.transaction() as conn:
+            _insert_failure(conn, variant_sha, run_id, input_id, repeat, error, now)
+            _insert_book(conn, variant_sha, run_id, input_id, repeat, book)
+
+    def books(self, variant_sha: str, run_id: str) -> Mapping[int, Mapping[str, StoredBook]]:
+        """The book each stored graph answer or refusal was asked from, by repeat then question."""
+        if not self.graph_tables:
+            return {}
+        by_repeat: dict[int, dict[str, StoredBook]] = {}
+        for row in self.conn.execute(
+            "SELECT * FROM graph_books WHERE variant_sha = ? AND run_id = ? "
+            "ORDER BY repeat, input_id",
+            (variant_sha, run_id),
+        ):
+            try:
+                book = StoredBook(
+                    mark=Decimal(row["mark"]),
+                    size=Decimal(row["size"]),
+                    entry=None if row["entry"] is None else Decimal(row["entry"]),
+                    wallet=Decimal(row["wallet"]),
+                    equity=Decimal(row["equity"]),
+                    last_fill_ms=(
+                        None
+                        if row["last_fill_at"] is None
+                        else epoch_ms(parse_instant(row["last_fill_at"]), what="last_fill_at")
+                    ),
+                    guardrail_side=(
+                        None
+                        if row["guardrail_side"] is None
+                        else GuardrailSide(row["guardrail_side"])
+                    ),
+                    graph_input_tokens=row["graph_input_tokens"],
+                    graph_output_tokens=row["graph_output_tokens"],
+                )
+            except (ValueError, InvalidOperation, TypeError) as exc:
+                raise ReplayStoreError(
+                    f"{self.path}: graph_books row for {row['input_id']!r} repeat "
+                    f"{row['repeat']} cannot be read ({exc})"
+                ) from exc
+            by_repeat.setdefault(row["repeat"], {})[row["input_id"]] = book
         return by_repeat
 
     # -- probes --------------------------------------------------------------

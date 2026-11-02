@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import date
 from pathlib import Path
 
@@ -10,7 +12,7 @@ import pytest
 from contrib.replay.upstream import epoch_ms, parse_instant
 from contrib.replay.variant import DEFAULT_MAX_TOKENS, VariantError, load_variant
 
-from .papers import variant as make_variant
+from .papers import graph_variant, variant as make_variant, write_graph_variant
 
 MINIMAL = "name: v\nmodel:\n  provider: openrouter\n  id: a/b\nsystem_prompt_path: s.md\n"
 
@@ -165,3 +167,98 @@ def test_the_shipped_example_loads():
         date(2026, 1, 31),
     )
     assert variant.system_prompt.startswith("As the Portfolio Manager,")
+
+
+# -- graph variants (plan PR 3b) --------------------------------------------------
+
+
+def test_a_graph_variant_file_loads_its_quick_model_and_guardrail_without_a_prompt(tmp_path):
+    variant = load_variant(write_graph_variant(tmp_path, "g", guardrail="off"))
+    assert (variant.mode, variant.system_prompt) == ("graph", "")
+    assert (variant.quick_provider, variant.quick_model) == ("openrouter", "fixture/g-quick")
+    assert variant.guardrail == "off"
+    assert "graph mode: trader and risk debators on openrouter/fixture/g-quick" in variant.describe()
+    assert "the engine's own portfolio manager prompt, guardrail off" in variant.describe()
+    # A prompt given is read and said; a quick model left out means the same model throughout.
+    variant = load_variant(write_graph_variant(tmp_path, "h", quick=False, prompt=True))
+    assert variant.system_prompt and variant.quick_model is None
+    assert (
+        "on the same model, the file's prompt as the portfolio manager's system message"
+    ) in variant.describe()
+
+
+@pytest.mark.parametrize(
+    "lines, message",
+    [
+        (
+            ["mode: graph", "model:", "  provider: p", "  id: m", "guardrail: always"],
+            "guardrail must be one of",
+        ),
+        (
+            ["mode: graph", "model:", "  provider: p", "  id: m", "quick_model:", "  provider: p"],
+            "quick_model must be a mapping with exactly",
+        ),
+        (
+            ["model:", "  provider: p", "  id: m", "system_prompt_path: s.md", "guardrail: off"],
+            "guardrail only apply to a graph variant",
+        ),
+        (
+            [
+                "model:",
+                "  provider: p",
+                "  id: m",
+                "system_prompt_path: s.md",
+                "quick_model:",
+                "  provider: p",
+                "  id: q",
+            ],
+            "quick_model only apply to a graph variant",
+        ),
+        (["mode: full", "model:", "  provider: p", "  id: m"], "mode must be one of"),
+        (["model:", "  provider: p", "  id: m"], "lacks"),
+    ],
+    ids=["guardrail", "quick-shape", "guardrail-simple", "quick-simple", "mode", "needs-prompt"],
+)
+def test_a_graph_key_out_of_place_is_refused_by_name(tmp_path, lines, message):
+    (tmp_path / "s.md").write_text("Decide.", encoding="utf-8")
+    path = tmp_path / "x.yaml"
+    path.write_text("\n".join(["name: x", *lines]) + "\n", encoding="utf-8")
+    with pytest.raises(VariantError, match=message):
+        load_variant(path)
+
+
+def test_in_memory_a_simple_variant_takes_no_graph_keys_and_a_graph_one_pairs_its_quick_model():
+    with pytest.raises(VariantError, match="quick_model is a graph variant's key"):
+        make_variant(quick_provider="p", quick_model="q")
+    with pytest.raises(VariantError, match="guardrail is a graph variant's key"):
+        make_variant(guardrail="off")
+    with pytest.raises(VariantError, match="together, or neither"):
+        graph_variant(quick_model="q")
+    with pytest.raises(VariantError, match="system_prompt must be a non-empty string"):
+        make_variant(system_prompt="")
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{"quick_provider": "p", "quick_model": "q"}, {"guardrail": "off"}, {"system_prompt": "Decide."}],
+    ids=["quick", "guardrail", "prompt"],
+)
+def test_what_reaches_the_graph_changes_a_graph_variants_sha(change):
+    assert graph_variant(**change).sha != graph_variant().sha
+
+
+def test_a_graph_variant_differs_from_the_simple_one_and_a_simple_sha_is_the_six_field_digest():
+    simple = make_variant(system_prompt="Decide.")
+    assert graph_variant(system_prompt="Decide.").sha != simple.sha
+    # The simple digest is over the six fields it always was: no mode, quick model or
+    # guardrail in it, so every variant stored before graph variants keeps its sha.
+    identity = {
+        "provider": "openrouter",
+        "model": "a/b",
+        "system_prompt": "Decide.",
+        "temperature": None,
+        "max_tokens": DEFAULT_MAX_TOKENS,
+        "extra_context": None,
+    }
+    canonical = json.dumps(identity, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    assert simple.sha == "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()

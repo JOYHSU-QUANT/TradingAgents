@@ -94,7 +94,7 @@ SELECT a.decision_attempt_id, a.scheduled_at, a.status, a.attempt_count,
        i.current_position_side, i.current_margin_pct, i.configured_leverage,
        i.max_target_margin_pct, i.autoresearch_bias, i.autoresearch_strategy_id,
        i.prompt_version, i.model, i.context_shape, i.input_payload_path,
-       i.input_payload_hash, i.current_position_size,
+       i.input_payload_hash, i.current_position_size, i.candle_end,
        o.output_id, o.decision_mode, o.target_side, o.requested_target_margin_pct,
        o.approved_target_margin_pct, o.risk_action, o.risk_reason, o.confidence,
        o.order_created, o.no_order_reason, o.guardrail_side
@@ -363,6 +363,11 @@ class InputFacts:
     # gate. Required, not defaulted: a caller that forgets it must not
     # replay without the guardrail and look like a run that had it off.
     guardrail_side: GuardrailSide | None
+    # The close of the newest candle the context was built from (the row's
+    # ``candle_end``): the ``As of:`` the prompt prints, which the asking
+    # walk (plan PR 3b) renders the account's position section against and
+    # dates the trade by, as the daemon did. ``None`` on a row without one.
+    candle_end_ms: int | None = None
 
 
 def _payload_name(recorded: object) -> str | None:
@@ -374,6 +379,10 @@ def _payload_name(recorded: object) -> str | None:
     backslash (the rule ``persistence/backfill`` uses for the same column).
     """
     return None if recorded is None else PureWindowsPath(str(recorded)).name
+
+
+def _instant_ms(text: str) -> int:
+    return epoch_ms(parse_instant(text), what="candle_end")
 
 
 def _input_facts(row: sqlite3.Row) -> InputFacts:
@@ -388,6 +397,7 @@ def _input_facts(row: sqlite3.Row) -> InputFacts:
         margin_pct=_cell(row, "current_margin_pct", Decimal),
         leverage=_need(row, "configured_leverage", Decimal),
         guardrail_side=_cell(row, "guardrail_side", GuardrailSide),
+        candle_end_ms=_cell(row, "candle_end", _instant_ms),
     )
 
 

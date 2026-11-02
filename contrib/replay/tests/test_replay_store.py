@@ -17,17 +17,19 @@ from contrib.replay.replay_store import (
     ReplayStore,
     ReplayStoreError,
     StoredAnswer,
+    StoredBook,
 )
 from contrib.replay.upstream import (
     CurrentPositionState,
     DecisionConfig,
+    GuardrailSide,
     RiskConfig,
     evaluate,
     parse_target_decision,
 )
 
-from .conftest import downgrade_to_v3, terms
-from .papers import decision_text, variant as make_variant
+from .conftest import downgrade_to_v3, downgrade_to_v4, terms
+from .papers import decision_text, graph_variant, variant as make_variant
 
 NOW = datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc)
 
@@ -458,3 +460,114 @@ def test_a_store_from_the_earlier_schema_is_named_not_taken_for_a_foreign_file(t
     conn.close()
     with pytest.raises(ReplayStoreError, match="was written at replay schema v1, before"):
         ReplayStore(path)
+
+
+# -- graph variants and books (plan PR 3b) -----------------------------------------
+
+
+def _book(**overrides) -> StoredBook:
+    fields = {
+        "mark": Decimal("100"),
+        "size": Decimal("3"),
+        "entry": Decimal("99"),
+        "wallet": Decimal("999.95545"),
+        "equity": Decimal("1002.95545"),
+        "last_fill_ms": 1_800_000_000_000,
+        "guardrail_side": GuardrailSide.LONG,
+        "graph_input_tokens": 500,
+        "graph_output_tokens": 50,
+    }
+    fields.update(overrides)
+    return StoredBook(**fields)
+
+
+def test_a_graph_variant_registers_with_its_quick_model_and_guardrail_and_reads_back(tmp_path):
+    variant = graph_variant(quick_provider="openrouter", quick_model="q/q", guardrail="rule")
+    with ReplayStore(tmp_path / "r.sqlite", create=True) as store:
+        assert store.register(variant, now=NOW) == []
+        assert store.variant("g") == variant
+        # The same file under another name is the same sha: refused as for any variant.
+        same = graph_variant(
+            name="h", quick_provider="openrouter", quick_model="q/q", guardrail="rule"
+        )
+        with pytest.raises(ReplayStoreError, match="already stored as 'g'"):
+            store.register(same, now=NOW)
+        # A simple variant beside it reads back simple.
+        store.register(make_variant(), now=NOW)
+        assert store.variant("v").mode == "simple"
+
+
+def test_a_graph_answer_and_its_book_are_written_together_and_read_back_exactly(tmp_path):
+    variant = graph_variant()
+    text = decision_text("set_target", "long", 30, 0.8)
+    answer = StoredAnswer(
+        run_id="run",
+        input_id="q1",
+        repeat=0,
+        asked_at=NOW,
+        segment="train",
+        raw_response=text,
+        truncated=False,
+        invalid_reason=None,
+        gate=_gate(text),
+        model_reported="m",
+        input_tokens=100,
+        output_tokens=10,
+    )
+    flat_book = _book(
+        size=Decimal(0),
+        entry=None,
+        last_fill_ms=None,
+        guardrail_side=None,
+        graph_input_tokens=None,
+        graph_output_tokens=None,
+    )
+    with ReplayStore(tmp_path / "r.sqlite", create=True) as store:
+        store.register(variant, now=NOW)
+        store.write_graph_answer(variant.sha, answer, _book())
+        store.record_graph_failure(
+            variant.sha, run_id="run", input_id="q2", repeat=0, error="422", now=NOW, book=flat_book
+        )
+        books = store.books(variant.sha, "run")[0]
+        held = books["q1"]
+        assert (held.size, held.entry, held.wallet, held.equity) == (
+            Decimal("3"),
+            Decimal("99"),
+            Decimal("999.95545"),
+            Decimal("1002.95545"),
+        )
+        assert held.last_fill_ms == 1_800_000_000_000
+        assert held.guardrail_side is GuardrailSide.LONG
+        assert (held.graph_input_tokens, held.graph_output_tokens) == (500, 50)
+        flat = books["q2"]
+        assert flat.size == 0 and flat.entry is None and flat.guardrail_side is None
+        assert flat.graph_input_tokens is None
+        assert [a.input_id for a in store.answers(variant.sha, "run")[0]] == ["q1"]
+        assert store.failed(variant.sha, "run") == {0: {"q2"}}
+        assert store.trials() == 1
+        # The same question and repeat cannot be stored twice; the book goes with the answer.
+        with pytest.raises(ReplayStoreError, match="write failed"):
+            store.write_graph_answer(variant.sha, answer, _book())
+        assert len(store.books(variant.sha, "run")[0]) == 2
+
+
+def test_a_v4_store_is_read_as_written_and_takes_no_graph_variant(tmp_path):
+    path = tmp_path / "r.sqlite"
+    with ReplayStore(path, create=True) as store:
+        store.register(make_variant(), now=NOW)
+    downgrade_to_v4(path)
+    with ReplayStore(path) as store:
+        assert store.backtest_tables and not store.graph_tables
+        assert store.variant("v") == make_variant()
+        assert store.books(make_variant().sha, "run") == {}
+        with pytest.raises(ReplayStoreError, match="before the graph tables"):
+            store.register(graph_variant(), now=NOW)
+    conn = sqlite3.connect(path)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone() == (4,)
+    finally:
+        conn.close()
+    with ReplayStore(path, create=True) as store:
+        assert store.graph_tables
+        store.register(graph_variant(), now=NOW)
+        assert store.variant("g").mode == "graph"

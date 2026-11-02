@@ -10,6 +10,28 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **`backtest --ask`: the lower half of the paper trader's graph re-run from
+  each cycle's recorded reports, question by question from the simulated
+  account's own book** (replay plan PR 3b). A graph variant (`mode: graph`,
+  with an optional `quick_model` for the trader and the three risk debators
+  and a `guardrail` setting: `recorded`, `off` or `rule`) is walked over a
+  run's train and validation questions: the `.reports.json` sidecar supplies
+  the analysts' reports and the research debate, the perp package's own
+  renderer (`render_position_section`, made public) puts the account's
+  position section where the recorded one stood (a payload without one is
+  refused), the engine's node factories run `Trader -> risk debate ->
+  Portfolio Manager` on a graph assembled in `contrib/replay/lower_graph.py`
+  (upstream `setup.py` untouched, structured output off as the daemon has
+  it), and the decision is parsed and gated from the account's book. Answers
+  are ordinary `answers` rows, so `score`, `compare` and `backtest --variant`
+  read them unchanged; `replay.sqlite` v5 adds `graph_variants` and
+  `graph_books` (the book each answer was asked from), which is what lets a
+  walk stopped by `--limit` resume where it left off and refuse a store whose
+  books no longer rebuild. `--dry-run` prints the plan without a client,
+  `--rule` names the rule spec for the `rule` guardrail, and the shipped
+  `variants/graph-current.yaml` is paper-BTC-7's models. The account module
+  gained an incremental `Walker` for this; `simulate` is the same walk over
+  asks known in advance.
 - **A `backtest` command for the replay package: one simulated account
   walked through a paper run's recorded decisions, four controls, and the
   mother plan's section 5 bar as a program** (replay plan PR 3a,

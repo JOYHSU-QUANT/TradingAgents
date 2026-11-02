@@ -19,7 +19,7 @@ import pytest
 from contrib.hyperliquid_perp.domains.perp.schema import Candle, FundingPoint
 from contrib.replay import cli
 from contrib.replay.replay_store import SCHEMA_VERSION, ReplayStore
-from contrib.replay.upstream import ResearchStore
+from contrib.replay.upstream import ResearchStore, payload_dir
 
 from .conftest import (
     ANCHOR_MS,
@@ -27,16 +27,23 @@ from .conftest import (
     ROWS,
     RUN_ID,
     STEP_MS,
+    at_ms,
     downgrade_to_v3,
     run_config,
     write_paper_store,
 )
 from .papers import (
+    FORMAT,
     PAPERS,
+    POSITION_SECTION,
     RUN_ID as GATE_RUN_ID,
     Echo,
+    EchoGraph,
+    input_id as gate_input_id,
+    question_line,
     replay_argv,
     write_gate_store,
+    write_graph_variant,
     write_variant,
 )
 
@@ -584,3 +591,301 @@ def test_a_maker_run_whose_bars_the_store_lacks_is_refused_by_name(tmp_path, cap
     err = capsys.readouterr().err
     assert "no bar in the research store covers" in err
     assert "whether the maker post fills cannot be judged" in err
+
+
+# -- backtest --ask (plan PR 3b) ---------------------------------------------------
+
+
+@pytest.fixture
+def graph_store(tmp_path: Path) -> Path:
+    return write_gate_store(tmp_path / "paper_trading.db", reports=True)
+
+
+def _ask_argv(store: Path, research: Path, variant_file: Path, *extra: str) -> list[str]:
+    return _gate_backtest(store, research, "--ask", str(variant_file), *extra)
+
+
+def _install_echo_graph(monkeypatch) -> list[EchoGraph]:
+    built: list[EchoGraph] = []
+
+    def build(variant):
+        graph = EchoGraph(variant)
+        built.append(graph)
+        return graph
+
+    monkeypatch.setattr(cli, "_build_graph", build)
+    return built
+
+
+def test_ask_walks_the_graph_variant_from_its_own_book_and_reads_the_bar_on_its_answers(
+    graph_store, gate_research, tmp_path, monkeypatch, capsys
+):
+    variant_file = write_graph_variant(tmp_path, "g")
+    built = _install_echo_graph(monkeypatch)
+    assert cli.main(_ask_argv(graph_store, gate_research, variant_file, "--repeats", "2")) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == (
+        f"ask: run {GATE_RUN_ID} (BTC, 4h cycle), train + validation: 8 question(s) x 2 "
+        "repeat(s), the lower half of the graph from each cycle's recorded reports"
+    )
+    assert out[1].endswith(
+        "graph mode: trader and risk debators on openrouter/fixture/g-quick, the engine's own "
+        "portfolio manager prompt, guardrail recorded"
+    )
+    assert "asked: 16 new answer(s); already stored, skipped: 0" in out
+    assert (
+        "tokens reported: portfolio manager 1600 in, 160 out; whole graph 8000 in, 800 out over "
+        "80 completion(s)"
+    ) in out
+    # Then the bar, as for any variant: the echo says what paper said, so it walks paper's path.
+    paper = _section(out, "-- paper --")
+    echo = _section(out, "-- g repeat 0 --")
+    assert paper[2:4] == echo[2:4]
+    (graph,) = built
+    # Question by question, the repeats inside.
+    firsts = [a["context_text"].splitlines()[0] for a in graph.asked[:4]]
+    assert firsts == [question_line(0), question_line(0), question_line(1), question_line(1)]
+    first, third = graph.asked[0]["context_text"], graph.asked[2]["context_text"]
+    # Slot 0 is asked from a flat 1000 USDC account; slot 1 from the long slot 0 opened
+    # (30% at 1x: 3 BTC at the post, marked at 102).
+    assert first.splitlines()[-2:] == [
+        "Position:",
+        "  flat, no open position (account equity 1,000.00 USDC)",
+    ]
+    assert "  Side: long, size 3 BTC, notional 306.00 USDC at mark" in third
+    assert POSITION_SECTION not in third
+    assert graph.asked[0]["format_instructions"] == FORMAT
+    assert graph.asked[0]["reports"].investment_plan == "plan 00"
+    with ReplayStore(_replay_db(graph_store)) as replay:
+        stored = replay.variant("g")
+        assert (stored.mode, stored.quick_model, stored.guardrail) == (
+            "graph",
+            "fixture/g-quick",
+            "recorded",
+        )
+        answers = replay.answers(stored.sha, GATE_RUN_ID)
+        assert {repeat: len(rows) for repeat, rows in answers.items()} == {0: 8, 1: 8}
+        books = replay.books(stored.sha, GATE_RUN_ID)
+        assert books[0][gate_input_id(0)].size == 0
+        assert books[0][gate_input_id(0)].last_fill_ms is None
+        assert books[0][gate_input_id(1)].size == Decimal(3)
+        assert books[0][gate_input_id(1)].last_fill_ms == at_ms(0)
+        assert books[1][gate_input_id(1)].graph_input_tokens == 500
+        assert replay.trials() == 2
+
+
+def test_ask_stops_at_the_limit_and_resumes_against_the_book_it_left(
+    graph_store, gate_research, tmp_path, monkeypatch, capsys
+):
+    variant_file = write_graph_variant(tmp_path, "g")
+    _install_echo_graph(monkeypatch)
+    argv = _ask_argv(graph_store, gate_research, variant_file, "--repeats", "2")
+    assert cli.main([*argv, "--limit", "3"]) == 0
+    out = capsys.readouterr().out
+    assert "asked: 3 new answer(s); already stored, skipped: 0" in out
+    assert "stopped at --limit" in out and "-- paper --" not in out  # the bar waits
+    # A dry run now says what is left.
+    assert cli.main([*argv, "--dry-run"]) == 0
+    assert (
+        "dry run: 3 answer(s) already stored, 13 to ask; this command would ask for 13 of them"
+    ) in capsys.readouterr().out
+    assert cli.main(argv) == 0
+    out = capsys.readouterr().out
+    assert "asked: 13 new answer(s); already stored, skipped: 3" in out
+    assert "-- g repeat 1 --" in out
+    # Under another tick the maker posts fill elsewhere, so the stored books no longer
+    # rebuild: refused by name, nothing asked.
+    assert cli.main([*argv, "--tick", "5"]) == 1
+    err = capsys.readouterr().err
+    assert "gate-in-01 repeat 0: the book it was asked from" in err
+    assert "is not the one this command rebuilds" in err
+
+
+def test_an_answer_stored_after_an_unasked_question_is_refused(
+    graph_store, gate_research, tmp_path, monkeypatch, capsys
+):
+    variant_file = write_graph_variant(tmp_path, "g")
+    _install_echo_graph(monkeypatch)
+    argv = _ask_argv(graph_store, gate_research, variant_file, "--repeats", "1")
+    assert cli.main(argv) == 0
+    capsys.readouterr()
+    conn = sqlite3.connect(_replay_db(graph_store))
+    conn.execute("DELETE FROM answers WHERE input_id = ?", (gate_input_id(0),))
+    conn.execute("DELETE FROM graph_books WHERE input_id = ?", (gate_input_id(0),))
+    conn.commit()
+    conn.close()
+    assert cli.main(argv) == 1
+    assert (
+        "gate-in-01 repeat 0: stored after gate-in-00, which the walk never asked"
+    ) in capsys.readouterr().err
+
+
+class _Refusing(Exception):
+    status_code = 422
+
+
+class _RefusingGraph(EchoGraph):
+    """An echo graph whose provider refuses the questions in ``slots`` for their own sake."""
+
+    def __init__(self, variant, *, slots) -> None:
+        super().__init__(variant)
+        self.slots = set(slots)
+
+    def ask(self, **kwargs):
+        if any(question_line(slot) in kwargs["context_text"] for slot in self.slots):
+            raise _Refusing("the context was too long")
+        return super().ask(**kwargs)
+
+
+def test_a_question_the_provider_refuses_holds_the_book_and_is_recorded(
+    graph_store, gate_research, tmp_path, monkeypatch, capsys
+):
+    variant_file = write_graph_variant(tmp_path, "g")
+    monkeypatch.setattr(cli, "_build_graph", lambda variant: _RefusingGraph(variant, slots={0}))
+    assert cli.main(_ask_argv(graph_store, gate_research, variant_file, "--repeats", "1")) == 0
+    captured = capsys.readouterr()
+    assert "questions the provider refused for their own sake: 1" in captured.out
+    assert (
+        "gate-in-00 repeat 0: refused (422 _Refusing: the context was too long); recorded as "
+        "unanswered, the book held"
+    ) in captured.err
+    with ReplayStore(_replay_db(graph_store)) as replay:
+        sha = replay.variant("g").sha
+        assert replay.failed(sha, GATE_RUN_ID) == {0: {gate_input_id(0)}}
+        books = replay.books(sha, GATE_RUN_ID)[0]
+        assert books[gate_input_id(0)].graph_input_tokens is None
+        # Slot 1 was asked from a flat book: the refused slot 0 opened nothing.
+        assert books[gate_input_id(1)].size == 0
+        assert len(replay.answers(sha, GATE_RUN_ID)[0]) == 7
+
+
+def test_a_failed_graph_call_is_tried_again_after_the_pause(
+    graph_store, gate_research, tmp_path, monkeypatch, capsys
+):
+    variant_file = write_graph_variant(tmp_path, "g")
+    pauses: list[float] = []
+    monkeypatch.setattr(cli, "_sleep", pauses.append)
+    monkeypatch.setattr(cli, "_build_graph", lambda variant: EchoGraph(variant, fail=1))
+    assert cli.main(_ask_argv(graph_store, gate_research, variant_file, "--repeats", "1")) == 0
+    assert pauses == [5.0]
+    assert "asked: 8 new answer(s)" in capsys.readouterr().out
+
+
+def test_ask_dry_run_builds_no_graph_and_writes_nothing(
+    graph_store, gate_research, tmp_path, monkeypatch, capsys
+):
+    variant_file = write_graph_variant(tmp_path, "g")
+    monkeypatch.setattr(
+        cli, "_build_graph", lambda variant: pytest.fail("a dry run builds no graph")
+    )
+    replay_db = graph_store.parent / "replay.sqlite"
+    argv = _backtest(
+        graph_store,
+        gate_research,
+        "--replay-db",
+        str(replay_db),
+        "--ask",
+        str(variant_file),
+        "--dry-run",
+        "--limit",
+        "5",
+        run_id=GATE_RUN_ID,
+    )
+    assert cli.main(argv) == 0
+    out = capsys.readouterr().out
+    assert "payloads and reports read: 8, each payload checked" in out
+    assert (
+        "dry run: 0 answer(s) already stored, 24 to ask; this command would ask for 5 of them"
+    ) in out
+    assert "split: not pinned in" in out
+    assert not replay_db.exists()
+
+
+@pytest.mark.parametrize(
+    "extra, message",
+    [
+        (("--ask", "g.yaml", "--variant", "v"), "--ask names the variant to walk"),
+        (("--ask", "g.yaml", "--holdout"), "the holdout is not asked in this build"),
+        (("--repeats", "2"), "--repeats only apply with --ask"),
+        (("--dry-run", "--limit", "1"), "--limit, --dry-run only apply with --ask"),
+        (("--ask", "g.yaml", "--repeats", "0"), "--repeats must be at least 1, got 0"),
+        (("--ask", "g.yaml", "--limit", "0"), "--limit must be at least 1, got 0"),
+        (
+            ("--ask", "g.yaml", "--rule", "r.yaml"),
+            "--rule only applies to a variant whose guardrail is 'rule'",
+        ),
+        (
+            ("--ask", "v.yaml"),
+            "variant 'v' is a simple variant; backtest --ask walks graph variants",
+        ),
+    ],
+)
+def test_ask_flags_out_of_place_are_refused_by_name(
+    graph_store, gate_research, tmp_path, monkeypatch, capsys, extra, message
+):
+    monkeypatch.chdir(tmp_path)
+    write_graph_variant(tmp_path, "g")
+    write_variant(tmp_path, "v")
+    assert cli.main(_gate_backtest(graph_store, gate_research, *extra)) == 1
+    assert message in capsys.readouterr().err
+
+
+def test_ask_needs_the_replay_store_and_the_reports_sidecars(
+    gate_store, gate_research, tmp_path, monkeypatch, capsys
+):
+    variant_file = write_graph_variant(tmp_path, "g")
+    argv = _backtest(gate_store, gate_research, "--ask", str(variant_file), run_id=GATE_RUN_ID)
+    assert cli.main(argv) == 1
+    assert "--ask needs --replay-db PATH" in capsys.readouterr().err
+    # The gate store without any sidecar: nothing to start the lower half from.
+    _install_echo_graph(monkeypatch)
+    assert cli.main(_ask_argv(gate_store, gate_research, variant_file)) == 1
+    err = capsys.readouterr().err
+    assert "has no question with a .reports.json beside its payload" in err
+    with ReplayStore(_replay_db(gate_store)) as replay:
+        assert replay.pinned_split(GATE_RUN_ID) is None  # refused before the pin
+
+
+def test_a_question_whose_cycle_wrote_no_sidecar_is_held_not_asked_and_a_broken_one_refused(
+    graph_store, gate_research, tmp_path, monkeypatch, capsys
+):
+    variant_file = write_graph_variant(tmp_path, "g")
+    built = _install_echo_graph(monkeypatch)
+    root = payload_dir(graph_store, GATE_RUN_ID)
+    # Slot 0 (the long open) lost its sidecar: an engine-failed cycle. It is
+    # walked as a hold, so slot 1 is asked from a flat book.
+    (root / "BTC-gate-00.reports.json").unlink()
+    argv = _ask_argv(graph_store, gate_research, variant_file, "--repeats", "1")
+    assert cli.main([*argv, "--limit", "2"]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "questions without a .reports.json beside the payload: 1 of 8 (the engine failed "
+        "those cycles; nothing is asked there and the account holds its book)"
+    ) in out
+    assert "asked: 2 new answer(s); already stored, skipped: 0" in out
+    assert [a["context_text"].splitlines()[0] for a in built[0].asked] == [
+        question_line(1),
+        question_line(2),
+    ]
+    # Resumed, the hold is replayed too, and the walk completes: seven asked in all.
+    assert cli.main(argv) == 0
+    out = capsys.readouterr().out
+    assert "asked: 5 new answer(s); already stored, skipped: 2" in out
+    assert "-- g repeat 0 --" in out
+    with ReplayStore(_replay_db(graph_store)) as replay:
+        sha = replay.variant("g").sha
+        assert len(replay.answers(sha, GATE_RUN_ID)[0]) == 7
+        assert replay.books(sha, GATE_RUN_ID)[0][gate_input_id(1)].size == 0
+    # A sidecar that exists but is not the daemon's shape is still refused by name.
+    (root / "BTC-gate-02.reports.json").write_text("{}", encoding="utf-8")
+    assert cli.main(argv) == 1
+    assert "gate-in-02:" in capsys.readouterr().err
+
+
+def test_replay_refuses_a_graph_variant(graph_store, tmp_path, monkeypatch, capsys):
+    variant_file = write_graph_variant(tmp_path, "g")
+    monkeypatch.setattr(cli, "_build_model", lambda _variant: Echo())
+    assert cli.main(replay_argv(graph_store, variant_file)) == 1
+    assert "variant 'g' is a graph variant (mode: graph): it is walked by backtest --ask" in (
+        capsys.readouterr().err
+    )

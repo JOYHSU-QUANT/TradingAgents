@@ -1,0 +1,27 @@
+# The paper trader's current brain, asked the full way (replay plan PR 3b):
+# the lower half of the graph (trader, three risk debators, portfolio
+# manager) re-run from each cycle's recorded reports, question by question
+# from a simulated account's own book, on the models paper-BTC-7 recorded
+# in its genesis ``engine`` block. No system_prompt_path: the portfolio
+# manager runs on the engine's own prompt, as it did in the daemon.
+#
+#   python -m contrib.replay backtest --db paper_trading.db --run-id paper-BTC-7 \
+#       --research-db autoresearch.sqlite --replay-db replay.sqlite \
+#       --ask contrib/replay/variants/graph-current.yaml --repeats 3 --dry-run
+name: graph-current
+mode: graph
+model:
+  provider: openrouter
+  id: anthropic/claude-sonnet-4-6
+quick_model:
+  provider: openrouter
+  id: qwen/qwen3-235b-a22b-2507
+# The gate reads the trend guardrail as the input row recorded it (None
+# while the guardrail was off): the gate the daemon ran. ``rule`` replays
+# the research rule instead; ``off`` reads none.
+guardrail: recorded
+# The completion cap paper-BTC-7 was asked under (the perp default until
+# 2026-10-07); both the deep and the quick client take it, as the daemon's do.
+max_tokens: 8192
+# Claude Sonnet 4.6's training data cutoff, as current-sonnet.yaml records it.
+model_cutoff: 2026-01-31

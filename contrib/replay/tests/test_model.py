@@ -15,6 +15,7 @@ import pytest
 from contrib.replay.model import engine_model
 from contrib.replay.upstream import Engine
 
+from .conftest import fake_engine
 from .papers import variant as make_variant
 
 
@@ -65,7 +66,7 @@ class _Fake:
                 response.content = "\n".join(response.content)
             return response
 
-        return Engine(
+        return fake_engine(
             CompletionUsageCollector=_Collector,
             HumanMessage=lambda content: _Message("human", content),
             SystemMessage=lambda content: _Message("system", content),

@@ -192,7 +192,7 @@ def test_train_is_asked_by_default_and_nothing_else_is_read(store, variant_file,
         (root / papers.payload_name(slot)).write_bytes(b"not the payload")
     assert cli.main(_replay(store, variant_file, "--repeats", "2")) == 0
     asked = sorted({human.splitlines()[1] for _, human in echo.calls})
-    assert asked == [papers.context_text(slot) for slot in TRAIN]
+    assert asked == [papers.question_line(slot) for slot in TRAIN]
     assert len(echo.calls) == len(TRAIN) * 2
     out = capsys.readouterr().out.splitlines()
     assert out[0] == (

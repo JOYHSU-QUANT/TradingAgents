@@ -51,12 +51,15 @@ __all__ = [
     "Readings",
     "Targets",
     "Verdict",
+    "answer_target",
     "answer_targets",
+    "approved_target",
     "control_targets",
     "decisions",
     "describe_paths",
     "judge",
     "pooled_sharpe",
+    "question_decision",
 ]
 
 # The controls, in report order; ``paper`` is the incumbent of plan §5.
@@ -91,17 +94,30 @@ def answer_targets(
     unanswered question ask nothing (``None``); a guardrail block is a flat
     target (its approved margin is pinned at zero).
     """
-    asks: list[Target | None] = []
-    for question in questions:
-        answer = answers.get(question.input_id)
-        if answer is None or answer.approved_margin_pct is None:
-            asks.append(None)
-        elif answer.approved_margin_pct == 0:
-            asks.append(_FLAT)
-        else:
-            assert answer.target_side is not None  # a sized target carries its side
-            asks.append(Target(answer.target_side, Decimal(str(answer.approved_margin_pct))))
-    return asks
+    return [answer_target(answers.get(question.input_id)) for question in questions]
+
+
+def answer_target(answer: Answer | None) -> Target | None:
+    """The ask one stored answer makes; an unanswered question (``None``) asks nothing."""
+    if answer is None:
+        return None
+    return approved_target(answer.target_side, answer.approved_margin_pct)
+
+
+def approved_target(
+    side: TargetSide | None, margin_pct: float | int | Decimal | None
+) -> Target | None:
+    """The ask one gated answer makes: none without an approved margin, flat at zero, else the target.
+
+    The same reading for a stored answer (:func:`answer_targets`) and for a
+    gate result the asking walk has just produced (:mod:`.walk`).
+    """
+    if margin_pct is None:
+        return None
+    if margin_pct == 0:
+        return _FLAT
+    assert side is not None  # a sized target carries its side
+    return Target(side, Decimal(str(margin_pct)))
 
 
 def control_targets(name: str, questions: Sequence[Question]) -> list[Target | None]:
@@ -151,18 +167,22 @@ def decisions(
         segment = segment_of(split, question.at_ms, step_ms)
         if segment is SegmentName.HOLDOUT and not holdout:
             continue
-        facts = inputs[question.input_id]
-        walked.append(
-            Decision(
-                input_id=question.input_id,
-                at_ms=question.at_ms,
-                segment=segment,
-                mark=facts.mark,
-                leverage=facts.leverage,
-                target=target,
-            )
-        )
+        walked.append(question_decision(question, inputs[question.input_id], segment, target))
     return walked
+
+
+def question_decision(
+    question: Question, facts: InputFacts, segment: SegmentName | None, target: Target | None
+) -> Decision:
+    """One question as the account takes it: its exact mark and leverage, its segment, its ask."""
+    return Decision(
+        input_id=question.input_id,
+        at_ms=question.at_ms,
+        segment=segment,
+        mark=facts.mark,
+        leverage=facts.leverage,
+        target=target,
+    )
 
 
 def pooled_sharpe(

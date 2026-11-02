@@ -105,7 +105,7 @@ def test_upstream_imports_nothing_it_has_not_declared():
 
 # The packages the engine half reaches: the upstream engine and the message
 # types it speaks. Named here so the scan can hold every other module off them.
-_ENGINE_PACKAGES = ("tradingagents", "langchain_core", "langchain")
+_ENGINE_PACKAGES = ("tradingagents", "langchain_core", "langchain", "langgraph")
 
 
 def _is_engine(name: str) -> bool:

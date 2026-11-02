@@ -173,30 +173,35 @@ variant 是資料不是程式，一個 YAML（範例：`variants/current-sonnet.
 |---|---|---|
 | `name` | 是 | 給人看的名字；在同一個 `replay.sqlite` 裡與 sha 一對一 |
 | `model.provider`／`model.id` | 是 | 走 `tradingagents` 的 `create_llm_client`，不自己接 SDK |
-| `system_prompt_path` | 是 | 相對於 YAML 檔 |
+| `mode` | 否 | `simple`（預設）＝一次 completion 的重放（`replay`）；`graph`＝`backtest --ask` 走的下半段 graph（PR 3b） |
+| `quick_model.provider`／`quick_model.id` | 否（只在 `mode: graph`） | trader 與三個 risk debator 用的模型；沒給＝與 `model` 同一個（PM 永遠用 `model`） |
+| `guardrail` | 否（只在 `mode: graph`） | 閘門讀的護欄：`recorded`（預設；input 列記下的讀數，護欄關著就是沒有）、`off`、`rule`（用 `--research-db` 重放研究規則）；YAML 把裸的 `off` 讀成 False，照 `off` 收 |
+| `system_prompt_path` | simple 是；graph 否 | 相對於 YAML 檔；graph variant 給了就是 PM 那次 completion 的 system message，沒給＝上游 PM 自己的 prompt |
 | `temperature` | 否 | 沒給＝provider 預設（跟 graph 一樣只在有設時才送） |
 | `max_tokens` | 否 | 預設 16384＝paper daemon 的 completion cap（2026-10-07 起；重放 run 6／7 的 `current-sonnet` 自己釘 8192＝當時的 cap。**沒寫這個鍵的自訂 variant 在那天之後 sha 會變**：換新名字註冊，或把舊 cap 寫進檔裡）；Gemini 自動換成 `max_output_tokens` |
 | `extra_context` | 否 | 見上 |
 | `model_cutoff` | 否 | 模型訓練截止日（YYYY-MM-DD），給 plan §6 用 |
 
 未知的鍵具名拒絕（打錯的 `temprature` 不能被默默當成 provider 預設）。**sha＝會送到模型的東西**：
-provider、model id、system prompt 的**文字**（不是路徑）、temperature、cap、extra context；改了
+provider、model id、system prompt 的**文字**（不是路徑）、temperature、cap、extra context（graph variant 再加
+mode、quick model、guardrail；simple variant 的 sha 與以前完全相同）；改了
 任何一個就是新 variant，要換名字（舊名字指向別的 sha 會被拒絕）。`model_cutoff` 不進 sha：它是
 模型的事實、不是模型看到的東西，更正它不必丟掉已經付錢買到的答案（store 會更新並在 stderr 說）。
 
 ### replay.sqlite
 
-自有的 store，九張表，**永遠不寫 paper store**：`variants`（sha 為鍵，name UNIQUE）、`answers`
+自有的 store，十一張表，**永遠不寫 paper store**：`variants`（sha 為鍵，name UNIQUE）、`answers`
 （`(variant_sha, run_id, input_id, repeat)` 為鍵；存原文、parse 結果、成績單讀的每個 gate 欄位）、
 `failures`（provider 因題目本身拒答的題，見下）、`splits`（每個 run 釘住的 split）、`ledger`
 （每次看 holdout 一列：誰、何時、哪個 variant 或 `paper`、`ask` 或 `score`；探針問 holdout 也記成
-那個 variant 的 `ask`），方向機率探針的 `probes` 與 `probe_answers`（見下面 PR 2.1 那一節），以及回測的
-`backtests` 與 `backtest_steps`（見下面 PR 3a 那一節）。
-版本在 `PRAGMA user_version`（現在是 v4）；別人的 SQLite 檔在寫入任何東西之前就具名拒絕，新 build
+那個 variant 的 `ask`），方向機率探針的 `probes` 與 `probe_answers`（見下面 PR 2.1 那一節），回測的
+`backtests` 與 `backtest_steps`（見下面 PR 3a 那一節），以及 graph variant 的 `graph_variants`（quick model、guardrail）與
+`graph_books`（每個 graph 答案問的時候的帳戶；PR 3b）。
+版本在 `PRAGMA user_version`（現在是 v5）；別人的 SQLite 檔在寫入任何東西之前就具名拒絕，新 build
 寫過的 store 也拒絕，v1 的 store 同樣拒絕（v1 沒出過 PR，沒有 migration），後來的表只出現一半的檔也
-原樣拒絕。**v2（探針之前）與 v3（回測之前）的 store** 由可能建 store 的指令（`replay`、`register`、看
-paper 自己答案的 `score --holdout`、以及 `backtest` 開既有 store）升到 v4：在一個 transaction 裡補上
-缺的表，裡面原有的東西一概不動；其他指令照原樣讀它，當成沒有探針答案、沒有回測。
+原樣拒絕。**v2（探針之前）、v3（回測之前）與 v4（graph variant 之前）的 store** 由可能建 store 的指令（`replay`、`register`、看
+paper 自己答案的 `score --holdout`、以及 `backtest` 開既有 store）升到 v5：在一個 transaction 裡補上
+缺的表，裡面原有的東西一概不動；其他指令照原樣讀它，當成沒有探針答案、沒有回測、沒有 graph variant。
 
 **`register --variant FILE [--replay-db PATH]`** 只登記 variant（或更正已登記同名 variant 的
 `model_cutoff`），不建 client、不問任何題。
@@ -437,12 +442,15 @@ python -m contrib.replay guardrail --db paper_trading.db --research-db autoresea
 python -m contrib.replay backtest --db paper_trading.db --run-id paper-BTC-7 [--run-id paper-BTC-8 ...] \
     --research-db data/autoresearch.sqlite [--tick 1] \
     [--replay-db PATH [--variant NAME] [--include-pre-cutoff] [--holdout]] [--out DIR]
+# 或者一題一題問一個 graph variant（PR 3b）：
+python -m contrib.replay backtest --db paper_trading.db --run-id paper-BTC-7 --research-db data/autoresearch.sqlite \
+    --replay-db PATH --ask contrib/replay/variants/graph-current.yaml [--repeats 3] [--limit N] [--dry-run] [--rule FILE]
 ```
 
 成績單把每一題各自拿去對答案（「這個主張抱一根會怎樣」）；回測是母計畫 §1 要的另一件事：**一個帳戶
 從頭走到尾**，每題的決策套在前面幾題留下的倉位上，最後那個數字才是一段的損益。這一張（3a）只做會計與
 門檻程式、**不叫任何模型**：輸入是 paper 自己的答案（`ai_outputs`）與 `replay.sqlite` 裡 variant 重放過的
-`answers`；從 `.reports.json` 起跑下半段 graph 是下一張（3b）。
+`answers`。3b 加上 `--ask`：從 `.reports.json` 起跑下半段 graph、倉位段換成模擬帳戶的，一題一題問（見下面那一節）。
 
 ### 模擬帳戶（`account.py`）
 
@@ -491,11 +499,52 @@ python -m contrib.replay backtest --db paper_trading.db --run-id paper-BTC-7 [--
 沒給 `--variant` 時，門檻程式拿 paper 對 paper 自己判一次＝**程式的煙霧測試**：(1)(3) 必不過、(4) 必過；
 報表印 `smoke test:` 那一行說明。給了 `--variant`，每個 repeat 各走一條路徑、各判一次。
 
+### 從 `.reports.json` 起跑下半段 graph（PR 3b：`--ask`）
+
+`backtest --ask VARIANT.yaml` 走的是 **graph variant**（variant 檔 `mode: graph`，見上面 variant 一節）：對 run 的
+train＋validation 每一題（holdout 不問；那是一次 look，由別的指令花）依時間順序走，一個 repeat 一條帳戶路徑：
+
+1. 結算到該題的 funding、讀帳戶**自己的**倉位與權益；
+2. 用 perp 自己的 renderer（`render_position_section`，與 daemon 同一支）把模擬帳戶的 `Position:` 段渲染出來，取代
+   payload `context_text` 末段記錄下來的 paper 倉位段（以最後一個 `Position:` 標題定位；`context_shape` 沒有 `position`
+   或找不到標題就具名拒絕，不默默拿 paper 的倉位去問）；holding cost 以研究 store 當時生效的 funding rate 計；
+   倉位段的 as-of（最後成交「幾小時前」的基準）與 `trade_date` 用 input 列的 `candle_end`＝prompt 自己印的 `As of:`
+   那一行（daemon 也是這樣），不是 payload 的 `as_of`（那是排程當下的時鐘，晚了 26 分鐘左右）；
+3. 從 `.reports.json`（PR 0 的 sidecar，schema 1）拿分析師報告、研究辯論與 investment plan 當起始狀態，trader 的提案、
+   風險辯論、final decision 清空重跑：`Trader → Aggressive → (上游 ConditionalLogic 的 router) → Portfolio Manager`，
+   用上游公開的 node factory 自己組 `StateGraph`（不改上游 `setup.py`）；trader 與三個 debator 用 variant 的 `quick_model`
+   （沒給就同一個模型），PM 用 `model`；`structured_output` 關著（與 daemon 同，否則 target JSON 會被吃掉）。
+   那一輪引擎失敗、沒寫 sidecar 的題（run 7 有 31／105 題）**不問**、帳戶抱著不動、報表印數量；sidecar 在但不是 daemon
+   的形狀仍具名拒絕；
+4. PM 的文字走 PR 2 同一條 `parse_target_decision` → `risk_gate.evaluate`，帳戶狀態是自己的倉位與權益，護欄照 variant 的
+   `guardrail`（`recorded`＝input 列記下的那個讀數、`off`、`rule`＝用 `--research-db` 重放研究規則，與 `guardrail` 報表
+   同一條 timeline；`--rule FILE` 換規則檔）；
+5. 答案寫進 `answers`（與 simple variant 同一張表，所以 `score --replay-db`、`compare`、`backtest --variant` 都讀得到），
+   旁邊 `graph_books` 記該題問的時候帳戶的 mark／倉位／錢包／權益／最後成交／護欄讀數／整個 graph 的 token；然後把
+   核准的 target 套進帳戶、走下一題。
+
+每題先套進帳戶、再存（答案＋book 同一個 transaction；帳戶吃不下的答案——tick 太粗把單湊成零——付了錢但不存、
+指令具名停下，所以 store 裡的答案一定重建得出來），`--limit N` 停了再跑同一個指令就**接著走**：先把 store 裡的答案
+依序套回一個新帳戶，每一題的 book（倉位、進場價、錢包、權益、最後成交、護欄讀數）都要與存的那列**完全相同**
+（研究 store、`--tick`、run 的 terms、護欄規則換了就具名拒絕，不在不同的帳本上接著問），問在沒問過的題之後的答案
+也拒絕（一次 walk 是一段前綴）。開跑前先做 preflight：每一題的倉位段找得到、`candle_end` 在、研究 store 有該題生效
+的 funding rate，任一不成立就在花錢、釘 split 之前具名拒絕；`--dry-run` 跑同一份 preflight、也把 store 裡的答案重建
+一遍（book 對不上同樣拒絕）、也查 variant 名字有沒有已經指向別的 sha，所以 dry run 說會問 N 題就是會問 N 題。所有 repeat 都走完才接回一般流程：用存下來的答案判
+§5 四條（與 `--variant` 完全相同，報表也相同）。呼叫紀律同 `replay`（401／403／404 停、其他 4xx 記 refused、帳戶抱著不
+動、其餘退避重試）；權益≤0 的 repeat 不再問。`--dry-run` 讀完所有 payload 與 sidecar、印要問幾題，不建 client、不寫。
+報表印 PM 與整個 graph 的 token、另印「失敗或被拒那幾次 graph 跑掉的 token」（付了錢、不在答案的數字裡）、持倉期間
+研究 store 缺的 funding 結算數；store 裡若已有 `--repeats` 以外的 repeat，印一行說門檻會連它們一起讀。
+
+與 daemon 已知的兩處差異：instrument 身分行不走網路查詢（`build_instrument_context(coin, "crypto")`），倉位段的
+holding cost 用研究 store 的結算 rate（daemon 用當下的預測 rate）。風險辯論一輪（上游預設，daemon 沒改）。
+
 ### store 與輸出
 
-- `replay.sqlite` 升 **v4**：多 `backtests`（誰、哪個 run、哪個 driver、成本模型、tick、起始權益、終值、ruined、
-  funding_missing）與 `backtest_steps`（一題一列）。v2／v3 的 store 由**可以建 store 的指令**（`replay`、`register`、
-  paper 的 `--holdout` 看一眼、以及 `backtest` 開既有 store）開檔時只加表、不動舊表；純讀取的指令照舊讀它。
+- `replay.sqlite` 3a 升 **v4**：多 `backtests`（誰、哪個 run、哪個 driver、成本模型、tick、起始權益、終值、ruined、
+  funding_missing）與 `backtest_steps`（一題一列）；3b 升 **v5**：多 `graph_variants`（graph variant 的 quick model 與
+  guardrail）與 `graph_books`（每個 graph 答案問的時候的帳戶）。v2／v3／v4 的 store 由**可以建 store 的指令**（`replay`、
+  `register`、paper 的 `--holdout` 看一眼、`backtest` 開既有 store、`backtest --ask`）開檔時只加表、不動舊表；純讀取的
+  指令照舊讀它。
   每走一次都寫一列（走路徑是計算，不是花錢買答案，不去重）。
 - 給了 `--replay-db`：各 run 用釘住的 split（還沒釘的這時釘住——寫進 store 的路徑要有一個固定的切法，與第一次 replay
   同一條規則）；`--holdout` 把 holdout 段也走完並記 ledger（與 `score --holdout` 同一條規則；所有 run 的
@@ -516,8 +565,8 @@ python -m contrib.replay backtest --db paper_trading.db --run-id paper-BTC-7 [--
 
 ## 還沒有的
 
-- 從 `.reports.json` 起跑下半段 graph（trader → 風險辯論 → PM）、倉位段換成模擬帳戶的（PR 3b）：
-  `backtest` 目前只走記錄下來的答案，不叫模型。
+- `--ask` 不問 holdout：graph variant 的 holdout 要等它過了 §5 四條才有意義（3c），這一版沒有那條路。
+- 不重跑分析師、不重抓資料（考古題的定義）；上游的 reflection／memory log 不給（母計畫 §7 否決）。
 - 停損／止盈不在回測裡（第一版拍板不帶）；paper 的 TWAP 分批也沒有（一題一單）。
 
 ## 測試
@@ -543,6 +592,13 @@ funding、ruin）寫成從 paper 公式推得出來的算式；對照組的 ask 
 對自己必不過 (1)(3)、必過 (4)）；指令用同一張 11 題的表加一個蓋住每題的研究 store，另外用 gate 夾具重放
 echo variant 兩個 repeat 再回測，釘住 echo 的路徑與 paper 的路徑逐單相同、store 寫了六條路徑、
 v3 store 被 `backtest` 升到 v4。
+
+3b（`test_lower_graph.py`、`test_walk.py`、`test_backtest_cli.py` 的 `--ask` 段、store 與 variant 各自的新測試）：
+sidecar 的讀取與每種拒絕、倉位段的替換與拒絕、假引擎上組出來的 graph（節點、邊、router 與 path map、deep／quick
+兩個 client 帶 cap 與 collector、PM 的 system message、起始狀態、token 按題切片）；`--ask` 用 echo graph 走兩個 repeat
+（路徑與 paper 逐單相同、第二題看到的是帳戶自己的 long 倉）、`--limit` 停下再接、換 `--tick` 被拒、亂序答案被拒、被拒的題
+抱著不動、失敗重試、dry-run 不建 client 不寫；v4 store 讀取不升版、graph 答案與 book 同一個 transaction、graph variant
+的 sha 與 simple 的六欄 digest。
 
 護欄報表（`test_guardrail.py`）沿用那張 11 題的表，研究 store 放 12 根看收盤價就知道方向的 K 線
 （規則：高於 102 持多、低於 98 持空）：判定表每一格、每一題讀到的規則方向與判定、介入次數的算法、

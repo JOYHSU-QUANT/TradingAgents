@@ -447,9 +447,11 @@ python -m contrib.replay backtest --db paper_trading.db --run-id paper-BTC-7 [--
 算術全部借 paper 這一邊的（列在 `upstream.py`）：
 
 - **sizing 照閘門**：target margin＝權益×approved margin%／100，名目＝margin×該題的 configured leverage，
-  下單量＝目標 signed 名目與**帳戶自己現倉**的差額，以該題的 mark 計；差額為 0 就不下單。ask＝每一題閘門
-  **核准的 target**（不管 paper 當時有沒有因 deadband 而不下單——那是對 paper 自己的倉位判的，模擬帳戶要對
-  自己的倉位判；2026-11-02 拍板）；maintain、被拒、fail-closed、沒答才是「不動」。
+  下單量＝目標 signed 名目與**帳戶自己現倉**的差額，以該題的 mark 計。ask＝每一題閘門**核准的 target**（不管
+  paper 當時有沒有因 deadband 而不下單——那是對 paper 自己的倉位判的；2026-11-02 拍板），而閘門的「要不要下單」
+  規則套在帳戶**自己的**倉位上：同方向、與持有 margin% 的差小於 run 的 `rebalance_deadband_pct`（從 genesis
+  的 `decision:` 區塊讀，所以 `backtest` 和 `replay` 一樣要求 genesis 有 `risk:`／`decision:`）就不下單，翻向
+  與平倉不受 deadband 限制，平倉一律全平（不留除法的零頭）；maintain、被拒、fail-closed、沒答才是「不動」。
 - **taker run**：立刻以 mark±slippage 成交（`fill_model.fill_price`）、付 taker fee。
 - **maker run**：掛在 mark∓assumed half spread、往被動側貼 tick（`maker_post_price`），**該題所在的那根 K 線**
   （與 split 放題目用同一根：`bar_open_ms`）的 low（買）／high（賣）穿過掛價一個 tick 才算成交
@@ -496,8 +498,11 @@ python -m contrib.replay backtest --db paper_trading.db --run-id paper-BTC-7 [--
   同一條規則）；`--holdout` 把 holdout 段也走完並記 ledger（與 `score --holdout` 同一條規則；所有 run 的
   前置檢查都過了才記、開始走之前記）。**帶 `--variant` 的 `--holdout` 先在 validation 段判四條，任一 repeat
   沒全過就具名拒絕、不記 look**（§5「四條全過才准看一次」寫成程式；2026-11-02 拍板）；paper 自己的
-  `--holdout` 不受此限。variant 的門檻：(1)(2) 的 Sharpe 與 (3)(4) 一樣只算 model_cutoff 之後的題（paper
-  那一邊也切到同一組題），對照組只合併該 repeat 問過的那些 run。
+  `--holdout` 不受此限。**判定一律從「holdout 沒讀」的那條路徑讀**：帶 `--holdout` 時路徑段落含 holdout，
+  但判定區塊印的是能授權看一眼的那份（否則最後一題 validation 的報酬與 4h 命中會因為看到 holdout 而多一題）。
+  variant 的門檻：(1)(2) 的 Sharpe 只算 model_cutoff 之後的題；(3)(4) 兩邊都切到「該 repeat 真的問過（答了或被拒）
+  且在 cutoff 之後」的同一組題（replay `--limit` 問一半也不會拿 paper 全部的題來比）；對照組只合併該 repeat
+  問過的那些 run。split 在所有前置檢查都過之後才釘（與 `replay` 同：被拒的指令不會把還在跑的 run 凍住）。
 - `--out DIR` 寫 `<run-ids>[-variant]-backtest-decisions.csv`（每條路徑每題一列：target、成交、倉位、錢包、權益、
   funding、報酬）與 `...-backtest-summary.txt`。
 - 幾個 run 一起跑要同一個 K 線週期；maker run 遇到研究 store 沒有該題那根 K 線＝具名拒絕（掛單無法判定），

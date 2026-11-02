@@ -87,7 +87,7 @@ def research(tmp_path: Path) -> Path:
 @pytest.fixture
 def store(tmp_path: Path) -> Path:
     return write_paper_store(
-        tmp_path / "paper_trading.db", payload_root=tmp_path / "p", config=run_config()
+        tmp_path / "paper_trading.db", payload_root=tmp_path / "p", config=run_config(gate=True)
     )
 
 
@@ -150,7 +150,9 @@ def test_the_paper_trader_and_the_controls_are_walked_and_the_bar_is_the_smoke_t
 
 def test_a_maker_run_posts_at_the_tick_and_reports_what_rested(tmp_path, research, capsys):
     maker = write_paper_store(
-        tmp_path / "maker.db", payload_root=tmp_path / "p", config=run_config(style="maker")
+        tmp_path / "maker.db",
+        payload_root=tmp_path / "p",
+        config=run_config(style="maker", gate=True),
     )
     assert cli.main(_backtest(maker, research, "--tick", "1")) == 0
     out = capsys.readouterr().out.splitlines()
@@ -168,7 +170,7 @@ def test_a_maker_run_posts_at_the_tick_and_reports_what_rested(tmp_path, researc
     wide = write_paper_store(
         tmp_path / "wide.db",
         payload_root=tmp_path / "p2",
-        config=run_config(style="maker", half_spread_bps="20"),
+        config=run_config(style="maker", half_spread_bps="20", gate=True),
     )
     assert cli.main(_backtest(wide, research)) == 0
     assert "posted at mark -/+ 20 bps" in capsys.readouterr().out.splitlines()[1]
@@ -358,13 +360,57 @@ def test_holdout_with_a_variant_needs_the_bar_and_spends_no_look_otherwise(
         assert replay.looks(GATE_RUN_ID) == []
         assert replay.backtests(GATE_RUN_ID) == []
     # The paper trader's own holdout is not gated, and its look names paper.
+    # The verdict printed is the one read with the holdout unread: its
+    # figures are the figures of a run without --holdout.
+    assert cli.main(_gate_backtest(gate_store, gate_research)) == 0
+    locked = capsys.readouterr().out.splitlines()
     assert cli.main(_gate_backtest(gate_store, gate_research, "--holdout")) == 0
     out = capsys.readouterr().out.splitlines()
     assert "HOLDOUT WALKED: this look is recorded in the ledger" in out
     assert out[-1].endswith("the holdout above was walked on the paper trader's look")
+    bar_locked = _section(locked, "-- plan section 5 bar: paper on the validation segment --")
+    bar_walked = _section(out, "-- plan section 5 bar: paper on the validation segment --")
+    assert bar_walked[1:5] == bar_locked[1:5]
+    assert any(line.startswith("the bar below was read with the holdout unread") for line in out)
     with ReplayStore(_replay_db(gate_store)) as replay:
         (look,) = replay.looks(GATE_RUN_ID)
         assert (look.action, look.variant_name) == ("score", "paper")
+
+
+def test_check_four_reads_paper_over_the_questions_the_repeat_was_asked(
+    gate_store, gate_research, tmp_path, monkeypatch, capsys
+):
+    variant_file = write_variant(tmp_path, "v")
+    monkeypatch.setattr(cli, "_build_model", lambda _variant: Echo())
+    assert cli.main(replay_argv(gate_store, variant_file, "--repeats", "1")) == 0
+    # One of the two validation questions asked: check (4) reads paper over
+    # that one question too, not over both.
+    argv = replay_argv(gate_store, variant_file, "--repeats", "1", "--segment", "validation")
+    assert cli.main([*argv, "--limit", "1"]) == 0
+    capsys.readouterr()
+    assert cli.main(_gate_backtest(gate_store, gate_research, "--variant", "v")) == 0
+    out = capsys.readouterr().out.splitlines()
+    bar = _section(out, "-- plan section 5 bar: v repeat 0 on the validation segment --")
+    # The one question asked (slot 6, prose) is a fail-closed round for both.
+    assert "v repeat 0 1/1 (100.0%) vs paper 1/1 (100.0%)" in bar[4]
+    assert "n 1 (needs >= " not in bar[3]  # a fail-closed round has no reading to pair
+    assert "n 0 (needs >= " in bar[3]
+
+
+def test_a_refused_backtest_pins_nothing(gate_store, gate_research, tmp_path, monkeypatch, capsys):
+    other = "paper-GATE-2"
+    write_gate_store(gate_store, run_id=other)
+    variant_file = write_variant(tmp_path, "v")
+    monkeypatch.setattr(cli, "_build_model", lambda _variant: Echo())
+    assert cli.main(replay_argv(gate_store, variant_file, "--repeats", "1")) == 0
+    capsys.readouterr()
+    # v was never asked on the second run: refused before anything is pinned or stored.
+    argv = _gate_backtest(gate_store, gate_research, "--run-id", other, "--variant", "v")
+    assert cli.main(argv) == 1
+    assert f"has no answers for run {other!r}" in capsys.readouterr().err
+    with ReplayStore(_replay_db(gate_store)) as replay:
+        assert replay.pinned_split(other) is None
+        assert replay.backtests(GATE_RUN_ID) == [] and replay.backtests(other) == []
 
 
 def test_a_repeat_asked_on_one_run_is_judged_against_that_runs_controls(
@@ -473,7 +519,9 @@ def test_a_missing_research_store_is_refused_before_anything_is_read(store, tmp_
 
 def test_a_maker_run_whose_bars_the_store_lacks_is_refused_by_name(tmp_path, capsys):
     maker = write_paper_store(
-        tmp_path / "maker.db", payload_root=tmp_path / "p", config=run_config(style="maker")
+        tmp_path / "maker.db",
+        payload_root=tmp_path / "p",
+        config=run_config(style="maker", gate=True),
     )
     empty = tmp_path / "empty.sqlite"
     with ResearchStore(empty):

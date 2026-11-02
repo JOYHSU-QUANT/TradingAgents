@@ -305,6 +305,43 @@ def test_a_short_pays_slippage_the_other_way_earns_positive_funding_and_flips_th
     assert after.equity == flipped.wallet + flipped.size * (Decimal(90) - buy_price)
 
 
+def test_a_same_side_ask_inside_the_runs_deadband_places_no_order_but_a_flip_does():
+    # Long 50 held; asking long 52 is inside a 4% deadband of the ~50% held,
+    # long 55 is not; a flip to short 50 and a close are never held back.
+    band = terms(deadband_pct="4")
+    bars = [bar(i, "100") for i in range(5)]
+    path = _simulate(
+        [
+            decision(0, "100", LONG_50),
+            decision(1, "100", Target(TargetSide.LONG, Decimal(52))),
+            decision(2, "100", Target(TargetSide.LONG, Decimal(55))),
+            decision(3, "100", Target(TargetSide.SHORT, Decimal(50))),
+            decision(4, "100", FLAT),
+        ],
+        terms=band,
+        bars=bars,
+        funding=[],
+    )
+    assert [s.filled for s in path.steps] == [True, None, True, True, True]
+    assert path.steps[4].size == 0 and path.steps[4].entry is None
+    assert "a same-side ask within 4% of the margin held places no order" in band.describe()
+
+
+def test_a_flat_ask_closes_the_whole_position_without_dust():
+    # 50% of 1000 at a mark of 100.3 is a quantity the division does not
+    # round; the close sells exactly what is held, and a second flat ask
+    # over the flat book places nothing.
+    path = _simulate(
+        [decision(0, "100.3", LONG_50), decision(1, "100.7", FLAT), decision(2, "100.9", FLAT)],
+        terms=terms(),
+        bars=[bar(0, "100.3"), bar(1, "100.7"), bar(2, "100.9")],
+        funding=[],
+    )
+    assert path.steps[1].size == 0 and path.steps[1].filled is True
+    assert path.steps[2].filled is None
+    assert path.orders == 2
+
+
 def test_a_maker_sell_post_is_judged_by_the_bars_high():
     # A sell posts at 100 x (1 + 0.00005) = 100.005, ceiled to the 1 tick: 101.
     # It fills when the bar's high reaches 101 + 1 = 102.

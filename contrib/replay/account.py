@@ -14,7 +14,10 @@ The arithmetic is the paper lane's own, borrowed through :mod:`.upstream`:
   target margin = equity × approved margin % / 100, notional = margin ×
   the question's configured leverage, and the order is the DIFFERENCE
   between that signed notional and the position held, at the question's
-  mark; a target the account already holds places no order;
+  mark. The gate's order-necessity rules apply to the account's OWN
+  book: a same-side ask less than the run's ``rebalance_deadband_pct``
+  away from the margin held places no order (flips and closes always
+  do), and a flat ask closes the whole position;
 - a taker run fills at once at the mark moved by the run's slippage
   (``fill_model.fill_price``) and pays the taker fee; a maker run posts at
   the mark less (buy) or plus (sell) the run's assumed half spread,
@@ -200,7 +203,9 @@ class Terms:
     run's ``assumed_half_spread_bps``; ``tick`` the venue's price tick, which
     the paper store does not record (it comes from the asset's metadata), so
     the caller says it. ``initial_balance`` is the run's
-    ``initial_balance_usdc``. ``fee_rate`` and ``slippage_bps`` are the cost
+    ``initial_balance_usdc``; ``deadband_pct`` the run's
+    ``rebalance_deadband_pct``, the same-side resize the account leaves
+    alone (0: none). ``fee_rate`` and ``slippage_bps`` are the cost
     model's figures as the books' ``Decimal``, fixed once here.
     """
 
@@ -209,11 +214,12 @@ class Terms:
     half_spread_bps: Decimal
     tick: Decimal
     initial_balance: Decimal
+    deadband_pct: Decimal = Decimal(0)
     fee_rate: Decimal = field(init=False)
     slippage_bps: Decimal = field(init=False)
 
     def __post_init__(self) -> None:
-        for name in ("half_spread_bps", "tick", "initial_balance"):
+        for name in ("half_spread_bps", "tick", "initial_balance", "deadband_pct"):
             if not isinstance(getattr(self, name), Decimal):
                 raise AccountError(f"{name} is a Decimal, got {getattr(self, name)!r}")
         if self.tick <= 0:
@@ -222,6 +228,8 @@ class Terms:
             raise AccountError(f"half_spread_bps must be >= 0, got {self.half_spread_bps}")
         if self.initial_balance <= 0:
             raise AccountError(f"initial_balance must be > 0, got {self.initial_balance}")
+        if self.deadband_pct < 0:
+            raise AccountError(f"deadband_pct must be >= 0, got {self.deadband_pct}")
         object.__setattr__(self, "fee_rate", Decimal(str(self.costs.fee_rate)))
         object.__setattr__(self, "slippage_bps", Decimal(str(self.costs.slippage_bps)))
 
@@ -236,7 +244,8 @@ class Terms:
         )
         return (
             f"account: opens at {self.initial_balance} USDC; {role} fills at "
-            f"{self.costs.fee_rate:g} fee, {fill}; funding settled hourly from the research "
+            f"{self.costs.fee_rate:g} fee, {fill}; a same-side ask within {self.deadband_pct}% of "
+            "the margin held places no order; funding settled hourly from the research "
             "store; no stop-loss, no take-profit; the last position is marked, not closed"
         )
 
@@ -531,7 +540,7 @@ def simulate(decisions: Sequence[Decision], *, terms: Terms, series: Series) -> 
                 target = resting if decision.target is None else decision.target
                 resting = None
                 if target is not None:
-                    order = _order(target, decision, position, equity)
+                    order = _order(target, decision, position, equity, terms)
                     if order is not None:
                         side, qty = order
                         filled, price = _fill(terms, series, decision, side)
@@ -602,11 +611,27 @@ def _settle(
 
 
 def _order(
-    target: Target, decision: Decision, position: PositionState, equity: Decimal
+    target: Target, decision: Decision, position: PositionState, equity: Decimal, terms: Terms
 ) -> tuple[Side, Decimal] | None:
-    """The order that takes the position to ``target``: ``(side, qty)``, or ``None`` if it is there."""
+    """The order that takes the position to ``target``: ``(side, qty)``, or ``None`` for none.
+
+    The gate's order-necessity rules (``risk_gate.evaluate`` step 7) on the
+    account's own book: a flat ask over a flat book and an exact ask place
+    nothing; a same-side ask less than the run's deadband away from the
+    margin held places nothing; a flat ask closes the whole position so no
+    dust is left behind by the division.
+    """
+    if target.side is TargetSide.FLAT:
+        if position.size == 0:
+            return None
+        return (Side.SELL if position.size > 0 else Side.BUY), abs(position.size)
+    held = position.size * decision.mark
+    if held != 0 and (held > 0) == (target.sign > 0):
+        margin_held = abs(held) / decision.leverage / equity * _HUNDRED
+        if abs(target.margin_pct - margin_held) < terms.deadband_pct:
+            return None
     wanted = target.sign * equity * target.margin_pct / _HUNDRED * decision.leverage
-    delta = wanted - position.size * decision.mark
+    delta = wanted - held
     if delta == 0:
         return None
     return (Side.BUY if delta > 0 else Side.SELL), abs(delta) / decision.mark

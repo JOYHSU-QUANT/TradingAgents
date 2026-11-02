@@ -60,6 +60,11 @@ ALLOWED: dict[str, frozenset[str]] = {
     # The exporter reads the three packages' documents through their command
     # lines, never their modules: the floor is all it imports.
     "dashboard": frozenset({"core"}),
+    # The benchmark of the research loop (discovery plan §2): it runs that
+    # package's search over synthetic worlds through its two ports, and
+    # reaches no trading package — its own ``tests/test_upstream.py`` also
+    # holds its tests off them, and the engine.
+    "discovery": frozenset({"core", "autoresearch"}),
 }
 
 _PERP = "hyperliquid_perp"

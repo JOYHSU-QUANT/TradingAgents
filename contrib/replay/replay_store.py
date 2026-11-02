@@ -1,6 +1,6 @@
 """``replay.sqlite``: the past papers' own store (replay plan PR 2).
 
-Seven tables, and nothing here ever writes the paper store:
+Nine tables, and nothing here ever writes the paper store:
 
 - ``variants``: one row per variant this store has asked with, keyed by its
   :attr:`~.variant.Variant.sha`. The name is UNIQUE too, so a name means
@@ -37,6 +37,15 @@ Seven tables, and nothing here ever writes the paper store:
 - ``probes``: one row per direction probe (plan PR 2.1) this store has
   asked with, keyed by :attr:`~.probe.Probe.sha`, its name UNIQUE, as a
   variant's is.
+- ``backtests`` / ``backtest_steps`` (plan PR 3a): one row per account
+  path the ``backtest`` command walked — which driver (a variant's repeat,
+  the paper trader's own answers, or one of the three price controls), on
+  which run, under which terms (the fill model, the tick, the segments
+  walked) — and one row per question of that path: the ask, the fill, the
+  position, the wallet, the equity, the funding and the decision's return,
+  the account's own figures as text decimals. Written on every walk, so a
+  path can be re-read beside the terms it was walked under; nothing here
+  is ever asked for twice (a walk is a computation, not a purchase).
 - ``probe_answers``: one row per question, variant, probe and repeat; the
   key is ``(variant_sha, probe_sha, run_id, input_id, repeat)``, so a probe
   run resumes as a replay does. A row keeps the raw text and the
@@ -49,11 +58,13 @@ The schema is versioned by ``PRAGMA user_version``. A file that holds
 tables but not ours is refused before anything writes to it, a store a
 newer build wrote is refused rather than written through, and a reader
 never creates the tables: an empty file opened to be read is refused. A
-store written at v2 (before the probe) is brought to v3 by a command that
-may create a store (``replay``, ``register``, ``score --holdout`` on the
-paper trader's own answers), which adds the two probe tables in one
+store written at v2 (before the probe) or v3 (before the backtest) is
+brought to v4 by a command that may create a store (``replay``,
+``register``, ``score --holdout`` on the paper trader's own answers, and
+``backtest`` on a store that exists), which adds the missing tables in one
 transaction and changes nothing already there; any other command reads it
-as written, as a store with no probe answers. A v1 store is refused: v1
+as written, as a store with no probe answers or no backtests. A v1 store
+is refused: v1
 never left its pull request, so there is no migration from it. A write
 that fails raises :class:`ReplayStoreError` naming the store, after
 whatever it had begun is rolled back.
@@ -71,6 +82,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Final
 
+from .account import Path as AccountPath, Step
 from .paper_store import answer_from_row
 from .probe import REFUSED, Forecast, Probe, ProbeAnswer, ProbeError
 from .score import Answer
@@ -79,19 +91,23 @@ from .variant import Variant, short_sha
 
 __all__ = [
     "SCHEMA_VERSION",
+    "VARIANT_DRIVER",
+    "BacktestRecord",
     "HoldoutLook",
     "ReplayStore",
     "ReplayStoreError",
     "StoredAnswer",
     "StoredProbeAnswer",
+    "WalkedPath",
 ]
 
 # v2 added ``failures`` and ``splits`` and let a ledger row name no variant;
-# v3 added ``probes`` and ``probe_answers``. v1 never left its pull request,
-# so there is no migration from it: a v1 file is named and refused, not
-# taken for someone else's database. A v2 file gains the v3 tables when a
-# command that may create a store opens it.
-SCHEMA_VERSION: Final = 3
+# v3 added ``probes`` and ``probe_answers``; v4 added ``backtests`` and
+# ``backtest_steps``. v1 never left its pull request, so there is no
+# migration from it: a v1 file is named and refused, not taken for someone
+# else's database. A v2 or v3 file gains the later tables when a command
+# that may create a store opens it.
+SCHEMA_VERSION: Final = 4
 
 _DDL: Final = (
     """
@@ -198,9 +214,61 @@ _PROBE_DDL: Final = (
     )
     """,
 )
+# The tables v4 added (plan PR 3a), created on their own when an older
+# store is brought to v4. ``variant_sha`` is NULL for the paper trader's own
+# answers and the three price controls, whose ``repeat`` is then NULL too.
+_BACKTEST_DDL: Final = (
+    """
+    CREATE TABLE backtests (
+        backtest_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+        walked_at       TEXT NOT NULL,
+        run_id          TEXT NOT NULL,
+        driver          TEXT NOT NULL,
+        variant_sha     TEXT REFERENCES variants (variant_sha),
+        repeat          INTEGER CHECK (repeat IS NULL OR repeat >= 0),
+        holdout_walked  INTEGER NOT NULL,
+        costs_json      TEXT NOT NULL,
+        half_spread_bps TEXT NOT NULL,
+        tick            TEXT NOT NULL,
+        initial_balance TEXT NOT NULL,
+        final_equity    TEXT NOT NULL,
+        ruined          INTEGER NOT NULL,
+        funding_missing INTEGER NOT NULL,
+        CHECK ((variant_sha IS NULL) = (repeat IS NULL))
+    )
+    """,
+    """
+    CREATE TABLE backtest_steps (
+        backtest_id       INTEGER NOT NULL REFERENCES backtests (backtest_id),
+        input_id          TEXT NOT NULL,
+        at                TEXT NOT NULL,
+        segment           TEXT,
+        mark              TEXT NOT NULL,
+        target_side       TEXT,
+        target_margin_pct TEXT,
+        carried           INTEGER NOT NULL,
+        filled            INTEGER,
+        fill_price        TEXT,
+        fee               TEXT NOT NULL,
+        funding           TEXT NOT NULL,
+        funding_missing   INTEGER NOT NULL,
+        size              TEXT NOT NULL,
+        entry             TEXT,
+        wallet            TEXT NOT NULL,
+        equity            TEXT NOT NULL,
+        ret               REAL,
+        PRIMARY KEY (backtest_id, input_id)
+    )
+    """,
+)
 _PROBE_TABLES: Final = frozenset({"probes", "probe_answers"})
+_BACKTEST_TABLES: Final = frozenset({"backtests", "backtest_steps"})
 _V2_TABLES: Final = frozenset({"variants", "answers", "failures", "splits", "ledger"})
-_TABLES: Final = _V2_TABLES | _PROBE_TABLES
+# What each version after v2 added: ``(last version without them, DDL, names)``.
+# The next schema bump adds a row here and moves ``SCHEMA_VERSION``.
+_LATER_TABLES: Final = ((2, _PROBE_DDL, _PROBE_TABLES), (3, _BACKTEST_DDL, _BACKTEST_TABLES))
+_TABLES: Final = _V2_TABLES.union(*(tables for _, _, tables in _LATER_TABLES))
+_ALL_DDL: Final = (*_DDL, *(ddl for _, ddls, _ in _LATER_TABLES for ddl in ddls))
 _BUSY_TIMEOUT_MS: Final = 5000
 
 
@@ -261,6 +329,55 @@ class HoldoutLook:
     questions: int
 
 
+# The driver a variant's path is filed under; the controls are filed under their names.
+VARIANT_DRIVER: Final = "variant"
+
+
+@dataclass(frozen=True)
+class BacktestRecord:
+    """A ``backtests`` row to write: who walked which run, and whether the holdout was walked.
+
+    A variant's path names its sha and repeat under :data:`VARIANT_DRIVER`;
+    a control's names neither.
+    """
+
+    walked_at: datetime
+    run_id: str
+    driver: str
+    variant_sha: str | None
+    repeat: int | None
+    holdout_walked: bool
+
+    def __post_init__(self) -> None:
+        if (self.variant_sha is None) != (self.repeat is None):
+            raise ValueError("a backtest names a variant with its repeat, or neither")
+        if (self.driver == VARIANT_DRIVER) != (self.variant_sha is not None):
+            raise ValueError(
+                f"a {VARIANT_DRIVER!r} path names its variant and a control none, got driver "
+                f"{self.driver!r} with variant_sha {self.variant_sha!r}"
+            )
+
+
+@dataclass(frozen=True)
+class WalkedPath:
+    """A ``backtests`` row as read back; ``variant_name`` is ``None`` for paper and the controls."""
+
+    backtest_id: int
+    walked_at: str
+    driver: str
+    variant_name: str | None
+    repeat: int | None
+    final_equity: Decimal
+
+
+def _step_row(step: Step) -> tuple[object, ...]:
+    """A step's :meth:`~.account.Step.values` as the store spells them: Decimals as text, bools as ints."""
+    return tuple(
+        str(v) if isinstance(v, Decimal) else int(v) if isinstance(v, bool) else v
+        for v in step.values()
+    )
+
+
 def _text(value: Decimal | int | None) -> str | None:
     # The gate's margins are ints on the grid, its confidence a ``Decimal``.
     return None if value is None else str(value)
@@ -274,17 +391,20 @@ class ReplayStore:
     """An open ``replay.sqlite``. Use as a context manager.
 
     ``create`` decides what a missing file means: ``replay``, ``register``
-    and ``score --holdout`` without a variant (it has a look to record)
-    create it, and any other reader refuses rather than leave an empty store
-    behind a typo. The same three bring a v2 store to v3; any other open
-    reads it as written (module docstring).
+    and ``score --holdout`` or ``backtest --holdout`` without a variant (they
+    have a look to record) create it, and any other reader refuses rather
+    than leave an empty store behind a typo. The same commands, and
+    ``backtest`` on a store that exists, bring a v2 or v3 store to v4; any
+    other open reads it as written (module docstring).
     """
 
     def __init__(self, path: Path, *, create: bool = False) -> None:
         self.path = path
         self._create = create
-        # False only for a v2 store opened by a reader (module docstring).
+        # False only for an older store opened by a reader (module docstring):
+        # a v2 store has no probe tables, a v2 or v3 store no backtest tables.
         self.probe_tables = True
+        self.backtest_tables = True
         if path.exists() and not path.is_file():
             raise ReplayStoreError(f"{path} is not a regular file")
         if not path.exists() and not create:
@@ -311,19 +431,32 @@ class ReplayStore:
             row[0] for row in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         version = self.conn.execute("PRAGMA user_version").fetchone()[0]
-        if version == 2 and names >= _V2_TABLES and not names & _PROBE_TABLES:
+        # A later table set present in part is a damaged file, not an older
+        # store: it falls through to the refusal below, untouched.
+        damaged = any(
+            names & tables and not names >= tables for _, _, tables in _LATER_TABLES
+        )
+        if 1 < version < SCHEMA_VERSION and names >= _V2_TABLES and not damaged:
+            missing = [
+                (ddl, tables)
+                for written, ddl, tables in _LATER_TABLES
+                if version <= written and not names & tables
+            ]
             if not self._create:
-                # A reader leaves a v2 store as it was written: it holds no
-                # probe answer, and the probe reads say so by finding none.
-                self.probe_tables = False
+                # A reader leaves an older store as it was written: it holds
+                # no probe answer or no backtest, and the reads say so by
+                # finding none.
+                self.probe_tables = bool(names & _PROBE_TABLES)
+                self.backtest_tables = bool(names & _BACKTEST_TABLES)
                 return
-            # The one migration: v3 only added tables, so a v2 store gains
-            # them and keeps everything it holds.
+            # The one kind of migration: a later version only added tables,
+            # so an older store gains them and keeps everything it holds.
             with self.transaction() as conn:
-                for ddl in _PROBE_DDL:
-                    conn.execute(ddl)
+                for ddl_set, tables in missing:
+                    for ddl in ddl_set:
+                        conn.execute(ddl)
+                    names |= tables
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-            names |= _PROBE_TABLES
             version = SCHEMA_VERSION
         if names and 0 < version < SCHEMA_VERSION:
             raise ReplayStoreError(
@@ -348,7 +481,7 @@ class ReplayStore:
                     "does not create one"
                 )
             with self.transaction() as conn:
-                for ddl in (*_DDL, *_PROBE_DDL):
+                for ddl in _ALL_DDL:
                     conn.execute(ddl)
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -712,6 +845,88 @@ class ReplayStore:
                 ) from exc
             found[sha][1].setdefault(row["repeat"], []).append(answer)
         return list(found.values())
+
+    # -- backtests (plan PR 3a) ----------------------------------------------
+
+    def write_backtests(self, walks: Sequence[tuple[BacktestRecord, AccountPath]]) -> list[int]:
+        """Every path one command walked, each row and all its steps, in ONE transaction; return the ids.
+
+        A walk is one computation, so it is written whole or not at all. A
+        record's ``variant_sha`` and ``repeat`` are both set (a variant's
+        repeat) or both ``None`` (the paper trader's answers, or a control).
+        """
+        if not self.backtest_tables:
+            raise ReplayStoreError(
+                f"{self.path} was written before the backtest tables (replay schema v4) and "
+                "was opened to read; a command that may create a store brings it to v4"
+            )
+        ids: list[int] = []
+        with self.transaction() as conn:
+            for record, path in walks:
+                cursor = conn.execute(
+                    "INSERT INTO backtests (walked_at, run_id, driver, variant_sha, repeat, "
+                    "holdout_walked, costs_json, half_spread_bps, tick, initial_balance, "
+                    "final_equity, ruined, funding_missing) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        record.walked_at.isoformat(),
+                        record.run_id,
+                        record.driver,
+                        record.variant_sha,
+                        record.repeat,
+                        int(record.holdout_walked),
+                        json.dumps(path.terms.costs.to_dict(), sort_keys=True),
+                        str(path.terms.half_spread_bps),
+                        str(path.terms.tick),
+                        str(path.terms.initial_balance),
+                        str(path.final_equity),
+                        int(path.ruined),
+                        path.funding_missing,
+                    ),
+                )
+                backtest_id = cursor.lastrowid
+                assert backtest_id is not None
+                conn.executemany(
+                    "INSERT INTO backtest_steps (backtest_id, input_id, at, segment, mark, "
+                    "target_side, target_margin_pct, carried, filled, fill_price, fee, funding, "
+                    "funding_missing, size, entry, wallet, equity, ret) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [(backtest_id, *_step_row(step)) for step in path.steps],
+                )
+                ids.append(backtest_id)
+        return ids
+
+    def write_backtest(self, record: BacktestRecord, path: AccountPath) -> int:
+        """One walked path (see :meth:`write_backtests`); return its id."""
+        return self.write_backtests([(record, path)])[0]
+
+    def backtests(self, run_id: str) -> list[WalkedPath]:
+        """Every path walked on the run, oldest first."""
+        if not self.backtest_tables:
+            return []
+        return [
+            WalkedPath(
+                backtest_id=row["backtest_id"],
+                walked_at=row["walked_at"],
+                driver=row["driver"],
+                variant_name=row["name"],
+                repeat=row["repeat"],
+                final_equity=Decimal(row["final_equity"]),
+            )
+            for row in self.conn.execute(
+                "SELECT b.backtest_id, b.walked_at, b.driver, b.repeat, b.final_equity, v.name "
+                "FROM backtests AS b LEFT JOIN variants AS v ON v.variant_sha = b.variant_sha "
+                "WHERE b.run_id = ? ORDER BY b.backtest_id",
+                (run_id,),
+            )
+        ]
+
+    def trials(self) -> int:
+        """How many variant repeats this store has tried, failures included (plan §5 (2))."""
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM (SELECT variant_sha, repeat FROM answers "
+            "UNION SELECT variant_sha, repeat FROM failures)"
+        ).fetchone()[0]
 
     # -- the split ------------------------------------------------------------
 

@@ -52,6 +52,12 @@ What is borrowed and why:
 - for the direction probe (plan PR 2.1): the decision parser's JSON
   extraction (``extract_json_block``), so a probe answer's object is found
   the way a decision's block is;
+- for the backtest's simulated account (plan PR 3a): the paper lane's
+  fill effect and funding formula (``runtime/accounting``), its fill model
+  (``paper/fill_model``), the position and side records the fill effect
+  takes, the unrealised-P&L formula, the funding cadence and the research
+  ledger's promote threshold (``Penalty``), so the account is the paper
+  books' own arithmetic and the bar is the research package's own;
 - for the guardrail's shadow report: the research package's guardrail rule
   and its side at every close (``load_rule``, ``build_timeline``), so the
   side a recorded decision is read against is the one that package replays.
@@ -70,7 +76,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from contrib.autoresearch.constants import MS_PER_DAY, STUDIED_INTERVALS
+from contrib.autoresearch.constants import FUNDING_INTERVAL_MS, MS_PER_DAY, STUDIED_INTERVALS
 from contrib.autoresearch.costs import CostModel, FillRole, require_amount
 from contrib.autoresearch.guardrail import (
     DEFAULT_RULE,
@@ -80,6 +86,7 @@ from contrib.autoresearch.guardrail import (
     build_timeline,
     load_rule,
 )
+from contrib.autoresearch.ledger import Penalty
 from contrib.autoresearch.split import SegmentName, Split, SplitError
 from contrib.autoresearch.store import ResearchStore, StoreError
 from contrib.autoresearch.vocabulary import SpecError, require_number
@@ -89,6 +96,7 @@ from contrib.core.instants import epoch_ms, from_epoch_ms, parse_instant
 from contrib.hyperliquid_perp.common.constants import FILE_TARGET_MODEL
 from contrib.hyperliquid_perp.common.sidecar import sidecar_path
 from contrib.hyperliquid_perp.common.store_layout import payload_dir
+from contrib.hyperliquid_perp.domains.perp.margin import unrealized_pnl
 from contrib.hyperliquid_perp.domains.perp.market_data_config import MarketDataConfig
 from contrib.hyperliquid_perp.domains.perp.risk_gate import (
     CurrentPositionState,
@@ -107,9 +115,12 @@ from contrib.hyperliquid_perp.domains.perp.target_decision import (
 )
 from contrib.hyperliquid_perp.integration.trading_graph import inject_perp_context
 from contrib.hyperliquid_perp.paper.config import PaperTradingConfig
+from contrib.hyperliquid_perp.paper.fill_model import fill_price, maker_post_price, maker_would_fill
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.db_types import SchemaVersionError
+from contrib.hyperliquid_perp.persistence.models import PositionState, Side
 from contrib.hyperliquid_perp.persistence.repository import TERMINAL_ATTEMPT_STATUSES, get_run
+from contrib.hyperliquid_perp.runtime.accounting import compute_fill_effect, funding_pnl
 
 __all__ = [
     "BORROWED",
@@ -117,6 +128,7 @@ __all__ = [
     "DEFAULT_RULE",
     "ENGINE_BORROWED",
     "FILE_TARGET_MODEL",
+    "FUNDING_INTERVAL_MS",
     "MS_PER_DAY",
     "RULE_INTERVAL",
     "STUDIED_INTERVALS",
@@ -133,6 +145,8 @@ __all__ = [
     "GuardrailSide",
     "MarketDataConfig",
     "PaperTradingConfig",
+    "Penalty",
+    "PositionState",
     "ResearchStore",
     "RiskAction",
     "RiskConfig",
@@ -140,21 +154,27 @@ __all__ = [
     "RuleTimeline",
     "SchemaVersionError",
     "SegmentName",
+    "Side",
     "SpecError",
     "Split",
     "SplitError",
     "StoreError",
     "TargetSide",
     "build_timeline",
+    "compute_fill_effect",
     "epoch_ms",
     "evaluate",
     "extract_json_block",
+    "fill_price",
     "from_epoch_ms",
+    "funding_pnl",
     "get_run",
     "inject_perp_context",
     "interval_to_ms",
     "load_engine",
     "load_rule",
+    "maker_post_price",
+    "maker_would_fill",
     "parse_instant",
     "parse_target_decision",
     "payload_digest",
@@ -162,6 +182,7 @@ __all__ = [
     "require_amount",
     "require_number",
     "sidecar_path",
+    "unrealized_pnl",
 ]
 
 # The packages this one may name at all: the two neighbours and the
@@ -179,6 +200,7 @@ UPSTREAM_PACKAGES: tuple[str, ...] = (
 # sequence the pin test walks. ``tests/test_upstream.py`` holds it equal to
 # the imports above and to ``__all__``.
 BORROWED: tuple[tuple[str, str], ...] = (
+    ("contrib.autoresearch.constants", "FUNDING_INTERVAL_MS"),
     ("contrib.autoresearch.constants", "MS_PER_DAY"),
     ("contrib.autoresearch.constants", "STUDIED_INTERVALS"),
     ("contrib.autoresearch.costs", "CostModel"),
@@ -190,6 +212,7 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.guardrail", "RuleTimeline"),
     ("contrib.autoresearch.guardrail", "build_timeline"),
     ("contrib.autoresearch.guardrail", "load_rule"),
+    ("contrib.autoresearch.ledger", "Penalty"),
     ("contrib.autoresearch.split", "SegmentName"),
     ("contrib.autoresearch.split", "Split"),
     ("contrib.autoresearch.split", "SplitError"),
@@ -205,6 +228,7 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.hyperliquid_perp.common.constants", "FILE_TARGET_MODEL"),
     ("contrib.hyperliquid_perp.common.sidecar", "sidecar_path"),
     ("contrib.hyperliquid_perp.common.store_layout", "payload_dir"),
+    ("contrib.hyperliquid_perp.domains.perp.margin", "unrealized_pnl"),
     ("contrib.hyperliquid_perp.domains.perp.market_data_config", "MarketDataConfig"),
     ("contrib.hyperliquid_perp.domains.perp.risk_gate", "CurrentPositionState"),
     ("contrib.hyperliquid_perp.domains.perp.risk_gate", "RiskAction"),
@@ -222,10 +246,17 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.hyperliquid_perp.domains.perp.target_decision", "parse_target_decision"),
     ("contrib.hyperliquid_perp.integration.trading_graph", "inject_perp_context"),
     ("contrib.hyperliquid_perp.paper.config", "PaperTradingConfig"),
+    ("contrib.hyperliquid_perp.paper.fill_model", "fill_price"),
+    ("contrib.hyperliquid_perp.paper.fill_model", "maker_post_price"),
+    ("contrib.hyperliquid_perp.paper.fill_model", "maker_would_fill"),
     ("contrib.hyperliquid_perp.persistence.db", "Database"),
     ("contrib.hyperliquid_perp.persistence.db_types", "SchemaVersionError"),
+    ("contrib.hyperliquid_perp.persistence.models", "PositionState"),
+    ("contrib.hyperliquid_perp.persistence.models", "Side"),
     ("contrib.hyperliquid_perp.persistence.repository", "TERMINAL_ATTEMPT_STATUSES"),
     ("contrib.hyperliquid_perp.persistence.repository", "get_run"),
+    ("contrib.hyperliquid_perp.runtime.accounting", "compute_fill_effect"),
+    ("contrib.hyperliquid_perp.runtime.accounting", "funding_pnl"),
 )
 
 # The engine half, borrowed lazily (module docstring): ``(dotted module,

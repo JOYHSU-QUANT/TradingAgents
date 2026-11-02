@@ -10,6 +10,46 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **A `backtest` command for the replay package: one simulated account
+  walked through a paper run's recorded decisions, four controls, and the
+  mother plan's section 5 bar as a program** (replay plan PR 3a,
+  `.claude/replay-pr3-backtest-plan-2026-11-02.md`). `contrib/replay/account.py`
+  carries a position from one decision to the next with the paper lane's own
+  arithmetic, borrowed through `upstream.py`: the gate's sizing (equity ×
+  approved margin × leverage, the order the difference from the book), the
+  taker fill at mark ± slippage, the maker post at the mark less or plus the
+  assumed half spread, rounded to the tick on the passive side, judged
+  against the bar the decision falls in (its low for a buy, its high for a
+  sell, through `maker_would_fill`; an unfilled
+  post rests and is re-priced at the next question until it fills, a new
+  target replaces it, or it is no longer needed), `compute_fill_effect`, and hourly funding from the research
+  store valued at the last close, with settlements the store lacks counted
+  rather than zeroed. No stop-loss or take-profit (decided 2026-11-02), the
+  last position marked rather than closed, ruin stops the path. A decision's
+  return is the equity move to the next question, read before its own order.
+  `gate.py` walks `buy_hold`, `flat`, `research_bias` and `paper` (the paper
+  trader's own answers, the "current variant": every target the gate
+  approved, compared with the account's own position under the run's own
+  deadband) through the same account and
+  writes the four checks of plan §5 on the validation segment pooled across
+  runs: Sharpe above every control, above `Penalty.threshold(n)` for the
+  `(variant, repeat)` pairs the store has tried, paired 4h hits ahead of
+  paper over at least 100 pooled questions at McNemar p < 0.05, and a
+  fail-closed rate not above paper's over the same questions; each check
+  prints its inputs. Without `--variant` the paper trader is judged against
+  itself as the program's smoke test; with one, `--holdout` is refused
+  unless every repeat passes the bar on the validation segment, so the
+  holdout look is spent only on an eligible candidate; the verdict printed
+  is always the one read with the holdout unread. `replay.sqlite` goes to schema v4 (`backtests`,
+  `backtest_steps`), gained by a v2 or v3 store when a command that may
+  create a store opens it, as the v3 tables were; `--tick` names the venue's
+  price tick the paper store does not record (default 1); `--out` writes
+  one CSV row per walked question per path. `score.sharpe` is now public,
+  `RunFacts` carries the run's opening balance and assumed half spread, and
+  the package-graph ratchet lets `replay` reach the perp package's
+  `runtime` area for the fill effect. Nothing here asks a model; the lower
+  half of the graph re-run from the recorded reports is plan PR 3b.
+
 - **A `contrib/discovery` skeleton: the research-loop benchmark's package,
   manifest, final verdict and isolation ratchets** (discovery plan
   2026-10-21, PR 1). The package borrows `contrib.autoresearch` and

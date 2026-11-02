@@ -36,8 +36,14 @@ sources to hold that. What is borrowed is listed once, in
 :mod:`~contrib.replay.upstream`, and every other module here imports from
 THAT rather than reaching out itself.
 
-The simple version scores each decision on its own: the position it was made
-from is the one the store recorded, and no simulated account carries a
-position from one decision to the next. That makes it a re-grading of
-judgement, not a backtest (replay plan §1).
+The scorecard scores each decision on its own: the position it was made
+from is the one the store recorded, and no account carries a position
+from one decision to the next. That makes it a re-grading of judgement,
+not a backtest (replay plan §1). The backtest (plan PR 3a,
+:mod:`~contrib.replay.account` and :mod:`~contrib.replay.gate`) is the
+other thing: one simulated account walked through the recorded answers
+under the run's own fill model, beside four controls, and the mother
+plan's section 5 bar read off the paths. It still asks no model; the
+lower half of the graph re-run from the recorded reports is the next
+pull request.
 """

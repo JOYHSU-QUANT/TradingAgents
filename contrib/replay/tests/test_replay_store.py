@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -9,7 +10,14 @@ from pathlib import Path
 
 import pytest
 
-from contrib.replay.replay_store import SCHEMA_VERSION, ReplayStore, ReplayStoreError, StoredAnswer
+from contrib.replay.account import Path as AccountPath
+from contrib.replay.replay_store import (
+    SCHEMA_VERSION,
+    BacktestRecord,
+    ReplayStore,
+    ReplayStoreError,
+    StoredAnswer,
+)
 from contrib.replay.upstream import (
     CurrentPositionState,
     DecisionConfig,
@@ -18,6 +26,7 @@ from contrib.replay.upstream import (
     parse_target_decision,
 )
 
+from .conftest import downgrade_to_v3, terms
 from .papers import decision_text, variant as make_variant
 
 NOW = datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc)
@@ -282,6 +291,161 @@ def test_an_unreadable_pin_is_refused_by_name(tmp_path):
         ReplayStoreError, match="the split pinned for run 'run' cannot be read"
     ):
         store.pinned_split("run")
+
+
+def test_a_v3_store_is_read_as_written_and_takes_no_backtest(tmp_path):
+    path = tmp_path / "r.sqlite"
+    with ReplayStore(path, create=True) as store:
+        store.register(make_variant(), now=NOW)
+    downgrade_to_v3(path)
+    record = BacktestRecord(NOW, "run", "flat", None, None, False)
+    with ReplayStore(path) as store:
+        assert store.probe_tables and not store.backtest_tables
+        assert store.backtests("run") == []
+        with pytest.raises(ReplayStoreError, match="before the backtest tables"):
+            store.write_backtest(record, AccountPath(terms(), ()))
+    conn = sqlite3.connect(path)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone() == (3,)
+    finally:
+        conn.close()
+    with ReplayStore(path, create=True) as store:
+        assert store.backtest_tables
+        store.write_backtest(record, AccountPath(terms(), ()))
+        (walked,) = store.backtests("run")
+        assert (walked.driver, walked.variant_name, walked.final_equity) == (
+            "flat",
+            None,
+            Decimal(1000),
+        )
+    with pytest.raises(ValueError, match="names a variant with its repeat, or neither"):
+        BacktestRecord(NOW, "run", "variant", "sha256:x", None, False)
+
+
+def _walked_path():
+    """A two-step maker path with a fill and a resting post, built through the account itself."""
+    from contrib.replay.account import Bar, Decision, Series, Target, simulate
+    from contrib.replay.upstream import CostModel, FillRole, TargetSide
+
+    from .conftest import STEP_MS, at_ms
+
+    maker = terms(CostModel(fill_role=FillRole.MAKER))
+    bars = [
+        Bar(at_ms(0) - STEP_MS + 1, at_ms(0), Decimal(103), Decimal(97), Decimal(100)),
+        Bar(at_ms(1) - STEP_MS + 1, at_ms(1), Decimal(101), Decimal(99), Decimal(100)),
+    ]
+    decisions = [
+        Decision("q0", at_ms(0), None, Decimal(100), Decimal(1), Target(TargetSide.LONG, Decimal(50))),
+        Decision("q1", at_ms(1), None, Decimal(100), Decimal(1), Target(TargetSide.FLAT, Decimal(0))),
+    ]
+    return simulate(decisions, terms=maker, series=Series.of(bars, []))
+
+
+def test_a_walked_path_reads_back_column_for_column(tmp_path):
+    path = _walked_path()
+    filled, resting = path.steps
+    assert filled.filled is True and resting.filled is False  # the fixture has both shapes
+    record = BacktestRecord(NOW, "run", "paper", None, None, False)
+    with ReplayStore(tmp_path / "r.sqlite", create=True) as store:
+        backtest_id = store.write_backtest(record, path)
+        row = store.conn.execute(
+            "SELECT * FROM backtests WHERE backtest_id = ?", (backtest_id,)
+        ).fetchone()
+        steps = store.conn.execute(
+            "SELECT * FROM backtest_steps WHERE backtest_id = ? ORDER BY at", (backtest_id,)
+        ).fetchall()
+    assert (row["driver"], row["tick"], row["half_spread_bps"], row["initial_balance"]) == (
+        "paper",
+        "1",
+        "0.5",
+        "1000",
+    )
+    # Four hours held with no settlement in the series: four counted missing.
+    assert (row["final_equity"], row["ruined"], row["funding_missing"]) == (
+        str(path.final_equity),
+        0,
+        4,
+    )
+    assert path.funding_missing == 4
+    assert json.loads(row["costs_json"])["fill_role"] == "maker"
+    for stored, step in zip(steps, path.steps, strict=True):
+        values = step.values()
+        assert stored["input_id"] == values[0]
+        assert stored["at"] == values[1]
+        assert stored["target_side"] == values[4]
+        assert stored["target_margin_pct"] == str(values[5])
+        assert (stored["carried"], stored["filled"]) == (int(values[6]), int(values[7]))
+        assert stored["fill_price"] == str(values[8])
+        assert (stored["fee"], stored["funding"]) == (str(values[9]), str(values[10]))
+        assert (stored["size"], stored["entry"]) == (
+            str(values[12]),
+            None if values[13] is None else str(values[13]),
+        )
+        assert (stored["wallet"], stored["equity"], stored["ret"]) == (
+            str(values[14]),
+            str(values[15]),
+            values[16],
+        )
+
+
+def test_write_backtests_is_one_transaction(tmp_path):
+    path = _walked_path()
+    good = BacktestRecord(NOW, "run", "flat", None, None, False)
+    unknown = BacktestRecord(NOW, "run", "variant", "sha256:nobody", 0, False)
+    with ReplayStore(tmp_path / "r.sqlite", create=True) as store:
+        with pytest.raises(ReplayStoreError, match="write failed, rolled back"):
+            store.write_backtests([(good, path), (unknown, path)])
+        assert store.backtests("run") == []
+
+
+def test_trials_counts_each_variant_repeat_once_failures_included(tmp_path):
+    variant = make_variant()
+    with ReplayStore(tmp_path / "r.sqlite", create=True) as store:
+        assert store.trials() == 0
+        store.register(variant, now=NOW)
+        gate = _gate(decision_text("set_target", "long", 30, 0.8))
+        store.write_answer(
+            variant.sha,
+            StoredAnswer("run", "in-1", 0, NOW, "train", "text", False, None, gate),
+        )
+        store.record_failure(
+            variant.sha, run_id="run", input_id="in-2", repeat=0, error="400", now=NOW
+        )
+        assert store.trials() == 1  # answers and failures of one repeat are one trial
+        store.record_failure(
+            variant.sha, run_id="other", input_id="in-1", repeat=1, error="400", now=NOW
+        )
+        assert store.trials() == 2  # a repeat that only failed still counts
+
+
+def test_a_half_formed_later_table_set_is_refused_untouched(tmp_path):
+    path = tmp_path / "r.sqlite"
+    with ReplayStore(path, create=True):
+        pass
+    conn = sqlite3.connect(path)
+    conn.execute("DROP TABLE backtest_steps")
+    conn.execute("DROP TABLE backtests")
+    conn.execute("DROP TABLE probe_answers")
+    conn.execute("PRAGMA user_version = 2")
+    conn.commit()
+    conn.close()
+    # Not an older store to bring forward: refused by its version, untouched.
+    with pytest.raises(ReplayStoreError, match="was written at replay schema v2"):
+        ReplayStore(path, create=True)
+    conn = sqlite3.connect(path)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone() == (2,)
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "backtests" not in tables
+    finally:
+        conn.close()
+
+
+def test_a_backtest_record_couples_its_driver_to_its_variant():
+    with pytest.raises(ValueError, match="names its variant and a control none"):
+        BacktestRecord(NOW, "run", "paper", "sha256:x", 0, False)
+    with pytest.raises(ValueError, match="names its variant and a control none"):
+        BacktestRecord(NOW, "run", "variant", None, None, False)
 
 
 def test_a_store_from_the_earlier_schema_is_named_not_taken_for_a_foreign_file(tmp_path):

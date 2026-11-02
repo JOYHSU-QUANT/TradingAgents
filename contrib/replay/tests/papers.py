@@ -44,7 +44,7 @@ from contrib.replay.replay import Completion
 from contrib.replay.upstream import Database, from_epoch_ms, payload_dir
 from contrib.replay.variant import Variant
 
-from .conftest import COIN, at_ms, insert_attempt, run_config
+from .conftest import COIN, GATE_DECISION, GATE_RISK, at_ms, insert_attempt, run_config
 
 RUN_ID = "paper-GATE"
 EQUITY = Decimal("1000")
@@ -52,16 +52,10 @@ LEVERAGE = Decimal("1")
 MAX_MARGIN_PCT = 60
 FORMAT = "Answer with one fenced JSON block."
 
-# Run 6's gate: deadband 4, the base bar 0.3, the resize bar 0.62.
-RISK = {"leverage": 1, "margin_mode": "cross", "max_target_margin_pct": MAX_MARGIN_PCT}
-DECISION = {
-    "ai_target_margin_min_pct": 0,
-    "ai_target_margin_max_pct": 100,
-    "target_margin_step_pct": 1,
-    "rebalance_deadband_pct": 4,
-    "min_confidence": 0.3,
-    "resize_min_confidence": 0.62,
-}
+# Run 6's gate: deadband 4, the base bar 0.3, the resize bar 0.62 (the
+# blocks ``conftest.run_config(gate=True)`` records).
+RISK = GATE_RISK
+DECISION = GATE_DECISION
 
 
 def gate_run_config() -> dict:

@@ -43,6 +43,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path, PureWindowsPath
 from typing import Final, TypeVar
 
+from .account import Bar, Funding
 from .score import Answer, Question, ScoreError
 from .upstream import (
     FILE_TARGET_MODEL,
@@ -74,7 +75,9 @@ __all__ = [
     "answer_from_row",
     "gate_config",
     "load_decisions",
+    "load_research_bars",
     "load_research_closes",
+    "load_research_funding",
     "run_facts",
 ]
 
@@ -128,6 +131,11 @@ class RunFacts:
     costs: CostModel
     config_recorded: bool
     missing_blocks: tuple[str, ...]
+    # What the backtest's account (plan PR 3a) opens with and posts at: the
+    # run's ``initial_balance_usdc`` and its fill model's
+    # ``assumed_half_spread_bps``, exact, as the genesis records them.
+    initial_balance: Decimal
+    half_spread_bps: Decimal
 
     def describe_source(self) -> str:
         """Where the costs and the interval came from, for the report's first line."""
@@ -165,6 +173,7 @@ def run_facts(db: Database, run_id: str) -> RunFacts | None:
     try:
         execution = PaperTradingConfig.from_dict(config.get("paper_trading")).execution
         market_data = MarketDataConfig.from_dict(config.get("market_data"))
+        initial_balance = Decimal(str(row["initial_balance_usdc"]))
         costs = CostModel(
             taker_fee_rate=float(execution.taker_fee_rate),
             maker_fee_rate=float(execution.fill_model.maker_fee_rate),
@@ -172,8 +181,13 @@ def run_facts(db: Database, run_id: str) -> RunFacts | None:
             fill_role=FillRole(execution.fill_model.style),
             leverage=1.0,
         )
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, InvalidOperation) as exc:
         raise ScoreError(f"run {run_id!r}: config_json does not parse ({exc})") from exc
+    if initial_balance <= 0:
+        raise ScoreError(
+            f"run {run_id!r}: initial_balance_usdc is {initial_balance}; an account opens with "
+            "a positive balance"
+        )
     coin = config.get("coin")
     if not isinstance(coin, str) or not coin:
         first = db.conn.execute(
@@ -195,6 +209,8 @@ def run_facts(db: Database, run_id: str) -> RunFacts | None:
         costs=costs,
         config_recorded=recorded,
         missing_blocks=missing,
+        initial_balance=initial_balance,
+        half_spread_bps=execution.fill_model.assumed_half_spread_bps,
     )
 
 
@@ -510,3 +526,43 @@ def load_research_closes(
         c.close_time: float(c.close)
         for c in store.iter_candles(coin, interval, since_ms=since_ms, until_ms=until_ms)
     }
+
+
+def load_research_bars(
+    store: ResearchStore,
+    *,
+    coin: str,
+    interval: str,
+    since_ms: int | None = None,
+    until_ms: int | None = None,
+) -> list[Bar]:
+    """The series' bars opening in ``[since, until]``, as the backtest's account reads them.
+
+    Through :meth:`iter_candles` for the reason :func:`load_research_closes`
+    gives; the window is the holdout lock. The account's own record keeps
+    the three prices it reads (high, low, close) and nothing else.
+    """
+    return [
+        Bar(
+            open_time=c.open_time,
+            close_time=c.close_time,
+            high=c.high,
+            low=c.low,
+            close=c.close,
+        )
+        for c in store.iter_candles(coin, interval, since_ms=since_ms, until_ms=until_ms)
+    ]
+
+
+def load_research_funding(
+    store: ResearchStore,
+    *,
+    coin: str,
+    since_ms: int | None = None,
+    until_ms: int | None = None,
+) -> list[Funding]:
+    """The coin's hourly funding settlements stamped in ``[since, until]``."""
+    return [
+        Funding(time=p.time, rate=p.rate)
+        for p in store.iter_funding(coin, since_ms=since_ms, until_ms=until_ms)
+    ]

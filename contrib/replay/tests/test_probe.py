@@ -472,15 +472,15 @@ def test_a_v2_store_is_read_as_it_is_and_upgraded_by_a_writer(tmp_path):
         assert conn.execute("PRAGMA user_version").fetchone() == (2,)
     finally:
         conn.close()
-    # A command that may create a store brings it to v3.
+    # A command that may create a store brings it to the current schema.
     with ReplayStore(path, create=True) as store:
         assert store.variant("v") == make_variant()
         assert store.probe_answers(make_variant().sha, "run") == []
     conn = sqlite3.connect(path)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,) == (3,)
+        assert conn.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,) == (4,)
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert {"probes", "probe_answers"} <= tables
+        assert {"probes", "probe_answers", "backtests", "backtest_steps"} <= tables
     finally:
         conn.close()
 

@@ -18,6 +18,7 @@ rows encoded the way the daemon encodes them, not against hand-written SQL.
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
@@ -27,8 +28,10 @@ from contrib.hyperliquid_perp.domains.perp.schema import Candle
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.ids import decision_attempt_id
 from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
+from contrib.replay.account import Terms
 from contrib.replay.score import Answer, Question
 from contrib.replay.upstream import (
+    CostModel,
     Database,
     ResearchStore,
     TargetSide,
@@ -219,18 +222,43 @@ def _maybe(text: str | None) -> float | None:
     return None if text is None else float(text)
 
 
-def run_config(*, style: str = "taker", interval: str = "4h") -> dict:
-    """The genesis ``config_json`` subset the paper daemon records, at the fixture's terms."""
-    return {
+# Run 6's gate, the one the backtest fixtures carry: deadband 4, the base
+# bar 0.3, the resize bar 0.62 (``papers.py`` records the same blocks).
+GATE_RISK = {"leverage": 1, "margin_mode": "cross", "max_target_margin_pct": int(MAX_MARGIN_PCT)}
+GATE_DECISION = {
+    "ai_target_margin_min_pct": 0,
+    "ai_target_margin_max_pct": 100,
+    "target_margin_step_pct": 1,
+    "rebalance_deadband_pct": 4,
+    "min_confidence": 0.3,
+    "resize_min_confidence": 0.62,
+}
+
+
+def run_config(
+    *,
+    style: str = "taker",
+    interval: str = "4h",
+    half_spread_bps: str | None = None,
+    gate: bool = False,
+) -> dict:
+    """The genesis ``config_json`` subset the paper daemon records, at the fixture's terms.
+
+    ``gate`` adds the ``risk:`` / ``decision:`` blocks the backtest reads its
+    deadband from.
+    """
+    fill_model: dict = {"style": style, "slippage_bps": "5", "maker_fee_rate": "0.00015"}
+    if half_spread_bps is not None:
+        fill_model["assumed_half_spread_bps"] = half_spread_bps
+    config = {
         "coin": COIN,
         "market_data": {"candle_interval": interval},
-        "paper_trading": {
-            "execution": {
-                "taker_fee_rate": "0.00045",
-                "fill_model": {"style": style, "slippage_bps": "5", "maker_fee_rate": "0.00015"},
-            }
-        },
+        "paper_trading": {"execution": {"taker_fee_rate": "0.00045", "fill_model": fill_model}},
     }
+    if gate:
+        config["risk"] = GATE_RISK
+        config["decision"] = GATE_DECISION
+    return config
 
 
 def write_paper_store(
@@ -386,6 +414,34 @@ def _insert_input(
 
 def _decimal(text: str | None) -> Decimal | None:
     return None if text is None else Decimal(text)
+
+
+def terms(
+    costs: CostModel | None = None,
+    *,
+    tick: str = "1",
+    half_spread: str = "0.5",
+    deadband_pct: str = "0",
+) -> Terms:
+    """The backtest account's terms at the fixture's defaults: a 1000 USDC account, the paper taker model."""
+    return Terms(
+        coin=COIN,
+        costs=CostModel() if costs is None else costs,
+        half_spread_bps=Decimal(half_spread),
+        tick=Decimal(tick),
+        initial_balance=Decimal(1000),
+        deadband_pct=Decimal(deadband_pct),
+    )
+
+
+def downgrade_to_v3(path: Path) -> None:
+    """Make a replay store look as PR 2.1 wrote it: no backtest tables, user_version 3."""
+    conn = sqlite3.connect(path)
+    conn.execute("DROP TABLE backtest_steps")
+    conn.execute("DROP TABLE backtests")
+    conn.execute("PRAGMA user_version = 3")
+    conn.commit()
+    conn.close()
 
 
 def write_research_store(path: Path) -> Path:

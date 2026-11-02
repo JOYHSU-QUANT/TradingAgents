@@ -24,7 +24,25 @@ from .replay import Completion, Model
 from .upstream import Engine, load_engine
 from .variant import Variant
 
-__all__ = ["engine_model"]
+__all__ = ["build_llm", "engine_model"]
+
+
+def build_llm(engine: Engine, variant: Variant, provider: str, model: str, **extra: Any) -> Any:
+    """The engine's chat model for ``provider``/``model`` under ``variant``'s cap and temperature.
+
+    The one knob translated here is the completion cap's key, which Gemini
+    names ``max_output_tokens`` (the graph's ``_get_provider_kwargs`` makes
+    the same switch); the temperature is forwarded only when the variant
+    sets one. ``extra`` reaches the client as given (the lower graph's
+    callbacks). The replay's one completion and the lower graph's two
+    clients are built here and nowhere else.
+    """
+    kwargs: dict[str, Any] = dict(extra)
+    cap_key = "max_output_tokens" if provider.lower() == "google" else "max_tokens"
+    kwargs[cap_key] = variant.max_tokens
+    if variant.temperature is not None:
+        kwargs["temperature"] = variant.temperature
+    return engine.create_llm_client(provider=provider, model=model, base_url=None, **kwargs).get_llm()
 
 
 def engine_model(variant: Variant, *, engine: Engine | None = None) -> Model:
@@ -36,15 +54,7 @@ def engine_model(variant: Variant, *, engine: Engine | None = None) -> Model:
     import loaded; a provider the factory does not know raises ``ValueError``.
     """
     engine = load_engine() if engine is None else engine
-    kwargs: dict[str, Any] = {}
-    cap_key = "max_output_tokens" if variant.provider.lower() == "google" else "max_tokens"
-    kwargs[cap_key] = variant.max_tokens
-    if variant.temperature is not None:
-        kwargs["temperature"] = variant.temperature
-    client = engine.create_llm_client(
-        provider=variant.provider, model=variant.model, base_url=None, **kwargs
-    )
-    llm = client.get_llm()
+    llm = build_llm(engine, variant, variant.provider, variant.model)
 
     def ask(system: str, human: str) -> Completion:
         collector = engine.CompletionUsageCollector()

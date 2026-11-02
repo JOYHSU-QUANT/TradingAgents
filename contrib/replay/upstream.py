@@ -63,12 +63,15 @@ What is borrowed and why:
   side a recorded decision is read against is the one that package replays.
 
 The engine half (the LLM client factory, the message types, the
-completion collector) is borrowed LAZILY: it is listed in
+completion collector, and for plan PR 3b the lower half of the graph:
+the trader, the three risk debators, the portfolio manager, the state
+type, the risk-debate router and ``langgraph``'s graph builder) is
+borrowed LAZILY: it is listed in
 ``ENGINE_BORROWED`` and imported only by :func:`load_engine`, because it
 pulls in ``langchain_core`` and a scorecard, a dry run and every test with
-a fake model must not pay for that. ``tradingagents`` and
-``langchain_core`` are the only packages outside ``contrib/`` borrowed
-from, and only through that function.
+a fake model must not pay for that. ``tradingagents``,
+``langchain_core`` and ``langgraph`` are the only packages outside
+``contrib/`` borrowed from, and only through that function.
 """
 
 from __future__ import annotations
@@ -97,22 +100,32 @@ from contrib.hyperliquid_perp.common.constants import FILE_TARGET_MODEL
 from contrib.hyperliquid_perp.common.sidecar import sidecar_path
 from contrib.hyperliquid_perp.common.store_layout import payload_dir
 from contrib.hyperliquid_perp.domains.perp.margin import unrealized_pnl
+from contrib.hyperliquid_perp.domains.perp.marginal_cost import (
+    BookPosition,
+    PositionInputs,
+    PositionPricing,
+    build_position_context,
+)
 from contrib.hyperliquid_perp.domains.perp.market_data_config import MarketDataConfig
+from contrib.hyperliquid_perp.domains.perp.prompt_context import render_position_section
 from contrib.hyperliquid_perp.domains.perp.risk_gate import (
     CurrentPositionState,
     RiskAction,
     RiskConfig,
     RiskGateResult,
+    effective_max_target_margin_pct,
     evaluate,
 )
 from contrib.hyperliquid_perp.domains.perp.schema import GuardrailSide, interval_to_ms
 from contrib.hyperliquid_perp.domains.perp.target_decision import (
+    FINAL_TRADE_DECISION_KEY,
     DecisionConfig,
     DecisionMode,
     TargetSide,
     extract_json_block,
     parse_target_decision,
 )
+from contrib.hyperliquid_perp.integration.decision_reports import REPORT_KEYS
 from contrib.hyperliquid_perp.integration.trading_graph import inject_perp_context
 from contrib.hyperliquid_perp.paper.config import PaperTradingConfig
 from contrib.hyperliquid_perp.paper.fill_model import fill_price, maker_post_price, maker_would_fill
@@ -124,12 +137,15 @@ from contrib.hyperliquid_perp.runtime.accounting import compute_fill_effect, fun
 
 __all__ = [
     "BORROWED",
+    "BookPosition",
     "DECIMAL_CONTEXT",
     "DEFAULT_RULE",
     "ENGINE_BORROWED",
     "FILE_TARGET_MODEL",
+    "FINAL_TRADE_DECISION_KEY",
     "FUNDING_INTERVAL_MS",
     "MS_PER_DAY",
+    "REPORT_KEYS",
     "RULE_INTERVAL",
     "STUDIED_INTERVALS",
     "TERMINAL_ATTEMPT_STATUSES",
@@ -146,6 +162,8 @@ __all__ = [
     "MarketDataConfig",
     "PaperTradingConfig",
     "Penalty",
+    "PositionInputs",
+    "PositionPricing",
     "PositionState",
     "ResearchStore",
     "RiskAction",
@@ -160,8 +178,10 @@ __all__ = [
     "SplitError",
     "StoreError",
     "TargetSide",
+    "build_position_context",
     "build_timeline",
     "compute_fill_effect",
+    "effective_max_target_margin_pct",
     "epoch_ms",
     "evaluate",
     "extract_json_block",
@@ -179,6 +199,7 @@ __all__ = [
     "parse_target_decision",
     "payload_digest",
     "payload_dir",
+    "render_position_section",
     "require_amount",
     "require_number",
     "sidecar_path",
@@ -229,21 +250,33 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.hyperliquid_perp.common.sidecar", "sidecar_path"),
     ("contrib.hyperliquid_perp.common.store_layout", "payload_dir"),
     ("contrib.hyperliquid_perp.domains.perp.margin", "unrealized_pnl"),
+    ("contrib.hyperliquid_perp.domains.perp.marginal_cost", "BookPosition"),
+    ("contrib.hyperliquid_perp.domains.perp.marginal_cost", "PositionInputs"),
+    ("contrib.hyperliquid_perp.domains.perp.marginal_cost", "PositionPricing"),
+    ("contrib.hyperliquid_perp.domains.perp.marginal_cost", "build_position_context"),
     ("contrib.hyperliquid_perp.domains.perp.market_data_config", "MarketDataConfig"),
+    # The position section as the daemon spells it, so the backtest can put
+    # its simulated book where the recorded one stood (plan PR 3b).
+    ("contrib.hyperliquid_perp.domains.perp.prompt_context", "render_position_section"),
     ("contrib.hyperliquid_perp.domains.perp.risk_gate", "CurrentPositionState"),
     ("contrib.hyperliquid_perp.domains.perp.risk_gate", "RiskAction"),
     ("contrib.hyperliquid_perp.domains.perp.risk_gate", "RiskConfig"),
     ("contrib.hyperliquid_perp.domains.perp.risk_gate", "RiskGateResult"),
+    ("contrib.hyperliquid_perp.domains.perp.risk_gate", "effective_max_target_margin_pct"),
     ("contrib.hyperliquid_perp.domains.perp.risk_gate", "evaluate"),
     # What the gate read from the trend guardrail on each recorded round
     # (schema v14), so the replay re-gates under the same reading.
     ("contrib.hyperliquid_perp.domains.perp.schema", "GuardrailSide"),
     ("contrib.hyperliquid_perp.domains.perp.schema", "interval_to_ms"),
+    ("contrib.hyperliquid_perp.domains.perp.target_decision", "FINAL_TRADE_DECISION_KEY"),
     ("contrib.hyperliquid_perp.domains.perp.target_decision", "DecisionConfig"),
     ("contrib.hyperliquid_perp.domains.perp.target_decision", "DecisionMode"),
     ("contrib.hyperliquid_perp.domains.perp.target_decision", "TargetSide"),
     ("contrib.hyperliquid_perp.domains.perp.target_decision", "extract_json_block"),
     ("contrib.hyperliquid_perp.domains.perp.target_decision", "parse_target_decision"),
+    # The reports sidecar's key set (plan PR 0): the lower graph reads the
+    # recorded reports under the engine state's own names (plan PR 3b).
+    ("contrib.hyperliquid_perp.integration.decision_reports", "REPORT_KEYS"),
     ("contrib.hyperliquid_perp.integration.trading_graph", "inject_perp_context"),
     ("contrib.hyperliquid_perp.paper.config", "PaperTradingConfig"),
     ("contrib.hyperliquid_perp.paper.fill_model", "fill_price"),
@@ -267,8 +300,22 @@ ENGINE_BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.hyperliquid_perp.integration.completion_usage", "CompletionUsageCollector"),
     ("langchain_core.messages", "HumanMessage"),
     ("langchain_core.messages", "SystemMessage"),
+    ("langgraph.graph", "END"),
+    ("langgraph.graph", "START"),
+    ("langgraph.graph", "StateGraph"),
+    ("tradingagents.agents", "create_aggressive_debator"),
+    ("tradingagents.agents", "create_conservative_debator"),
+    ("tradingagents.agents", "create_neutral_debator"),
+    ("tradingagents.agents", "create_portfolio_manager"),
+    ("tradingagents.agents", "create_trader"),
+    ("tradingagents.agents.utils.agent_states", "AgentState"),
+    ("tradingagents.agents.utils.agent_utils", "build_instrument_context"),
+    ("tradingagents.dataflows.config", "set_config"),
+    ("tradingagents.graph.conditional_logic", "ConditionalLogic"),
+    ("tradingagents.graph.setup", "RISK_ANALYSIS_PATH_MAP"),
     ("tradingagents.llm_clients", "create_llm_client"),
     ("tradingagents.llm_clients.base_client", "normalize_content"),
+    ("tradingagents.node_names", "PORTFOLIO_MANAGER_NODE"),
 )
 
 
@@ -279,8 +326,22 @@ class Engine:
     CompletionUsageCollector: Any
     HumanMessage: Any
     SystemMessage: Any
+    END: Any
+    START: Any
+    StateGraph: Any
+    create_aggressive_debator: Any
+    create_conservative_debator: Any
+    create_neutral_debator: Any
+    create_portfolio_manager: Any
+    create_trader: Any
+    AgentState: Any
+    build_instrument_context: Any
+    set_config: Any
+    ConditionalLogic: Any
+    RISK_ANALYSIS_PATH_MAP: Any
     create_llm_client: Any
     normalize_content: Any
+    PORTFOLIO_MANAGER_NODE: Any
 
 
 def load_engine() -> Engine:
@@ -290,15 +351,43 @@ def load_engine() -> Engine:
     installed raises ``ImportError`` here, and the caller words it.
     """
     from langchain_core.messages import HumanMessage, SystemMessage
+    from langgraph.graph import END, START, StateGraph
 
     from contrib.hyperliquid_perp.integration.completion_usage import CompletionUsageCollector
+    from tradingagents.agents import (
+        create_aggressive_debator,
+        create_conservative_debator,
+        create_neutral_debator,
+        create_portfolio_manager,
+        create_trader,
+    )
+    from tradingagents.agents.utils.agent_states import AgentState
+    from tradingagents.agents.utils.agent_utils import build_instrument_context
+    from tradingagents.dataflows.config import set_config
+    from tradingagents.graph.conditional_logic import ConditionalLogic
+    from tradingagents.graph.setup import RISK_ANALYSIS_PATH_MAP
     from tradingagents.llm_clients import create_llm_client
     from tradingagents.llm_clients.base_client import normalize_content
+    from tradingagents.node_names import PORTFOLIO_MANAGER_NODE
 
     return Engine(
         CompletionUsageCollector=CompletionUsageCollector,
         HumanMessage=HumanMessage,
         SystemMessage=SystemMessage,
+        END=END,
+        START=START,
+        StateGraph=StateGraph,
+        create_aggressive_debator=create_aggressive_debator,
+        create_conservative_debator=create_conservative_debator,
+        create_neutral_debator=create_neutral_debator,
+        create_portfolio_manager=create_portfolio_manager,
+        create_trader=create_trader,
+        AgentState=AgentState,
+        build_instrument_context=build_instrument_context,
+        set_config=set_config,
+        ConditionalLogic=ConditionalLogic,
+        RISK_ANALYSIS_PATH_MAP=RISK_ANALYSIS_PATH_MAP,
         create_llm_client=create_llm_client,
         normalize_content=normalize_content,
+        PORTFOLIO_MANAGER_NODE=PORTFOLIO_MANAGER_NODE,
     )

@@ -11,6 +11,7 @@ this file free of any directional funding interpretation.
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 
 from contrib.core.instants import delta_ms, from_epoch_ms, gap_label
@@ -441,7 +442,20 @@ def _funding_bps(rate: Decimal | None) -> str:
 
 
 def _position_lines(pos: PositionContext, ctx: PerpMarketContext) -> list[str]:
-    """The ``Position:`` section. Only called when a position context exists.
+    """The ``Position:`` section of ``ctx``; see :func:`render_position_section`."""
+    return render_position_section(pos, coin=ctx.coin, as_of=ctx.as_of)
+
+
+def render_position_section(
+    pos: PositionContext, *, coin: str, as_of: datetime
+) -> list[str]:
+    """The ``Position:`` section, rendered from the position alone.
+
+    Public because the offline replay (``contrib.replay``, plan PR 3b) puts
+    its simulated account's position where the recorded one stood, and
+    must spell it exactly as the daemon spelled it. ``coin`` and
+    ``as_of`` are the two context facts the section reads besides the
+    position (the size's unit, and the fill's age).
 
     Facts and prices only. What is deliberately NOT here: any sentence about
     which gate bar a target faces (the open / flip / flat exemptions), any
@@ -459,7 +473,7 @@ def _position_lines(pos: PositionContext, ctx: PerpMarketContext) -> list[str]:
     unrealized, holding = pos.unrealized_pnl, pos.holding_cost_8h
     assert unrealized is not None and holding is not None
     lines.append(
-        f"  Side: {pos.side.value}, size {abs(pos.size)} {ctx.coin}, "
+        f"  Side: {pos.side.value}, size {abs(pos.size)} {coin}, "
         f"notional {_num(pos.notional)} USDC at mark"
     )
     lines.append(
@@ -482,7 +496,7 @@ def _position_lines(pos: PositionContext, ctx: PerpMarketContext) -> list[str]:
         # recover that number from (issue #288). ``delta_ms`` floors, so a
         # fill inside the same millisecond as the as-of stays on the
         # "before" side and prints "0 ms before".
-        age_ms = delta_ms(ctx.as_of, pos.last_fill_at)
+        age_ms = delta_ms(as_of, pos.last_fill_at)
         when = (
             f"{gap_label(age_ms)} before the as-of time above"
             if age_ms >= 0

@@ -104,6 +104,7 @@ from .gate import (
     judge,
 )
 from .guardrail import describe_shadow, shadow, shadow_table
+from .lower_graph import LowerGraph, LowerGraphError
 from .model import engine_model
 from .paper_store import (
     Decisions,
@@ -172,7 +173,8 @@ from .upstream import (
     load_rule,
     payload_dir,
 )
-from .variant import Variant, VariantError, load_variant
+from .variant import GRAPH_MODE, GUARDRAIL_RULE, Variant, VariantError, load_variant, short_sha
+from .walk import Exam, ask_walks, load_all_reports, pending_walks, preflight
 
 __all__ = ["main"]
 
@@ -186,6 +188,7 @@ def _utc_now() -> datetime:
 _now: Callable[[], datetime] = _utc_now
 _sleep: Callable[[float], None] = time.sleep
 _build_model = engine_model
+_build_graph = LowerGraph
 
 
 class _Refused(Exception):
@@ -541,6 +544,48 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     backtest.add_argument("--variant", metavar="NAME", help="with --replay-db: the variant to walk")
     backtest.add_argument(
+        "--ask",
+        metavar="FILE",
+        help=(
+            "a graph variant's YAML file (mode: graph): walk its train and validation "
+            "questions in order, asking the lower half of the graph (trader, risk debate, "
+            "portfolio manager) from each cycle's recorded reports with the simulated "
+            "account's own position in the context, store every answer in --replay-db, then "
+            "read the bar on them as for --variant; resumes where it stopped (plan PR 3b)"
+        ),
+    )
+    backtest.add_argument(
+        "--repeats",
+        type=int,
+        metavar="N",
+        help="with --ask: walks per question (default: 3, plan section 3-10)",
+    )
+    backtest.add_argument(
+        "--limit",
+        type=int,
+        metavar="N",
+        help=(
+            "with --ask: store at most N new answers or refusals this time; the bar is read "
+            "once every walk is complete"
+        ),
+    )
+    backtest.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "with --ask: check every payload and reports sidecar and print what would be "
+            "asked; no client, no writes"
+        ),
+    )
+    backtest.add_argument(
+        "--rule",
+        metavar="FILE",
+        help=(
+            "with --ask on a variant whose guardrail is 'rule': the rule spec to replay over "
+            "--research-db (default: the research package's own rule)"
+        ),
+    )
+    backtest.add_argument(
         "--include-pre-cutoff",
         action="store_true",
         help=(
@@ -594,6 +639,7 @@ def _replay_db_flags(
     *,
     without_store: Sequence[tuple[str, bool]],
     without_variant: Sequence[tuple[str, bool]],
+    creates: bool = False,
 ) -> Path | None:
     """The validated ``--replay-db`` path (``None`` when none was given); every refusal is a :class:`_Refused`.
 
@@ -620,7 +666,7 @@ def _replay_db_flags(
         if stray:
             raise _Refused(f"{', '.join(stray)} only apply with --variant")
     path = Path(args.replay_db)
-    creates = args.holdout and args.variant is None
+    creates = creates or (args.holdout and args.variant is None)
     if not path.is_file() and not creates:
         raise _Refused(f"--replay-db {args.replay_db!r} does not exist")
     return path
@@ -1046,6 +1092,12 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         probe = None if args.probe is None else load_probe(Path(args.probe))
     except (VariantError, ProbeError) as exc:
         return _fail(str(exc))
+    if variant.mode == GRAPH_MODE:
+        return _fail(
+            f"variant {variant.name!r} is a graph variant (mode: graph): it is walked by "
+            "backtest --ask, question by question from its own simulated book; replay asks "
+            "simple variants"
+        )
     run = _open_run(
         db_path,
         args.db,
@@ -1113,16 +1165,10 @@ def _cmd_replay(args: argparse.Namespace) -> int:
                 )
             prepared = prepare(papers, payload_root=payload_root, risk=risk)
             if pinned is None:
-                stood, pinned_at = store.pin_split(args.run_id, run.split, now=_now())
-                if stood != run.split:
-                    # Another command pinned the run between the read above
-                    # and here: the questions selected belong to a split that
-                    # does not stand.
-                    return _fail(
-                        f"run {args.run_id!r} had its split pinned by another command while "
-                        "this one ran; run it again to replay under that split"
-                    )
-                run = _pinned(run, stood, pinned_at)
+                # Another command may have pinned the run between the read
+                # above and here: the questions selected would then belong to
+                # a split that does not stand.
+                run = _pin(store, run, "replay")
             if args.retry_failed:
                 cleared = (
                     store.clear_failures(variant.sha, args.run_id)
@@ -1177,8 +1223,6 @@ def _replay_header(
     questions: int,
     repeats: int,
 ) -> list[str]:
-    assert run.gate is not None
-    risk, decision = run.gate
     lines = [
         f"replay: run {run.facts.run_id} ({run.facts.coin}, {run.facts.interval} cycle), "
         f"{segment.value} segment: {questions} question(s) x {repeats} repeat(s)",
@@ -1189,12 +1233,7 @@ def _replay_header(
             f"{probe.describe()}: asked instead of a decision, with the variant's model; no gate"
         )
         return lines
-    lines.append(
-        f"gate: the run's genesis risk/decision blocks (leverage {risk.leverage}, max target "
-        f"margin {risk.max_target_margin_pct}%, deadband {decision.rebalance_deadband_pct}%, "
-        f"min_confidence {decision.min_confidence}, resize_min_confidence "
-        f"{decision.resize_min_confidence})"
-    )
+    lines.append(_gate_line(run))
     return lines
 
 
@@ -1449,6 +1488,31 @@ def _guardrail_run(db_path: Path, db_arg: str, run_id: str) -> tuple[RunFacts, D
     return facts, decisions
 
 
+def _rule_timelines(
+    research_path: Path, rule_arg: str | None, runs: Sequence[RunFacts]
+) -> dict[str, RuleTimeline]:
+    """The guardrail rule's timeline per coin: one replay per coin, since every run on it reads the same history."""
+    rule = load_rule(DEFAULT_RULE if rule_arg is None else rule_arg)
+    timelines: dict[str, RuleTimeline] = {}
+    with ResearchStore(research_path) as store:
+        for facts in runs:
+            if facts.coin not in timelines:
+                timelines[facts.coin] = build_timeline(store, rule, coin=facts.coin)
+    return timelines
+
+
+def _pin(store: ReplayStore, run: _Run, verb: str) -> _Run:
+    """Pin the run's split in the store, or refuse if another command pinned a different one meanwhile."""
+    run_id = run.facts.run_id
+    stood, pinned_at = store.pin_split(run_id, run.split, now=_now())
+    if stood != run.split:
+        raise _Refused(
+            f"run {run_id!r} had its split pinned by another command while this one ran; run "
+            f"it again to {verb} under that split"
+        )
+    return _pinned(run, stood, pinned_at)
+
+
 def _cmd_guardrail(args: argparse.Namespace) -> int:
     """What the trend guardrail would have done to each run's recorded decisions."""
     db_path = Path(args.db)
@@ -1465,13 +1529,8 @@ def _cmd_guardrail(args: argparse.Namespace) -> int:
     runs = [_guardrail_run(db_path, args.db, run_id) for run_id in args.run_id]
     # One replay per coin: the timeline is the store's whole history, so every
     # run on that coin reads the same one.
-    timelines: dict[str, RuleTimeline] = {}
     try:
-        rule = load_rule(DEFAULT_RULE if args.rule is None else args.rule)
-        with ResearchStore(research_path) as store:
-            for facts, _ in runs:
-                if facts.coin not in timelines:
-                    timelines[facts.coin] = build_timeline(store, rule, coin=facts.coin)
+        timelines = _rule_timelines(research_path, args.rule, [facts for facts, _ in runs])
     except (GuardrailError, StoreError) as exc:
         return _fail(str(exc))
     reports: list[tuple[str, list[str], Table]] = []
@@ -1600,6 +1659,41 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
         # exist would CREATE an empty research store there.
         return _fail(f"--research-db {args.research_db!r} does not exist")
     _repeated_run_ids(args.run_id)
+    if args.ask is None:
+        stray = [
+            flag
+            for flag, given in (
+                ("--repeats", args.repeats is not None),
+                ("--limit", args.limit is not None),
+                ("--dry-run", args.dry_run),
+                ("--rule", args.rule is not None),
+            )
+            if given
+        ]
+        if stray:
+            return _fail(f"{', '.join(stray)} only apply with --ask")
+    else:
+        if args.variant is not None:
+            return _fail(
+                "--ask names the variant to walk; --variant reads answers already stored, so "
+                "the two do not go together"
+            )
+        if args.holdout:
+            return _fail(
+                "--ask walks the train and validation segments only; the holdout is not asked "
+                "in this build (plan section 3-9), so --holdout does not go with it"
+            )
+        if args.replay_db is None:
+            return _fail(
+                "--ask needs --replay-db PATH: every answer the graph gives is stored there "
+                "(the store is created if it does not exist)"
+            )
+        if args.repeats is None:
+            args.repeats = 3
+        if args.repeats < 1:
+            return _fail(f"--repeats must be at least 1, got {args.repeats}")
+        if args.limit is not None and args.limit < 1:
+            return _fail(f"--limit must be at least 1, got {args.limit}")
     try:
         tick = Decimal(args.tick)
     except InvalidOperation:
@@ -1612,9 +1706,13 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
         args,
         without_store=(
             ("--variant", args.variant is not None),
+            ("--ask", args.ask is not None),
             ("--include-pre-cutoff", args.include_pre_cutoff),
         ),
-        without_variant=(("--include-pre-cutoff", args.include_pre_cutoff),),
+        without_variant=(
+            () if args.ask is not None else (("--include-pre-cutoff", args.include_pre_cutoff),)
+        ),
+        creates=args.ask is not None,
     )
     # The gate's blocks are read for the deadband the account applies to
     # its own book, as ``replay`` reads them for the gate it re-runs.
@@ -1636,6 +1734,11 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
             f"--run-id names runs on {' and '.join(intervals)} candles; the pooled bar reads "
             "runs on one interval"
         )
+    if args.ask is not None:
+        assert replay_path is not None  # --ask needs --replay-db (checked above)
+        ended = _ask(args, runs, db_path, replay_path, research_path, tick)
+        if ended is not None:
+            return ended
     variant: Variant | None = None
     trials = 1
     store: ReplayStore | None = None
@@ -1734,13 +1837,7 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
                 run = item.run
                 run_id = run.facts.run_id
                 if run_id in unpinned:
-                    stood, pinned_at = store.pin_split(run_id, run.split, now=_now())
-                    if stood != run.split:
-                        raise _Refused(
-                            f"run {run_id!r} had its split pinned by another command while this "
-                            "one ran; run it again to walk under that split"
-                        )
-                    run = _pinned(run, stood, pinned_at)
+                    run = _pin(store, run, "walk")
                 pinned_runs.append(replace(item, run=run))
             prepared = pinned_runs
         # The walk, under the runs as they now stand (pinned).
@@ -1774,6 +1871,240 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
             Path(args.out), args.out, f"{stem}-backtest", lines, _backtest_table(walked)
         )
     return 0
+
+
+def _gate_line(run: _Run) -> str:
+    """The run's gate in one line: the thresholds every replayed or asked answer meets."""
+    assert run.gate is not None
+    risk, decision = run.gate
+    return (
+        f"gate: the run's genesis risk/decision blocks (leverage {risk.leverage}, max target "
+        f"margin {risk.max_target_margin_pct}%, deadband {decision.rebalance_deadband_pct}%, "
+        f"min_confidence {decision.min_confidence}, resize_min_confidence "
+        f"{decision.resize_min_confidence})"
+    )
+
+
+def _ask(
+    args: argparse.Namespace,
+    runs: Sequence[_Run],
+    db_path: Path,
+    replay_path: Path,
+    research_path: Path,
+    tick: Decimal,
+) -> int | None:
+    """``--ask``: walk a graph variant over each run's train and validation questions, asking as it goes.
+
+    Returns an exit status when the command ends here (a dry run, a walk
+    stopped by ``--limit``, a refusal), or ``None`` once every walk is
+    complete, with ``args.variant`` set so the bar is read off the stored
+    answers as for any variant.
+    """
+    try:
+        variant = load_variant(Path(args.ask))
+    except VariantError as exc:
+        return _fail(str(exc))
+    if variant.mode != GRAPH_MODE:
+        return _fail(
+            f"variant {variant.name!r} is a {variant.mode} variant; backtest --ask walks graph "
+            "variants (mode: graph), and replay asks the simple ones"
+        )
+    if variant.model_cutoff is None and not args.include_pre_cutoff:
+        return _fail(
+            f"{variant.name!r} records no model_cutoff, so the validation questions the model "
+            "may have been trained on cannot be left out of the bar read after the walk (plan "
+            "section 6): set model_cutoff in the variant file, or pass --include-pre-cutoff"
+        )
+    if args.rule is not None and variant.guardrail != GUARDRAIL_RULE:
+        return _fail(
+            f"--rule only applies to a variant whose guardrail is {GUARDRAIL_RULE!r}; "
+            f"{variant.name!r} reads the guardrail as {variant.guardrail!r}"
+        )
+    timelines: dict[str, RuleTimeline] = {}
+    if variant.guardrail == GUARDRAIL_RULE:
+        for run in runs:
+            if run.facts.interval != RULE_INTERVAL:
+                return _fail(
+                    f"run {run.facts.run_id!r} was traded on {run.facts.interval} candles; "
+                    f"the guardrail rule is written in {RULE_INTERVAL} bars and is read "
+                    f"against {RULE_INTERVAL} runs only"
+                )
+        try:
+            timelines = _rule_timelines(research_path, args.rule, [run.facts for run in runs])
+        except (GuardrailError, StoreError) as exc:
+            return _fail(str(exc))
+    graph: LowerGraph | None = None
+    if not args.dry_run:
+        try:
+            # Built before the store is written or any payload is read: a
+            # client that cannot be built must not have registered or pinned.
+            graph = _build_graph(variant)
+        except (ImportError, ValueError, LowerGraphError) as exc:
+            return _fail(f"the lower graph for {variant.name!r} could not be built: {exc}")
+    store: ReplayStore | None = None
+    try:
+        if not args.dry_run or replay_path.is_file():
+            store = ReplayStore(replay_path, create=not args.dry_run)
+            # What ``register`` would refuse, said now and without writing; the
+            # variant itself is registered once every run has passed preflight.
+            standing = store.sha_of(variant.name)
+            if standing is not None and standing != variant.sha:
+                raise _Refused(
+                    f"variant name {variant.name!r} already stands for "
+                    f"{short_sha(standing)} in {replay_path}, and this file is "
+                    f"{variant.short_sha}; a changed variant needs a new name"
+                )
+        exams: list[tuple[_Run, Exam, bool]] = []
+        for run in runs:
+            run_id = run.facts.run_id
+            pinned = None if store is None else store.pinned_split(run_id)
+            if pinned is not None:
+                run = _pinned(run, *pinned)
+            payload_root = payload_dir(db_path, run_id)
+            if not payload_root.is_dir():
+                raise _Refused(
+                    f"no payload directory at {str(payload_root)!r}; backtest --ask reads the "
+                    "run's payloads and their .reports.json where the daemon writes them "
+                    "(payloads/<run-id>/ beside the paper store)"
+                )
+            assert run.gate is not None  # opened with the gate
+            risk, decision = run.gate
+            papers = select(
+                run.decisions.questions,
+                run.decisions.inputs,
+                split=run.split,
+                step_ms=run.facts.step_ms,
+                segments={SegmentName.TRAIN, SegmentName.VALIDATION},
+            )
+            if not papers:
+                raise _Refused(f"run {run_id!r} has no question in its train or validation segment")
+            prepared = prepare(papers, payload_root=payload_root, risk=risk)
+            reports = load_all_reports(prepared, payload_root)
+            if not reports:
+                raise _Refused(
+                    f"run {run_id!r} has no question with a .reports.json beside its payload in "
+                    "its train or validation segment, so the lower half of the graph has "
+                    "nothing to start from"
+                )
+            exam = Exam(
+                run_id=run_id,
+                terms=_terms(run, tick),
+                series=_load_series(run, research_path, args.research_db, holdout=False),
+                risk=risk,
+                decision=decision,
+                prepared=prepared,
+                reports=reports,
+            )
+            # What the walk would refuse at a question, refused now: a dry run
+            # promises what the live run does, and nothing is paid for or
+            # pinned before every question has passed.
+            preflight(exam)
+            exams.append((run, exam, pinned is None))
+        if store is not None and not args.dry_run:
+            for note in store.register(variant, now=_now()):
+                print(f"note: {note}", file=sys.stderr)
+        remaining = args.limit
+        for run, exam, unpinned in exams:
+            run_id = run.facts.run_id
+            timeline = timelines.get(run.facts.coin)
+            print(
+                f"ask: run {run_id} ({run.facts.coin}, {run.facts.interval} cycle), train + "
+                f"validation: {len(exam.prepared)} question(s) x {args.repeats} repeat(s), the "
+                "lower half of the graph from each cycle's recorded reports"
+            )
+            print(variant.describe())
+            recorded = sorted({q.model for q in run.decisions.questions if q.model})
+            mismatch = "" if variant.model in recorded else " (not the variant's portfolio manager model)"
+            print(f"recorded model of the run's own answers: {', '.join(recorded) or 'unknown'}{mismatch}")
+            if variant.guardrail == GUARDRAIL_RULE:
+                print(f"guardrail rule: {DEFAULT_RULE if args.rule is None else args.rule}")
+            print(_gate_line(run))
+            unasked = len(exam.prepared) - exam.askable
+            if unasked:
+                print(
+                    f"questions without a .reports.json beside the payload: {unasked} of "
+                    f"{len(exam.prepared)} (the engine failed those cycles; nothing is asked "
+                    "there and the account holds its book)"
+                )
+            if store is not None:
+                held = sorted(
+                    set(store.answers(variant.sha, run_id)) | set(store.failed(variant.sha, run_id))
+                )
+                beyond = [repeat for repeat in held if repeat >= args.repeats]
+                if beyond:
+                    print(
+                        f"note: the store also holds repeat(s) {beyond} of {variant.name!r} on this "
+                        f"run; this command walks repeats 0-{args.repeats - 1} and the bar reads "
+                        "every stored repeat",
+                        file=sys.stderr,
+                    )
+            if args.dry_run:
+                stored, todo = pending_walks(exam, variant, store, args.repeats, timeline)
+                asks = todo if remaining is None else min(todo, remaining)
+                print(run.split_line(replay_path))
+                print(
+                    f"payloads and reports read: {len(exam.prepared)}, each payload checked "
+                    "against its input row's digest where one was recorded"
+                )
+                print(
+                    f"dry run: {stored} answer(s) already stored, {todo} to ask; this command "
+                    f"would ask for {asks} of them"
+                )
+                if remaining is not None:
+                    remaining = max(0, remaining - asks)
+                continue
+            assert store is not None and graph is not None
+            if unpinned:
+                # Pinned once every payload and sidecar has been read and
+                # checked, as the replay pins: a refused command freezes nothing.
+                run = _pin(store, run, "walk")
+            print(run.split_line(replay_path))
+            report = ask_walks(
+                exam,
+                graph=graph,
+                store=store,
+                repeats=args.repeats,
+                now=_now,
+                sleep=_sleep,
+                timeline=timeline,
+                limit=remaining,
+                progress=_progress,
+            )
+            for line in report.describe():
+                print(line)
+            if report.stopped_at_limit:
+                print(
+                    "the bar is read once every walk is complete; run the same command again "
+                    "to continue"
+                )
+                return 0
+            if remaining is not None:
+                remaining -= report.asked + report.refused
+    except (ReplayError, LowerGraphError, ReplayStoreError, StoreError, AccountError, _Refused) as exc:
+        _say_lost(graph)
+        return _fail(str(exc))
+    except KeyboardInterrupt:
+        # The interrupted run's completions are paid for too; said before the
+        # usual exit, or they are said nowhere.
+        _say_lost(graph)
+        raise
+    finally:
+        if store is not None:
+            store.close()
+    if args.dry_run:
+        return 0
+    args.variant = variant.name
+    return None
+
+
+def _say_lost(graph: LowerGraph | None) -> None:
+    """What the graph runs that produced no stored answer cost, when the walk stops before its report."""
+    if graph is not None and (graph.lost_input_tokens or graph.lost_output_tokens):
+        print(
+            f"tokens spent on graph runs that failed, since this command started: "
+            f"{graph.lost_input_tokens} in, {graph.lost_output_tokens} out (paid for)",
+            file=sys.stderr,
+        )
 
 
 def _require_holdout_asked(
@@ -1816,6 +2147,44 @@ def _require_holdout_asked(
             )
 
 
+def _load_series(run: _Run, research_path: Path, research_arg: str, *, holdout: bool) -> Series:
+    """The run's bars and funding from the research store, read under the holdout lock."""
+    facts, split = run.facts, run.split
+    until = split.loadable_until(holdout=holdout)
+    try:
+        with ResearchStore(research_path) as research:
+            return Series.of(
+                load_research_bars(
+                    research,
+                    coin=facts.coin,
+                    interval=facts.interval,
+                    since_ms=split.train.start_ms,
+                    until_ms=until,
+                ),
+                load_research_funding(
+                    research, coin=facts.coin, since_ms=split.train.start_ms, until_ms=until
+                ),
+            )
+    except (ValueError, InvalidOperation) as exc:
+        # A corrupt row the store's own DTOs refuse, or a series the
+        # account refuses (overlapping bars): named, not a traceback.
+        raise _Refused(f"--research-db {research_arg}: {exc}") from exc
+
+
+def _terms(run: _Run, tick: Decimal) -> Terms:
+    """The account's terms for the run: its fill model, the tick, its opening balance, its deadband."""
+    assert run.gate is not None  # opened with the gate
+    facts = run.facts
+    return Terms(
+        coin=facts.coin,
+        costs=facts.costs,
+        half_spread_bps=facts.half_spread_bps,
+        tick=tick,
+        initial_balance=facts.initial_balance,
+        deadband_pct=Decimal(str(run.gate[1].rebalance_deadband_pct)),
+    )
+
+
 def _walk(
     run: _Run,
     research_path: Path,
@@ -1833,24 +2202,7 @@ def _walk(
     assert run.gate is not None  # opened with the gate
     questions = run.decisions.questions
     until = split.loadable_until(holdout=holdout)
-    try:
-        with ResearchStore(research_path) as research:
-            series = Series.of(
-                load_research_bars(
-                    research,
-                    coin=facts.coin,
-                    interval=facts.interval,
-                    since_ms=split.train.start_ms,
-                    until_ms=until,
-                ),
-                load_research_funding(
-                    research, coin=facts.coin, since_ms=split.train.start_ms, until_ms=until
-                ),
-            )
-    except (ValueError, InvalidOperation) as exc:
-        # A corrupt row the store's own DTOs refuse, or a series the
-        # account refuses (overlapping bars): named, not a traceback.
-        raise _Refused(f"--research-db {research_arg}: {exc}") from exc
+    series = _load_series(run, research_path, research_arg, holdout=holdout)
     # The scorecard's later marks come from the same bars, keyed as
     # ``load_research_closes`` keys them, so the store is read once.
     closes = {bar.close_time: float(bar.close) for bar in series.bars}
@@ -1863,14 +2215,7 @@ def _walk(
             "questions' marks",
             file=sys.stderr,
         )
-    terms = Terms(
-        coin=facts.coin,
-        costs=facts.costs,
-        half_spread_bps=facts.half_spread_bps,
-        tick=tick,
-        initial_balance=facts.initial_balance,
-        deadband_pct=Decimal(str(run.gate[1].rebalance_deadband_pct)),
-    )
+    terms = _terms(run, tick)
 
     def walk(targets: Targets) -> AccountPath:
         return simulate(

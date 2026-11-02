@@ -49,7 +49,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, localcontext
 from pathlib import Path
-from typing import Final
+from typing import Final, TypeVar
 
 from .paper_store import InputFacts
 from .probe import CLASSES, INVALID_PROBE, PROBE_KEYS, REFUSED, Probe, parse_probe
@@ -84,6 +84,7 @@ __all__ = [
     "ReplayReport",
     "ask_all",
     "ask_probes",
+    "attempt",
     "call_model",
     "human_message",
     "inside",
@@ -107,6 +108,9 @@ _STOP_STATUSES: Final = frozenset({401, 403, 404})
 # rate limit. Every other 4xx is the question's own (its context too long, a
 # content filter) and is recorded as unanswered instead (decided 2026-09-24).
 _RETRY_CLIENT_STATUSES: Final = frozenset({408, 409, 429})
+
+
+_T = TypeVar("_T")
 
 
 class ReplayError(Exception):
@@ -152,13 +156,19 @@ class Paper:
 
 @dataclass(frozen=True)
 class Prepared:
-    """A question ready to ask: the two texts and the gate's inputs, all checked."""
+    """A question ready to ask: the two texts and the gate's inputs, all checked.
+
+    ``context_shape`` is the payload's own stamp of which sections the
+    context carries, read for the asking walk (plan PR 3b), ``None`` on a
+    payload that lacks it.
+    """
 
     paper: Paper
     context_text: str
     format_instructions: str
     account_equity: Decimal
     current: CurrentPositionState
+    context_shape: str | None = None
 
     @property
     def input_id(self) -> str:
@@ -260,8 +270,17 @@ def position_state(facts: InputFacts, risk: RiskConfig) -> tuple[Decimal, Curren
     return facts.account_equity, current
 
 
-def _read_payload(root: Path, facts: InputFacts) -> tuple[str, str]:
-    """``(context_text, format_instructions)`` of the question's payload, checked against its row."""
+@dataclass(frozen=True)
+class _Payload:
+    """What the replay reads off one payload file."""
+
+    context_text: str
+    format_instructions: str
+    context_shape: str | None
+
+
+def _read_payload(root: Path, facts: InputFacts) -> _Payload:
+    """The question's payload, checked against its row: the two texts and the context's shape."""
     me = facts.input_id
     if facts.payload_name is None:
         raise ReplayError(f"{me}: the input row names no payload")
@@ -286,7 +305,10 @@ def _read_payload(root: Path, facts: InputFacts) -> tuple[str, str]:
         if not isinstance(value, str) or not value:
             raise ReplayError(f"{me}: payload {str(path)!r} has no {key} text")
         texts.append(value)
-    return texts[0], texts[1]
+    shape = document.get("context_shape")
+    if shape is not None and not isinstance(shape, str):
+        raise ReplayError(f"{me}: payload {str(path)!r} has a non-text context_shape")
+    return _Payload(texts[0], texts[1], shape)
 
 
 def prepare(papers: Sequence[Paper], *, payload_root: Path, risk: RiskConfig) -> list[Prepared]:
@@ -299,9 +321,18 @@ def prepare(papers: Sequence[Paper], *, payload_root: Path, risk: RiskConfig) ->
     """
     prepared = []
     for paper in papers:
-        context_text, format_instructions = _read_payload(payload_root, paper.facts)
+        payload = _read_payload(payload_root, paper.facts)
         equity, current = position_state(paper.facts, risk)
-        prepared.append(Prepared(paper, context_text, format_instructions, equity, current))
+        prepared.append(
+            Prepared(
+                paper,
+                payload.context_text,
+                payload.format_instructions,
+                equity,
+                current,
+                context_shape=payload.context_shape,
+            )
+        )
     return prepared
 
 
@@ -514,6 +545,51 @@ def _status(exc: BaseException) -> int | None:
     return None
 
 
+def attempt(
+    call: Callable[[], _T],
+    *,
+    input_id: str,
+    repeat: int,
+    sleep: Callable[[float], None],
+    asked: int,
+    unretried: tuple[type[BaseException], ...] = (),
+) -> _T:
+    """One paid call under the replay's call discipline (see :func:`ask_all`).
+
+    ``call`` is tried once and, when it fails in a way worth another try,
+    once more after each of :data:`BACKOFF_SECONDS`. Raises
+    :class:`ReplayError` to stop the command, or :class:`QuestionRefused`
+    for a question the caller records and passes. The decision replay, the
+    direction probe (:mod:`.probe`) and the asking walk (:mod:`.walk`) all
+    call through it. ``unretried`` names the caller's own exceptions, which
+    are no provider failure and escape at once.
+    """
+    for tried, pause in enumerate((*BACKOFF_SECONDS, None)):
+        try:
+            return call()
+        except unretried:
+            raise
+        except Exception as exc:  # noqa: BLE001 - any provider failure is a failed call
+            status = _status(exc)
+            if status in _STOP_STATUSES:
+                raise ReplayError(
+                    f"{input_id} repeat {repeat}: the provider refused the call with "
+                    f"{status} ({type(exc).__name__}: {exc}); that is the key or the model, not "
+                    f"the question, so the replay stops here; {asked} new answer(s) were stored "
+                    "before it"
+                ) from exc
+            if status is not None and 400 <= status < 500 and status not in _RETRY_CLIENT_STATUSES:
+                raise QuestionRefused(f"{status} {type(exc).__name__}: {exc}") from exc
+            if pause is None:
+                raise ReplayError(
+                    f"{input_id} repeat {repeat}: the model call failed {tried + 1} time(s), "
+                    f"last with {type(exc).__name__}: {exc}; {asked} new answer(s) were stored "
+                    "before it, and the same command resumes from here"
+                ) from exc
+            sleep(pause)
+    raise AssertionError("unreachable: the last pause is None, and a failure there raises")
+
+
 def call_model(
     model: Model,
     system: str,
@@ -524,38 +600,13 @@ def call_model(
     sleep: Callable[[float], None],
     asked: int,
 ) -> Completion:
-    """One model call, sorted by what a failure says (see :func:`ask_all`).
-
-    Raises :class:`ReplayError` to stop the replay, or
-    :class:`QuestionRefused` for a question the caller records and passes.
-    The direction probe (:mod:`.probe`) makes its calls through it too.
-    """
-    for attempt, pause in enumerate((*BACKOFF_SECONDS, None)):
-        try:
-            completion = model(system, human)
-        except Exception as exc:  # noqa: BLE001 - any provider failure is a failed call
-            status = _status(exc)
-            if status in _STOP_STATUSES:
-                raise ReplayError(
-                    f"{item.input_id} repeat {repeat}: the provider refused the call with "
-                    f"{status} ({type(exc).__name__}: {exc}); that is the key or the model, not "
-                    f"the question, so the replay stops here; {asked} new answer(s) were stored "
-                    "before it"
-                ) from exc
-            if status is not None and 400 <= status < 500 and status not in _RETRY_CLIENT_STATUSES:
-                raise QuestionRefused(f"{status} {type(exc).__name__}: {exc}") from exc
-            if pause is None:
-                raise ReplayError(
-                    f"{item.input_id} repeat {repeat}: the model call failed {attempt + 1} time(s), "
-                    f"last with {type(exc).__name__}: {exc}; {asked} new answer(s) were stored "
-                    "before it, and the same command resumes from here"
-                ) from exc
-            sleep(pause)
-            continue
-        if not isinstance(completion, Completion):
-            raise ReplayError(f"the model returned a {type(completion).__name__}, not a Completion")
-        return completion
-    raise AssertionError("unreachable: the last pause is None, and a failure there raises")
+    """One model call under :func:`attempt`; what comes back must be a :class:`Completion`."""
+    completion = attempt(
+        lambda: model(system, human), input_id=item.input_id, repeat=repeat, sleep=sleep, asked=asked
+    )
+    if not isinstance(completion, Completion):
+        raise ReplayError(f"the model returned a {type(completion).__name__}, not a Completion")
+    return completion
 
 
 # -- the direction probe (plan PR 2.1) ------------------------------------------

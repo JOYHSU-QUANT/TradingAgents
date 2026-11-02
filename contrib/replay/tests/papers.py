@@ -40,6 +40,7 @@ from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.audit_rows import write_ai_output
 from contrib.hyperliquid_perp.persistence.ids import decision_attempt_id
 from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
+from contrib.replay.lower_graph import GraphCompletion
 from contrib.replay.replay import Completion
 from contrib.replay.upstream import Database, from_epoch_ms, payload_dir
 from contrib.replay.variant import Variant
@@ -47,6 +48,10 @@ from contrib.replay.variant import Variant
 from .conftest import COIN, GATE_DECISION, GATE_RISK, at_ms, insert_attempt, run_config
 
 RUN_ID = "paper-GATE"
+# The context is built from the newest closed candle, which the daemon
+# records as ``candle_end``; the cycle itself ran this much later, so the
+# fixture keeps the two apart as the real rows do.
+CANDLE_LAG_MS = 26 * 60_000
 EQUITY = Decimal("1000")
 LEVERAGE = Decimal("1")
 MAX_MARGIN_PCT = 60
@@ -109,8 +114,24 @@ def input_id(slot: int) -> str:
     return f"gate-in-{slot:02d}"
 
 
-def context_text(slot: int) -> str:
+# The position section every fixture payload ends with, as the renderer
+# spells a flat book; the asking walk replaces it with the account's own.
+POSITION_SECTION = "Position:\n  flat, no open position (account equity 1000 USDC)"
+
+
+def question_line(slot: int) -> str:
+    """The first line of a question's context: how a fake finds the question it was sent."""
     return f"question {slot:02d}: {COIN} at mark {PAPERS[slot].mark}"
+
+
+def context_text(slot: int) -> str:
+    """The recorded perp context: the question line, then the position section last."""
+    return f"{question_line(slot)}\n\n{POSITION_SECTION}"
+
+
+def candle_end_ms(slot: int) -> int:
+    """The as-of the question's context was built from: the candle end the row records."""
+    return at_ms(slot) - CANDLE_LAG_MS
 
 
 def payload_name(slot: int) -> str:
@@ -123,7 +144,7 @@ def payload_bytes(slot: int) -> bytes:
             "coin": COIN,
             "as_of": from_epoch_ms(at_ms(slot)).isoformat(),
             "prompt_version": "phase2-target-v6",
-            "context_shape": "perp",
+            "context_shape": "price|position",
             "format_fingerprint": "sha256:fixture",
             "context_text": context_text(slot),
             "format_instructions": FORMAT,
@@ -138,12 +159,48 @@ def position(paper: Paper) -> CurrentPositionState:
     )
 
 
+def reports_record(slot: int) -> dict:
+    """A ``.reports.json`` of the daemon's shape for one fixture question."""
+    return {
+        "schema": 1,
+        "selected_analysts": ["market", "social", "news"],
+        "market_report": f"market report {slot:02d}",
+        "sentiment_report": f"sentiment report {slot:02d}",
+        "news_report": f"news report {slot:02d}",
+        "fundamentals_report": None,
+        "investment_debate_state": {
+            "bull_history": "bull",
+            "bear_history": "bear",
+            "history": "bull\nbear",
+            "current_response": "bear",
+            "judge_decision": f"judge {slot:02d}",
+            "count": 2,
+        },
+        "investment_plan": f"plan {slot:02d}",
+        "trader_investment_plan": "the recorded trader plan",
+        "risk_debate_state": {
+            "judge_decision": "the recorded judge decision",
+            "history": "",
+            "aggressive_history": "",
+            "conservative_history": "",
+            "neutral_history": "",
+            "latest_speaker": "Judge",
+            "current_aggressive_response": "",
+            "current_conservative_response": "",
+            "current_neutral_response": "",
+            "count": 3,
+        },
+        "final_trade_decision": PAPERS[slot].text,
+    }
+
+
 def write_gate_store(
     path: Path,
     *,
     papers: tuple[Paper, ...] = PAPERS,
     grow: bool = False,
     run_id: str = RUN_ID,
+    reports: bool = False,
 ) -> Path:
     """The fixture run, every answer produced by the real gate, every payload on disk.
 
@@ -153,6 +210,7 @@ def write_gate_store(
     store does, and are matched by file name. ``grow`` adds ``papers`` to a
     store this function already wrote: the run trading on. ``run_id`` writes
     another run into the same store, its ids prefixed with the run id.
+    ``reports`` writes a ``.reports.json`` sidecar beside every payload.
     """
     risk, decision = RiskConfig.from_dict(RISK), DecisionConfig.from_dict(DECISION)
 
@@ -176,6 +234,10 @@ def write_gate_store(
             stamp = from_epoch_ms(at_ms(paper.slot))
             raw = payload_bytes(paper.slot)
             (root / payload_name(paper.slot)).write_bytes(raw)
+            if reports:
+                (root / payload_name(paper.slot)).with_suffix(".reports.json").write_bytes(
+                    json_bytes(reports_record(paper.slot))
+                )
             state = position(paper)
             side = "flat" if state.side is None else state.side.value
             repo.insert_ai_input(
@@ -185,7 +247,7 @@ def write_gate_store(
                 mode="paper",
                 run_id=run_id,
                 symbol=COIN,
-                candle_end=stamp,
+                candle_end=from_epoch_ms(candle_end_ms(paper.slot)),
                 mark_price=Decimal(paper.mark),
                 account_equity=EQUITY,
                 current_position_side=side,
@@ -245,19 +307,72 @@ class Echo:
 
     def __call__(self, system: str, human: str) -> Completion:
         self.calls.append((system, human))
-        if self.fail > 0:
-            self.fail -= 1
-            raise ConnectionError("the provider hung up")
-        for paper in PAPERS:
-            if context_text(paper.slot) in human:
-                return Completion(
-                    text=self.text_for.get(paper.slot, paper.text),
-                    truncated=paper.truncated,
-                    model="echo-1",
-                    input_tokens=100,
-                    output_tokens=10,
-                )
-        raise AssertionError(f"no fixture question in {human!r}")
+        paper = fixture_paper(self, human)
+        return Completion(
+            text=self.text_for.get(paper.slot, paper.text),
+            truncated=paper.truncated,
+            model="echo-1",
+            input_tokens=100,
+            output_tokens=10,
+        )
+
+
+def fixture_paper(fake, haystack: str) -> Paper:
+    """The fixture question ``haystack`` names (by its question line), after ``fake``'s failures are spent."""
+    if fake.fail > 0:
+        fake.fail -= 1
+        raise ConnectionError("the provider hung up")
+    for paper in PAPERS:
+        if question_line(paper.slot) in haystack:
+            return paper
+    raise AssertionError(f"no fixture question in {haystack!r}")
+
+
+class EchoGraph:
+    """A fake lower graph: says what paper's model said for the question named in the context.
+
+    Built the way the command builds the real one (from the variant), it
+    keeps every ask it was sent. ``fail`` makes that many asks raise first;
+    ``text_for`` says something else for the slots it names.
+    """
+
+    def __init__(
+        self, variant: Variant, *, fail: int = 0, text_for: dict[int, str] | None = None
+    ) -> None:
+        self.variant = variant
+        self.asked: list[dict] = []
+        self.fail = fail
+        self.text_for = text_for or {}
+        # What the real graph keeps of its failed runs; the fake's failures cost 40 / 4.
+        self.lost_input_tokens = 0
+        self.lost_output_tokens = 0
+
+    def ask(self, *, coin, as_of, context_text, format_instructions, reports) -> GraphCompletion:
+        self.asked.append(
+            {
+                "coin": coin,
+                "as_of": as_of,
+                "context_text": context_text,
+                "format_instructions": format_instructions,
+                "reports": reports,
+            }
+        )
+        try:
+            paper = fixture_paper(self, context_text)
+        except ConnectionError:
+            self.lost_input_tokens += 40
+            self.lost_output_tokens += 4
+            raise
+        return GraphCompletion(
+            text=self.text_for.get(paper.slot, paper.text),
+            truncated=paper.truncated,
+            model="echo-graph",
+            input_tokens=100,
+            output_tokens=10,
+            graph_input_tokens=500,
+            graph_output_tokens=50,
+            completions=5,
+        )
 
 
 # -- variants and the command line, shared by the suites -------------------------------
@@ -270,6 +385,11 @@ def variant(**overrides) -> Variant:
     fields = {"name": "v", "provider": "openrouter", "model": "a/b", "system_prompt": "Decide."}
     fields.update(overrides)
     return Variant(**fields)
+
+
+def graph_variant(**overrides) -> Variant:
+    """A graph variant in memory: no prompt, the same model throughout, with ``overrides`` applied."""
+    return variant(**{"name": "g", "system_prompt": "", "mode": "graph", **overrides})
 
 
 # The day before the fixture's first question (2027-01-15): a cutoff that
@@ -289,6 +409,36 @@ def write_variant(
         f"  id: fixture/{name}",
         "system_prompt_path: system.md",
     ]
+    if cutoff is not None:
+        lines.append(f"model_cutoff: {cutoff}")
+    path = directory / f"{name}.yaml"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def write_graph_variant(
+    directory: Path,
+    name: str,
+    *,
+    cutoff: str | None = BEFORE_ANY_QUESTION,
+    guardrail: str = "recorded",
+    quick: bool = True,
+    prompt: bool = False,
+) -> Path:
+    """A graph variant file named ``name`` in ``directory``: deep model ``fixture/<name>``."""
+    lines = [
+        f"name: {name}",
+        "mode: graph",
+        "model:",
+        "  provider: openrouter",
+        f"  id: fixture/{name}",
+    ]
+    if quick:
+        lines += ["quick_model:", "  provider: openrouter", f"  id: fixture/{name}-quick"]
+    if prompt:
+        (directory / "system.md").write_text(SYSTEM, encoding="utf-8")
+        lines.append("system_prompt_path: system.md")
+    lines.append(f"guardrail: {guardrail}")
     if cutoff is not None:
         lines.append(f"model_cutoff: {cutoff}")
     path = directory / f"{name}.yaml"

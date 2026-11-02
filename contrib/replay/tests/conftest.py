@@ -17,6 +17,7 @@ rows encoded the way the daemon encodes them, not against hand-written SQL.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import sqlite3
 from collections.abc import Sequence
@@ -33,6 +34,7 @@ from contrib.replay.score import Answer, Question
 from contrib.replay.upstream import (
     CostModel,
     Database,
+    Engine,
     ResearchStore,
     TargetSide,
     from_epoch_ms,
@@ -434,8 +436,19 @@ def terms(
     )
 
 
+def downgrade_to_v4(path: Path) -> None:
+    """Make a replay store look as PR 3a wrote it: no graph tables, user_version 4."""
+    conn = sqlite3.connect(path)
+    conn.execute("DROP TABLE graph_books")
+    conn.execute("DROP TABLE graph_variants")
+    conn.execute("PRAGMA user_version = 4")
+    conn.commit()
+    conn.close()
+
+
 def downgrade_to_v3(path: Path) -> None:
-    """Make a replay store look as PR 2.1 wrote it: no backtest tables, user_version 3."""
+    """Make a replay store look as PR 2.1 wrote it: no backtest or graph tables, user_version 3."""
+    downgrade_to_v4(path)
     conn = sqlite3.connect(path)
     conn.execute("DROP TABLE backtest_steps")
     conn.execute("DROP TABLE backtests")
@@ -448,3 +461,14 @@ def write_research_store(path: Path) -> Path:
     with ResearchStore(path) as store:
         store.upsert_candles(COIN, "4h", [RESEARCH_CANDLE])
     return path
+
+
+def fake_engine(**names) -> Engine:
+    """An engine surface with ``names`` set; every other borrowed name is a stand-in that refuses to be used."""
+
+    def unused(*args, **kwargs):
+        raise AssertionError("this engine name is not part of the test")
+
+    values = {field.name: unused for field in dataclasses.fields(Engine)}
+    values.update(names)
+    return Engine(**values)

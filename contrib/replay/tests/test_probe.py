@@ -478,9 +478,16 @@ def test_a_v2_store_is_read_as_it_is_and_upgraded_by_a_writer(tmp_path):
         assert store.probe_answers(make_variant().sha, "run") == []
     conn = sqlite3.connect(path)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,) == (4,)
+        assert conn.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,) == (5,)
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert {"probes", "probe_answers", "backtests", "backtest_steps"} <= tables
+        assert {
+            "probes",
+            "probe_answers",
+            "backtests",
+            "backtest_steps",
+            "graph_variants",
+            "graph_books",
+        } <= tables
     finally:
         conn.close()
 

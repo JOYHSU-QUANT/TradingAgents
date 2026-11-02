@@ -43,7 +43,9 @@ not a backtest (replay plan §1). The backtest (plan PR 3a,
 :mod:`~contrib.replay.account` and :mod:`~contrib.replay.gate`) is the
 other thing: one simulated account walked through the recorded answers
 under the run's own fill model, beside four controls, and the mother
-plan's section 5 bar read off the paths. It still asks no model; the
-lower half of the graph re-run from the recorded reports is the next
-pull request.
+plan's section 5 bar read off the paths. Its ``--ask`` (plan PR 3b,
+:mod:`~contrib.replay.lower_graph` and :mod:`~contrib.replay.walk`) re-runs
+the lower half of the graph from each cycle's recorded reports, question by
+question from that account's own book, so a graph variant's whole path is
+a thing the bar can judge.
 """

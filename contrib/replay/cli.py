@@ -1678,7 +1678,9 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
                             f"{replay_path}"
                         )
                     if args.holdout:
-                        _require_holdout_asked(run, variant, answers, failed)
+                        _require_holdout_asked(
+                            run, variant, answers, failed, include_pre_cutoff=args.include_pre_cutoff
+                        )
                 before = len(store.backtests(run_id))
             prepared.append(_Prepared(run, answers, failed, before))
 
@@ -1717,10 +1719,16 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
                     "the validation segment, so the holdout stays locked and no look is spent; "
                     "run without --holdout to read the checks"
                 )
+        # With --holdout the holdout is walked into memory first, so a
+        # refusal the walk raises (a bar the store lacks) spends nothing and
+        # pins nothing; the look is recorded before anything of it is shown
+        # or stored.
+        fresh = walk_all(prepared, holdout=True) if args.holdout else locked
         if store is not None:
             # A walk written to the store fixes the exam as a replay does:
-            # the run is pinned once every check has passed, so a refusal
-            # on the way never freezes a run that is still trading.
+            # the run is pinned once every check and every walk has passed,
+            # so a refusal on the way never freezes a run that is still
+            # trading.
             pinned_runs: list[_Prepared] = []
             for item in prepared:
                 run = item.run
@@ -1735,11 +1743,9 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
                     run = _pinned(run, stood, pinned_at)
                 pinned_runs.append(replace(item, run=run))
             prepared = pinned_runs
+        # The walk, under the runs as they now stand (pinned).
+        walked = [replace(w, run=item.run) for w, item in zip(fresh, prepared, strict=True)]
         if args.holdout:
-            # The holdout is walked into memory first, so a refusal the
-            # walk raises (a bar the store lacks) spends no look; the look
-            # is recorded before anything of it is shown or stored.
-            walked = walk_all(prepared, holdout=True)
             assert store is not None  # --holdout needs the store
             for item in prepared:
                 store.record_look(
@@ -1750,12 +1756,7 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
                     who=_who(),
                     now=_now(),
                 )
-            looks_recorded = True
-        else:
-            # The locked walk, under the runs as they now stand (pinned).
-            walked = [
-                replace(w, run=item.run) for w, item in zip(locked, prepared, strict=True)
-            ]
+                looks_recorded = True
         lines = _backtest_report(walked, verdicts, variant, replay_path, args)
         for line in lines:
             print(line)
@@ -1780,24 +1781,33 @@ def _require_holdout_asked(
     variant: Variant,
     answers: Mapping[int, Sequence[Answer]],
     failed: Mapping[int, Collection[str]],
+    *,
+    include_pre_cutoff: bool,
 ) -> None:
-    """Refuse a holdout walk of a repeat that was never asked the run's holdout questions.
+    """Refuse a holdout walk of a repeat not asked every holdout question in the cutoff scope.
 
     Walked unasked, the repeat would hold whatever it carried out of
-    validation and the figures would read as its holdout path.
+    validation through those questions and the figures would read as its
+    holdout path; the look is spent once, so partial coverage is refused
+    before it, not reported after.
     """
+    eligible = cutoff_scope(
+        run.decisions.questions, variant, include_pre_cutoff=include_pre_cutoff
+    ).eligible
     holdout = {
         q.input_id
         for q in run.decisions.questions
-        if segment_of(run.split, q.at_ms, run.facts.step_ms) is SegmentName.HOLDOUT
+        if q.input_id in eligible
+        and segment_of(run.split, q.at_ms, run.facts.step_ms) is SegmentName.HOLDOUT
     }
     for repeat in sorted(set(answers) | set(failed)):
         asked = {a.input_id for a in answers.get(repeat, ())} | set(failed.get(repeat, ()))
-        if holdout and not asked & holdout:
+        missing = holdout - asked
+        if missing:
             raise _Refused(
-                f"variant {variant.name!r} repeat {repeat} was not asked any holdout question "
-                f"of run {run.facts.run_id!r} (replay it with --segment holdout --holdout first); "
-                "no look is spent"
+                f"variant {variant.name!r} repeat {repeat} was not asked {len(missing)} of the "
+                f"{len(holdout)} holdout question(s) of run {run.facts.run_id!r} in scope (replay "
+                "it with --segment holdout --holdout first); no look is spent"
             )
 
 

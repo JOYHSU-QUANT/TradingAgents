@@ -465,9 +465,16 @@ def test_holdout_needs_the_repeat_to_have_been_asked_the_holdout_and_prints_cove
     # never asked the holdout questions is refused with nothing spent.
     assert cli.main(_gate_backtest(gate_store, gate_research, "--variant", "v", "--holdout")) == 1
     err = capsys.readouterr().err
-    assert "repeat 0 was not asked any holdout question" in err and "no look is spent" in err
+    assert "repeat 0 was not asked 2 of the 2 holdout question(s)" in err
+    assert "no look is spent" in err
+    # One of the two asked is still not every one: the look is irreversible.
+    holdout_argv = replay_argv(gate_store, variant_file, "--repeats", "1", "--segment", "holdout")
+    assert cli.main([*holdout_argv, "--holdout", "--limit", "1"]) == 0
+    capsys.readouterr()
+    assert cli.main(_gate_backtest(gate_store, gate_research, "--variant", "v", "--holdout")) == 1
+    assert "repeat 0 was not asked 1 of the 2 holdout question(s)" in capsys.readouterr().err
     with ReplayStore(_replay_db(gate_store)) as replay:
-        assert replay.looks(GATE_RUN_ID) == []
+        assert [look.action for look in replay.looks(GATE_RUN_ID)] == ["ask"]  # the replay's only
 
 
 def test_a_holdout_walk_that_fails_spends_no_look(tmp_path, capsys):

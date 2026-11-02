@@ -21,8 +21,8 @@ Breaking changes within the 0.x line are called out explicitly.
   assumed half spread, rounded to the tick on the passive side, judged
   against the bar the decision falls in (its low for a buy, its high for a
   sell, through `maker_would_fill`; an unfilled
-  post rests and is re-priced at the next question until a new target
-  replaces it), `compute_fill_effect`, and hourly funding from the research
+  post rests and is re-priced at the next question until it fills, a new
+  target replaces it, or it is no longer needed), `compute_fill_effect`, and hourly funding from the research
   store valued at the last close, with settlements the store lacks counted
   rather than zeroed. No stop-loss or take-profit (decided 2026-11-02), the
   last position marked rather than closed, ruin stops the path. A decision's

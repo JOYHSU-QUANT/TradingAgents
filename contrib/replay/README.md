@@ -500,8 +500,8 @@ python -m contrib.replay backtest --db paper_trading.db --run-id paper-BTC-7 [--
 - 給了 `--replay-db`：各 run 用釘住的 split（還沒釘的這時釘住——寫進 store 的路徑要有一個固定的切法，與第一次 replay
   同一條規則）；`--holdout` 把 holdout 段也走完並記 ledger（與 `score --holdout` 同一條規則；所有 run 的
   前置檢查都過了才記、開始走之前記）。**帶 `--variant` 的 `--holdout` 先在 validation 段判四條，任一 repeat
-  沒全過就具名拒絕、不記 look**（§5「四條全過才准看一次」寫成程式；2026-11-02 拍板），repeat 沒被問過
-  holdout 的題也拒絕（否則走的是抱著 validation 末倉位不動的假路徑）；holdout 先在記憶體走完、才記 look、
+  沒全過就具名拒絕、不記 look**（§5「四條全過才准看一次」寫成程式；2026-11-02 拍板），repeat 沒把
+  範圍內的 holdout 題全部問過也拒絕（否則走的是抱著 validation 末倉位不動的假路徑；look 只能花一次）；holdout 先在記憶體走完、才記 look、
   才印、才寫 store，走到一半被拒就什麼都不花；印出來之後 store 寫失敗，錯誤訊息會說 look 已記；paper 自己的
   `--holdout` 不受此限。**判定一律從「holdout 沒讀」的那條路徑讀**：帶 `--holdout` 時路徑段落含 holdout，
   但判定區塊印的是能授權看一眼的那份（否則最後一題 validation 的報酬與 4h 命中會因為看到 holdout 而多一題）。

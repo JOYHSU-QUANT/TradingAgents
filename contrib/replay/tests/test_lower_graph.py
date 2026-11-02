@@ -21,6 +21,7 @@ from contrib.replay.lower_graph import (
     LowerGraph,
     LowerGraphError,
     Reports,
+    _WithSystem,
     load_reports,
     position_section,
     replace_position_section,
@@ -442,3 +443,35 @@ def test_a_simple_variant_cannot_build_the_lower_graph():
         LowerGraphError, match="'v' is a simple variant; the lower graph walks graph"
     ):
         LowerGraph(simple_variant(), engine=_Fake().engine())
+
+
+def test_a_graph_that_returns_no_state_is_refused_and_its_cost_kept():
+    class _Lost(_Graph):
+        def invoke(self, state: dict) -> dict:
+            super().invoke(state)
+            return []  # type: ignore[return-value]
+
+    fake = _Fake()
+
+    def lost_graph(state_type: Any) -> _Graph:
+        graph = _Lost(state_type, fake.collector)
+        fake.graphs.append(graph)
+        return graph
+
+    fake.state_graph = lost_graph  # type: ignore[method-assign]
+    graph = LowerGraph(graph_variant(**_QUICK), engine=fake.engine())
+    with pytest.raises(LowerGraphError, match="returned a list, not the state mapping"):
+        _ask(graph)
+    assert (graph.lost_input_tokens, graph.lost_output_tokens) == (700, 120)
+
+
+def test_the_system_message_wrapper_refuses_the_calls_that_would_skip_it():
+    engine = _Fake().engine()
+    inner = SimpleNamespace(
+        invoke=lambda prompt, config=None: prompt, batch=lambda *a: None, model="m"
+    )
+    wrapped = _WithSystem(inner, "Decide.", engine)
+    assert wrapped.invoke("p") == [("system", "Decide."), ("human", "p")]
+    assert wrapped.model == "m"
+    with pytest.raises(LowerGraphError, match=r"called batch\(\), which would run the model"):
+        wrapped.batch  # noqa: B018 - the attribute read is the call under test

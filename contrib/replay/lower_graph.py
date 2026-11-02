@@ -310,7 +310,16 @@ class _WithSystem:
             [self._engine.SystemMessage(content=self._system), *messages], config=config, **kwargs
         )
 
+    # The other ways to run a chat model, which would skip the system message
+    # without a word; the manager node calls ``invoke`` and nothing else.
+    _BYPASSES = frozenset({"ainvoke", "batch", "abatch", "stream", "astream", "bind"})
+
     def __getattr__(self, name: str) -> Any:
+        if name in self._BYPASSES:
+            raise LowerGraphError(
+                f"the portfolio manager node called {name}(), which would run the model "
+                "without the variant's system message; the lower graph only supports invoke()"
+            )
         return getattr(self._llm, name)
 
 
@@ -417,16 +426,18 @@ class LowerGraph:
         before = len(self.collector.calls)
         try:
             final = self._graph.invoke(state)
+            if not isinstance(final, Mapping):
+                raise LowerGraphError(
+                    f"the graph returned a {type(final).__name__}, not the state mapping; "
+                    "the engine's shape has changed and the decision text cannot be read"
+                )
         except BaseException:
+            # Whatever the run cost before it failed is paid for: kept here,
+            # since no answer will carry it.
             spent = self.collector.calls[before:]
             self.lost_input_tokens += sum(c.input_tokens or 0 for c in spent)
             self.lost_output_tokens += sum(c.output_tokens or 0 for c in spent)
             raise
-        if not isinstance(final, Mapping):
-            raise LowerGraphError(
-                f"the graph returned a {type(final).__name__}, not the state mapping; the "
-                "engine's shape has changed and the decision text cannot be read"
-            )
         calls = self.collector.calls[before:]
         manager = next(
             (c for c in reversed(calls) if c.node == self._engine.PORTFOLIO_MANAGER_NODE), None

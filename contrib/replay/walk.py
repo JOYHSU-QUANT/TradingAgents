@@ -8,32 +8,35 @@ settle the funding, read the book, render its position section into the
 recorded context, run the lower half of the graph, gate the decision under
 the run's own gate from that book, apply it to the account, store the
 answer, and move on. The holdout is never asked here (plan §3-9: it is a
-look, spent elsewhere); the walk covers the train and validation segments.
+look, spent elsewhere); :class:`Exam` refuses a holdout question, so the
+walk covers the train and validation segments and nothing else.
 
 Every answer is an ordinary ``answers`` row of the replay store, so the
 scorecard, the comparison and ``backtest --variant`` read a graph variant's
 answers as they read any variant's; beside each one a ``graph_books`` row
-keeps the book the question was asked from. A walk stopped by ``--limit``
-or an interruption resumes from the store: the stored answers are applied
-to a fresh account in order, each one's book checked against the row that
-recorded it (the position, the entry, the wallet, the equity, the last
-fill and the guardrail reading, all exact: the research store, the tick,
-the run's terms or the rule changed otherwise, and the resumed walk would
-not be the stored one), and the asking continues from the first question
-not yet asked. A stored answer after an unasked question is refused by
-name: a walk is a prefix. The account is advanced BEFORE the answer is
-stored, so a stored answer is one the account could take; an answer the
-account refuses (an order the tick rounds to nothing) is paid for once and
-not stored, and the walk stops there by name.
+keeps the book the question was asked from and what the question cost. A
+walk stopped by ``--limit`` or an interruption resumes from the store: the
+stored answers are applied to a fresh account in order, each one's book
+checked against the row that recorded it (the mark, the position, the
+entry, the wallet, the equity, the last fill and the guardrail reading,
+all exact: the research store, the tick, the run's terms or the rule
+changed otherwise, and the resumed walk would not be the stored one), and
+the asking continues from the first question not yet asked. A stored
+answer after an unasked question is refused by name: a walk is a prefix.
+The account is advanced BEFORE the answer is stored, so a stored answer is
+one the account could take; an answer the account refuses (an order the
+tick rounds to nothing) is paid for, not stored, and the walk stops there
+by name.
 
 The call discipline is the replay's (:func:`~.replay.attempt`): a 401, 403
 or 404 stops the walk by name; another client error (bar 408, 409 and 429)
 records the question as refused, the account holds its book through it,
 and the walk goes on; anything else is retried after each pause, then
-stops by name. An account whose equity reaches zero is ruined and takes no
-further question in that repeat. A question whose cycle wrote no reports
-sidecar (the engine failed that cycle) is never asked: the account holds
-its book through it.
+stops by name. A question's cost is every graph run it took, the failed
+ones included, and is written on its book row. An account whose equity
+reaches zero is ruined and takes no further question in that repeat. A
+question whose cycle wrote no reports sidecar (the engine failed that
+cycle) is never asked: the account holds its book through it.
 """
 
 from __future__ import annotations
@@ -41,13 +44,15 @@ from __future__ import annotations
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
+from decimal import Decimal
 from functools import partial
 from pathlib import Path
 
-from .account import Decision, Series, Step, Terms, Walker
+from .account import AccountError, Decision, Series, Step, Terms, Walker
 from .gate import answer_target, approved_target, question_decision
 from .lower_graph import (
     LowerGraph,
+    LowerGraphError,
     Reports,
     load_reports,
     position_section,
@@ -64,6 +69,7 @@ from .upstream import (
     RiskAction,
     RiskConfig,
     RuleTimeline,
+    SegmentName,
     evaluate,
     from_epoch_ms,
     parse_target_decision,
@@ -119,17 +125,47 @@ class Exam:
 
     ``reports`` holds the questions that can be asked, by id; a question of
     ``prepared`` absent from it has no reports sidecar and is walked as a
-    hold, never asked.
+    hold, never asked. The questions are in time order, each id once, none
+    of them in the holdout (the lock the module docstring states), and
+    every report names one of them.
     """
 
     run_id: str
-    coin: str
     terms: Terms
     series: Series
     risk: RiskConfig
     decision: DecisionConfig
     prepared: Sequence[Prepared]
     reports: Mapping[str, Reports]
+
+    def __post_init__(self) -> None:
+        ids = [item.input_id for item in self.prepared]
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"run {self.run_id!r}: a question is prepared twice")
+        for earlier, later in zip(self.prepared, self.prepared[1:], strict=False):
+            if later.paper.question.at_ms <= earlier.paper.question.at_ms:
+                raise ValueError(
+                    f"run {self.run_id!r}: {later.input_id} does not follow {earlier.input_id} in "
+                    "time; the walk asks in time order"
+                )
+        holdout = [
+            item.input_id for item in self.prepared if item.paper.segment is SegmentName.HOLDOUT
+        ]
+        if holdout:
+            raise ValueError(
+                f"run {self.run_id!r}: {holdout[0]} is a holdout question; the walk never asks the "
+                "holdout (plan section 3-9)"
+            )
+        strangers = set(self.reports) - set(ids)
+        if strangers:
+            raise ValueError(
+                f"run {self.run_id!r}: reports for {sorted(strangers)[0]!r}, which is not a prepared "
+                "question"
+            )
+
+    @property
+    def coin(self) -> str:
+        return self.terms.coin
 
     @property
     def askable(self) -> int:
@@ -188,7 +224,7 @@ def _as_of_ms(item: Prepared) -> int:
     return candle_end
 
 
-def _rate(exam: Exam, item: Prepared) -> object:
+def _rate(exam: Exam, item: Prepared) -> Decimal:
     rate = exam.series.rate_at(item.paper.question.at_ms)
     if rate is None:
         raise ReplayError(
@@ -202,7 +238,13 @@ def _rate(exam: Exam, item: Prepared) -> object:
 
 @dataclass(frozen=True)
 class WalkReport:
-    """What one ``backtest --ask`` invocation did on one run."""
+    """What one ``backtest --ask`` invocation did on one run.
+
+    The graph token figures are what the invocation PAID for on this run:
+    every graph run, the ones that failed or were refused included;
+    ``lost_*`` say how much of that went to those. ``completions`` counts
+    the completions of the runs that produced an answer.
+    """
 
     asked: int
     already_stored: int
@@ -230,8 +272,8 @@ class WalkReport:
         ]
         if self.lost_input_tokens or self.lost_output_tokens:
             lines.append(
-                f"tokens spent on graph runs that failed or were refused: {self.lost_input_tokens} "
-                f"in, {self.lost_output_tokens} out (paid for, not in the figures above)"
+                f"of which on graph runs that failed or were refused: {self.lost_input_tokens} in, "
+                f"{self.lost_output_tokens} out (paid for; counted above and on the question's book)"
             )
         if self.refused:
             lines.append(
@@ -276,12 +318,14 @@ class _Tally:
     unreported: int = 0
     ruined: int = 0
     funding_missing: int = 0
+    lost_input_tokens: int = 0
+    lost_output_tokens: int = 0
 
     @property
     def done(self) -> int:
         return self.already_stored + self.asked + self.refused
 
-    def report(self, stopped: bool, graph: object) -> WalkReport:
+    def report(self, stopped: bool) -> WalkReport:
         return WalkReport(
             asked=self.asked,
             already_stored=self.already_stored,
@@ -296,9 +340,8 @@ class _Tally:
             ruined=self.ruined,
             stopped_at_limit=stopped,
             funding_missing=self.funding_missing,
-            # The lower graph keeps what its failed runs cost (a fake may not).
-            lost_input_tokens=getattr(graph, "lost_input_tokens", 0),
-            lost_output_tokens=getattr(graph, "lost_output_tokens", 0),
+            lost_input_tokens=self.lost_input_tokens,
+            lost_output_tokens=self.lost_output_tokens,
         )
 
 
@@ -381,18 +424,12 @@ def _rebuild(
         facts = item.paper.facts
         walker.settle(item.paper.question.at_ms)
         found = _book(walker, facts, guardrail(item.paper.question, facts))
-        if replace(found, graph_input_tokens=None, graph_output_tokens=None) != replace(
-            book, graph_input_tokens=None, graph_output_tokens=None
-        ):
+        if found.identity != book.identity:
             raise ReplayError(
-                f"{me}: the book it was asked from (size {book.size}, entry {book.entry}, wallet "
-                f"{book.wallet}, equity {book.equity}, last fill {book.last_fill_ms}, guardrail "
-                f"{_side_text(book.guardrail_side)}) is not the one this command rebuilds (size "
-                f"{found.size}, entry {found.entry}, wallet {found.wallet}, equity {found.equity}, "
-                f"last fill {found.last_fill_ms}, guardrail {_side_text(found.guardrail_side)}); "
-                "the research store, the tick, the run's terms or the guardrail rule changed since "
-                "it was asked, so the walk cannot resume under them; restore them or walk the "
-                "variant under a new name"
+                f"{me}: the book it was asked from ({book.describe()}) is not the one this command "
+                f"rebuilds ({found.describe()}); the research store, the tick, the run's terms or "
+                "the guardrail rule changed since it was asked, so the walk cannot resume under "
+                "them; restore them or walk the variant under a new name"
             )
         walker.advance(
             question_decision(
@@ -402,18 +439,13 @@ def _rebuild(
     return _State(walker, start, stored)
 
 
-def _side_text(side: GuardrailSide | None) -> str:
-    return "none" if side is None else side.value
-
-
 def _states(
-    exam: Exam, variant: Variant, store: ReplayStore, repeats: int, guardrail: GuardrailReader
+    exam: Exam, sha: str, store: ReplayStore, repeats: int, guardrail: GuardrailReader
 ) -> dict[int, _State]:
     """Every repeat's account rebuilt from the store, read once."""
-    sha, run_id = variant.sha, exam.run_id
-    answers = store.answers(sha, run_id)
-    failed = store.failed(sha, run_id)
-    books = store.books(sha, run_id)
+    answers = store.answers(sha, exam.run_id)
+    failed = store.failed(sha, exam.run_id)
+    books = store.books(sha, exam.run_id)
     return {
         repeat: _rebuild(
             exam,
@@ -432,50 +464,66 @@ def pending_walks(
     variant: Variant,
     store: ReplayStore | None,
     repeats: int,
-    guardrail: GuardrailReader,
+    timeline: RuleTimeline | None = None,
 ) -> tuple[int, int]:
     """``(stored, to ask)`` over the exam's askable questions and ``repeats``: what a dry run reports.
 
-    Counted by rebuilding every repeat's account from the store, as the
-    walk does, so a stored answer the walk would refuse to resume from is
-    refused here too, by name.
+    Counted by rebuilding every repeat's account from the store under the
+    variant's own guardrail reading, as the walk does, so a stored answer
+    the walk would refuse to resume from is refused here too, by name.
     """
-    total = exam.askable * repeats
     if store is None:
-        return 0, total
-    stored = sum(
-        state.stored for state in _states(exam, variant, store, repeats, guardrail).values()
+        return 0, exam.askable * repeats
+    reader = guardrail_reader(variant.guardrail, timeline)
+    states = _states(exam, variant.sha, store, repeats, reader)
+    stored = sum(state.stored for state in states.values())
+    # A repeat already ruined asks nothing more, whatever is left of its questions.
+    todo = sum(
+        0 if state.walker.ruined else exam.askable - state.stored for state in states.values()
     )
-    return stored, total - stored
+    return stored, todo
 
 
 def ask_walks(
     exam: Exam,
     *,
-    variant: Variant,
     graph: LowerGraph,
     store: ReplayStore,
     repeats: int,
-    guardrail: GuardrailReader,
     now: Callable[[], datetime],
     sleep: Callable[[float], None],
+    timeline: RuleTimeline | None = None,
     limit: int | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> WalkReport:
     """Walk ``repeats`` accounts through the exam's questions, asking the graph at each.
 
-    Question by question, repeats inside (the replay's asking order), so a
-    ``limit`` of twelve on three repeats asks the first four questions of
-    each. Each answer is applied to its account, then stored with its book
-    in one transaction. ``limit`` caps the NEW answers and refusals stored.
+    The variant is the graph's own (``graph.variant``): its sha keys every
+    row written, and its ``guardrail`` setting (with ``timeline`` for the
+    rule) is what the gate reads, so the three cannot disagree. Question by
+    question, repeats inside (the replay's asking order), so a ``limit`` of
+    twelve on three repeats asks the first four questions of each. Each
+    answer is applied to its account, then stored with its book in one
+    transaction. ``limit`` caps the NEW answers and refusals stored.
     """
+    variant = graph.variant
     sha, run_id = variant.sha, exam.run_id
-    states = _states(exam, variant, store, repeats, guardrail)
+    guardrail = guardrail_reader(variant.guardrail, timeline)
+    states = _states(exam, sha, store, repeats, guardrail)
     tally = _Tally(already_stored=sum(state.stored for state in states.values()))
     total = exam.askable * repeats
 
-    def took(step: Step) -> None:
+    def took(step: Step, label: str | None = None) -> None:
         tally.funding_missing += step.funding_missing
+        if step.equity <= 0:
+            # A hold that found the account ruined: counted and said, as an
+            # asked question's ruin is.
+            tally.ruined += 1
+            if progress is not None and label is not None:
+                progress(f"{label}: equity {step.equity} at the mark; the account is ruined")
+
+    def lost() -> tuple[int, int]:
+        return graph.lost_input_tokens, graph.lost_output_tokens
 
     for index, item in enumerate(exam.prepared):
         question, facts = item.paper.question, item.paper.facts
@@ -483,9 +531,9 @@ def ask_walks(
         if qid not in exam.reports:
             # No sidecar: nothing to ask; every account still mid-walk holds
             # its book through the question (``_rebuild`` did so before ``start``).
-            for state in states.values():
+            for repeat, state in states.items():
                 if index >= state.start and not state.walker.ruined:
-                    took(state.walker.advance(_hold(item)))
+                    took(state.walker.advance(_hold(item)), f"{qid} repeat {repeat} (no reports)")
             continue
         for repeat in range(repeats):
             state = states[repeat]
@@ -493,17 +541,12 @@ def ask_walks(
             if index < state.start or walker.ruined:
                 continue
             if limit is not None and tally.asked + tally.refused >= limit:
-                return tally.report(True, graph)
+                return tally.report(True)
             label = f"[{tally.done + 1}/{total}] {qid} repeat {repeat}"
             walker.settle(question.at_ms)
             equity = walker.equity(facts.mark)
             if equity <= 0:
-                took(walker.advance(_hold(item)))
-                tally.ruined += 1
-                if progress is not None:
-                    progress(
-                        f"{label}: equity {equity} at the mark; the account is ruined, not asked"
-                    )
+                took(walker.advance(_hold(item)), label)
                 continue
             as_of = from_epoch_ms(_as_of_ms(item))
             lines = position_section(
@@ -512,7 +555,7 @@ def ask_walks(
                 wallet=walker.wallet,
                 last_fill_ms=walker.last_fill_ms,
                 mark=facts.mark,
-                funding_rate=_rate(exam, item),  # type: ignore[arg-type]
+                funding_rate=_rate(exam, item),
                 coin=exam.coin,
                 as_of=as_of,
                 risk=exam.risk,
@@ -523,6 +566,7 @@ def ask_walks(
                 item.context_text, item.context_shape, lines, input_id=qid
             )
             book = _book(walker, facts, guardrail(question, facts))
+            lost_before = lost()
             try:
                 completion = attempt(
                     partial(
@@ -537,8 +581,10 @@ def ask_walks(
                     repeat=repeat,
                     sleep=sleep,
                     asked=tally.asked,
+                    unretried=(LowerGraphError,),
                 )
             except QuestionRefused as exc:
+                lost_in, lost_out = (a - b for a, b in zip(lost(), lost_before, strict=True))
                 took(walker.advance(_hold(item)))
                 store.record_graph_failure(
                     sha,
@@ -547,12 +593,17 @@ def ask_walks(
                     repeat=repeat,
                     error=str(exc),
                     now=now(),
-                    book=book,
+                    book=replace(book, graph_input_tokens=lost_in, graph_output_tokens=lost_out),
                 )
                 tally.refused += 1
+                tally.graph_input_tokens += lost_in
+                tally.graph_output_tokens += lost_out
+                tally.lost_input_tokens += lost_in
+                tally.lost_output_tokens += lost_out
                 if progress is not None:
                     progress(f"{label}: refused ({exc}); recorded as unanswered, the book held")
                 continue
+            lost_in, lost_out = (a - b for a, b in zip(lost(), lost_before, strict=True))
             parsed = parse_target_decision(
                 completion.text, exam.decision, truncated=completion.truncated
             )
@@ -568,8 +619,8 @@ def ask_walks(
             )
             # The account first: an answer it cannot take is not stored, so
             # what the store holds always rebuilds (module docstring).
-            took(
-                walker.advance(
+            try:
+                step = walker.advance(
                     question_decision(
                         question,
                         facts,
@@ -577,7 +628,13 @@ def ask_walks(
                         approved_target(gate.target_side, gate.approved_target_margin_pct),
                     )
                 )
-            )
+            except AccountError as exc:
+                raise ReplayError(
+                    f"{label}: the account cannot take the answer it was given ({exc}); the answer "
+                    "was paid for and not stored, so the next run asks it again; change the "
+                    "terms (--tick) before that"
+                ) from exc
+            took(step)
             store.write_graph_answer(
                 sha,
                 StoredAnswer(
@@ -596,16 +653,18 @@ def ask_walks(
                 ),
                 replace(
                     book,
-                    graph_input_tokens=completion.graph_input_tokens,
-                    graph_output_tokens=completion.graph_output_tokens,
+                    graph_input_tokens=completion.graph_input_tokens + lost_in,
+                    graph_output_tokens=completion.graph_output_tokens + lost_out,
                 ),
             )
             tally.asked += 1
             tally.fail_closed += gate.risk_action is RiskAction.INVALID_FAIL_CLOSED
             tally.input_tokens += completion.input_tokens or 0
             tally.output_tokens += completion.output_tokens or 0
-            tally.graph_input_tokens += completion.graph_input_tokens
-            tally.graph_output_tokens += completion.graph_output_tokens
+            tally.graph_input_tokens += completion.graph_input_tokens + lost_in
+            tally.graph_output_tokens += completion.graph_output_tokens + lost_out
+            tally.lost_input_tokens += lost_in
+            tally.lost_output_tokens += lost_out
             tally.completions += completion.completions
             tally.unreported += not completion.usage_reported
             if progress is not None:
@@ -615,4 +674,4 @@ def ask_walks(
                     f"(book size {walker.position.size:.8f}, equity {equity:.2f}; graph "
                     f"{completion.graph_input_tokens} in / {completion.graph_output_tokens} out)"
                 )
-    return tally.report(False, graph)
+    return tally.report(False)

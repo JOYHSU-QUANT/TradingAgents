@@ -22,7 +22,7 @@ from contrib.replay.account import (
 )
 from contrib.replay.upstream import CostModel, FillRole, SegmentName, TargetSide
 
-from .conftest import STEP_MS, terms
+from .conftest import STEP_MS, at_ms, terms
 
 HOUR = 3_600_000
 T0 = 1_800_000_000_000 - 1_800_000_000_000 % STEP_MS
@@ -482,3 +482,46 @@ def test_the_terms_describe_the_fill_model_in_one_line():
     )
     assert "posted at mark -/+ 0.5 bps on a 1 tick" in terms(MAKER).describe()
     assert "no stop-loss, no take-profit" in terms().describe()
+
+
+# -- the incremental walker (plan PR 3b) --------------------------------------------
+
+
+def _walker():
+    from contrib.replay.account import Series, Walker
+
+    return Walker(terms(), Series.of([], []))
+
+
+def _flat_decision(input_id: str, at: int):
+    from contrib.replay.account import Decision
+
+    return Decision(input_id, at, None, Decimal(100), Decimal(1), None)
+
+
+def test_the_walker_refuses_a_second_decision_at_the_same_instant_and_a_repeated_question():
+    from contrib.replay.account import AccountError
+
+    walker = _walker()
+    walker.advance(_flat_decision("a", at_ms(0)))
+    with pytest.raises(AccountError, match="a and b: decided at the same instant"):
+        walker.advance(_flat_decision("b", at_ms(0)))
+    walker.advance(_flat_decision("b", at_ms(1)))
+    # Not only the question just taken: any earlier one.
+    with pytest.raises(AccountError, match="a: decided twice"):
+        walker.advance(_flat_decision("a", at_ms(2)))
+
+
+def test_the_walker_refuses_to_settle_past_an_instant_no_decision_was_taken_at():
+    from contrib.replay.account import AccountError
+
+    walker = _walker()
+    walker.advance(_flat_decision("a", at_ms(0)))
+    walker.settle(at_ms(1))
+    walker.settle(at_ms(1))  # the same instant again is nothing
+    with pytest.raises(AccountError, match="settled to .* and no decision was taken there"):
+        walker.settle(at_ms(2))
+    with pytest.raises(AccountError, match="no decision was taken there"):
+        walker.advance(_flat_decision("c", at_ms(2)))
+    walker.advance(_flat_decision("b", at_ms(1)))  # the settled instant is fine
+    assert [step.input_id for step in walker.finish().steps] == ["a", "b"]

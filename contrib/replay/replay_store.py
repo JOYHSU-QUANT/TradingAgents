@@ -379,6 +379,33 @@ class StoredBook:
     graph_input_tokens: int | None = None
     graph_output_tokens: int | None = None
 
+    def __post_init__(self) -> None:
+        if (self.graph_input_tokens is None) != (self.graph_output_tokens is None):
+            raise ValueError(
+                "a book's graph tokens are recorded in and out together, or not at all"
+            )
+
+    @property
+    def identity(self) -> tuple[object, ...]:
+        """The book itself, without what the question cost: what a resumed walk compares."""
+        return (
+            self.mark,
+            self.size,
+            self.entry,
+            self.wallet,
+            self.equity,
+            self.last_fill_ms,
+            self.guardrail_side,
+        )
+
+    def describe(self) -> str:
+        """The identity in one clause, every compared field named."""
+        side = "none" if self.guardrail_side is None else self.guardrail_side.value
+        return (
+            f"mark {self.mark}, size {self.size}, entry {self.entry}, wallet {self.wallet}, "
+            f"equity {self.equity}, last fill {self.last_fill_ms}, guardrail {side}"
+        )
+
 
 @dataclass(frozen=True)
 class StoredProbeAnswer:
@@ -862,8 +889,20 @@ class ReplayStore:
         return by_repeat
 
     def clear_failures(self, variant_sha: str, run_id: str) -> int:
-        """Forget this variant's recorded failures on the run, so they are asked again."""
+        """Forget this variant's recorded failures on the run, so they are asked again.
+
+        A refused graph question's book goes with its failure (plan PR 3b), so
+        a later ask of the question can record a book again.
+        """
         with self.transaction() as conn:
+            if self.graph_tables:
+                conn.execute(
+                    "DELETE FROM graph_books WHERE variant_sha = ? AND run_id = ? AND EXISTS ("
+                    "SELECT 1 FROM failures AS f WHERE f.variant_sha = graph_books.variant_sha "
+                    "AND f.run_id = graph_books.run_id AND f.input_id = graph_books.input_id "
+                    "AND f.repeat = graph_books.repeat)",
+                    (variant_sha, run_id),
+                )
             return conn.execute(
                 "DELETE FROM failures WHERE variant_sha = ? AND run_id = ?", (variant_sha, run_id)
             ).rowcount

@@ -262,3 +262,12 @@ def test_a_graph_variant_differs_from_the_simple_one_and_a_simple_sha_is_the_six
     }
     canonical = json.dumps(identity, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     assert simple.sha == "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def test_a_graph_prompt_is_text_or_nothing(tmp_path):
+    with pytest.raises(VariantError, match="text, or empty for none"):
+        graph_variant(system_prompt="   ")
+    path = write_graph_variant(tmp_path, "g", prompt=True)
+    (tmp_path / "system.md").write_text("  \n", encoding="utf-8")
+    with pytest.raises(VariantError, match=r"system prompt .*system\.md.* is empty"):
+        load_variant(path)

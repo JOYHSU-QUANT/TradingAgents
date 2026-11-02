@@ -174,7 +174,7 @@ from .upstream import (
     payload_dir,
 )
 from .variant import GRAPH_MODE, GUARDRAIL_RULE, Variant, VariantError, load_variant, short_sha
-from .walk import Exam, ask_walks, guardrail_reader, load_all_reports, pending_walks, preflight
+from .walk import Exam, ask_walks, load_all_reports, pending_walks, preflight
 
 __all__ = ["main"]
 
@@ -1945,18 +1945,15 @@ def _ask(
     try:
         if not args.dry_run or replay_path.is_file():
             store = ReplayStore(replay_path, create=not args.dry_run)
-            if args.dry_run:
-                # What ``register`` would refuse, said now and without writing.
-                standing = store.sha_of(variant.name)
-                if standing is not None and standing != variant.sha:
-                    raise _Refused(
-                        f"variant name {variant.name!r} already stands for "
-                        f"{short_sha(standing)} in {replay_path}, and this file is "
-                        f"{variant.short_sha}; a changed variant needs a new name"
-                    )
-            else:
-                for note in store.register(variant, now=_now()):
-                    print(f"note: {note}", file=sys.stderr)
+            # What ``register`` would refuse, said now and without writing; the
+            # variant itself is registered once every run has passed preflight.
+            standing = store.sha_of(variant.name)
+            if standing is not None and standing != variant.sha:
+                raise _Refused(
+                    f"variant name {variant.name!r} already stands for "
+                    f"{short_sha(standing)} in {replay_path}, and this file is "
+                    f"{variant.short_sha}; a changed variant needs a new name"
+                )
         exams: list[tuple[_Run, Exam, bool]] = []
         for run in runs:
             run_id = run.facts.run_id
@@ -1991,7 +1988,6 @@ def _ask(
                 )
             exam = Exam(
                 run_id=run_id,
-                coin=run.facts.coin,
                 terms=_terms(run, tick),
                 series=_load_series(run, research_path, args.research_db, holdout=False),
                 risk=risk,
@@ -2004,16 +2000,24 @@ def _ask(
             # pinned before every question has passed.
             preflight(exam)
             exams.append((run, exam, pinned is None))
+        if store is not None and not args.dry_run:
+            for note in store.register(variant, now=_now()):
+                print(f"note: {note}", file=sys.stderr)
         remaining = args.limit
         for run, exam, unpinned in exams:
             run_id = run.facts.run_id
-            reader = guardrail_reader(variant.guardrail, timelines.get(run.facts.coin))
+            timeline = timelines.get(run.facts.coin)
             print(
                 f"ask: run {run_id} ({run.facts.coin}, {run.facts.interval} cycle), train + "
                 f"validation: {len(exam.prepared)} question(s) x {args.repeats} repeat(s), the "
                 "lower half of the graph from each cycle's recorded reports"
             )
             print(variant.describe())
+            recorded = sorted({q.model for q in run.decisions.questions if q.model})
+            mismatch = "" if variant.model in recorded else " (not the variant's portfolio manager model)"
+            print(f"recorded model of the run's own answers: {', '.join(recorded) or 'unknown'}{mismatch}")
+            if variant.guardrail == GUARDRAIL_RULE:
+                print(f"guardrail rule: {DEFAULT_RULE if args.rule is None else args.rule}")
             print(_gate_line(run))
             unasked = len(exam.prepared) - exam.askable
             if unasked:
@@ -2031,10 +2035,11 @@ def _ask(
                     print(
                         f"note: the store also holds repeat(s) {beyond} of {variant.name!r} on this "
                         f"run; this command walks repeats 0-{args.repeats - 1} and the bar reads "
-                        "every stored repeat"
+                        "every stored repeat",
+                        file=sys.stderr,
                     )
             if args.dry_run:
-                stored, todo = pending_walks(exam, variant, store, args.repeats, reader)
+                stored, todo = pending_walks(exam, variant, store, args.repeats, timeline)
                 asks = todo if remaining is None else min(todo, remaining)
                 print(run.split_line(replay_path))
                 print(
@@ -2056,13 +2061,12 @@ def _ask(
             print(run.split_line(replay_path))
             report = ask_walks(
                 exam,
-                variant=variant,
                 graph=graph,
                 store=store,
                 repeats=args.repeats,
-                guardrail=reader,
                 now=_now,
                 sleep=_sleep,
+                timeline=timeline,
                 limit=remaining,
                 progress=_progress,
             )
@@ -2077,6 +2081,14 @@ def _ask(
             if remaining is not None:
                 remaining -= report.asked + report.refused
     except (ReplayError, LowerGraphError, ReplayStoreError, StoreError, AccountError, _Refused) as exc:
+        if graph is not None and (graph.lost_input_tokens or graph.lost_output_tokens):
+            # The walk stopped before its report: what its failed graph runs
+            # cost is said here, or it is said nowhere.
+            print(
+                f"tokens spent on graph runs that failed before the walk stopped: "
+                f"{graph.lost_input_tokens} in, {graph.lost_output_tokens} out (paid for)",
+                file=sys.stderr,
+            )
         return _fail(str(exc))
     finally:
         if store is not None:

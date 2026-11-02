@@ -532,8 +532,15 @@ train＋validation 每一題（holdout 不問；那是一次 look，由別的指
 一遍（book 對不上同樣拒絕）、也查 variant 名字有沒有已經指向別的 sha，所以 dry run 說會問 N 題就是會問 N 題。所有 repeat 都走完才接回一般流程：用存下來的答案判
 §5 四條（與 `--variant` 完全相同，報表也相同）。呼叫紀律同 `replay`（401／403／404 停、其他 4xx 記 refused、帳戶抱著不
 動、其餘退避重試）；權益≤0 的 repeat 不再問。`--dry-run` 讀完所有 payload 與 sidecar、印要問幾題，不建 client、不寫。
-報表印 PM 與整個 graph 的 token、另印「失敗或被拒那幾次 graph 跑掉的 token」（付了錢、不在答案的數字裡）、持倉期間
-研究 store 缺的 funding 結算數；store 裡若已有 `--repeats` 以外的 repeat，印一行說門檻會連它們一起讀。
+報表印 PM 與整個 graph 的 token（＝這次**付了錢的**全部，失敗或被拒那幾次 graph 跑掉的也算進去，另印「其中多少花在
+失敗／被拒那幾次」），每題的 book 也記該題全部花掉的 token（被拒的題記失敗那幾次的）；持倉期間研究 store 缺的 funding
+結算數；store 裡若已有 `--repeats` 以外的 repeat，stderr 印一行說門檻會連它們一起讀；header 印 run 自己答案記錄的
+模型（與 variant 的 PM 模型不同就標出來）與 `rule` 模式用的規則檔。被拒的題在這條 walk 裡是永久的 hold（沒有
+`--retry-failed`：中途重問會改掉後面每一題的 book）；要重問就換 variant 名字重走。**研究 store 的快照在 variant 走完前
+不要換**：補一筆 funding 都會讓 book 對不上、walk 接不下去。graph variant 的 `system_prompt_path` 是**加在 PM 那次
+completion 前面的 system message**，上游 PM 自己的 prompt 仍在 human message 裡；不要把 `current_system.md` 指給 graph
+variant（那是 simple 模式整份指示，會讓模型讀到兩份）；`extra_context` 在 graph 模式進 `instrument_context`，五個 node
+都看得到，不只 PM。
 
 與 daemon 已知的兩處差異：instrument 身分行不走網路查詢（`build_instrument_context(coin, "crypto")`），倉位段的
 holding cost 用研究 store 的結算 rate（daemon 用當下的預測 rate）。風險辯論一輪（上游預設，daemon 沒改）。

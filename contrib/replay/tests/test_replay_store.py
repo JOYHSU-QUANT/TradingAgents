@@ -571,3 +571,21 @@ def test_a_v4_store_is_read_as_written_and_takes_no_graph_variant(tmp_path):
         assert store.graph_tables
         store.register(graph_variant(), now=NOW)
         assert store.variant("g").mode == "graph"
+
+
+def test_clearing_failures_takes_the_refused_questions_books_with_them(tmp_path):
+    variant = graph_variant()
+    text = decision_text("set_target", "long", 30, 0.8)
+    answer = StoredAnswer("run", "q1", 0, NOW, "train", text, False, None, _gate(text), "m", 1, 1)
+    with ReplayStore(tmp_path / "r.sqlite", create=True) as store:
+        store.register(variant, now=NOW)
+        store.write_graph_answer(variant.sha, answer, _book())
+        store.record_graph_failure(
+            variant.sha, run_id="run", input_id="q2", repeat=0, error="422", now=NOW, book=_book()
+        )
+        assert store.clear_failures(variant.sha, "run") == 1
+        assert set(store.books(variant.sha, "run")[0]) == {"q1"}
+    with pytest.raises(ValueError, match="in and out together, or not at all"):
+        _book(graph_input_tokens=1, graph_output_tokens=None)
+    assert _book().identity == _book(graph_input_tokens=9, graph_output_tokens=9).identity
+    assert _book().describe().startswith("mark 100, size 3, entry 99, wallet 999.95545, equity")

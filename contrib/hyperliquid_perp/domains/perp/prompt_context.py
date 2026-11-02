@@ -457,7 +457,6 @@ def render_position_section(
     ``as_of`` are the two context facts the section reads besides the
     position (the size's unit, and the fill's age).
 
-
     Facts and prices only. What is deliberately NOT here: any sentence about
     which gate bar a target faces (the open / flip / flat exemptions), any
     reading of the position ("underwater", "winning"), and any accumulated

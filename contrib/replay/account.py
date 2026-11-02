@@ -535,6 +535,7 @@ class Walker:
         self.ruined = False
         self.last_fill_ms: int | None = None
         self._steps: list[Step] = []
+        self._seen: set[str] = set()
         self._previous: Decision | None = None
         self._resting: Target | None = None
         self._settled_to: int | None = None
@@ -548,6 +549,15 @@ class Walker:
         """
         if self._settled_to == at_ms:
             return
+        if self._settled_to is not None and (
+            self._previous is None or self._previous.at_ms != self._settled_to
+        ):
+            # Settled to an instant no decision was taken at: a second settle
+            # would pay the funding of the first slice again.
+            raise AccountError(
+                f"the account was settled to {self._settled_to} and no decision was taken "
+                f"there; advance at that instant before settling to {at_ms}"
+            )
         if self._previous is not None and self._previous.at_ms >= at_ms:
             raise AccountError(
                 f"a question at {at_ms} does not follow the previous one at "
@@ -573,7 +583,7 @@ class Walker:
         """Apply ``decision`` to the book and record its step."""
         if self.ruined:
             raise AccountError(f"{decision.input_id}: the account is ruined; the walk has ended")
-        if self._previous is not None and self._previous.input_id == decision.input_id:
+        if decision.input_id in self._seen:
             raise AccountError(f"{decision.input_id}: decided twice")
         if self._previous is not None and self._previous.at_ms == decision.at_ms:
             raise AccountError(
@@ -639,6 +649,7 @@ class Walker:
             equity=equity,
         )
         self._steps.append(step)
+        self._seen.add(decision.input_id)
         self._previous = decision
         return step
 

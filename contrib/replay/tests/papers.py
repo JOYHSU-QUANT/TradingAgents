@@ -48,6 +48,10 @@ from contrib.replay.variant import Variant
 from .conftest import COIN, GATE_DECISION, GATE_RISK, at_ms, insert_attempt, run_config
 
 RUN_ID = "paper-GATE"
+# The context is built from the newest closed candle, which the daemon
+# records as ``candle_end``; the cycle itself ran this much later, so the
+# fixture keeps the two apart as the real rows do.
+CANDLE_LAG_MS = 26 * 60_000
 EQUITY = Decimal("1000")
 LEVERAGE = Decimal("1")
 MAX_MARGIN_PCT = 60
@@ -123,6 +127,11 @@ def question_line(slot: int) -> str:
 def context_text(slot: int) -> str:
     """The recorded perp context: the question line, then the position section last."""
     return f"{question_line(slot)}\n\n{POSITION_SECTION}"
+
+
+def candle_end_ms(slot: int) -> int:
+    """The as-of the question's context was built from: the candle end the row records."""
+    return at_ms(slot) - CANDLE_LAG_MS
 
 
 def payload_name(slot: int) -> str:
@@ -238,7 +247,7 @@ def write_gate_store(
                 mode="paper",
                 run_id=run_id,
                 symbol=COIN,
-                candle_end=stamp,
+                candle_end=from_epoch_ms(candle_end_ms(paper.slot)),
                 mark_price=Decimal(paper.mark),
                 account_equity=EQUITY,
                 current_position_side=side,
@@ -334,6 +343,9 @@ class EchoGraph:
         self.asked: list[dict] = []
         self.fail = fail
         self.text_for = text_for or {}
+        # What the real graph keeps of its failed runs; the fake's failures cost 40 / 4.
+        self.lost_input_tokens = 0
+        self.lost_output_tokens = 0
 
     def ask(self, *, coin, as_of, context_text, format_instructions, reports) -> GraphCompletion:
         self.asked.append(
@@ -345,7 +357,12 @@ class EchoGraph:
                 "reports": reports,
             }
         )
-        paper = fixture_paper(self, context_text)
+        try:
+            paper = fixture_paper(self, context_text)
+        except ConnectionError:
+            self.lost_input_tokens += 40
+            self.lost_output_tokens += 4
+            raise
         return GraphCompletion(
             text=self.text_for.get(paper.slot, paper.text),
             truncated=paper.truncated,

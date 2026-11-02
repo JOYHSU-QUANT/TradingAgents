@@ -19,7 +19,7 @@ import pytest
 from contrib.hyperliquid_perp.domains.perp.schema import Candle, FundingPoint
 from contrib.replay import cli
 from contrib.replay.replay_store import SCHEMA_VERSION, ReplayStore
-from contrib.replay.upstream import ResearchStore, payload_dir
+from contrib.replay.upstream import ResearchStore, from_epoch_ms, payload_dir
 
 from .conftest import (
     ANCHOR_MS,
@@ -39,6 +39,7 @@ from .papers import (
     RUN_ID as GATE_RUN_ID,
     Echo,
     EchoGraph,
+    candle_end_ms,
     input_id as gate_input_id,
     question_line,
     replay_argv,
@@ -753,13 +754,14 @@ def test_a_question_the_provider_refuses_holds_the_book_and_is_recorded(
         sha = replay.variant("g").sha
         assert replay.failed(sha, GATE_RUN_ID) == {0: {gate_input_id(0)}}
         books = replay.books(sha, GATE_RUN_ID)[0]
-        assert books[gate_input_id(0)].graph_input_tokens is None
+        # The refused question's book carries what its failed run cost (nothing here).
+        assert books[gate_input_id(0)].graph_input_tokens == 0
         # Slot 1 was asked from a flat book: the refused slot 0 opened nothing.
         assert books[gate_input_id(1)].size == 0
         assert len(replay.answers(sha, GATE_RUN_ID)[0]) == 7
 
 
-def test_a_failed_graph_call_is_tried_again_after_the_pause(
+def test_a_failed_graph_call_is_tried_again_after_the_pause_and_its_cost_is_counted(
     graph_store, gate_research, tmp_path, monkeypatch, capsys
 ):
     variant_file = write_graph_variant(tmp_path, "g")
@@ -768,7 +770,109 @@ def test_a_failed_graph_call_is_tried_again_after_the_pause(
     monkeypatch.setattr(cli, "_build_graph", lambda variant: EchoGraph(variant, fail=1))
     assert cli.main(_ask_argv(graph_store, gate_research, variant_file, "--repeats", "1")) == 0
     assert pauses == [5.0]
-    assert "asked: 8 new answer(s)" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "asked: 8 new answer(s)" in out
+    # The failed run's 40 / 4 tokens are paid for: in the graph total, said apart,
+    # and on the book of the question they were spent on.
+    assert "whole graph 4040 in, 404 out over 40 completion(s)" in out
+    assert "of which on graph runs that failed or were refused: 40 in, 4 out" in out
+    with ReplayStore(_replay_db(graph_store)) as replay:
+        books = replay.books(replay.variant("g").sha, GATE_RUN_ID)[0]
+        assert books[gate_input_id(0)].graph_input_tokens == 540
+        assert books[gate_input_id(1)].graph_input_tokens == 500
+
+
+def test_the_position_section_and_the_trade_date_are_as_of_the_rows_candle_end(
+    graph_store, gate_research, tmp_path, monkeypatch, capsys
+):
+    variant_file = write_graph_variant(tmp_path, "g")
+    built = _install_echo_graph(monkeypatch)
+    argv = _ask_argv(graph_store, gate_research, variant_file, "--repeats", "1", "--limit", "2")
+    assert cli.main(argv) == 0
+    first, second = built[0].asked
+    # The candle end the row recorded, not the scheduler's instant the payload stamps.
+    assert first["as_of"] == from_epoch_ms(candle_end_ms(0))
+    assert second["as_of"] == from_epoch_ms(candle_end_ms(1))
+    # Slot 1's section is rendered from the slot 0 fill, aged against that as-of.
+    fill_line = next(
+        line for line in second["context_text"].splitlines() if line.startswith("  Last fill: ")
+    )
+    assert from_epoch_ms(at_ms(0)).isoformat() in fill_line
+    assert fill_line.endswith("before the as-of time above)")
+
+
+def test_preflight_refuses_before_anything_is_registered_or_pinned(
+    graph_store, gate_research, tmp_path, monkeypatch, capsys
+):
+    variant_file = write_graph_variant(tmp_path, "g")
+    _install_echo_graph(monkeypatch)
+    # No funding settlement in the research store before the questions.
+    conn = sqlite3.connect(gate_research)
+    conn.execute("DELETE FROM funding")
+    conn.commit()
+    conn.close()
+    argv = _ask_argv(graph_store, gate_research, variant_file, "--repeats", "1")
+    assert cli.main([*argv, "--dry-run"]) == 1
+    err = capsys.readouterr().err
+    assert "gate-in-00: the research store has no funding settlement at or before" in err
+    assert cli.main(argv) == 1
+    assert "no funding settlement" in capsys.readouterr().err
+    with ReplayStore(_replay_db(graph_store)) as replay:
+        assert replay.sha_of("g") is None  # not registered
+        assert replay.pinned_split(GATE_RUN_ID) is None  # not pinned
+    # A row without a candle end cannot say what its section is as of.
+    again = write_research(gate_research.parent / "again.sqlite", GATE_MARKS, slots=12)
+    conn = sqlite3.connect(graph_store)
+    conn.execute(
+        "UPDATE ai_inputs SET candle_end = NULL WHERE input_id = ?", (gate_input_id(2),)
+    )
+    conn.commit()
+    conn.close()
+    assert cli.main([*_ask_argv(graph_store, again, variant_file), "--dry-run"]) == 1
+    assert "gate-in-02: the input row records no candle_end" in capsys.readouterr().err
+
+
+def test_an_answer_the_account_cannot_take_is_not_stored_and_the_walk_stops_by_name(
+    graph_store, gate_research, tmp_path, monkeypatch, capsys
+):
+    from contrib.replay import walk
+    from contrib.replay.account import AccountError, Walker
+
+    variant_file = write_graph_variant(tmp_path, "g")
+    _install_echo_graph(monkeypatch)
+    # The account refuses the order the answer asks for (the books' own refusal,
+    # a quantity the venue would not take); nothing was stored before it.
+    original = Walker.advance
+
+    def refusing(self, decision):
+        if decision.target is not None:
+            raise AccountError(f"{decision.input_id}: the order rounds to nothing")
+        return original(self, decision)
+
+    monkeypatch.setattr(walk.Walker, "advance", refusing)
+    argv = _ask_argv(graph_store, gate_research, variant_file, "--repeats", "1")
+    assert cli.main(argv) == 1
+    err = capsys.readouterr().err
+    assert "gate-in-00 repeat 0: the account cannot take the answer it was given" in err
+    assert "the answer was paid for and not stored, so the next run asks it again" in err
+    with ReplayStore(_replay_db(graph_store)) as replay:
+        assert replay.answers(replay.variant("g").sha, GATE_RUN_ID) == {}
+
+
+def test_repeats_the_store_holds_beyond_this_command_are_said(
+    graph_store, gate_research, tmp_path, monkeypatch, capsys
+):
+    variant_file = write_graph_variant(tmp_path, "g")
+    _install_echo_graph(monkeypatch)
+    assert cli.main(_ask_argv(graph_store, gate_research, variant_file, "--repeats", "2")) == 0
+    capsys.readouterr()
+    assert cli.main(_ask_argv(graph_store, gate_research, variant_file, "--repeats", "1")) == 0
+    captured = capsys.readouterr()
+    assert "note: the store also holds repeat(s) [1] of 'g' on this run" in captured.err
+    assert "-- g repeat 1 --" in captured.out  # the bar reads every stored repeat
+    assert (
+        "recorded model of the run's own answers: recorded-model (not the variant's"
+    ) in captured.out
 
 
 def test_ask_dry_run_builds_no_graph_and_writes_nothing(

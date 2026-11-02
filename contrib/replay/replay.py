@@ -552,6 +552,7 @@ def attempt(
     repeat: int,
     sleep: Callable[[float], None],
     asked: int,
+    unretried: tuple[type[BaseException], ...] = (),
 ) -> _T:
     """One paid call under the replay's call discipline (see :func:`ask_all`).
 
@@ -560,11 +561,14 @@ def attempt(
     :class:`ReplayError` to stop the command, or :class:`QuestionRefused`
     for a question the caller records and passes. The decision replay, the
     direction probe (:mod:`.probe`) and the asking walk (:mod:`.walk`) all
-    call through it.
+    call through it. ``unretried`` names the caller's own exceptions, which
+    are no provider failure and escape at once.
     """
     for tried, pause in enumerate((*BACKOFF_SECONDS, None)):
         try:
             return call()
+        except unretried:
+            raise
         except Exception as exc:  # noqa: BLE001 - any provider failure is a failed call
             status = _status(exc)
             if status in _STOP_STATUSES:

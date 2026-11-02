@@ -116,7 +116,8 @@ def approved_target(
         return None
     if margin_pct == 0:
         return _FLAT
-    assert side is not None  # a sized target carries its side
+    if side is None:
+        raise ValueError(f"an approved margin of {margin_pct} with no side")
     return Target(side, Decimal(str(margin_pct)))
 
 

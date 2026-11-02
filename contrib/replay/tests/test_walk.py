@@ -120,7 +120,49 @@ def test_the_walk_report_says_what_was_asked_what_it_cost_and_what_stopped_it():
     costly = WalkReport(8, 0, 0, 0, 800, 80, 4000, 400, 40, 0, 0, False, 2, 900, 30)
     lines = costly.describe()
     assert lines[3] == (
-        "tokens spent on graph runs that failed or were refused: 900 in, 30 out (paid for, "
-        "not in the figures above)"
+        "of which on graph runs that failed or were refused: 900 in, 30 out (paid for; "
+        "counted above and on the question's book)"
     )
     assert lines[4].startswith("funding settlements missing from the research store")
+
+
+def test_an_exam_refuses_a_holdout_question_a_repeated_one_and_a_report_for_no_question():
+    from contrib.replay.account import Series
+    from contrib.replay.replay import Paper, Prepared
+    from contrib.replay.upstream import (
+        CurrentPositionState,
+        DecisionConfig,
+        RiskConfig,
+        SegmentName,
+    )
+    from contrib.replay.walk import Exam
+
+    from .conftest import terms
+
+    questions = fixture_questions()[:2]
+
+    def prepared(question, segment):
+        paper = Paper(question, segment, _facts(None))
+        return Prepared(paper, "Position:", "f", Decimal(1000), CurrentPositionState.flat())
+
+    def exam(items, reports=None):
+        return Exam(
+            run_id="run",
+            terms=terms(),
+            series=Series.of([], []),
+            risk=RiskConfig(),
+            decision=DecisionConfig(),
+            prepared=items,
+            reports={} if reports is None else reports,
+        )
+
+    with pytest.raises(ValueError, match="is a holdout question; the walk never asks the holdout"):
+        exam([prepared(questions[0], SegmentName.HOLDOUT)])
+    with pytest.raises(ValueError, match="a question is prepared twice"):
+        exam([prepared(questions[0], SegmentName.TRAIN)] * 2)
+    with pytest.raises(ValueError, match="does not follow"):
+        exam([prepared(questions[1], SegmentName.TRAIN), prepared(questions[0], SegmentName.TRAIN)])
+    with pytest.raises(ValueError, match="reports for 'ghost', which is not a prepared question"):
+        exam([prepared(questions[0], SegmentName.TRAIN)], {"ghost": object()})
+    good = exam([prepared(q, SegmentName.TRAIN) for q in questions])
+    assert good.askable == 0 and good.coin == terms().coin

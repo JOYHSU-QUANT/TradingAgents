@@ -163,6 +163,10 @@ class Variant:
             raise VariantError(
                 f"system_prompt must be a non-empty string, got {self.system_prompt!r}"
             )
+        if self.system_prompt and not self.system_prompt.strip():
+            # Whitespace would reach the model as a system message and hash into
+            # the sha while behaving like no prompt: one setting, two shas.
+            raise VariantError("a graph variant's system_prompt is text, or empty for none")
         if self.temperature is not None:
             # The engine's own rule (``default_config``'s temperature check):
             # finite and non-negative, no ceiling, since the ceiling is the

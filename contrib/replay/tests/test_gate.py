@@ -47,7 +47,7 @@ def _target(side: TargetSide, margin: int) -> Target:
 # -- the asks -------------------------------------------------------------------------------
 
 
-def test_answer_targets_follow_the_orders_the_gate_created():
+def test_answer_targets_follow_the_targets_the_gate_approved():
     questions = fixture_questions()
     asks = answer_targets(questions, {a.input_id: a for a in fixture_answers()})
     by_slot = {q.input_id: ask for q, ask in zip(questions, asks, strict=True)}
@@ -197,7 +197,7 @@ def test_a_candidate_that_clears_all_four_is_eligible():
     assert lines[0] == "-- plan section 5 bar: cand on the validation segment --"
     assert lines[1].startswith("  (1) net sharpe above every control: cand ")
     assert lines[1].endswith("-> pass")
-    assert "1 + 0.25 x ln 1; 1 variant(s) tried" in lines[2]
+    assert "1 + 0.25 x ln 1; 1 variant repeat(s) tried" in lines[2]
     assert f"n 110 (needs >= {POOLED_MIN_QUESTIONS}), cand only 40, paper only 10" in lines[3]
     assert "cand 1/20 (5.0%) vs paper 2/20 (10.0%)" in lines[4]
     assert lines[-1].endswith("eligible for --holdout (one look, recorded in the ledger)")

@@ -91,6 +91,7 @@ from .variant import Variant, short_sha
 
 __all__ = [
     "SCHEMA_VERSION",
+    "VARIANT_DRIVER",
     "BacktestRecord",
     "HoldoutLook",
     "ReplayStore",
@@ -328,9 +329,17 @@ class HoldoutLook:
     questions: int
 
 
+# The driver a variant's path is filed under; the controls are filed under their names.
+VARIANT_DRIVER: Final = "variant"
+
+
 @dataclass(frozen=True)
 class BacktestRecord:
-    """A ``backtests`` row to write: who walked which run, and whether the holdout was walked."""
+    """A ``backtests`` row to write: who walked which run, and whether the holdout was walked.
+
+    A variant's path names its sha and repeat under :data:`VARIANT_DRIVER`;
+    a control's names neither.
+    """
 
     walked_at: datetime
     run_id: str
@@ -342,6 +351,11 @@ class BacktestRecord:
     def __post_init__(self) -> None:
         if (self.variant_sha is None) != (self.repeat is None):
             raise ValueError("a backtest names a variant with its repeat, or neither")
+        if (self.driver == VARIANT_DRIVER) != (self.variant_sha is not None):
+            raise ValueError(
+                f"a {VARIANT_DRIVER!r} path names its variant and a control none, got driver "
+                f"{self.driver!r} with variant_sha {self.variant_sha!r}"
+            )
 
 
 @dataclass(frozen=True)
@@ -417,7 +431,12 @@ class ReplayStore:
             row[0] for row in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         version = self.conn.execute("PRAGMA user_version").fetchone()[0]
-        if 1 < version < SCHEMA_VERSION and names >= _V2_TABLES:
+        # A later table set present in part is a damaged file, not an older
+        # store: it falls through to the refusal below, untouched.
+        damaged = any(
+            names & tables and not names >= tables for _, _, tables in _LATER_TABLES
+        )
+        if 1 < version < SCHEMA_VERSION and names >= _V2_TABLES and not damaged:
             missing = [
                 (ddl, tables)
                 for written, ddl, tables in _LATER_TABLES
@@ -903,7 +922,7 @@ class ReplayStore:
         ]
 
     def trials(self) -> int:
-        """How many variants this store has tried, a repeat each, failures included (plan §5 (2))."""
+        """How many variant repeats this store has tried, failures included (plan §5 (2))."""
         return self.conn.execute(
             "SELECT COUNT(*) FROM (SELECT variant_sha, repeat FROM answers "
             "UNION SELECT variant_sha, repeat FROM failures)"

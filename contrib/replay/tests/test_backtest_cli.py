@@ -142,7 +142,7 @@ def test_the_paper_trader_and_the_controls_are_walked_and_the_bar_is_the_smoke_t
     bar = _section(out, "-- plan section 5 bar: paper on the validation segment --")
     assert bar[1].startswith("  (1) net sharpe above every control: paper ")
     assert bar[1].endswith("-> FAIL")
-    assert "1 variant(s) tried in the store" in bar[2]
+    assert "1 variant repeat(s) tried in the store" in bar[2]
     assert "paper only 0, McNemar p 1.000" in bar[3] and bar[3].endswith("-> FAIL")
     assert bar[4].endswith("-> pass")
     assert bar[5] == "  verdict: paper does not pass; the holdout stays locked"
@@ -320,7 +320,7 @@ def test_a_variants_repeats_are_walked_and_judged_and_every_path_is_stored(
         bar = _section(
             out, f"-- plan section 5 bar: v repeat {repeat} on the validation segment --"
         )
-        assert "2 variant(s) tried in the store" in bar[2]  # two repeats, one variant
+        assert "2 variant repeat(s) tried in the store" in bar[2]  # two repeats, one variant
         # The echo says what the paper trader said, so no paired question
         # is discordant and the fail-closed rates are equal.
         assert "McNemar p 1.000" in bar[3] and bar[3].endswith("-> FAIL")
@@ -349,15 +349,18 @@ def test_holdout_with_a_variant_needs_the_bar_and_spends_no_look_otherwise(
     variant_file = write_variant(tmp_path, "v")
     monkeypatch.setattr(cli, "_build_model", lambda _variant: Echo())
     assert cli.main(replay_argv(gate_store, variant_file, "--repeats", "1")) == 0
+    # Asked the holdout too (the replay's own ask look), so the bar is what refuses.
+    holdout_argv = replay_argv(gate_store, variant_file, "--repeats", "1", "--segment", "holdout")
+    assert cli.main([*holdout_argv, "--holdout"]) == 0
     capsys.readouterr()
     # The echo says what paper said: checks (1) and (3) cannot pass, so the
-    # holdout stays locked and nothing is spent or stored.
+    # holdout stays locked and nothing is spent or stored by the backtest.
     assert cli.main(_gate_backtest(gate_store, gate_research, "--variant", "v", "--holdout")) == 1
     err = capsys.readouterr().err
     assert "v repeat 0: not every check of the plan section 5 bar passes" in err
     assert "no look is spent" in err
     with ReplayStore(_replay_db(gate_store)) as replay:
-        assert replay.looks(GATE_RUN_ID) == []
+        assert [look.action for look in replay.looks(GATE_RUN_ID)] == ["ask"]  # the replay's
         assert replay.backtests(GATE_RUN_ID) == []
     # The paper trader's own holdout is not gated, and its look names paper.
     # The verdict printed is the one read with the holdout unread: its
@@ -373,7 +376,7 @@ def test_holdout_with_a_variant_needs_the_bar_and_spends_no_look_otherwise(
     assert bar_walked[1:5] == bar_locked[1:5]
     assert any(line.startswith("the bar below was read with the holdout unread") for line in out)
     with ReplayStore(_replay_db(gate_store)) as replay:
-        (look,) = replay.looks(GATE_RUN_ID)
+        look = replay.looks(GATE_RUN_ID)[-1]
         assert (look.action, look.variant_name) == ("score", "paper")
 
 
@@ -440,7 +443,51 @@ def test_a_repeat_asked_on_one_run_is_judged_against_that_runs_controls(
     # the echo's path IS paper's, so paper's pooled figure is the repeat's.
     assert f"paper {figure} (n {n_alone.rstrip(')')})" in bar[1]
     # Trials are (variant, repeat) pairs store-wide: repeats 0 and 1, whichever runs asked them.
-    assert "2 variant(s) tried in the store" in bar[2]
+    assert "2 variant repeat(s) tried in the store" in bar[2]
+
+
+def test_holdout_needs_the_repeat_to_have_been_asked_the_holdout_and_prints_coverage(
+    gate_store, gate_research, tmp_path, monkeypatch, capsys
+):
+    variant_file = write_variant(tmp_path, "v")
+    monkeypatch.setattr(cli, "_build_model", lambda _variant: Echo())
+    assert cli.main(replay_argv(gate_store, variant_file, "--repeats", "1")) == 0
+    capsys.readouterr()
+    # Asked the train segment only: the two validation questions were not
+    # asked, and the report says so per repeat and run.
+    assert cli.main(_gate_backtest(gate_store, gate_research, "--variant", "v")) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert (
+        f"  run {GATE_RUN_ID}: asked 6 of 8 question(s) in scope (answered 6, refused 0, "
+        "not asked 2; a question not asked holds the book)"
+    ) in out
+    # The holdout gate reads the holdout coverage before the bar: a repeat
+    # never asked the holdout questions is refused with nothing spent.
+    assert cli.main(_gate_backtest(gate_store, gate_research, "--variant", "v", "--holdout")) == 1
+    err = capsys.readouterr().err
+    assert "repeat 0 was not asked any holdout question" in err and "no look is spent" in err
+    with ReplayStore(_replay_db(gate_store)) as replay:
+        assert replay.looks(GATE_RUN_ID) == []
+
+
+def test_a_holdout_walk_that_fails_spends_no_look(tmp_path, capsys):
+    # A maker run whose research store stops before the holdout: the holdout
+    # walk refuses before any look is recorded, and the store holds no path.
+    maker = write_paper_store(
+        tmp_path / "maker.db",
+        payload_root=tmp_path / "p",
+        config=run_config(style="maker", gate=True),
+    )
+    short = write_research(tmp_path / "short.sqlite", MARKS, slots=8)  # no bar for slot 9's order
+    replay_db = tmp_path / "looks.sqlite"
+    assert cli.main(_backtest(maker, short, "--holdout", "--replay-db", str(replay_db))) == 1
+    captured = capsys.readouterr()
+    assert "no bar in the research store covers" in captured.err
+    assert "recorded in the ledger" not in captured.err
+    assert captured.out == ""
+    with ReplayStore(replay_db) as replay:
+        assert replay.looks(RUN_ID) == []
+        assert replay.backtests(RUN_ID) == []
 
 
 def test_a_v3_store_gains_the_backtest_tables_when_the_command_opens_it(

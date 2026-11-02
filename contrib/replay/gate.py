@@ -13,8 +13,9 @@ Two things, both pure functions of records:
   re-stated as paths; the fourth is the "current variant" of §5.
 - **The bar** (:func:`judge`): a candidate wins on the validation segment
   when, at once, (1) its net Sharpe is above every control's (a ruined
-  candidate cannot), (2) above ``Penalty.threshold(n)`` for ``n`` variants
-  tried in the store, (3) its model reading beats the paper trader's
+  candidate cannot), (2) above ``Penalty.threshold(n)`` for ``n`` variant
+  repeats tried in the store (plan §5: a repeat is a trial), (3) its model
+  reading beats the paper trader's
   question by question (McNemar's exact p below :data:`ALPHA`, the
   candidate ahead) over at least :data:`POOLED_MIN_QUESTIONS` paired
   validation questions pooled across runs (decided 2026-09-24: validation
@@ -48,6 +49,7 @@ __all__ = [
     "POOLED_MIN_QUESTIONS",
     "Check",
     "Readings",
+    "Targets",
     "Verdict",
     "answer_targets",
     "control_targets",
@@ -304,8 +306,8 @@ def judge(
 
     ``candidate_readings`` and ``paper_readings`` are the two sides' cards
     reduced by :class:`Readings`, one per run in the same run order and cut
-    to the same questions; ``trials`` is how many variants the store has
-    tried (a repeat each), at least one. ``eligible`` names the questions
+    to the same questions; ``trials`` is how many variant repeats the store
+    has tried, at least one. ``eligible`` names the questions
     past the model cutoff (plan §6): the Sharpe of the candidate AND of
     every control is pooled over those alone, so checks (1) and (2) leave
     out what (3) and (4) leave out.
@@ -332,7 +334,7 @@ def judge(
         "above the promote threshold",
         mine > bar,
         f"{mine:.2f} vs {bar:.2f} ({_PENALTY.sharpe_base:g} + {_PENALTY.k:g} x ln {trials}; "
-        f"{trials} variant(s) tried in the store)",
+        f"{trials} variant repeat(s) tried in the store)",
     )
     paired = paired_hits(*_paired(candidate_readings, paper_readings))
     three = Check(

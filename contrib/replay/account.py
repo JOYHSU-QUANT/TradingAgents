@@ -27,7 +27,9 @@ The arithmetic is the paper lane's own, borrowed through :mod:`.upstream`:
   ``maker_would_fill`` with that extreme standing in for the mid (decided
   2026-11-02) — at the post price, for the maker fee and no slippage. A
   post that does not fill rests: it is re-priced at the next question's
-  mark and tried again there, until it fills or a new target replaces it;
+  mark and tried again there, until it fills, a new target replaces it,
+  or the re-pricing finds it no longer needed (inside the deadband, or
+  exactly held), where it is dropped like any ask that places nothing;
 - the fill's effect on the position and the wallet is
   ``accounting.compute_fill_effect`` (weighted entry, realised P&L on a
   reduce, the fee out of the wallet);
@@ -58,7 +60,7 @@ from __future__ import annotations
 from bisect import bisect_right
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field, replace
-from decimal import Decimal, localcontext
+from decimal import Decimal, InvalidOperation, localcontext
 from typing import Final
 
 from .upstream import (
@@ -281,8 +283,9 @@ class Step:
     ``filled`` is ``None`` when no order was placed (nothing asked, or the
     ask already held), ``True`` for a fill at ``fill_price`` paying ``fee``,
     ``False`` for a maker post the bar did not reach, left resting at
-    ``fill_price`` (the post's price). ``carried`` says the order was a post
-    left over from an earlier question. ``funding`` is what the settlements
+    ``fill_price`` (the post's price). ``carried`` says the ask was a post
+    left over from an earlier question; whether it placed an order again is
+    ``filled``, as for any ask. ``funding`` is what the settlements
     since the previous question moved the wallet by (income positive),
     ``funding_missing`` how many of them the store lacked while a position
     was held. ``size``, ``entry`` and ``wallet`` are the position and the
@@ -462,6 +465,15 @@ class Series:
             tuple(sorted(funding, key=lambda f: f.time)),
         )
 
+    @property
+    def gaps(self) -> int:
+        """How many times a bar does not open where the previous one closed: holes in the store."""
+        return sum(
+            1
+            for earlier, later in zip(self.bars, self.bars[1:], strict=False)
+            if later.open_time != earlier.close_time + 1
+        )
+
     def bar_at(self, at_ms: int) -> Bar | None:
         """The bar holding ``at_ms`` (``open <= at <= close``), or ``None`` when none does.
 
@@ -540,19 +552,31 @@ def simulate(decisions: Sequence[Decision], *, terms: Terms, series: Series) -> 
                 target = resting if decision.target is None else decision.target
                 resting = None
                 if target is not None:
-                    order = _order(target, decision, position, equity, terms)
-                    if order is not None:
-                        side, qty = order
-                        filled, price = _fill(terms, series, decision, side)
-                        if filled:
-                            effect = compute_fill_effect(
-                                position, side=side, qty=qty, price=price, fee_rate=terms.fee_rate
-                            )
-                            position = effect.position
-                            wallet += effect.wallet_delta
-                            fee = effect.fee
-                        else:
-                            resting = target
+                    try:
+                        order = _order(target, decision, position, equity, terms)
+                        if order is not None:
+                            side, qty = order
+                            filled, price = _fill(terms, series, decision, side)
+                            if filled:
+                                effect = compute_fill_effect(
+                                    position,
+                                    side=side,
+                                    qty=qty,
+                                    price=price,
+                                    fee_rate=terms.fee_rate,
+                                )
+                                position = effect.position
+                                wallet += effect.wallet_delta
+                                fee = effect.fee
+                            else:
+                                resting = target
+                    except AccountError:
+                        raise
+                    except (ValueError, InvalidOperation) as exc:
+                        # The fill model's and the books' own refusals (a post
+                        # rounded to nothing on a coarse tick, a zero quantity),
+                        # named by the question that hit them.
+                        raise AccountError(f"{decision.input_id}: {exc}") from exc
             steps.append(
                 Step(
                     input_id=decision.input_id,

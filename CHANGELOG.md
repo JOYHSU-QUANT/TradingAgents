@@ -17,9 +17,10 @@ Breaking changes within the 0.x line are called out explicitly.
   carries a position from one decision to the next with the paper lane's own
   arithmetic, borrowed through `upstream.py`: the gate's sizing (equity ×
   approved margin × leverage, the order the difference from the book), the
-  taker fill at mark ± slippage, the maker post one tick on the passive side
-  of the assumed spread judged against the bar the decision falls in (its
-  low for a buy, its high for a sell, through `maker_would_fill`; an unfilled
+  taker fill at mark ± slippage, the maker post at the mark less or plus the
+  assumed half spread, rounded to the tick on the passive side, judged
+  against the bar the decision falls in (its low for a buy, its high for a
+  sell, through `maker_would_fill`; an unfilled
   post rests and is re-priced at the next question until a new target
   replaces it), `compute_fill_effect`, and hourly funding from the research
   store valued at the last close, with settlements the store lacks counted

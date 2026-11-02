@@ -418,6 +418,36 @@ def test_trials_counts_each_variant_repeat_once_failures_included(tmp_path):
         assert store.trials() == 2  # a repeat that only failed still counts
 
 
+def test_a_half_formed_later_table_set_is_refused_untouched(tmp_path):
+    path = tmp_path / "r.sqlite"
+    with ReplayStore(path, create=True):
+        pass
+    conn = sqlite3.connect(path)
+    conn.execute("DROP TABLE backtest_steps")
+    conn.execute("DROP TABLE backtests")
+    conn.execute("DROP TABLE probe_answers")
+    conn.execute("PRAGMA user_version = 2")
+    conn.commit()
+    conn.close()
+    # Not an older store to bring forward: refused by its version, untouched.
+    with pytest.raises(ReplayStoreError, match="was written at replay schema v2"):
+        ReplayStore(path, create=True)
+    conn = sqlite3.connect(path)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone() == (2,)
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "backtests" not in tables
+    finally:
+        conn.close()
+
+
+def test_a_backtest_record_couples_its_driver_to_its_variant():
+    with pytest.raises(ValueError, match="names its variant and a control none"):
+        BacktestRecord(NOW, "run", "paper", "sha256:x", 0, False)
+    with pytest.raises(ValueError, match="names its variant and a control none"):
+        BacktestRecord(NOW, "run", "variant", None, None, False)
+
+
 def test_a_store_from_the_earlier_schema_is_named_not_taken_for_a_foreign_file(tmp_path):
     path = tmp_path / "old.sqlite"
     conn = sqlite3.connect(path)

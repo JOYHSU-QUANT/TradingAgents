@@ -499,7 +499,7 @@ python -m contrib.replay backtest --db paper_trading.db --run-id paper-BTC-7 [--
   每走一次都寫一列（走路徑是計算，不是花錢買答案，不去重）。
 - 給了 `--replay-db`：各 run 用釘住的 split（還沒釘的這時釘住——寫進 store 的路徑要有一個固定的切法，與第一次 replay
   同一條規則）；`--holdout` 把 holdout 段也走完並記 ledger（與 `score --holdout` 同一條規則；所有 run 的
-  前置檢查都過了才記、開始走之前記）。**帶 `--variant` 的 `--holdout` 先在 validation 段判四條，任一 repeat
+  前置檢查都過、holdout 在記憶體走完之後才記；cutoff 範圍內一題 holdout 都沒有也拒絕）。**帶 `--variant` 的 `--holdout` 先在 validation 段判四條，任一 repeat
   沒全過就具名拒絕、不記 look**（§5「四條全過才准看一次」寫成程式；2026-11-02 拍板），repeat 沒把
   範圍內的 holdout 題全部問過也拒絕（否則走的是抱著 validation 末倉位不動的假路徑；look 只能花一次）；holdout 先在記憶體走完、才記 look、
   才印、才寫 store，走到一半被拒就什麼都不花；印出來之後 store 寫失敗，錯誤訊息會說 look 已記；paper 自己的
@@ -507,7 +507,7 @@ python -m contrib.replay backtest --db paper_trading.db --run-id paper-BTC-7 [--
   但判定區塊印的是能授權看一眼的那份（否則最後一題 validation 的報酬與 4h 命中會因為看到 holdout 而多一題）。
   variant 的門檻：(1)(2) 的 Sharpe 只算 model_cutoff 之後的題；(3)(4) 兩邊都切到「該 repeat 真的問過（答了或被拒）
   且在 cutoff 之後」的同一組題（replay `--limit` 問一半也不會拿 paper 全部的題來比）；對照組只合併該 repeat
-  問過的那些 run。split 在所有前置檢查都過之後才釘（與 `replay` 同：被拒的指令不會把還在跑的 run 凍住）。
+  問過的那些 run。split 在所有前置檢查與走路徑都過之後才釘（與 `replay` 同：被拒的指令不會把還在跑的 run 凍住）。
 - `--out DIR` 寫 `<run-ids>[-variant]-backtest-decisions.csv`（每條路徑每題一列：target、成交、倉位、錢包、權益、
   funding、報酬）與 `...-backtest-summary.txt`。
 - 幾個 run 一起跑要同一個 K 線週期；maker run 遇到研究 store 沒有該題那根 K 線＝具名拒絕（掛單無法判定），

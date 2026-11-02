@@ -1547,7 +1547,7 @@ class _Coverage:
         return (
             f"asked {self.answered + self.refused} of {self.in_scope} question(s) in scope "
             f"(answered {self.answered}, refused {self.refused}, not asked {self.not_asked}"
-            + ("; a question not asked holds the book)" if self.not_asked else ")")
+            + ("; a refused or not-asked question holds the book)" if self.refused or self.not_asked else ")")
         )
 
 
@@ -1800,6 +1800,11 @@ def _require_holdout_asked(
         if q.input_id in eligible
         and segment_of(run.split, q.at_ms, run.facts.step_ms) is SegmentName.HOLDOUT
     }
+    if not holdout:
+        raise _Refused(
+            f"run {run.facts.run_id!r} has no holdout question in the cutoff scope of variant "
+            f"{variant.name!r}, so there is nothing of the holdout to walk; no look is spent"
+        )
     for repeat in sorted(set(answers) | set(failed)):
         asked = {a.input_id for a in answers.get(repeat, ())} | set(failed.get(repeat, ()))
         missing = holdout - asked

@@ -459,7 +459,7 @@ def test_holdout_needs_the_repeat_to_have_been_asked_the_holdout_and_prints_cove
     out = capsys.readouterr().out.splitlines()
     assert (
         f"  run {GATE_RUN_ID}: asked 6 of 8 question(s) in scope (answered 6, refused 0, "
-        "not asked 2; a question not asked holds the book)"
+        "not asked 2; a refused or not-asked question holds the book)"
     ) in out
     # The holdout gate reads the holdout coverage before the bar: a repeat
     # never asked the holdout questions is refused with nothing spent.

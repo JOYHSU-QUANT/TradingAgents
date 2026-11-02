@@ -128,7 +128,7 @@ def test_the_walk_report_says_what_was_asked_what_it_cost_and_what_stopped_it():
 
 def test_an_exam_refuses_a_holdout_question_a_repeated_one_and_a_report_for_no_question():
     from contrib.replay.account import Series
-    from contrib.replay.replay import Paper, Prepared
+    from contrib.replay.replay import Paper, Prepared, ReplayError
     from contrib.replay.upstream import (
         CurrentPositionState,
         DecisionConfig,
@@ -156,13 +156,13 @@ def test_an_exam_refuses_a_holdout_question_a_repeated_one_and_a_report_for_no_q
             reports={} if reports is None else reports,
         )
 
-    with pytest.raises(ValueError, match="is a holdout question; the walk never asks the holdout"):
+    with pytest.raises(ReplayError, match="is a holdout question; the walk never asks the holdout"):
         exam([prepared(questions[0], SegmentName.HOLDOUT)])
-    with pytest.raises(ValueError, match="a question is prepared twice"):
+    with pytest.raises(ReplayError, match="a question is prepared twice"):
         exam([prepared(questions[0], SegmentName.TRAIN)] * 2)
-    with pytest.raises(ValueError, match="does not follow"):
+    with pytest.raises(ReplayError, match="does not follow"):
         exam([prepared(questions[1], SegmentName.TRAIN), prepared(questions[0], SegmentName.TRAIN)])
-    with pytest.raises(ValueError, match="reports for 'ghost', which is not a prepared question"):
+    with pytest.raises(ReplayError, match="reports for 'ghost', which is not a prepared question"):
         exam([prepared(questions[0], SegmentName.TRAIN)], {"ghost": object()})
     good = exam([prepared(q, SegmentName.TRAIN) for q in questions])
     assert good.askable == 0 and good.coin == terms().coin

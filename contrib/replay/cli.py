@@ -2085,7 +2085,7 @@ def _ask(
             # The walk stopped before its report: what its failed graph runs
             # cost is said here, or it is said nowhere.
             print(
-                f"tokens spent on graph runs that failed before the walk stopped: "
+                f"tokens spent on graph runs that failed, since this command started: "
                 f"{graph.lost_input_tokens} in, {graph.lost_output_tokens} out (paid for)",
                 file=sys.stderr,
             )

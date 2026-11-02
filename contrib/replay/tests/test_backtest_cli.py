@@ -734,8 +734,22 @@ class _RefusingGraph(EchoGraph):
 
     def ask(self, **kwargs):
         if any(question_line(slot) in kwargs["context_text"] for slot in self.slots):
+            # The trader and the debators ran before the manager was refused.
+            self.lost_input_tokens += 300
+            self.lost_output_tokens += 30
             raise _Refusing("the context was too long")
         return super().ask(**kwargs)
+
+
+class _Stopping(Exception):
+    status_code = 401
+
+
+class _StoppingGraph(EchoGraph):
+    def ask(self, **kwargs):
+        self.lost_input_tokens += 300
+        self.lost_output_tokens += 30
+        raise _Stopping("bad key")
 
 
 def test_a_question_the_provider_refuses_holds_the_book_and_is_recorded(
@@ -746,6 +760,8 @@ def test_a_question_the_provider_refuses_holds_the_book_and_is_recorded(
     assert cli.main(_ask_argv(graph_store, gate_research, variant_file, "--repeats", "1")) == 0
     captured = capsys.readouterr()
     assert "questions the provider refused for their own sake: 1" in captured.out
+    assert "whole graph 3800 in, 380 out over 35 completion(s)" in captured.out
+    assert "of which on graph runs that failed or were refused: 300 in, 30 out" in captured.out
     assert (
         "gate-in-00 repeat 0: refused (422 _Refusing: the context was too long); recorded as "
         "unanswered, the book held"
@@ -754,8 +770,8 @@ def test_a_question_the_provider_refuses_holds_the_book_and_is_recorded(
         sha = replay.variant("g").sha
         assert replay.failed(sha, GATE_RUN_ID) == {0: {gate_input_id(0)}}
         books = replay.books(sha, GATE_RUN_ID)[0]
-        # The refused question's book carries what its failed run cost (nothing here).
-        assert books[gate_input_id(0)].graph_input_tokens == 0
+        # The refused question's book carries what its failed run cost.
+        assert books[gate_input_id(0)].graph_input_tokens == 300
         # Slot 1 was asked from a flat book: the refused slot 0 opened nothing.
         assert books[gate_input_id(1)].size == 0
         assert len(replay.answers(sha, GATE_RUN_ID)[0]) == 7
@@ -854,7 +870,9 @@ def test_an_answer_the_account_cannot_take_is_not_stored_and_the_walk_stops_by_n
     assert cli.main(argv) == 1
     err = capsys.readouterr().err
     assert "gate-in-00 repeat 0: the account cannot take the answer it was given" in err
-    assert "the answer was paid for and not stored, so the next run asks it again" in err
+    assert "out graph tokens) was paid for and not stored, so the next run asks it again" in err
+    # The cost of that unstored answer is said on the way out.
+    assert "tokens spent on graph runs that failed, since this command started: 500 in, 50 out" in err
     with ReplayStore(_replay_db(graph_store)) as replay:
         assert replay.answers(replay.variant("g").sha, GATE_RUN_ID) == {}
 
@@ -993,3 +1011,14 @@ def test_replay_refuses_a_graph_variant(graph_store, tmp_path, monkeypatch, caps
     assert "variant 'g' is a graph variant (mode: graph): it is walked by backtest --ask" in (
         capsys.readouterr().err
     )
+
+
+def test_a_walk_that_stops_on_a_provider_error_says_what_its_failed_runs_cost(
+    graph_store, gate_research, tmp_path, monkeypatch, capsys
+):
+    variant_file = write_graph_variant(tmp_path, "g")
+    monkeypatch.setattr(cli, "_build_graph", lambda variant: _StoppingGraph(variant))
+    assert cli.main(_ask_argv(graph_store, gate_research, variant_file, "--repeats", "1")) == 1
+    err = capsys.readouterr().err
+    assert "gate-in-00 repeat 0: the provider refused the call with 401" in err
+    assert "tokens spent on graph runs that failed, since this command started: 300 in, 30 out" in err

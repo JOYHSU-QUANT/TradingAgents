@@ -312,7 +312,24 @@ class _WithSystem:
 
     # The other ways to run a chat model, which would skip the system message
     # without a word; the manager node calls ``invoke`` and nothing else.
-    _BYPASSES = frozenset({"ainvoke", "batch", "abatch", "stream", "astream", "bind"})
+    _BYPASSES = frozenset(
+        {
+            "ainvoke",
+            "batch",
+            "abatch",
+            "stream",
+            "astream",
+            "astream_events",
+            "bind",
+            "bind_tools",
+            "with_structured_output",
+            "with_config",
+            "with_retry",
+            "with_fallbacks",
+            "generate",
+            "predict",
+        }
+    )
 
     def __getattr__(self, name: str) -> Any:
         if name in self._BYPASSES:

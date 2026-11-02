@@ -473,5 +473,6 @@ def test_the_system_message_wrapper_refuses_the_calls_that_would_skip_it():
     wrapped = _WithSystem(inner, "Decide.", engine)
     assert wrapped.invoke("p") == [("system", "Decide."), ("human", "p")]
     assert wrapped.model == "m"
-    with pytest.raises(LowerGraphError, match=r"called batch\(\), which would run the model"):
-        wrapped.batch  # noqa: B018 - the attribute read is the call under test
+    for name in ("batch", "with_structured_output", "bind_tools", "stream"):
+        with pytest.raises(LowerGraphError, match=rf"called {name}\(\), which would run the model"):
+            getattr(wrapped, name)

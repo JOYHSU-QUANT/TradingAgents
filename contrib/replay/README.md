@@ -537,7 +537,9 @@ train＋validation 每一題（holdout 不問；那是一次 look，由別的指
 結算數；store 裡若已有 `--repeats` 以外的 repeat，stderr 印一行說門檻會連它們一起讀；header 印 run 自己答案記錄的
 模型（與 variant 的 PM 模型不同就標出來）與 `rule` 模式用的規則檔。被拒的題在這條 walk 裡是永久的 hold（沒有
 `--retry-failed`：中途重問會改掉後面每一題的 book）；要重問就換 variant 名字重走。**研究 store 的快照在 variant 走完前
-不要換**：補一筆 funding 都會讓 book 對不上、walk 接不下去。graph variant 的 `system_prompt_path` 是**加在 PM 那次
+不要換**：補一筆 funding 都會讓 book 對不上、walk 接不下去。`rule` 模式的規則檔是 CLI 旗標、不進 variant 的 sha（2026-11-02
+拍板：3c 只用預設規則），所以**同一個 variant 名字不要換規則檔**；header 印的那個檔就是這條 walk 用的。graph variant 的
+`system_prompt_path` 是**加在 PM 那次
 completion 前面的 system message**，上游 PM 自己的 prompt 仍在 human message 裡；不要把 `current_system.md` 指給 graph
 variant（那是 simple 模式整份指示，會讓模型讀到兩份）；`extra_context` 在 graph 模式進 `instrument_context`，五個 node
 都看得到，不只 PM。

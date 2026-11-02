@@ -141,10 +141,10 @@ class Exam:
     def __post_init__(self) -> None:
         ids = [item.input_id for item in self.prepared]
         if len(set(ids)) != len(ids):
-            raise ValueError(f"run {self.run_id!r}: a question is prepared twice")
+            raise ReplayError(f"run {self.run_id!r}: a question is prepared twice")
         for earlier, later in zip(self.prepared, self.prepared[1:], strict=False):
             if later.paper.question.at_ms <= earlier.paper.question.at_ms:
-                raise ValueError(
+                raise ReplayError(
                     f"run {self.run_id!r}: {later.input_id} does not follow {earlier.input_id} in "
                     "time; the walk asks in time order"
                 )
@@ -152,13 +152,13 @@ class Exam:
             item.input_id for item in self.prepared if item.paper.segment is SegmentName.HOLDOUT
         ]
         if holdout:
-            raise ValueError(
+            raise ReplayError(
                 f"run {self.run_id!r}: {holdout[0]} is a holdout question; the walk never asks the "
                 "holdout (plan section 3-9)"
             )
         strangers = set(self.reports) - set(ids)
         if strangers:
-            raise ValueError(
+            raise ReplayError(
                 f"run {self.run_id!r}: reports for {sorted(strangers)[0]!r}, which is not a prepared "
                 "question"
             )
@@ -477,11 +477,24 @@ def pending_walks(
     reader = guardrail_reader(variant.guardrail, timeline)
     states = _states(exam, variant.sha, store, repeats, reader)
     stored = sum(state.stored for state in states.values())
-    # A repeat already ruined asks nothing more, whatever is left of its questions.
+    # A repeat already ruined asks nothing more, whatever is left of its
+    # questions; so does one the next question finds ruined (that ruin is
+    # a hold the walk never stores, so only settling to it shows it).
     todo = sum(
-        0 if state.walker.ruined else exam.askable - state.stored for state in states.values()
+        0 if _ruined_ahead(exam, state) else exam.askable - state.stored
+        for state in states.values()
     )
     return stored, todo
+
+
+def _ruined_ahead(exam: Exam, state: _State) -> bool:
+    if state.walker.ruined:
+        return True
+    if state.start >= len(exam.prepared):
+        return False
+    item = exam.prepared[state.start]
+    state.walker.settle(item.paper.question.at_ms)
+    return state.walker.equity(item.paper.facts.mark) <= 0
 
 
 def ask_walks(
@@ -525,6 +538,13 @@ def ask_walks(
     def lost() -> tuple[int, int]:
         return graph.lost_input_tokens, graph.lost_output_tokens
 
+    if progress is not None:
+        for repeat, state in states.items():
+            if state.walker.ruined:
+                progress(
+                    f"repeat {repeat}: already ruined in an earlier invocation; nothing more is "
+                    "asked of it"
+                )
     for index, item in enumerate(exam.prepared):
         question, facts = item.paper.question, item.paper.facts
         qid = item.input_id
@@ -604,59 +624,72 @@ def ask_walks(
                     progress(f"{label}: refused ({exc}); recorded as unanswered, the book held")
                 continue
             lost_in, lost_out = (a - b for a, b in zip(lost(), lost_before, strict=True))
-            parsed = parse_target_decision(
-                completion.text, exam.decision, truncated=completion.truncated
-            )
-            gate = evaluate(
-                parsed,
-                account_equity=equity,
-                current=CurrentPositionState.from_signed_size(
-                    walker.position.size, mark=facts.mark, equity=equity, leverage=facts.leverage
-                ),
-                risk=exam.risk,
-                decision_cfg=exam.decision,
-                guardrail=book.guardrail_side,
-            )
-            # The account first: an answer it cannot take is not stored, so
-            # what the store holds always rebuilds (module docstring).
+            stored = False
             try:
-                step = walker.advance(
-                    question_decision(
-                        question,
-                        facts,
-                        item.paper.segment,
-                        approved_target(gate.target_side, gate.approved_target_margin_pct),
-                    )
+                parsed = parse_target_decision(
+                    completion.text, exam.decision, truncated=completion.truncated
                 )
-            except AccountError as exc:
-                raise ReplayError(
-                    f"{label}: the account cannot take the answer it was given ({exc}); the answer "
-                    "was paid for and not stored, so the next run asks it again; change the "
-                    "terms (--tick) before that"
-                ) from exc
-            took(step)
-            store.write_graph_answer(
-                sha,
-                StoredAnswer(
-                    run_id=run_id,
-                    input_id=qid,
-                    repeat=repeat,
-                    asked_at=now(),
-                    segment=item.paper.segment.value,
-                    raw_response=parsed.raw_response,
-                    truncated=completion.truncated,
-                    invalid_reason=parsed.invalid_reason,
-                    gate=gate,
-                    model_reported=completion.model,
-                    input_tokens=completion.input_tokens,
-                    output_tokens=completion.output_tokens,
-                ),
-                replace(
-                    book,
-                    graph_input_tokens=completion.graph_input_tokens + lost_in,
-                    graph_output_tokens=completion.graph_output_tokens + lost_out,
-                ),
-            )
+                gate = evaluate(
+                    parsed,
+                    account_equity=equity,
+                    current=CurrentPositionState.from_signed_size(
+                        walker.position.size,
+                        mark=facts.mark,
+                        equity=equity,
+                        leverage=facts.leverage,
+                    ),
+                    risk=exam.risk,
+                    decision_cfg=exam.decision,
+                    guardrail=book.guardrail_side,
+                )
+                # The account first: an answer it cannot take is not stored, so
+                # what the store holds always rebuilds (module docstring).
+                try:
+                    step = walker.advance(
+                        question_decision(
+                            question,
+                            facts,
+                            item.paper.segment,
+                            approved_target(gate.target_side, gate.approved_target_margin_pct),
+                        )
+                    )
+                except AccountError as exc:
+                    raise ReplayError(
+                        f"{label}: the account cannot take the answer it was given ({exc}); the "
+                        f"answer ({completion.graph_input_tokens} in / "
+                        f"{completion.graph_output_tokens} out graph tokens) was paid for and not "
+                        "stored, so the next run asks it again; change the terms (--tick) before that"
+                    ) from exc
+                took(step)
+                store.write_graph_answer(
+                    sha,
+                    StoredAnswer(
+                        run_id=run_id,
+                        input_id=qid,
+                        repeat=repeat,
+                        asked_at=now(),
+                        segment=item.paper.segment.value,
+                        raw_response=parsed.raw_response,
+                        truncated=completion.truncated,
+                        invalid_reason=parsed.invalid_reason,
+                        gate=gate,
+                        model_reported=completion.model,
+                        input_tokens=completion.input_tokens,
+                        output_tokens=completion.output_tokens,
+                    ),
+                    replace(
+                        book,
+                        graph_input_tokens=completion.graph_input_tokens + lost_in,
+                        graph_output_tokens=completion.graph_output_tokens + lost_out,
+                    ),
+                )
+                stored = True
+            finally:
+                if not stored:
+                    # A run that produced an answer nobody kept: its cost goes
+                    # where the stopping line reads it, since no book will.
+                    graph.lost_input_tokens += completion.graph_input_tokens
+                    graph.lost_output_tokens += completion.graph_output_tokens
             tally.asked += 1
             tally.fail_closed += gate.risk_action is RiskAction.INVALID_FAIL_CLOSED
             tally.input_tokens += completion.input_tokens or 0

@@ -222,17 +222,17 @@ def _maybe(text: str | None) -> float | None:
     return None if text is None else float(text)
 
 
-def run_config(*, style: str = "taker", interval: str = "4h") -> dict:
+def run_config(
+    *, style: str = "taker", interval: str = "4h", half_spread_bps: str | None = None
+) -> dict:
     """The genesis ``config_json`` subset the paper daemon records, at the fixture's terms."""
+    fill_model: dict = {"style": style, "slippage_bps": "5", "maker_fee_rate": "0.00015"}
+    if half_spread_bps is not None:
+        fill_model["assumed_half_spread_bps"] = half_spread_bps
     return {
         "coin": COIN,
         "market_data": {"candle_interval": interval},
-        "paper_trading": {
-            "execution": {
-                "taker_fee_rate": "0.00045",
-                "fill_model": {"style": style, "slippage_bps": "5", "maker_fee_rate": "0.00015"},
-            }
-        },
+        "paper_trading": {"execution": {"taker_fee_rate": "0.00045", "fill_model": fill_model}},
     }
 
 

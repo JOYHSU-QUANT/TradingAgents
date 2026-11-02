@@ -14,7 +14,7 @@ The arithmetic is the paper lane's own, borrowed through :mod:`.upstream`:
   target margin = equity × approved margin % / 100, notional = margin ×
   the question's configured leverage, and the order is the DIFFERENCE
   between that signed notional and the position held, at the question's
-  mark;
+  mark; a target the account already holds places no order;
 - a taker run fills at once at the mark moved by the run's slippage
   (``fill_model.fill_price``) and pays the taker fee; a maker run posts at
   the mark less (buy) or plus (sell) the run's assumed half spread,
@@ -30,8 +30,10 @@ The arithmetic is the paper lane's own, borrowed through :mod:`.upstream`:
   reduce, the fee out of the wallet);
 - funding is settled hourly from the research store's series, the ledger's
   own ``funding_pnl`` (income positive) on the position's notional at the
-  last bar closed at or before the settlement. A settlement the store lacks
-  while a position is held is COUNTED and reported, never taken as zero.
+  last bar closed at or before the settlement (at the previous question's
+  mark for a settlement before any bar has closed). A settlement the store
+  lacks while a position is held is COUNTED and reported, never taken as
+  zero.
 
 No stop-loss and no take-profit (decided 2026-11-02; the mother plan keeps
 the safety gates out of the score), and the position still open at the
@@ -43,8 +45,9 @@ A decision's RETURN is the move of the account's equity from this
 question's mark to the next one's: ``equity_{i+1} / equity_i - 1``, with
 ``equity_i`` read before the question's own order, so a fill's fee and the
 funding paid up to the next question land on the decision that caused
-them. The last question has none. An account whose equity reaches zero is
-ruined: the path stops there and says so.
+them. The last question has none; the path's final equity is read after
+its order. An account whose equity reaches zero is ruined: the path stops
+there and says so.
 """
 
 from __future__ import annotations
@@ -162,8 +165,8 @@ class Decision:
     """One question as the account needs it: when, at what mark, at what leverage, and the ask.
 
     ``target`` is ``None`` when the decision changed nothing (a maintain, a
-    rejection, a fail-closed round, an approved target inside the deadband):
-    the account holds what it holds, and a post still resting is tried again.
+    rejection, a fail-closed round, an unanswered question): the account
+    holds what it holds, and a post still resting is tried again.
     """
 
     input_id: str
@@ -177,6 +180,9 @@ class Decision:
         me = self.input_id
         if isinstance(self.at_ms, bool) or not isinstance(self.at_ms, int):
             raise AccountError(f"{me}: at_ms is epoch ms, got {self.at_ms!r}")
+        for name in ("mark", "leverage"):
+            if not isinstance(getattr(self, name), Decimal):
+                raise AccountError(f"{me}: {name} is a Decimal, got {getattr(self, name)!r}")
         if self.mark <= 0:
             raise AccountError(f"{me}: mark must be > 0, got {self.mark}")
         if self.leverage <= 0:
@@ -207,6 +213,9 @@ class Terms:
     slippage_bps: Decimal = field(init=False)
 
     def __post_init__(self) -> None:
+        for name in ("half_spread_bps", "tick", "initial_balance"):
+            if not isinstance(getattr(self, name), Decimal):
+                raise AccountError(f"{name} is a Decimal, got {getattr(self, name)!r}")
         if self.tick <= 0:
             raise AccountError(f"tick must be > 0, got {self.tick}")
         if self.half_spread_bps < 0:
@@ -262,13 +271,14 @@ class Step:
     funding paid since the previous question already in the wallet.
     ``filled`` is ``None`` when no order was placed (nothing asked, or the
     ask already held), ``True`` for a fill at ``fill_price`` paying ``fee``,
-    ``False`` for a maker post the bar did not reach, left resting.
-    ``carried`` says the order was a post left over from an earlier
-    question. ``funding`` is what the settlements since the previous
-    question moved the wallet by (income positive), ``funding_missing`` how
-    many of them the store lacked while a position was held. ``size`` and
-    ``entry`` are the position AFTER the step. ``ret`` is this decision's
-    return (module docstring), ``None`` on the last step.
+    ``False`` for a maker post the bar did not reach, left resting at
+    ``fill_price`` (the post's price). ``carried`` says the order was a post
+    left over from an earlier question. ``funding`` is what the settlements
+    since the previous question moved the wallet by (income positive),
+    ``funding_missing`` how many of them the store lacked while a position
+    was held. ``size``, ``entry`` and ``wallet`` are the position and the
+    wallet AFTER the step. ``ret`` is this decision's return (module
+    docstring), ``None`` on the last step.
     """
 
     input_id: str
@@ -287,6 +297,25 @@ class Step:
     wallet: Decimal
     equity: Decimal
     ret: float | None = None
+
+    def __post_init__(self) -> None:
+        me = self.input_id
+        if (self.filled is None) != (self.fill_price is None):
+            raise AccountError(f"{me}: an order has a price and no order has none")
+        if self.filled is not True and self.fee != 0:
+            raise AccountError(f"{me}: only a fill pays a fee, got {self.fee}")
+        if self.carried and self.target is None:
+            raise AccountError(f"{me}: a carried post is a target")
+        if (self.size == 0) != (self.entry is None):
+            raise AccountError(f"{me}: a flat position has no entry and a sized one has")
+
+    @property
+    def closing_equity(self) -> Decimal:
+        """The equity AFTER the step's order, marked at the step's mark."""
+        if self.size == 0:
+            return self.wallet
+        assert self.entry is not None
+        return self.wallet + unrealized_pnl(self.size, self.mark, self.entry)
 
     def values(self) -> tuple[object, ...]:
         """The step as :data:`STEP_COLUMNS` primitives: ISO stamp, enum values, Decimals, bools."""
@@ -313,15 +342,23 @@ class Step:
 
 @dataclass(frozen=True)
 class Path:
-    """One account's whole path over a run's questions, under one set of terms."""
+    """One account's whole path over a run's questions, under one set of terms.
+
+    ``ruined`` is a fact of the steps: the walk stops at the question that
+    finds the equity at or below zero, so that step is last.
+    """
 
     terms: Terms
     steps: tuple[Step, ...]
-    ruined: bool
+
+    @property
+    def ruined(self) -> bool:
+        return bool(self.steps) and self.steps[-1].equity <= 0
 
     @property
     def final_equity(self) -> Decimal:
-        return self.steps[-1].equity if self.steps else self.terms.initial_balance
+        """The equity after the last question's order, at its mark."""
+        return self.steps[-1].closing_equity if self.steps else self.terms.initial_balance
 
     @property
     def total_return(self) -> float:
@@ -387,43 +424,52 @@ class Path:
 class Series:
     """A run's bars and settlements in time order, checked once and walked by every path.
 
-    Built through :meth:`of`; the caller that walks several drivers over one
-    run builds it once and hands it to each :func:`simulate`.
+    The caller that walks several drivers over one run builds it once
+    (:meth:`of` sorts; the constructor checks) and hands it to each
+    :func:`simulate`.
     """
 
     bars: tuple[Bar, ...]
     funding: tuple[Funding, ...]
 
-    @classmethod
-    def of(cls, bars: Iterable[Bar], funding: Iterable[Funding]) -> Series:
-        ordered = tuple(sorted(bars, key=lambda b: b.open_time))
-        for earlier, later in zip(ordered, ordered[1:], strict=False):
+    def __post_init__(self) -> None:
+        for earlier, later in zip(self.bars, self.bars[1:], strict=False):
             if later.open_time < earlier.close_time:
                 raise AccountError(
-                    f"bars opening {earlier.open_time} and {later.open_time} overlap"
+                    f"bars opening {earlier.open_time} and {later.open_time} overlap or are "
+                    "out of order"
                 )
-        settled = tuple(sorted(funding, key=lambda f: f.time))
-        for first, second in zip(settled, settled[1:], strict=False):
-            if second.time == first.time:
-                raise AccountError(f"two funding settlements stamped {second.time}")
-        return cls(ordered, settled)
+        for first, second in zip(self.funding, self.funding[1:], strict=False):
+            if second.time <= first.time:
+                raise AccountError(
+                    f"funding settlements stamped {first.time} and {second.time} repeat or are "
+                    "out of order"
+                )
+
+    @classmethod
+    def of(cls, bars: Iterable[Bar], funding: Iterable[Funding]) -> Series:
+        return cls(
+            tuple(sorted(bars, key=lambda b: b.open_time)),
+            tuple(sorted(funding, key=lambda f: f.time)),
+        )
 
     def bar_at(self, at_ms: int) -> Bar | None:
-        """The bar holding ``at_ms`` (``open <= at <= close``), else the next to open.
+        """The bar holding ``at_ms`` (``open <= at <= close``), or ``None`` when none does.
 
         The same bar the split places the question in (``score.bar_open_ms``
         floors the instant to the grid), so the bar a post is judged against
         is always inside the question's own segment and never past the
-        holdout lock. The paper scheduler rolls (next cycle = last decision
-        + one bar), so a decision lands somewhere inside a bar; the fixture's
+        holdout lock. A gap in the store is ``None``, never a later bar: a
+        post judged against a bar that opens after the decision would read
+        the future. The paper scheduler rolls (next cycle = last decision +
+        one bar), so a decision lands somewhere inside a bar; the fixture's
         "one millisecond before the boundary" sits on the closing bar's last
         instant and is judged against that bar.
         """
         index = bisect_right(self.bars, at_ms, key=lambda b: b.open_time) - 1
         if index >= 0 and self.bars[index].close_time >= at_ms:
             return self.bars[index]
-        index += 1
-        return self.bars[index] if index < len(self.bars) else None
+        return None
 
     def close_before(self, at_ms: int) -> Decimal | None:
         """The close of the last bar closed at or before ``at_ms``."""
@@ -463,7 +509,6 @@ def simulate(decisions: Sequence[Decision], *, terms: Terms, series: Series) -> 
     position = PositionState(coin=terms.coin, size=Decimal(0), entry_price=None)
     wallet = terms.initial_balance
     resting: Target | None = None
-    ruined = False
     with localcontext(DECIMAL_CONTEXT):
         for index, decision in enumerate(ordered):
             funding_paid = Decimal(0)
@@ -480,9 +525,8 @@ def simulate(decisions: Sequence[Decision], *, terms: Terms, series: Series) -> 
             filled: bool | None = None
             price: Decimal | None = None
             fee = Decimal(0)
-            if equity <= 0:
-                ruined = True
-            else:
+            ruined = equity <= 0
+            if not ruined:
                 carried = decision.target is None and resting is not None
                 target = resting if decision.target is None else decision.target
                 resting = None
@@ -529,7 +573,7 @@ def simulate(decisions: Sequence[Decision], *, terms: Terms, series: Series) -> 
         else replace(step, ret=float(steps[index + 1].equity / step.equity) - 1.0)
         for index, step in enumerate(steps)
     ]
-    return Path(terms=terms, steps=tuple(finished), ruined=ruined)
+    return Path(terms=terms, steps=tuple(finished))
 
 
 def _unrealized(position: PositionState, mark: Decimal) -> Decimal:

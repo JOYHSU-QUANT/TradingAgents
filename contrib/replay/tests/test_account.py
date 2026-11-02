@@ -187,10 +187,16 @@ def test_a_post_is_judged_against_the_bar_the_split_places_the_question_in():
         funding=[],
     )
     assert path.steps[0].filled is True
-    # A decision before any stored bar opens is judged against the first to open.
+    # A decision no stored bar holds is refused, never judged against a later
+    # bar: that bar's range is the future.
     early = Decision("early", T0 - 5_000, None, Decimal(100), Decimal(1), LONG_50)
-    path = _simulate([early], terms=terms(MAKER), bars=[bar(0, "100", low="99")], funding=[])
-    assert path.steps[0].filled is False
+    with pytest.raises(AccountError, match="early: no bar in the research store covers"):
+        _simulate([early], terms=terms(MAKER), bars=[bar(0, "100", low="99")], funding=[])
+    gap = [decision(0, "100", LONG_50), decision(2, "100", LONG_50)]
+    with pytest.raises(AccountError, match="q2: no bar in the research store covers"):
+        _simulate(
+            gap, terms=terms(MAKER), bars=[bar(0, "100", low="98"), bar(3, "100")], funding=[]
+        )
 
 
 def test_a_maker_run_without_the_bar_is_refused_by_name():
@@ -202,9 +208,11 @@ def test_a_maker_run_without_the_bar_is_refused_by_name():
 
 
 def test_funding_is_settled_hourly_on_the_last_close_and_missing_hours_are_counted():
-    # Long 5 BTC from question 0; four hourly settlements fall in (q0, q1],
-    # all before bar 0 closes, so each is valued at the mark the position
-    # was opened at (no bar has closed yet).
+    # Long 5 BTC from question 0; four hourly settlements fall in (q0, q1].
+    # The first three come before bar 0 closes and are valued at the mark
+    # the position was opened at; the fourth, just after bar 0 closed at
+    # 100, at that close. Every price is 100 here, so the sum is four
+    # equal settlements; the valuation rule has its own test below.
     stamps = [T0 + h * HOUR + 7 for h in range(1, 5)]  # ms after the hour, as the venue posts
     path = _simulate(
         [decision(0, "100", LONG_50), decision(1, "100", None)],
@@ -241,6 +249,110 @@ def test_funding_values_the_position_at_the_last_close_once_a_bar_has_closed():
     assert path.steps[1].funding_missing == 7  # eight hours between the two questions
 
 
+def test_funding_is_valued_at_the_close_of_the_last_bar_closed_before_each_settlement():
+    # Bars close at 100 (bar 0), 110 (bar 1), 120 (bar 2); the position is
+    # 5 BTC long from q0. Settlements: one inside bar 0 (no close yet: the
+    # mark, 100), one inside bar 1 (bar 0's close, 100), one inside bar 2
+    # (bar 1's close, 110) -- never the settlement's own bar.
+    stamps = [T0 + 1 * HOUR + 7, T0 + STEP_MS + 1 * HOUR + 7, T0 + 2 * STEP_MS + 1 * HOUR + 7]
+    path = _simulate(
+        [decision(0, "100", LONG_50), decision(3, "120", None)],
+        terms=terms(),
+        bars=[bar(0, "100"), bar(1, "110"), bar(2, "120")],
+        funding=[Funding(t, Decimal("0.0001")) for t in stamps],
+    )
+    rate = Decimal("0.0001")
+    expected = -(Decimal(5) * Decimal(100) * rate) * 2 - Decimal(5) * Decimal(110) * rate
+    assert path.steps[1].funding == expected
+    assert path.steps[1].funding_missing == 12 - 3  # twelve hours between the two questions
+
+
+def test_a_short_pays_slippage_the_other_way_earns_positive_funding_and_flips_through_zero():
+    # Short 50% of 1000 at mark 100: 5 BTC sold 5 bps below the mark, then a
+    # settlement at a positive rate (the short EARNS), then a flip to long
+    # 50% at mark 90: the 5 BTC short is bought back at 90 x (1 + 5 bps) and
+    # the remainder opens a long at that price, the entry reset to it.
+    stamp = T0 + 1 * HOUR + 7
+    path = _simulate(
+        [
+            decision(0, "100", Target(TargetSide.SHORT, Decimal(50))),
+            decision(1, "90", LONG_50),
+            decision(2, "90", None),
+        ],
+        terms=terms(),
+        bars=[bar(0, "100"), bar(1, "90"), bar(2, "90")],
+        funding=[Funding(stamp, Decimal("0.0001"))],
+    )
+    opened, flipped, after = path.steps
+    assert (opened.fill_price, opened.size) == (Decimal("99.95"), Decimal(-5))
+    assert opened.fee == Decimal(5) * Decimal("99.95") * Decimal("0.00045")
+    # funding_pnl = -(signed notional x rate): -(-5 x 100 x 0.0001) = +0.05
+    assert flipped.funding == Decimal(5) * Decimal(100) * Decimal("0.0001")
+    # Equity before the flip: wallet (opening fee out, funding in) plus the
+    # short's unrealised gain of 5 x (99.95 - 90).
+    equity = opened.wallet + flipped.funding + Decimal(5) * (Decimal("99.95") - Decimal(90))
+    assert flipped.equity == equity
+    buy_price = Decimal("90.045")
+    assert flipped.fill_price == buy_price
+    # Wanted: long 50% of equity at mark 90; delta = wanted + 5 x 90 (the short's notional).
+    wanted = equity * Decimal(50) / Decimal(100)
+    qty = (wanted + Decimal(5) * Decimal(90)) / Decimal(90)
+    assert flipped.size == qty - Decimal(5)
+    assert flipped.entry == buy_price  # the remainder opened fresh at the fill
+    realised = Decimal(5) * (Decimal("99.95") - buy_price)  # the closed short's gain
+    fee = qty * buy_price * Decimal("0.00045")
+    assert flipped.wallet == opened.wallet + flipped.funding + realised - fee
+    assert after.equity == flipped.wallet + flipped.size * (Decimal(90) - buy_price)
+
+
+def test_a_maker_sell_post_is_judged_by_the_bars_high():
+    # A sell posts at 100 x (1 + 0.00005) = 100.005, ceiled to the 1 tick: 101.
+    # It fills when the bar's high reaches 101 + 1 = 102.
+    short = Target(TargetSide.SHORT, Decimal(50))
+    untouched = _simulate(
+        [decision(0, "100", short)],
+        terms=terms(MAKER),
+        bars=[bar(0, "100", high="101")],
+        funding=[],
+    )
+    assert untouched.steps[0].filled is False
+    reached = _simulate(
+        [decision(0, "100", short)],
+        terms=terms(MAKER),
+        bars=[bar(0, "100", high="102")],
+        funding=[],
+    )
+    assert (reached.steps[0].filled, reached.steps[0].fill_price, reached.steps[0].size) == (
+        True,
+        Decimal(101),
+        Decimal(-5),
+    )
+
+
+def test_the_final_equity_is_read_after_the_last_order():
+    # The last question opens a long: its fee is paid and the path's final
+    # equity shows it, while the step's own equity was read before the order.
+    path = _simulate(
+        [decision(0, "100", None), decision(1, "100", LONG_50)],
+        terms=terms(),
+        bars=[bar(0, "100"), bar(1, "100")],
+        funding=[],
+    )
+    last = path.steps[1]
+    assert last.equity == Decimal(1000)
+    assert last.closing_equity == last.wallet + Decimal(5) * (Decimal(100) - Decimal("100.05"))
+    assert path.final_equity == last.closing_equity < Decimal(1000)
+    assert path.fees == last.fee > 0
+
+
+def test_a_series_out_of_order_or_overlapping_is_refused():
+    with pytest.raises(AccountError, match="overlap or are out of order"):
+        Series((bar(1, "100"), bar(0, "100")), ())
+    with pytest.raises(AccountError, match="repeat or are out of order"):
+        Series((), (Funding(T0, Decimal(0)), Funding(T0, Decimal(0))))
+    assert Series.of([bar(1, "100"), bar(0, "100")], []).bars[0].open_time == T0
+
+
 def test_a_flat_book_owes_no_funding_and_counts_nothing_missing():
     path = _simulate(
         [decision(0, "100", None), decision(1, "100", None)],
@@ -269,6 +381,7 @@ def test_a_blown_account_stops_the_path_and_says_so():
     )
     assert path.ruined
     assert len(path.steps) == 2  # the path stopped at the question that found it empty
+    assert path.final_equity == path.steps[1].equity <= 0
     assert path.steps[1].equity <= 0
     assert path.steps[0].ret is not None and path.steps[0].ret < -1.0
     assert "RUINED" in path.describe()[1]

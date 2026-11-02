@@ -57,7 +57,7 @@ def test_answer_targets_follow_the_orders_the_gate_created():
     assert by_slot[input_id(3)] is None  # fail-closed
     assert by_slot[input_id(5)] == _target(FLAT, 0)  # a flat target
     assert by_slot[input_id(6)] is None  # rejected
-    assert by_slot[input_id(7)] is None  # approved inside the deadband: no order
+    assert by_slot[input_id(7)] == _target(LONG, 30)  # inside PAPER's deadband: still an ask
     assert by_slot[input_id(9)] == _target(SHORT, 50)
     assert by_slot[input_id(11)] is None  # unanswered
 
@@ -149,7 +149,7 @@ def _path(returns: list[float], segment: SegmentName = SegmentName.VALIDATION) -
         )
         for i, r in enumerate(returns)
     )
-    return Path(terms(), steps, ruined=False)
+    return Path(terms(), steps)
 
 
 GOOD = [0.01, 0.02, 0.01, 0.03, 0.02]
@@ -212,6 +212,26 @@ def test_the_sharpe_checks_read_only_the_eligible_questions():
         0.0,
         1,
     )
+
+
+def test_a_ruined_candidate_cannot_pass_check_one():
+    ruined = _path(GOOD)
+    last = ruined.steps[-1]
+    ruined = Path(ruined.terms, (*ruined.steps[:-1], replace(last, equity=Decimal(0), ret=None)))
+    assert ruined.ruined
+    verdict = _judge(candidate_paths=[ruined])
+    assert not verdict.checks[0].passed
+    assert "RUINED: a path that stopped cannot win" in verdict.checks[0].detail
+
+
+def test_readings_hold_their_counts_and_the_verdict_says_when_the_holdout_was_walked():
+    with pytest.raises(ValueError, match="is a count of the answered"):
+        Readings({}, fail_closed=3, answered=2)
+    walked = _judge().describe(holdout_walked=True)
+    assert walked[-1].endswith("the holdout was walked above and the look recorded")
+    mine, _ = _readings(40, 10, 60)
+    locked = _judge(candidate_readings=[mine], paper_readings=[mine]).describe(holdout_walked=True)
+    assert locked[-1].endswith("the holdout above was walked on the paper trader's look")
 
 
 def test_check_one_needs_strictly_more_than_every_control():

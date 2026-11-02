@@ -8,20 +8,20 @@ Two things, both pure functions of records:
   the run's margin cap at the first question and holds; ``flat`` never
   trades; ``research_bias`` takes the radar's side at the cap whenever the
   side changes (a question with no bias holds); ``paper`` is the incumbent
-  — the paper trader's own recorded answers, every approved target an
-  order was created for. The first three are the scorecard's baselines
-  (:mod:`.score`), re-stated as paths; the fourth is the "current variant"
-  of §5.
+  — the paper trader's own recorded answers, every target the gate
+  approved. The first three are the scorecard's baselines (:mod:`.score`),
+  re-stated as paths; the fourth is the "current variant" of §5.
 - **The bar** (:func:`judge`): a candidate wins on the validation segment
-  when, at once, (1) its net Sharpe is above every control's, (2) above
-  ``Penalty.threshold(n)`` for ``n`` variants tried in the store, (3) its
-  model reading beats the paper trader's question by question (McNemar's
-  exact p below :data:`ALPHA`, the candidate ahead) over at least
-  :data:`POOLED_MIN_QUESTIONS` paired validation questions pooled across
-  runs (decided 2026-09-24: validation pools, the holdout stays per run),
-  and (4) its fail-closed rate is not above the paper trader's. All four,
-  or it is not eligible for a look at the holdout. Each check prints its
-  inputs beside its verdict, so a reader can re-derive it.
+  when, at once, (1) its net Sharpe is above every control's (a ruined
+  candidate cannot), (2) above ``Penalty.threshold(n)`` for ``n`` variants
+  tried in the store, (3) its model reading beats the paper trader's
+  question by question (McNemar's exact p below :data:`ALPHA`, the
+  candidate ahead) over at least :data:`POOLED_MIN_QUESTIONS` paired
+  validation questions pooled across runs (decided 2026-09-24: validation
+  pools, the holdout stays per run), and (4) its fail-closed rate is not
+  above the paper trader's over the same questions. All four, or it is not
+  eligible for a look at the holdout. Each check prints its inputs beside
+  its verdict, so a reader can re-derive it.
 
 The Sharpe here is the scorecard's own definition over the ACCOUNT's
 per-decision returns (:mod:`.account`), annualised by the bars in a year
@@ -67,6 +67,7 @@ ALPHA: Final = 0.05
 _PAIRED_HORIZON: Final = HORIZONS[0]
 # The research ledger's own promote penalty, at its defaults.
 _PENALTY: Final = Penalty()
+_FLAT: Final = Target(TargetSide.FLAT, Decimal(0))
 
 # What each question asks of the account, in the question's order.
 Targets = Sequence[Target | None]
@@ -79,23 +80,24 @@ def _cap(question: Question) -> Decimal:
 def answer_targets(
     questions: Sequence[Question], answers: Mapping[str, Answer]
 ) -> list[Target | None]:
-    """The account's ask per question, from a set of answers: the approved target an order was created for.
+    """The account's ask per question, from a set of answers: the target the gate approved.
 
-    A maintain, a rejection, a fail-closed round, an unanswered question and
-    an approved target inside the deadband all ask nothing (``None``); a
-    guardrail block that created an order is a flat target (its approved
-    margin is pinned at zero).
+    Every approved target is an ask, whether or not the paper trader's own
+    book then needed an order for it (decided 2026-11-02): the account
+    compares the ask with ITS OWN position, and an ask it already holds
+    places nothing. A maintain, a rejection, a fail-closed round and an
+    unanswered question ask nothing (``None``); a guardrail block is a flat
+    target (its approved margin is pinned at zero).
     """
     asks: list[Target | None] = []
     for question in questions:
         answer = answers.get(question.input_id)
-        if answer is None or not answer.order_created:
+        if answer is None or answer.approved_margin_pct is None:
             asks.append(None)
-            continue
-        assert answer.approved_margin_pct is not None and answer.target_side is not None
-        if answer.approved_margin_pct == 0:
-            asks.append(Target(TargetSide.FLAT, Decimal(0)))
+        elif answer.approved_margin_pct == 0:
+            asks.append(_FLAT)
         else:
+            assert answer.target_side is not None  # a sized target carries its side
             asks.append(Target(answer.target_side, Decimal(str(answer.approved_margin_pct))))
     return asks
 
@@ -114,11 +116,7 @@ def control_targets(name: str, questions: Sequence[Question]) -> list[Target | N
             if bias is None:
                 asks.append(None)
                 continue
-            wanted = (
-                Target(TargetSide.FLAT, Decimal(0))
-                if bias is TargetSide.FLAT
-                else Target(bias, _cap(question))
-            )
+            wanted = _FLAT if bias is TargetSide.FLAT else Target(bias, _cap(question))
         else:
             raise ValueError(f"no control named {name!r}; the controls are {', '.join(CONTROLS)}")
         # Re-asked only when the ask changes: the account re-sizes a held
@@ -206,12 +204,21 @@ class Readings:
 
     ``hits`` is the model's reading at the paired horizon by question (an
     unanswered or fail-closed row reads ``None``); ``fail_closed`` and
-    ``answered`` count the validation rows that carried an answer.
+    ``answered`` count the validation rows that carried an answer. Built
+    from a card already cut to the questions in scope (``score_run``'s
+    ``only``), so two readings compared by the bar cover one set of
+    questions.
     """
 
     hits: Mapping[str, bool | None]
     fail_closed: int
     answered: int
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.fail_closed <= self.answered:
+            raise ValueError(
+                f"fail_closed {self.fail_closed} is a count of the answered {self.answered}"
+            )
 
     @classmethod
     def of(cls, card: Scorecard) -> Readings:
@@ -262,17 +269,23 @@ class Verdict:
     def eligible(self) -> bool:
         return all(check.passed for check in self.checks)
 
-    def describe(self) -> list[str]:
+    def describe(self, *, holdout_walked: bool = False) -> list[str]:
+        """The block; with ``holdout_walked`` the last line says the look is already spent."""
         lines = [f"-- plan section 5 bar: {self.candidate} on the validation segment --"]
         lines.extend(check.describe() for check in self.checks)
-        lines.append(
-            f"  verdict: {self.candidate} "
-            + (
-                "passes all four -> eligible for --holdout (one look, recorded in the ledger)"
-                if self.eligible
+        if self.eligible:
+            outcome = (
+                "passes all four -> the holdout was walked above and the look recorded"
+                if holdout_walked
+                else "passes all four -> eligible for --holdout (one look, recorded in the ledger)"
+            )
+        else:
+            outcome = (
+                "does not pass; the holdout above was walked on the paper trader's look"
+                if holdout_walked
                 else "does not pass; the holdout stays locked"
             )
-        )
+        lines.append(f"  verdict: {self.candidate} {outcome}")
         return lines
 
 
@@ -290,11 +303,12 @@ def judge(
     """The four checks of plan §5 on the validation segment (module docstring).
 
     ``candidate_readings`` and ``paper_readings`` are the two sides' cards
-    reduced by :class:`Readings`, one per run in the same run order;
-    ``trials`` is how many variants the store has tried (a repeat each), at
-    least one. ``eligible`` names the questions past the model cutoff (plan
-    §6): the Sharpe of the candidate AND of every control is pooled over
-    those alone, so checks (1) and (2) leave out what (3) and (4) leave out.
+    reduced by :class:`Readings`, one per run in the same run order and cut
+    to the same questions; ``trials`` is how many variants the store has
+    tried (a repeat each), at least one. ``eligible`` names the questions
+    past the model cutoff (plan §6): the Sharpe of the candidate AND of
+    every control is pooled over those alone, so checks (1) and (2) leave
+    out what (3) and (4) leave out.
     """
 
     def pooled(paths: Sequence[Path]) -> tuple[float, int]:
@@ -302,11 +316,14 @@ def judge(
 
     mine, n_mine = pooled(candidate_paths)
     theirs = {name: pooled(paths) for name, paths in control_paths.items()}
+    ruined = any(path.ruined for path in candidate_paths)
     one = Check(
         1,
         "net sharpe above every control",
-        all(mine > value for value, _ in theirs.values()),
-        f"{candidate} {mine:.2f} (n {n_mine}) vs "
+        not ruined and all(mine > value for value, _ in theirs.values()),
+        f"{candidate} {mine:.2f} (n {n_mine}"
+        + (", RUINED: a path that stopped cannot win" if ruined else "")
+        + ") vs "
         + ", ".join(f"{name} {value:.2f} (n {n})" for name, (value, n) in theirs.items()),
     )
     bar = _PENALTY.threshold(trials)

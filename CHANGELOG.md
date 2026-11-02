@@ -27,14 +27,17 @@ Breaking changes within the 0.x line are called out explicitly.
   last position marked rather than closed, ruin stops the path. A decision's
   return is the equity move to the next question, read before its own order.
   `gate.py` walks `buy_hold`, `flat`, `research_bias` and `paper` (the paper
-  trader's own answers, the "current variant") through the same account and
+  trader's own answers, the "current variant": every target the gate
+  approved, compared with the account's own position) through the same account and
   writes the four checks of plan §5 on the validation segment pooled across
   runs: Sharpe above every control, above `Penalty.threshold(n)` for the
   `(variant, repeat)` pairs the store has tried, paired 4h hits ahead of
   paper over at least 100 pooled questions at McNemar p < 0.05, and a
-  fail-closed rate not above paper's; each check prints its inputs. Without
-  `--variant` the paper trader is judged against itself as the program's
-  smoke test. `replay.sqlite` goes to schema v4 (`backtests`,
+  fail-closed rate not above paper's over the same questions; each check
+  prints its inputs. Without `--variant` the paper trader is judged against
+  itself as the program's smoke test; with one, `--holdout` is refused
+  unless every repeat passes the bar on the validation segment, so the
+  holdout look is spent only on an eligible candidate. `replay.sqlite` goes to schema v4 (`backtests`,
   `backtest_steps`), gained by a v2 or v3 store when a command that may
   create a store opens it, as the v3 tables were; `--tick` names the venue's
   price tick the paper store does not record (default 1); `--out` writes

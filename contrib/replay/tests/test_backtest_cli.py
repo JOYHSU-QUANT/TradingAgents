@@ -131,9 +131,10 @@ def test_the_paper_trader_and_the_controls_are_walked_and_the_bar_is_the_smoke_t
     held = _section(out, "-- buy_hold --")
     assert "1 order(s), 1 fill(s)" in held[2]
     paper = _section(out, "-- paper --")
-    # The fixture's answers created an order at slots 0, 2, 5 and 9 (the
-    # approved target inside the deadband at slot 7 created none).
-    assert "4 order(s), 4 fill(s)" in paper[2]
+    # The gate approved a target at slots 0, 2, 5, 7 and 9; slot 7 was
+    # inside PAPER's deadband, but the account is flat there (slot 5
+    # closed it), so it is an order here.
+    assert "5 order(s), 5 fill(s)" in paper[2]
     assert (
         "smoke test: no --variant, so the bar judges the paper trader against itself; "
         "checks (1) and (3) cannot pass and (4) cannot fail"
@@ -155,8 +156,22 @@ def test_a_maker_run_posts_at_the_tick_and_reports_what_rested(tmp_path, researc
     out = capsys.readouterr().out.splitlines()
     assert "maker fills at 0.00015 fee, posted at mark -/+ 0.5 bps on a 1 tick" in out[1]
     paper = _section(out, "-- paper --")
-    assert "post(s) left resting" in paper[2]
-    assert "fill(s)" in paper[2]
+    # The bars range +/-3 around each close and a post rests one tick off
+    # the mark, so every post is reached within its bar: five orders, five
+    # fills, nothing resting.
+    assert "5 order(s), 5 fill(s), 0 post(s) left resting" in paper[2]
+    # A coarser tick moves the post further from the mark and is printed.
+    assert cli.main(_backtest(maker, research, "--tick", "5")) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert "on a 5 tick" in out[1]
+    # The run's own assumed half spread reaches the account from the genesis.
+    wide = write_paper_store(
+        tmp_path / "wide.db",
+        payload_root=tmp_path / "p2",
+        config=run_config(style="maker", half_spread_bps="20"),
+    )
+    assert cli.main(_backtest(wide, research)) == 0
+    assert "posted at mark -/+ 20 bps" in capsys.readouterr().out.splitlines()[1]
 
 
 def test_two_runs_pool_their_validation_returns_and_pin_their_splits(
@@ -181,6 +196,36 @@ def test_two_runs_pool_their_validation_returns_and_pin_their_splits(
         assert replay.pinned_split(other) is not None
         assert len(replay.backtests(GATE_RUN_ID)) == 8 and len(replay.backtests(other)) == 4
         assert replay.looks(GATE_RUN_ID) == []  # no holdout, no look spent
+
+
+def test_nothing_past_the_holdout_lock_is_read(store, tmp_path, capsys):
+    research = write_research(tmp_path / "autoresearch.sqlite", MARKS)
+    assert cli.main(_backtest(store, research)) == 0
+    before = capsys.readouterr().out
+    # Absurd prices and a wild funding rate in the holdout and after it: a
+    # walk that stopped at the lock cannot see them.
+    with ResearchStore(research) as rs:
+        rs.upsert_candles(
+            COIN,
+            "4h",
+            [
+                Candle(
+                    open_time=ANCHOR_MS + slot * STEP_MS,
+                    close_time=ANCHOR_MS + (slot + 1) * STEP_MS - 1,
+                    open=Decimal(5),
+                    high=Decimal(1000),
+                    low=Decimal(1),
+                    close=Decimal(5),
+                    volume=Decimal(1),
+                )
+                for slot in range(9, 16)
+            ],
+        )
+        rs.upsert_funding(
+            COIN, [FundingPoint(time=ANCHOR_MS + 9 * STEP_MS + 11, rate=Decimal("0.5"))]
+        )
+    assert cli.main(_backtest(store, research)) == 0
+    assert capsys.readouterr().out == before
 
 
 def test_funding_is_settled_from_the_research_store(store, research, capsys):
@@ -294,6 +339,62 @@ def test_a_variants_repeats_are_walked_and_judged_and_every_path_is_stored(
         ("variant", "v", 1),
     ]
     assert walked[3].final_equity == walked[4].final_equity
+
+
+def test_holdout_with_a_variant_needs_the_bar_and_spends_no_look_otherwise(
+    gate_store, gate_research, tmp_path, monkeypatch, capsys
+):
+    variant_file = write_variant(tmp_path, "v")
+    monkeypatch.setattr(cli, "_build_model", lambda _variant: Echo())
+    assert cli.main(replay_argv(gate_store, variant_file, "--repeats", "1")) == 0
+    capsys.readouterr()
+    # The echo says what paper said: checks (1) and (3) cannot pass, so the
+    # holdout stays locked and nothing is spent or stored.
+    assert cli.main(_gate_backtest(gate_store, gate_research, "--variant", "v", "--holdout")) == 1
+    err = capsys.readouterr().err
+    assert "v repeat 0: not every check of the plan section 5 bar passes" in err
+    assert "no look is spent" in err
+    with ReplayStore(_replay_db(gate_store)) as replay:
+        assert replay.looks(GATE_RUN_ID) == []
+        assert replay.backtests(GATE_RUN_ID) == []
+    # The paper trader's own holdout is not gated, and its look names paper.
+    assert cli.main(_gate_backtest(gate_store, gate_research, "--holdout")) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert "HOLDOUT WALKED: this look is recorded in the ledger" in out
+    assert out[-1].endswith("the holdout above was walked on the paper trader's look")
+    with ReplayStore(_replay_db(gate_store)) as replay:
+        (look,) = replay.looks(GATE_RUN_ID)
+        assert (look.action, look.variant_name) == ("score", "paper")
+
+
+def test_a_repeat_asked_on_one_run_is_judged_against_that_runs_controls(
+    gate_store, gate_research, tmp_path, monkeypatch, capsys
+):
+    other = "paper-GATE-2"
+    write_gate_store(gate_store, run_id=other)
+    variant_file = write_variant(tmp_path, "v")
+    monkeypatch.setattr(cli, "_build_model", lambda _variant: Echo())
+    assert cli.main(replay_argv(gate_store, variant_file, "--repeats", "2")) == 0
+    argv = replay_argv(gate_store, variant_file, "--repeats", "1")
+    argv[argv.index(GATE_RUN_ID)] = other
+    assert cli.main(argv) == 0
+    capsys.readouterr()
+    both_runs = _gate_backtest(gate_store, gate_research, "--run-id", other, "--variant", "v")
+    assert cli.main(both_runs) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert sum(1 for line in out if line.startswith(f"run {GATE_RUN_ID}: model_cutoff")) == 1
+    assert sum(1 for line in out if line.startswith(f"run {other}: model_cutoff")) == 1
+    both = _section(out, "-- v repeat 0 --")
+    alone = _section(out, "-- v repeat 1 --")
+    assert f"  run {other}:" in both and f"  run {other}:" not in alone
+    pooled_alone = next(line for line in alone if "pooled:" in line)
+    figure, n_alone = pooled_alone.split("validation sharpe ")[1].split(" (n ")
+    bar = _section(out, "-- plan section 5 bar: v repeat 1 on the validation segment --")
+    # The controls of repeat 1 are pooled over the one run it was asked on:
+    # the echo's path IS paper's, so paper's pooled figure is the repeat's.
+    assert f"paper {figure} (n {n_alone.rstrip(')')})" in bar[1]
+    # Trials are (variant, repeat) pairs store-wide: repeats 0 and 1, whichever runs asked them.
+    assert "2 variant(s) tried in the store" in bar[2]
 
 
 def test_a_v3_store_gains_the_backtest_tables_when_the_command_opens_it(

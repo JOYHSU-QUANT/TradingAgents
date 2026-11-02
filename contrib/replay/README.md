@@ -447,20 +447,23 @@ python -m contrib.replay backtest --db paper_trading.db --run-id paper-BTC-7 [--
 算術全部借 paper 這一邊的（列在 `upstream.py`）：
 
 - **sizing 照閘門**：target margin＝權益×approved margin%／100，名目＝margin×該題的 configured leverage，
-  下單量＝目標 signed 名目與現倉的**差額**，以該題的 mark 計。拿到的 target 是「閘門核准且有下單」的那個
-  （`order_created`）；maintain、被拒、fail-closed、沒答、deadband 內的核准都是「不動」。
+  下單量＝目標 signed 名目與**帳戶自己現倉**的差額，以該題的 mark 計；差額為 0 就不下單。ask＝每一題閘門
+  **核准的 target**（不管 paper 當時有沒有因 deadband 而不下單——那是對 paper 自己的倉位判的，模擬帳戶要對
+  自己的倉位判；2026-11-02 拍板）；maintain、被拒、fail-closed、沒答才是「不動」。
 - **taker run**：立刻以 mark±slippage 成交（`fill_model.fill_price`）、付 taker fee。
 - **maker run**：掛在 mark∓assumed half spread、往被動側貼 tick（`maker_post_price`），**該題所在的那根 K 線**
   （與 split 放題目用同一根：`bar_open_ms`）的 low（買）／high（賣）穿過掛價一個 tick 才算成交
   （`maker_would_fill`，用極值代 mid；2026-11-02 拍板），以掛價成交、付 maker fee、無 slippage。
   沒成交的掛單**留著**：下一題以新 mark 重掛、再判一次，直到成交或被新 target 取代；每一步記 `filled`
-  （None＝沒下單、True／False）與 `carried`。tick 不在 paper store 裡（來自交易所 asset metadata），
-  用 `--tick` 帶（預設 1＝BTC）、印在報表上。
+  （None＝沒下單、True／False）與 `carried`。研究 store 在該題沒有涵蓋的 K 線＝具名拒絕，不拿之後的 K 線
+  頂替（那是偷看未來）。tick 不在 paper store 裡（來自交易所 asset metadata），用 `--tick` 帶
+  （預設 1＝BTC）、印在報表上。
 - **成交效果**＝`accounting.compute_fill_effect`（加權成本、減倉實現損益、fee 從錢包扣）。
 - **funding** 每小時從研究 store 的 `funding` 表結算（`funding_pnl`，收入為正），名目以結算當下最後一根已收
   K 線的收盤價計；持倉期間研究 store **缺的結算具名計數**（`funding_missing`），不默默當 0。
 - **不帶停損／止盈**（2026-11-02 拍板；母計畫 §1 安全類閘門不在評分範圍），最後一題的倉位以該題 mark
-  估值、不平倉；權益≤0＝ruined，路徑在那一題停下並印出來。
+  估值、不平倉；路徑終值＝最後一題**下單之後**的權益（含它的 fee）；權益≤0＝ruined，路徑在那一題停下並
+  印出來，ruined 的候選 (1) 必不過。
 - **一題的報酬**＝權益從這題 mark 走到下一題 mark 的變化（`equity_{i+1}/equity_i − 1`，`equity_i` 在該題
   下單**之前**讀），所以成交費與到下一題為止的 funding 都算在造成它們的那一題頭上；最後一題沒有報酬。
 
@@ -490,9 +493,11 @@ python -m contrib.replay backtest --db paper_trading.db --run-id paper-BTC-7 [--
   paper 的 `--holdout` 看一眼、以及 `backtest` 開既有 store）開檔時只加表、不動舊表；純讀取的指令照舊讀它。
   每走一次都寫一列（走路徑是計算，不是花錢買答案，不去重）。
 - 給了 `--replay-db`：各 run 用釘住的 split（還沒釘的這時釘住——寫進 store 的路徑要有一個固定的切法，與第一次 replay
-  同一條規則）；`--holdout` 把 holdout 段也走完並記 ledger（與 `score --holdout` 同一條規則；ledger 在 variant 的答案
-  確認存在之後、開始走之前記）。variant 的門檻：(1)(2) 的 Sharpe 與 (3)(4) 一樣只算 model_cutoff 之後的題，
-  對照組只合併該 repeat 問過的那些 run。
+  同一條規則）；`--holdout` 把 holdout 段也走完並記 ledger（與 `score --holdout` 同一條規則；所有 run 的
+  前置檢查都過了才記、開始走之前記）。**帶 `--variant` 的 `--holdout` 先在 validation 段判四條，任一 repeat
+  沒全過就具名拒絕、不記 look**（§5「四條全過才准看一次」寫成程式；2026-11-02 拍板）；paper 自己的
+  `--holdout` 不受此限。variant 的門檻：(1)(2) 的 Sharpe 與 (3)(4) 一樣只算 model_cutoff 之後的題（paper
+  那一邊也切到同一組題），對照組只合併該 repeat 問過的那些 run。
 - `--out DIR` 寫 `<run-ids>[-variant]-backtest-decisions.csv`（每條路徑每題一列：target、成交、倉位、錢包、權益、
   funding、報酬）與 `...-backtest-summary.txt`。
 - 幾個 run 一起跑要同一個 K 線週期；maker run 遇到研究 store 沒有該題那根 K 線＝具名拒絕（掛單無法判定），

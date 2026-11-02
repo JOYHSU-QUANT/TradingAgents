@@ -81,7 +81,15 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-from .account import STEP_COLUMNS, AccountError, Path as AccountPath, Series, Terms, simulate
+from .account import (
+    STEP_COLUMNS,
+    AccountError,
+    Path as AccountPath,
+    Series,
+    Target,
+    Terms,
+    simulate,
+)
 from .compare import Scope, Table, compare, cutoff_scope
 from .gate import (
     CONTROLS,
@@ -1517,20 +1525,28 @@ class _Walked:
     """One run's paths, and what the bar reads off them.
 
     ``controls`` are the four controls' paths, ``candidate`` the variant's
-    by repeat; ``paper`` and ``candidate_readings`` the validation rows the
-    bar's checks (3) and (4) read, reduced. ``scope`` is the variant's
-    cutoff scope over the run's questions (plan §6), ``None`` without a
-    variant, when every question counts. ``walked_before`` counts the paths
-    the store already held for the run (``None`` without a store).
+    by repeat; ``paper`` is the paper trader's validation rows reduced for
+    the smoke test (every question), ``paper_scoped`` the same rows cut to
+    the variant's cutoff scope (plan §6) so a check compares one set of
+    questions on both sides, and ``candidate_readings`` the variant's by
+    repeat. ``scope`` is the variant's cutoff scope over the run's
+    questions, ``None`` without a variant. ``walked_before`` counts the
+    paths the store already held for the run (``None`` without a store).
     """
 
     run: _Run
     controls: dict[str, AccountPath]
     candidate: dict[int, AccountPath]
     paper: Readings
+    paper_scoped: Readings | None
     candidate_readings: dict[int, Readings]
     scope: Scope | None
     walked_before: int | None
+
+
+# One run as the store left it for the walk: pinned, with the variant's
+# answers and failures by repeat, and how many paths the store already held.
+_Prepared = tuple[_Run, Mapping[int, Sequence[Answer]], Mapping[int, Collection[str]], int | None]
 
 
 def _cmd_backtest(args: argparse.Namespace) -> int:
@@ -1586,6 +1602,10 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
                         "or pass --include-pre-cutoff"
                     )
             trials = max(store.trials(), 1)
+        # Every refusal that reads nothing of the holdout comes first, for
+        # every run, so a refusal on the second run cannot find the first
+        # run's look already spent.
+        prepared: list[_Prepared] = []
         for run in runs:
             answers: Mapping[int, Sequence[Answer]] = {}
             failed: Mapping[int, Collection[str]] = {}
@@ -1608,20 +1628,56 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
                             f"{replay_path}"
                         )
                 before = len(store.backtests(run_id))
-                if args.holdout:
-                    # After the checks that read nothing of the holdout, and
-                    # before the walk, which does: the look is spent by the
-                    # walk, however the walk ends (plan section 3-9).
-                    store.record_look(
-                        action="score",
-                        run_id=run_id,
-                        variant_sha=None if variant is None else variant.sha,
-                        questions=_holdout_questions(run),
-                        who=_who(),
-                        now=_now(),
-                    )
-            paths = _walk(run, research_path, args.research_db, tick, variant, answers, failed, args)
-            walked.append(replace(paths, walked_before=before))
+            prepared.append((run, answers, failed, before))
+
+        def walk_all(holdout: bool) -> list[_Walked]:
+            return [
+                replace(
+                    _walk(
+                        run,
+                        research_path,
+                        args.research_db,
+                        tick,
+                        variant,
+                        answers,
+                        failed,
+                        include_pre_cutoff=args.include_pre_cutoff,
+                        holdout=holdout,
+                    ),
+                    walked_before=before,
+                )
+                for run, answers, failed, before in prepared
+            ]
+
+        if args.holdout and variant is not None:
+            # Plan section 5: all four, or no look at the holdout. The bar
+            # is read on the validation segment first, with the holdout
+            # unread; a candidate that does not pass is refused by name and
+            # spends nothing.
+            failing = [
+                verdict.candidate
+                for verdict in _verdicts(walk_all(holdout=False), variant, trials)
+                if not verdict.eligible
+            ]
+            if failing:
+                raise _Refused(
+                    f"{', '.join(failing)}: not every check of the plan section 5 bar passes on "
+                    "the validation segment, so the holdout stays locked and no look is spent; "
+                    "run without --holdout to read the checks"
+                )
+        if store is not None and args.holdout:
+            for run, _, _, _ in prepared:
+                # Before the walk, which reads the holdout: the look is
+                # spent by the walk, however the walk ends (plan section 3-9).
+                store.record_look(
+                    action="score",
+                    run_id=run.facts.run_id,
+                    variant_sha=None if variant is None else variant.sha,
+                    questions=_holdout_questions(run),
+                    who=_who(),
+                    now=_now(),
+                )
+        walked = walk_all(holdout=args.holdout)
         if store is not None:
             _record_paths(store, walked, variant, holdout=args.holdout)
     except (ReplayStoreError, StoreError, AccountError) as exc:
@@ -1648,25 +1704,32 @@ def _walk(
     variant: Variant | None,
     answers: Mapping[int, Sequence[Answer]],
     failed: Mapping[int, Collection[str]],
-    args: argparse.Namespace,
+    *,
+    include_pre_cutoff: bool,
+    holdout: bool,
 ) -> _Walked:
     """One run: its bars and funding read once under the lock, every driver walked, the bar's inputs reduced."""
     facts, split = run.facts, run.split
     questions = run.decisions.questions
-    until = split.loadable_until(holdout=args.holdout)
-    with ResearchStore(research_path) as research:
-        series = Series.of(
-            load_research_bars(
-                research,
-                coin=facts.coin,
-                interval=facts.interval,
-                since_ms=split.train.start_ms,
-                until_ms=until,
-            ),
-            load_research_funding(
-                research, coin=facts.coin, since_ms=split.train.start_ms, until_ms=until
-            ),
-        )
+    until = split.loadable_until(holdout=holdout)
+    try:
+        with ResearchStore(research_path) as research:
+            series = Series.of(
+                load_research_bars(
+                    research,
+                    coin=facts.coin,
+                    interval=facts.interval,
+                    since_ms=split.train.start_ms,
+                    until_ms=until,
+                ),
+                load_research_funding(
+                    research, coin=facts.coin, since_ms=split.train.start_ms, until_ms=until
+                ),
+            )
+    except (ValueError, InvalidOperation) as exc:
+        # A corrupt row the store's own DTOs refuse, or a series the
+        # account refuses (overlapping bars): named, not a traceback.
+        raise _Refused(f"--research-db {research_arg}: {exc}") from exc
     # The scorecard's later marks come from the same bars, keyed as
     # ``load_research_closes`` keys them, so the store is read once.
     closes = {bar.close_time: float(bar.close) for bar in series.bars}
@@ -1675,7 +1738,8 @@ def _walk(
             f"warning: --research-db {research_arg} holds no {facts.coin} {facts.interval} "
             f"candles opening between {from_epoch_ms(split.train.start_ms):%Y-%m-%d %H:%M} and "
             f"{from_epoch_ms(until):%Y-%m-%d %H:%M}; no missing cycle of run {facts.run_id} "
-            "can be filled from it, and no maker post can be judged",
+            "can be filled from it, no maker post can be judged, and funding is valued at the "
+            "questions' marks",
             file=sys.stderr,
         )
     terms = Terms(
@@ -1686,7 +1750,7 @@ def _walk(
         initial_balance=facts.initial_balance,
     )
 
-    def walk(targets: Sequence) -> AccountPath:
+    def walk(targets: Sequence[Target | None]) -> AccountPath:
         return simulate(
             account_decisions(
                 questions,
@@ -1694,7 +1758,7 @@ def _walk(
                 targets,
                 split=split,
                 step_ms=facts.step_ms,
-                holdout=args.holdout,
+                holdout=holdout,
             ),
             terms=terms,
             series=series,
@@ -1709,7 +1773,7 @@ def _walk(
                 costs=facts.costs,
                 research_closes=closes,
                 split=split,
-                holdout=args.holdout,
+                holdout=holdout,
                 only=only,
             )
         )
@@ -1726,8 +1790,10 @@ def _walk(
     candidate: dict[int, AccountPath] = {}
     candidate_readings: dict[int, Readings] = {}
     scope: Scope | None = None
+    paper_scoped: Readings | None = None
     if variant is not None:
-        scope = cutoff_scope(questions, variant, include_pre_cutoff=args.include_pre_cutoff)
+        scope = cutoff_scope(questions, variant, include_pre_cutoff=include_pre_cutoff)
+        paper_scoped = readings(run.decisions.answers, scope.eligible)
         for repeat in sorted(set(answers) | set(failed)):
             theirs = {a.input_id: a for a in answers.get(repeat, ())}
             candidate[repeat] = walk(answer_targets(questions, theirs))
@@ -1739,6 +1805,7 @@ def _walk(
         controls=controls,
         candidate=candidate,
         paper=readings(run.decisions.answers),
+        paper_scoped=paper_scoped,
         candidate_readings=candidate_readings,
         scope=scope,
         walked_before=None,
@@ -1763,6 +1830,38 @@ def _record_paths(
                 (BacktestRecord(now, run_id, "variant", variant.sha, repeat, holdout), path)
             )
     store.write_backtests(walks)
+
+
+def _verdicts(walked: Sequence[_Walked], variant: Variant, trials: int) -> list[Verdict]:
+    """The bar on each of the variant's repeats, over the runs that repeat was asked on."""
+    per_year = bars_per_year(walked[0].run.facts.step_ms)
+    verdicts: list[Verdict] = []
+    for repeat in sorted({repeat for w in walked for repeat in w.candidate}):
+        # The runs this repeat was asked on: the controls and the paper
+        # readings are pooled over the same runs, so both sides of every
+        # check cover one set of questions.
+        present = [w for w in walked if repeat in w.candidate]
+        eligible: frozenset[str] = frozenset()
+        papers: list[Readings] = []
+        for w in present:
+            assert w.scope is not None and w.paper_scoped is not None
+            eligible |= w.scope.eligible
+            papers.append(w.paper_scoped)
+        verdicts.append(
+            judge(
+                candidate=f"{variant.name} repeat {repeat}",
+                candidate_paths=[w.candidate[repeat] for w in present],
+                control_paths={
+                    control: [w.controls[control] for w in present] for control in CONTROLS
+                },
+                trials=trials,
+                candidate_readings=[w.candidate_readings[repeat] for w in present],
+                paper_readings=papers,
+                bars_per_year=per_year,
+                eligible=eligible,
+            )
+        )
+    return verdicts
 
 
 def _backtest_report(
@@ -1797,10 +1896,9 @@ def _backtest_report(
                 holdout=args.holdout,
             )
         )
-    verdicts: list[Verdict] = []
     if variant is None:
         papers = [w.paper for w in walked]
-        verdicts.append(
+        verdicts = [
             judge(
                 candidate="paper",
                 candidate_paths=[w.controls["paper"] for w in walked],
@@ -1810,7 +1908,7 @@ def _backtest_report(
                 paper_readings=papers,
                 bars_per_year=per_year,
             )
-        )
+        ]
         lines.append(
             "smoke test: no --variant, so the bar judges the paper trader against itself; "
             "checks (1) and (3) cannot pass and (4) cannot fail"
@@ -1823,41 +1921,19 @@ def _backtest_report(
             assert w.scope is not None
             prefix = f"run {w.run.facts.run_id}: " if len(walked) > 1 else ""
             lines.extend(prefix + line for line in w.scope.preamble[1:])
-        repeats = sorted({repeat for w in walked for repeat in w.candidate})
-        for repeat in repeats:
-            name = f"{variant.name} repeat {repeat}"
-            # The runs this repeat was asked on: the controls and the paper
-            # readings are pooled over the same runs, so both sides of every
-            # check cover one set of questions.
+        for repeat in sorted({repeat for w in walked for repeat in w.candidate}):
             present = [w for w in walked if repeat in w.candidate]
             lines.extend(
                 describe_paths(
-                    name,
+                    f"{variant.name} repeat {repeat}",
                     {w.run.facts.run_id: w.candidate[repeat] for w in present},
                     bars_per_year=per_year,
                     holdout=args.holdout,
                 )
             )
-            eligible: frozenset[str] = frozenset()
-            for w in present:
-                assert w.scope is not None
-                eligible |= w.scope.eligible
-            verdicts.append(
-                judge(
-                    candidate=name,
-                    candidate_paths=[w.candidate[repeat] for w in present],
-                    control_paths={
-                        control: [w.controls[control] for w in present] for control in CONTROLS
-                    },
-                    trials=trials,
-                    candidate_readings=[w.candidate_readings[repeat] for w in present],
-                    paper_readings=[w.paper for w in present],
-                    bars_per_year=per_year,
-                    eligible=eligible,
-                )
-            )
+        verdicts = _verdicts(walked, variant, trials)
     for verdict in verdicts:
-        lines.extend(verdict.describe())
+        lines.extend(verdict.describe(holdout_walked=args.holdout))
     return lines
 
 

@@ -306,8 +306,10 @@ class MarketContextProvider(ABC):
             # The word the engine run hands ``propagate`` (#392), recorded so
             # the replay puts the same word in the trader's prompt per
             # question: a payload without this key was handed the bare coin.
-            # Payload metadata, like ``context_shape``: not a PROMPT_VERSION
-            # bump by itself.
+            # Payload-only metadata, not a segmentation key: the fact follows
+            # ``prompt_version`` (bare before v7, the pair from v7), so no
+            # ``ai_inputs`` column carries it. Recorded for a file-target
+            # (carry) cycle too, where no graph runs: the word it would get.
             "graph_ticker": graph_ticker(coin),
             "as_of": as_of.isoformat(),
             "prompt_version": PROMPT_VERSION,

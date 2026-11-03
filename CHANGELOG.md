@@ -627,7 +627,9 @@ Breaking changes within the 0.x line are called out explicitly.
   `common/graph_ticker.py` (`<COIN>-USD`; a bare coin only — a blank, a
   dash, a slash or a space is refused rather than suffixed) before
   `propagate`, and the daemon records the same word in the payload JSON
-  beside `coin` as `graph_ticker` (metadata, like `context_shape`). The
+  beside `coin` as `graph_ticker` (payload-only metadata, not a
+  segmentation key: the fact follows `prompt_version`, so no `ai_inputs`
+  column carries it). The
   replay's lower graph (`backtest --ask`) reads that key back and puts the
   recorded word in the trader's prompt and the identity line; a payload
   from before the key existed was handed the bare coin, and the replay
@@ -648,7 +650,14 @@ Breaking changes within the 0.x line are called out explicitly.
   hottest file in every upstream sync, and the fix would not reach the
   uniswap package's wrapped-token table anyway. The pin in
   `tests/test_upstream_names.py` goes red if upstream ever spells a bare
-  crypto word itself, which is when the helper can be retired.
+  crypto word itself, which is when the helper can be retired. Two side
+  effects to know at the cutover: the engine's memory log (upstream
+  `TradingMemoryLog`, on by its default path unless the environment
+  blanks it) keys reflections by the ticker, so the portfolio manager's
+  "lessons from prior decisions" for `BTC-USD` start empty and the
+  pending `BTC` entries — reflected against the ETF's returns — are
+  never resolved again; and a file-target (carry) cycle's payload records
+  the key too, although no graph runs there.
 
 - **`fred.get_macro_data` checks the caller's `look_back_days` the way the
   fork's vendors do** (#382, the upstream sibling of #380). The entry point

@@ -95,6 +95,7 @@ class EngineRun:
         """
         from tradingagents.node_names import PORTFOLIO_MANAGER_NODE
 
+        from ..common.graph_ticker import graph_ticker
         from ..domains.perp.target_decision import FINAL_TRADE_DECISION_KEY, parse_target_decision
         from .completion_usage import (
             log_decision_truncation,
@@ -111,7 +112,8 @@ class EngineRun:
             )
 
         try:
-            propagated = self._graph.propagate(coin, trade_date, asset_type="crypto")
+            # Yahoo's spelling, not the bare coin (#392; see common/graph_ticker).
+            propagated = self._graph.propagate(graph_ticker(coin), trade_date, asset_type="crypto")
         except Exception as exc:  # noqa: BLE001 — every engine-side failure is the caller's to word
             raise EngineRunFailed(exc, unparsed_note()) from exc
         finally:

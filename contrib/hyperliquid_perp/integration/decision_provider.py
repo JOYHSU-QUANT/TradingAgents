@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 # ``cli/live_loop`` import this module at load time for
 # :func:`build_decision_provider`.
 from ..common.decision_source import FILE_TARGET_PROVIDER, decision_source
+from ..common.graph_ticker import graph_ticker
 from ..common.prompt_regime import PROMPT_VERSION, position_section_omitted, prompt_regime_line
 
 if TYPE_CHECKING:  # annotation-only: the heavy in-package imports stay function-local
@@ -302,6 +303,14 @@ class MarketContextProvider(ABC):
         fingerprint = format_fingerprint(format_text)
         payload = {
             "coin": coin,
+            # The word the engine run hands ``propagate`` (#392), recorded so
+            # the replay puts the same word in the trader's prompt per
+            # question: a payload without this key was handed the bare coin.
+            # Payload-only metadata, not a segmentation key: the fact follows
+            # ``prompt_version`` (bare before v7, the pair from v7), so no
+            # ``ai_inputs`` column carries it. Recorded for a file-target
+            # (carry) cycle too, where no graph runs: the word it would get.
+            "graph_ticker": graph_ticker(coin),
             "as_of": as_of.isoformat(),
             "prompt_version": PROMPT_VERSION,
             "context_shape": shape,

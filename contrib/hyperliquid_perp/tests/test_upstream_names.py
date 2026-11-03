@@ -8,7 +8,10 @@ string on our side, so an upstream rename would not raise — it would make a
 a dead key (the engine keeps ITS default), or an ``==`` go quietly False (the
 run falls back to the stock pipeline). The tests that fabricate engine output
 spell the same literals, so they would stay green. These pins turn each such
-rename into a red test naming the literal that drifted.
+rename into a red test naming the literal that drifted. The last test pins an
+upstream BEHAVIOUR the contrib leans on rather than a name (how
+``normalize_symbol`` treats a bare crypto word, #392): same purpose, a drift
+there goes red here instead of inside a vendor call.
 """
 
 from __future__ import annotations
@@ -61,3 +64,16 @@ def test_the_asset_type_value_the_contrib_passes_is_the_one_upstream_branches_on
     # the behaviour drifted. It catches the one drift that matters most —
     # the value itself changing — at zero cost.
     assert 'asset_type == "crypto"' in inspect.getsource(agent_utils)
+
+
+def test_the_pair_spelling_the_contrib_hands_the_graph_is_what_upstreams_symbol_rules_expect():
+    # Why the perp side spells the coin ``BTC-USD`` before ``propagate``
+    # (``common/graph_ticker``, #392): upstream's ``normalize_symbol`` hands a
+    # bare ``BTC`` to Yahoo unchanged — where it is the Grayscale ETF — but
+    # returns the pair as is. If upstream ever maps a bare CRYPTO_BASES word
+    # to its pair, the first line goes red here, next to the other upstream
+    # pins, and the spelling helper can be retired.
+    from tradingagents.dataflows.symbol_utils import normalize_symbol
+
+    assert normalize_symbol("BTC") == "BTC"
+    assert normalize_symbol("BTC-USD") == "BTC-USD"

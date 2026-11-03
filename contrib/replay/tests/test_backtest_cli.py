@@ -657,6 +657,9 @@ def test_ask_walks_the_graph_variant_from_its_own_book_and_reads_the_bar_on_its_
     assert POSITION_SECTION not in third
     assert graph.asked[0]["format_instructions"] == FORMAT
     assert graph.asked[0]["reports"].investment_plan == "plan 00"
+    # The fixture payloads predate the recorded ``graph_ticker`` (#392): those
+    # cycles were handed the bare coin, so the walk hands the same.
+    assert graph.asked[0]["ticker"] == COIN
     with ReplayStore(_replay_db(graph_store)) as replay:
         stored = replay.variant("g")
         assert (stored.mode, stored.quick_model, stored.guardrail) == (
@@ -1184,6 +1187,33 @@ def test_preflight_refuses_a_maker_run_whose_bars_the_research_store_lacks(
     assert built and built[-1].asked == []
     with ReplayStore(_replay_db(graph_store)) as replay:
         assert replay.sha_of("g") is None
+
+
+def test_ask_hands_the_graph_the_word_the_payload_recorded_and_the_bare_coin_before_it(
+    graph_store, gate_research, tmp_path, monkeypatch
+):
+    # The daemon records what it handed the graph as ``graph_ticker`` (#392):
+    # the walk hands that word for a payload carrying it, and the bare coin
+    # for one from before the key — slot 0 gets the key here, the rest do not.
+    import json
+
+    variant_file = write_graph_variant(tmp_path, "g")
+    built = _install_echo_graph(monkeypatch)
+    payload = payload_dir(graph_store, GATE_RUN_ID) / "BTC-gate-00.json"
+    document = json.loads(payload.read_text(encoding="utf-8"))
+    document["graph_ticker"] = "BTC-USD"
+    payload.write_text(json.dumps(document), encoding="utf-8")
+    conn = sqlite3.connect(graph_store)
+    conn.execute(
+        "UPDATE ai_inputs SET input_payload_hash = NULL WHERE input_id = ?", (gate_input_id(0),)
+    )
+    conn.commit()
+    conn.close()
+    assert cli.main(_ask_argv(graph_store, gate_research, variant_file, "--repeats", "1")) == 0
+    (graph,) = built
+    tickers = [asked["ticker"] for asked in graph.asked]
+    assert tickers[0] == "BTC-USD"
+    assert len(tickers) == 8 and set(tickers[1:]) == {COIN}
 
 
 def test_preflight_refuses_a_payload_without_a_position_section_before_any_ask(

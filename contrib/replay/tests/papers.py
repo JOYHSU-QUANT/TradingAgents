@@ -347,10 +347,10 @@ class EchoGraph:
         self.lost_input_tokens = 0
         self.lost_output_tokens = 0
 
-    def ask(self, *, coin, as_of, context_text, format_instructions, reports) -> GraphCompletion:
+    def ask(self, *, ticker, as_of, context_text, format_instructions, reports) -> GraphCompletion:
         self.asked.append(
             {
-                "coin": coin,
+                "ticker": ticker,
                 "as_of": as_of,
                 "context_text": context_text,
                 "format_instructions": format_instructions,

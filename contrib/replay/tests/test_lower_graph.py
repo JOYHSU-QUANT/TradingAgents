@@ -358,7 +358,7 @@ def _reports(slot: int) -> Reports:
 
 def _ask(graph: LowerGraph, **overrides):
     args: dict[str, Any] = {
-        "coin": "BTC",
+        "ticker": "BTC-USD",
         "as_of": from_epoch_ms(at_ms(0)),
         "context_text": "Coin: BTC\n\nPosition:\n  flat",
         "format_instructions": "Answer in JSON.",
@@ -423,10 +423,16 @@ def test_ask_starts_from_the_reports_with_a_fresh_risk_debate_and_the_account_co
     graph = LowerGraph(graph_variant(extra_context="A lesson.", **_QUICK), engine=fake.engine())
     completion = _ask(graph)
     trader_state = fake.states["Trader"]
-    assert (trader_state["company_of_interest"], trader_state["asset_type"]) == ("BTC", "crypto")
+    # The word the caller says the daemon handed the graph (#392), in the
+    # prompt and the identity line alike; the perp context keeps the coin.
+    assert (trader_state["company_of_interest"], trader_state["asset_type"]) == (
+        "BTC-USD",
+        "crypto",
+    )
     assert trader_state["trade_date"] == from_epoch_ms(at_ms(0)).strftime("%Y-%m-%d")
     assert trader_state["instrument_context"] == (
-        "The crypto to analyze is `BTC`.\n\n## Perpetual market context\nCoin: BTC\n\nPosition:\n"
+        "The crypto to analyze is `BTC-USD`.\n\n## Perpetual market context\nCoin: BTC\n\n"
+        "Position:\n"
         "  flat\n\nA lesson.\n\nAnswer in JSON."
     )
     assert trader_state["investment_plan"] == "plan 00"

@@ -33,7 +33,7 @@ extension points 負責把 perp 資料送*進去*、把引擎的決策讀*出來
 | `TradingAgentsGraph(selected_analysts, config, callbacks=…)` | 建構子；`callbacks` 是掛到兩個 LLM client 上的 langchain callback handlers。 | 子類別化。`callbacks` 是每次呼叫的 response metadata（stop reason、token 用量）離開引擎的**唯一** seam（`propagate()` 只回渲染後的文字）：`integration/completion_usage.CompletionUsageCollector` 每次引擎 run（`integration/engine_drive.build_engine_run`，daemon 與 one-shot 共用）掛一個新實例，靠 langgraph 在 run metadata 上蓋的 `langgraph_node` 把每筆 completion 歸到節點；決策節點名稱從 `tradingagents.node_names.PORTFOLIO_MANAGER_NODE` 取（graph 自己也從那裡註冊節點），不手抄（issue #182）。 |
 | `.resolve_instrument_context(ticker, asset_type) -> str` | 建立注入每個 agent 的 per-instrument context 字串。 | **Override 點**——附加 perp snapshot。 |
 | `._create_tool_nodes() -> dict[str, ToolNode]` | 註冊每個 analyst 可呼叫的 tools。 | **可選 override**——加即時 HL tool（不在 Phase 3 第一版範圍，見 phase3-spec §25）。 |
-| `.propagate(company_name, trade_date, asset_type) -> (final_state, signal)` | 跑整個 graph。 | 以 `asset_type="crypto"` 呼叫。 |
+| `.propagate(company_name, trade_date, asset_type) -> (final_state, signal)` | 跑整個 graph。 | 以 `asset_type="crypto"` 呼叫；`company_name` 給的是 Yahoo 的拼法 `BTC-USD`（`common/graph_ticker.py`，#392），不是裸 coin。 |
 | `final_state["final_trade_decision"]` | PM 的自由文字決策（注入 output-format 契約後結尾帶 structured target JSON）。**契約只在 free-text 路徑存活**：structured output 成功時輸出是 `render_pm_decision` 的固定欄位 markdown、天生不含 JSON，故 perp 端 `_build_engine_config` 預設 `structured_output: false` 強制 free-text。 | `parse_target_decision` 的輸入。 |
 | `final_state["trader_investment_plan"]` | 渲染後的 `TraderProposal`（`action`、`entry_price`、`stop_loss`、`position_sizing`）。 | Phase 2 不再**消費**（Phase 1 adapter 的價格水位輸入，已退役）；只由下一列的 sidecar 原樣記錄。 |
 | `final_state` 的九個報告 key：`market_report`、`sentiment_report`、`news_report`、`fundamentals_report`、`investment_debate_state`、`investment_plan`、`trader_investment_plan`、`risk_debate_state`、`final_trade_decision` | 引擎在得出決策途中各節點寫下的報告、辯論狀態與計畫（`tradingagents/agents/utils/agent_states.py::AgentState`）。 | `integration/decision_reports.write_decision_reports` 在每個拿到 dict `final_state` 的 cycle（引擎拋錯或回傳形狀讀不了的 run 沒有）原樣寫進 `<payload>.reports.json`，前面多一個 `selected_analysts`（這個 cycle 配了哪些分析師）與 sidecar 契約的 `schema: 1`；缺的 key 記 `null`。**只記錄、不消費**——決策路徑仍只讀 `final_trade_decision`。key 名是對上游的依賴：`tests/test_upstream_names.py` 釘住九個名字都是 `AgentState` 的欄位，上游改名時測試會紅，而不是 sidecar 那一欄安靜地變成 `null`。 |
@@ -56,7 +56,7 @@ contrib main.py（一次性）／ integration/decision_provider.py（daemon；�
    ├─ graph = build_graph(perp_context_text=…, callbacks=[collector])   (HyperliquidTradingGraph)
    │     └─ override resolve_instrument_context() injects ctx text
    │
-   ├─ final_state, signal = graph.propagate("BTC", date, asset_type="crypto")
+   ├─ final_state, signal = graph.propagate("BTC-USD", date, asset_type="crypto")   ← common/graph_ticker.py，#392
    │     └─ UNCHANGED engine: analysts → researchers → trader → PM
    │        → PortfolioDecision (rating + thesis)
    │

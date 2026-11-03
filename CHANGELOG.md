@@ -654,10 +654,14 @@ Breaking changes within the 0.x line are called out explicitly.
   effects to know at the cutover: the engine's memory log (upstream
   `TradingMemoryLog`, on by its default path unless the environment
   blanks it) keys reflections by the ticker, so the portfolio manager's
-  "lessons from prior decisions" for `BTC-USD` start empty and the
-  pending `BTC` entries — reflected against the ETF's returns — are
-  never resolved again; and a file-target (carry) cycle's payload records
-  the key too, although no graph runs there.
+  same-ticker "past analyses" block for `BTC-USD` starts empty while the
+  three most recent resolved `BTC` reflections — computed against the
+  ETF's returns — keep arriving as "cross-ticker lessons" until newer
+  entries push them out, and the pending `BTC` entries are never resolved
+  again; the engine's own per-cycle state logs, keyed by the same word,
+  move from `<results_dir>/BTC/` to `<results_dir>/BTC-USD/`; and a
+  file-target (carry) cycle's payload records the key too, although no
+  graph runs there.
 
 - **`fred.get_macro_data` checks the caller's `look_back_days` the way the
   fork's vendors do** (#382, the upstream sibling of #380). The entry point

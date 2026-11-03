@@ -12,7 +12,7 @@ from contrib.hyperliquid_perp.common.graph_ticker import graph_ticker
     [
         ("BTC", "BTC-USD"),
         (" eth ", "ETH-USD"),
-        ("HYPE", "HYPE-USD"),  # no table: a coin the symbol rules never heard of still spells
+        ("HYPE", "HYPE-USD"),  # no table: a coin the symbol rules have no entry for spells the same way
     ],
 )
 def test_spells_a_bare_coin_the_way_yahoo_quotes_crypto(coin, spelled):

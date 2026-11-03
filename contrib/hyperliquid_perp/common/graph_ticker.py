@@ -19,11 +19,13 @@ package has passed ``ETH-USD`` / ``BTC-USD`` from the start. Yahoo quotes
 every crypto pair in USD; the fork's symbol rules recognise USDT/USDC too,
 but the graph is handed the one spelling Yahoo serves.
 
-Shared with ``contrib.replay`` (through its ``upstream`` seam) so the
-re-run lower graph and the daemon put the same word in
-``company_of_interest`` — the parity the replay plan's §5 measures. A pure
-string function with no imports, so that seam stays importable without
-loading the engine.
+``contrib.replay`` does NOT import this: the daemon records the word it
+handed the graph in the payload JSON (``graph_ticker``,
+``integration/decision_provider``), and the re-run lower graph replays
+that recorded word — the bare coin for a payload from before the key —
+so a question is asked with the spelling its cycle saw, which is the
+parity the replay plan's §5 measures. Importing the helper there would
+respell those old cycles.
 """
 
 from __future__ import annotations

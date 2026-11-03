@@ -8,7 +8,10 @@ string on our side, so an upstream rename would not raise — it would make a
 a dead key (the engine keeps ITS default), or an ``==`` go quietly False (the
 run falls back to the stock pipeline). The tests that fabricate engine output
 spell the same literals, so they would stay green. These pins turn each such
-rename into a red test naming the literal that drifted.
+rename into a red test naming the literal that drifted. The last test pins an
+upstream BEHAVIOUR the contrib leans on rather than a name (how
+``normalize_symbol`` treats a bare crypto word, #392): same purpose, a drift
+there goes red here instead of inside a vendor call.
 """
 
 from __future__ import annotations

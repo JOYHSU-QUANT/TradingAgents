@@ -169,7 +169,9 @@ prompt 的 context／format 契約改形狀**或改措辭**時（v5 就是純措
 部署點的會是最後成交停在 2026-07-16、此後零成交、策略價值歸零的 `paper-BTC`。
 
 **這條例外附一個硬規則：量測窗內不得夾帶其他輸入面變更。** 切段鍵是
-`prompt_version`，而它只在 context／format **契約改形狀或改措辭**時才 bump；輸入面的**內容**
+`prompt_version`，而它只在 context／format **契約改形狀或改措辭**時才 bump（唯一例外＝v7：
+graph 拿到的代號拼法改變，analyst 的整個輸入跟著變，issue #392；那是一次部署、開了新 run-id，
+不是量測窗內的 A/B）；輸入面的**內容**
 變了（例如把某個 ships-OFF 的 vendor 翻成啟用）不改形狀、不會 bump，`input_payload_hash`
 每個 cycle 本來就不同也切不了段——於是 after 段的前半後半是兩個不同的輸入制度，而資料
 裡完全看不出來。所以跨過 v3 邊界之後、量測窗結束之前，`deploy/paper` **只准**帶 prompt

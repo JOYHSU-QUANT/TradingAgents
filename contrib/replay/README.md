@@ -545,7 +545,7 @@ completion 前面的 system message**，上游 PM 自己的 prompt 仍在 human 
 variant（那是 simple 模式整份指示，會讓模型讀到兩份）；`extra_context` 在 graph 模式進 `instrument_context`，五個 node
 都看得到，不只 PM。
 
-與 daemon 已知的兩處差異：instrument 身分行不走網路查詢（`build_instrument_context(coin, "crypto")`），倉位段的
+與 daemon 已知的兩處差異：instrument 身分行不走網路查詢（`build_instrument_context(ticker, "crypto")`，`ticker` 是 payload 記下的 `graph_ticker`——daemon 當時交給 graph 的字，#392 起是 `BTC-USD`；沒有這個鍵的舊 payload 給裸 coin），倉位段的
 holding cost 用研究 store 的結算 rate（daemon 用當下的預測 rate）。風險辯論一輪（上游預設，daemon 沒改）。
 
 ### store 與輸出

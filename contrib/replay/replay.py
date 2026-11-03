@@ -160,7 +160,10 @@ class Prepared:
 
     ``context_shape`` is the payload's own stamp of which sections the
     context carries, read for the asking walk (plan PR 3b), ``None`` on a
-    payload that lacks it.
+    payload that lacks it. ``graph_ticker`` is the word the daemon handed
+    the graph for that cycle (``BTC-USD`` since #392), ``None`` on a payload
+    written before the daemon recorded it — those cycles were handed the
+    bare coin, and the asking walk hands the same.
     """
 
     paper: Paper
@@ -169,6 +172,7 @@ class Prepared:
     account_equity: Decimal
     current: CurrentPositionState
     context_shape: str | None = None
+    graph_ticker: str | None = None
 
     @property
     def input_id(self) -> str:
@@ -277,10 +281,11 @@ class _Payload:
     context_text: str
     format_instructions: str
     context_shape: str | None
+    graph_ticker: str | None
 
 
 def _read_payload(root: Path, facts: InputFacts) -> _Payload:
-    """The question's payload, checked against its row: the two texts and the context's shape."""
+    """The question's payload, checked against its row: the two texts, the context's shape, the graph's word."""
     me = facts.input_id
     if facts.payload_name is None:
         raise ReplayError(f"{me}: the input row names no payload")
@@ -305,10 +310,13 @@ def _read_payload(root: Path, facts: InputFacts) -> _Payload:
         if not isinstance(value, str) or not value:
             raise ReplayError(f"{me}: payload {str(path)!r} has no {key} text")
         texts.append(value)
-    shape = document.get("context_shape")
-    if shape is not None and not isinstance(shape, str):
-        raise ReplayError(f"{me}: payload {str(path)!r} has a non-text context_shape")
-    return _Payload(texts[0], texts[1], shape)
+    optional = []
+    for key in ("context_shape", "graph_ticker"):
+        value = document.get(key)
+        if value is not None and (not isinstance(value, str) or not value):
+            raise ReplayError(f"{me}: payload {str(path)!r} has a non-text {key}")
+        optional.append(value)
+    return _Payload(texts[0], texts[1], *optional)
 
 
 def prepare(papers: Sequence[Paper], *, payload_root: Path, risk: RiskConfig) -> list[Prepared]:
@@ -331,6 +339,7 @@ def prepare(papers: Sequence[Paper], *, payload_root: Path, risk: RiskConfig) ->
                 equity,
                 current,
                 context_shape=payload.context_shape,
+                graph_ticker=payload.graph_ticker,
             )
         )
     return prepared

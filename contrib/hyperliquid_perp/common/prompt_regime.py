@@ -58,10 +58,18 @@ __all__ = [
 # v6 (2026-09-22): the context's ``Last fill:`` line states the fill's age
 # in the largest unit its figure reaches instead of fixed hours (issue
 # #288); the format block is unchanged (v6's digest is v5's).
+# v7 (2026-11-03): the graph is handed ``BTC-USD`` instead of the bare coin
+# (issue #392, ``common/graph_ticker``) — the identity line, the name behind
+# it and every yfinance-fed analyst input change with it; the perp context
+# and the format block are unchanged (v7's digest is v5's). Bumped so the
+# ETF-fed cycles and the bitcoin-fed ones land in different regime buckets:
+# the first bump for a change outside the perp-rendered text (the identity
+# line is the system prompt's first sentence). The per-row fact rides in
+# the payload's ``graph_ticker`` key (``integration/decision_provider``).
 # The text this versions is rendered in ``domains/perp/target_decision``; a
 # test pins this value to that block's digest so an edit there that forgot
 # the bump fails (tests/integration/test_decision_provider.py).
-PROMPT_VERSION = "phase2-target-v6"
+PROMPT_VERSION = "phase2-target-v7"
 
 # The grep handle. ``validate`` has printed it since schema v11 (issue #129,
 # when the third key landed); the daemon log and ``--context-only`` now carry

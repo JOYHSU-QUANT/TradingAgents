@@ -405,18 +405,18 @@ class LowerGraph:
         graph.add_edge(engine.PORTFOLIO_MANAGER_NODE, engine.END)
         self._graph = graph.compile()
 
-    def _instrument_context(self, coin: str, context_text: str, format_instructions: str) -> str:
+    def _instrument_context(self, ticker: str, context_text: str, format_instructions: str) -> str:
         """The state's ``instrument_context``: the identity line, the perp context, the format block last."""
         context = context_text
         if self.variant.extra_context is not None:
             context = f"{context}\n\n{self.variant.extra_context}"
-        base = self._engine.build_instrument_context(coin, "crypto")
+        base = self._engine.build_instrument_context(ticker, "crypto")
         return inject_perp_context(base, context, format_instructions)
 
     def ask(
         self,
         *,
-        coin: str,
+        ticker: str,
         as_of: datetime,
         context_text: str,
         format_instructions: str,
@@ -424,17 +424,21 @@ class LowerGraph:
     ) -> GraphCompletion:
         """Run the lower half once and return the portfolio manager's decision text and usage.
 
-        ``context_text`` already carries the simulated account's position
-        section; ``as_of`` is the context's own as-of, which dates the
-        trade as the daemon dates it. A failure anywhere in the graph
-        propagates after its completions are added to the lost tokens: the
-        caller's call discipline (:func:`~.replay.attempt`) sorts it.
+        ``ticker`` is the word the daemon handed ``propagate`` for the
+        recorded cycle — the payload's ``graph_ticker``, or the bare coin
+        for a payload from before it was recorded (#392) — and goes into
+        the trader's prompt and the identity line alike. ``context_text``
+        already carries the simulated account's position section; ``as_of``
+        is the context's own as-of, which dates the trade as the daemon
+        dates it. A failure anywhere in the graph propagates after its
+        completions are added to the lost tokens: the caller's call
+        discipline (:func:`~.replay.attempt`) sorts it.
         """
         state: dict[str, Any] = {
             "messages": [],
-            "company_of_interest": coin,
+            "company_of_interest": ticker,
             "asset_type": "crypto",
-            "instrument_context": self._instrument_context(coin, context_text, format_instructions),
+            "instrument_context": self._instrument_context(ticker, context_text, format_instructions),
             "trade_date": as_of.strftime("%Y-%m-%d"),
             "sender": "",
             "past_context": "",

@@ -605,7 +605,10 @@ def ask_walks(
                 completion = attempt(
                     partial(
                         graph.ask,
-                        coin=exam.coin,
+                        # The word the daemon handed the graph for THIS cycle
+                        # (#392); a payload from before it was recorded was
+                        # handed the bare coin.
+                        ticker=item.graph_ticker if item.graph_ticker is not None else exam.coin,
                         as_of=as_of,
                         context_text=context,
                         format_instructions=item.format_instructions,

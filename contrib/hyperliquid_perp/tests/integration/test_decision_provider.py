@@ -166,7 +166,7 @@ def test_request_decision_drives_engine_with_cycle_as_of_not_now(monkeypatch):
     provider.request_decision(DecisionInput(context=_perp_ctx(as_of)))
 
     assert captured["trade_date"] == "2026-03-15"  # the cycle's as_of date, not today
-    assert captured["coin"] == "BTC"
+    assert captured["coin"] == "BTC-USD"  # Yahoo's spelling for the graph (#392), not the bare coin
     assert captured["asset_type"] == "crypto"
 
 
@@ -1024,6 +1024,8 @@ def test_build_input_carries_the_context_shape_beside_the_prompt_version(tmp_pat
         payload = json.load(fh)
     assert payload["context_shape"] == expected
     assert payload["prompt_version"] == decision_input.prompt_version
+    # The graph's word beside the perp's (#392): what the replay reads back.
+    assert (payload["coin"], payload["graph_ticker"]) == ("BTC", "BTC-USD")
     # The third key (issue #129): a digest of the format block AS RENDERED
     # for this provider — its config and its effective ceiling — so the row,
     # the payload and the text the model is shown all agree on one value.
@@ -1230,8 +1232,10 @@ def test_the_prompt_version_is_pinned_to_the_block_it_versions():
     # v3's. v5 (2026-09-01) changed the FORMAT block: the three gate
     # thresholds are no longer rendered as numbers (marginal-cost plan PR-B).
     # v6 (2026-09-22) bumped for the CONTEXT again — the Last fill: line's
-    # age unit (issue #288) — so v6's digest is v5's.
-    assert (prompt_regime.PROMPT_VERSION, digest) == ("phase2-target-v6", "947e85a9b7b750f1")
+    # age unit (issue #288) — so v6's digest is v5's. v7 (2026-11-03) bumped
+    # for the graph's input — the coin spelled ``BTC-USD`` (issue #392) — so
+    # v7's digest is still v5's.
+    assert (prompt_regime.PROMPT_VERSION, digest) == ("phase2-target-v7", "947e85a9b7b750f1")
     # The daemon's spelling (``integration.decision_provider``) is the same
     # object as ``prompt_regime``'s, not a second declaration that would keep
     # equal today and fork the next time one side moves.

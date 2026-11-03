@@ -315,6 +315,33 @@ def test_an_altered_payload_is_refused_before_any_call(store, variant_file, echo
     assert echo.calls == []
 
 
+def test_the_graphs_word_is_read_off_the_payload_and_absent_on_one_written_before_it(
+    store, tmp_path
+):
+    # The daemon records what it handed the graph as ``graph_ticker`` (#392);
+    # a payload from before that key was handed the bare coin, which the
+    # asking walk restores by reading ``None`` here (``walk.py``).
+    import json
+    from types import SimpleNamespace
+
+    from contrib.replay.replay import _read_payload
+
+    _, chosen, risk, _ = _papers(store, SegmentName.TRAIN)
+    assert prepare(chosen, payload_root=payload_dir(store, RUN_ID), risk=risk)[0].graph_ticker is None
+
+    def facts(name: str) -> SimpleNamespace:
+        return SimpleNamespace(input_id=name, payload_name=f"{name}.json", payload_hash=None)
+
+    base = {"context_text": "c", "format_instructions": "f", "context_shape": "price"}
+    (tmp_path / "new.json").write_text(json.dumps({**base, "graph_ticker": "BTC-USD"}))
+    (tmp_path / "old.json").write_text(json.dumps(base))
+    (tmp_path / "bad.json").write_text(json.dumps({**base, "graph_ticker": 7}))
+    assert _read_payload(tmp_path, facts("new")).graph_ticker == "BTC-USD"
+    assert _read_payload(tmp_path, facts("old")).graph_ticker is None
+    with pytest.raises(ReplayError, match="bad: payload .* has a non-text graph_ticker"):
+        _read_payload(tmp_path, facts("bad"))
+
+
 def test_a_missing_payload_directory_is_named(store, variant_file, echo, capsys, tmp_path):
     nowhere = str(tmp_path / "nowhere")
     assert cli.main(_replay(store, variant_file, "--payload-root", nowhere)) == 1

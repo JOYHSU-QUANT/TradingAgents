@@ -657,6 +657,9 @@ def test_ask_walks_the_graph_variant_from_its_own_book_and_reads_the_bar_on_its_
     assert POSITION_SECTION not in third
     assert graph.asked[0]["format_instructions"] == FORMAT
     assert graph.asked[0]["reports"].investment_plan == "plan 00"
+    # The fixture payloads predate the recorded ``graph_ticker`` (#392): those
+    # cycles were handed the bare coin, so the walk hands the same.
+    assert graph.asked[0]["ticker"] == COIN
     with ReplayStore(_replay_db(graph_store)) as replay:
         stored = replay.variant("g")
         assert (stored.mode, stored.quick_model, stored.guardrail) == (

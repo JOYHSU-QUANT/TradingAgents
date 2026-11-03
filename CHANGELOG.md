@@ -613,6 +613,43 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **The perp engine hands the graph Yahoo's spelling of the coin
+  (`BTC-USD`), not the bare `BTC`** (#392). The analysts carry the word
+  they are given to the yfinance-backed tools unchanged, and on Yahoo
+  Finance a bare `BTC` is the NYSE-listed Grayscale Bitcoin Mini Trust:
+  `normalize_symbol` leaves a plain upper-case word alone because it is a
+  legal equity ticker. Across paper runs 7–9 the instrument identity came
+  back as the ETF's name on every cycle, the market analyst's verified
+  snapshot as the ETF's ~US$37 daily closes on a third of the recorded
+  cycles (the reports then argue about the "discrepancy" with the perp
+  context's five-figure mark), and the ticker news as the ETF's near-empty
+  feed. `EngineRun.drive` now spells the coin through
+  `common/graph_ticker.py` (`<COIN>-USD`; a bare coin only — a blank, a
+  dash, a slash or a space is refused rather than suffixed) before
+  `propagate`, and the daemon records the same word in the payload JSON
+  beside `coin` as `graph_ticker` (metadata, like `context_shape`). The
+  replay's lower graph (`backtest --ask`) reads that key back and puts the
+  recorded word in the trader's prompt and the identity line; a payload
+  from before the key existed was handed the bare coin, and the replay
+  hands the same, so a recorded question replays with the word its cycle
+  saw rather than today's. Every routed crypto tool already accepts the
+  pair form (`classify_crypto_asset` reads the base off it). Everything
+  perp-side — the store's `symbol`, the payload's `coin`, the context
+  text's `Coin:` line, the exchange calls — keeps the bare coin.
+  `PROMPT_VERSION` is bumped to `phase2-target-v7` (the format block is
+  unchanged, so v7's digest is v5's): the analysts' whole input changes
+  with the word, and the bump is what puts ETF-fed and bitcoin-fed cycles
+  in different regime buckets for `validate` and the scorecard — the first
+  bump for a change outside the perp-rendered text. Considered and
+  declined: spelling the pair upstream. `normalize_symbol` has no asset
+  type and serves equities where `BTC`, `SOL` and `LINK` are real tickers;
+  the one upstream seam holding both the word and `asset_type`
+  (`TradingAgentsGraph.propagate` / `resolve_instrument_context`) is the
+  hottest file in every upstream sync, and the fix would not reach the
+  uniswap package's wrapped-token table anyway. The pin in
+  `tests/test_upstream_names.py` goes red if upstream ever spells a bare
+  crypto word itself, which is when the helper can be retired.
+
 - **`fred.get_macro_data` checks the caller's `look_back_days` the way the
   fork's vendors do** (#382, the upstream sibling of #380). The entry point
   defaulted only `None` and then subtracted the count from `curr_date`

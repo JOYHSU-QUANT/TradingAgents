@@ -70,9 +70,10 @@ def test_a_collector_the_logger_would_not_feed_records_unknown_and_says_so(caplo
     # What a level cannot repair — ``logging.disable`` here — makes the
     # collector deaf: the run's set is "not recorded", never the empty set
     # that reads as every input having answered, and the journal says why
-    # while ERROR is still audible. WARNING, not ERROR: pytest's caplog
-    # re-enables the level it captures (``logging.disable(level - 10)``), so
-    # a disable at ERROR would be exercised as this one anyway; said plainly.
+    # while ERROR is still audible. WARNING, not ERROR: a disable at ERROR
+    # would silence the very line this asserts on, and pytest's caplog
+    # lowers a global disable to just below the level it captures anyway,
+    # so that case would be exercised as this one; said plainly.
     logging.disable(logging.WARNING)
     try:
         with (

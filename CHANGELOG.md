@@ -733,15 +733,23 @@ Breaking changes within the 0.x line are called out explicitly.
   rather than three — the StockTwits section and every instruction that
   reads it are left out, the retail read is the subreddits' — and Reddit's
   default rooms become `r/CryptoCurrency`, `r/Bitcoin`, `r/ethtrader` and
-  `r/CryptoMarkets` (`reddit.CRYPTO_SUBREDDITS`; the analyst decides both
-  the skip and the rooms from the asset type the graph was told, so a coin
-  outside the symbol rules' base list is treated as a coin too, while a
-  direct caller of `fetch_reddit_posts` gets `reddit.subreddits_for`'s
-  symbol-based default or the rooms it names). The crypto prompt's retail
-  rule reads post titles and bodies, not engagement — the RSS path carries
-  no scores — and its catalyst vocabulary is the coin's (ETF flows,
-  exchange and regulatory headlines, protocol upgrades, liquidations). A
-  stock keeps all three sources unchanged, which leaves one known gap: a
+  `r/CryptoMarkets` (`reddit.CRYPTO_SUBREDDITS`), with the coin's own room
+  ahead of them when it has one (`r/Bitcoin` for BTC, `r/ethtrader` for
+  ETH; `reddit.COIN_SUBREDDITS`) — three requests per cycle as before and
+  none spent on another coin's room. `reddit.subreddits_for` is the one
+  chooser: the analyst hands it the asset type the graph was told, so a
+  coin outside the symbol rules' base list gets the generic crypto rooms
+  rather than the stock ones, while a direct caller of `fetch_reddit_posts`
+  gets the symbol-based default or the rooms it names. The crypto prompt's
+  retail and weighting rules read post titles and bodies, not engagement —
+  the RSS path carries no scores, and the heading's engagement sentence is
+  left out of that prompt too — and its catalyst vocabulary is the coin's
+  (ETF flows, exchange and regulatory headlines, protocol upgrades,
+  liquidations). The uniswap_v3 judge (ETH-USD, the same analyst) moves
+  with it on the same deploy, an input-surface segment for paper-ai-1 as
+  well as for the perp run. A stock keeps all three sources byte-for-byte
+  as they were (a test pins the heading, the engagement rule and the
+  catalyst list), which leaves one known gap: a
   stock analysed from a datacenter address still fetches StockTwits and
   still reads its placeholder under a prompt that calls it the leading
   signal — the two-source prompt is keyed on the asset type, not on the

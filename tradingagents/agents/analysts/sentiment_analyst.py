@@ -13,8 +13,9 @@ LLM is invoked and injects them into the prompt as structured blocks:
                            user-labeled Bullish/Bearish sentiment tags
                            (stocks only: a crypto asset skips it, #395)
   3. Reddit posts        — r/wallstreetbets, r/stocks, r/investing for a
-                           stock; r/CryptoCurrency, r/Bitcoin, r/ethtrader,
-                           r/CryptoMarkets for a crypto asset
+                           stock; the coin's own room (r/Bitcoin, r/ethtrader)
+                           plus r/CryptoCurrency and r/CryptoMarkets for a
+                           crypto asset
 
 The agent does not use tool-calling; the data is in the prompt from
 turn 0. Output uses the structured-output pattern (json_schema for
@@ -43,7 +44,7 @@ from tradingagents.agents.utils.structured import (
     bind_structured,
     invoke_structured_or_freetext,
 )
-from tradingagents.dataflows.reddit import CRYPTO_SUBREDDITS, DEFAULT_SUBREDDITS, fetch_reddit_posts
+from tradingagents.dataflows.reddit import fetch_reddit_posts, subreddits_for
 from tradingagents.dataflows.stocktwits import fetch_stocktwits_messages
 
 
@@ -76,9 +77,10 @@ def create_sentiment_analyst(llm):
         # One decision for both the StockTwits skip and the Reddit rooms: the
         # asset type the graph was told, not a re-derivation from the symbol
         # (a coin outside the symbol rules' base list — HYPE-USD, SUI-USD —
-        # would otherwise lose StockTwits AND be searched in the stock rooms).
+        # would otherwise lose StockTwits AND be searched in the stock rooms);
+        # the chooser then adds the coin's own room when it has one.
         is_crypto = state.get("asset_type", "stock") == "crypto"
-        subreddits = CRYPTO_SUBREDDITS if is_crypto else DEFAULT_SUBREDDITS
+        subreddits = subreddits_for(ticker, crypto=is_crypto)
 
         # Pre-fetch the sources: three for a stock, two for a crypto asset
         # (no StockTwits, #395). StockTwits and Reddit degrade to a
@@ -162,17 +164,17 @@ def create_sentiment_analyst(llm):
 # analyst weighs a post by where it was said; one line per subreddit the two
 # default sets know, the room's name alone for any other a caller passes.
 _SUBREDDIT_CHARACTER = {
-    "wallstreetbets": "often contrarian/exuberant",
+    "wallstreetbets": "is often contrarian/exuberant",
     "stocks": "more measured",
     "investing": "longer-term",
     "cryptocurrency": "broad and noisy, the retail crowd across coins",
-    "bitcoin": "Bitcoin's own room (BTC holders and maximalists; off-topic for another coin)",
-    "ethtrader": "Ether's own room (ETH holders and traders; off-topic for another coin)",
+    "bitcoin": "Bitcoin's own room (BTC holders and maximalists)",
+    "ethtrader": "Ether's own room (ETH holders and traders)",
     "cryptomarkets": "trading-minded, shorter horizon, across coins",
 }
 
 
-def _reddit_heading(subreddits: tuple[str, ...]) -> str:
+def _reddit_heading(subreddits: tuple[str, ...], *, engagement: bool) -> str:
     rooms = ", ".join(f"r/{sub}" for sub in subreddits)
     # Subreddit names are case-insensitive to Reddit; so is the lookup.
     character = "; ".join(
@@ -181,10 +183,11 @@ def _reddit_heading(subreddits: tuple[str, ...]) -> str:
         if sub.casefold() in _SUBREDDIT_CHARACTER
     )
     note = f" Subreddit character matters ({character})." if character else ""
-    return (
-        f"### Reddit posts — {rooms} (past 7 days)\n"
-        f"Community discussion. Engagement signal via upvote score and comment count.{note}"
-    )
+    # The engagement sentence is the stock prompt's as it always was; the
+    # crypto prompt leaves it out, because its retail rule says the feed
+    # carries no counts and one prompt must not say both.
+    signal = " Engagement signal via upvote score and comment count." if engagement else ""
+    return f"### Reddit posts — {rooms} (past 7 days)\nCommunity discussion.{signal}{note}"
 
 
 def _build_system_message(
@@ -238,9 +241,14 @@ Fast-moving signal. Each message carries a user-labeled sentiment tag (Bullish /
         else 'If the subreddits returned only a handful of posts, or one or more sources returned an "<unavailable>" placeholder'
     )
     catalysts = (
-        "news of upcoming earnings, product launches, competitive threats, macro headlines, etc."
+        "news of upcoming earnings, product launches, competitive threats, macro headlines, etc"
         if with_stocktwits
-        else "ETF flows, exchange or regulatory headlines, protocol upgrades and hacks, liquidation cascades, macro and rates headlines, etc."
+        else "ETF flows, exchange or regulatory headlines, protocol upgrades and hacks, liquidation cascades, macro and rates headlines, etc"
+    )
+    weighting_rule = (
+        "3. **Weight Reddit posts by engagement.** A 400-upvote / 200-comment thread reflects community attention; a 3-upvote post is noise. Read the body excerpts for context — the title alone often misleads."
+        if with_stocktwits
+        else "3. **Weight Reddit posts by substance.** Read the body excerpts for context — the title alone often misleads; a post that argues from something checkable (a flow, a filing, an on-chain fact) outweighs a bare opinion."
     )
     return f"""You are a financial market sentiment analyst. Your task is to produce a comprehensive sentiment report for {ticker} covering the period from {start_date} to {end_date}, drawing on {count} complementary data sources that have already been collected for you.
 
@@ -253,7 +261,7 @@ Institutional framing. Fact-driven, slower-moving signal.
 {news_block}
 <end_of_news>
 
-{stocktwits_section}{_reddit_heading(subreddits)}
+{stocktwits_section}{_reddit_heading(subreddits, engagement=with_stocktwits)}
 
 <start_of_reddit>
 {reddit_block}
@@ -265,7 +273,7 @@ Institutional framing. Fact-driven, slower-moving signal.
 
 2. **Look for cross-source divergences.** {divergence_rule} — it can mean retail is leaning into a thesis the news flow hasn't caught up to (or vice versa, that retail is chasing while institutions are cautious).
 
-3. **Weight Reddit posts by engagement.** A 400-upvote / 200-comment thread reflects community attention; a 3-upvote post is noise. Read the body excerpts for context — the title alone often misleads.
+{weighting_rule}
 
 4. **Distinguish opinion from event.** A news headline ("Nvidia announces $500M Corning deal") is an event; {opinion_example} is opinion. Both are inputs but should be weighted differently in your conclusions.
 

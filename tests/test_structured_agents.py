@@ -515,14 +515,17 @@ class TestSentimentAnalystAgent:
         prompt = "\n".join(getattr(m, "content", str(m)) for m in captured["prompt"])
         assert "StockTwits" not in prompt and "<start_of_stocktwits>" not in prompt
         assert "two complementary data sources" in prompt
-        assert "r/CryptoCurrency, r/Bitcoin, r/ethtrader, r/CryptoMarkets" in prompt
+        assert "r/Bitcoin, r/CryptoCurrency, r/CryptoMarkets" in prompt
         assert "Read the Reddit posts as the retail-sentiment signal" in prompt
-        assert reddit_calls["subreddits"] == ("CryptoCurrency", "Bitcoin", "ethtrader", "CryptoMarkets")
+        assert reddit_calls["subreddits"] == ("Bitcoin", "CryptoCurrency", "CryptoMarkets")
         assert reddit_calls["ticker"] == "BTC-USD"
-        assert "Bitcoin's own room" in prompt and "Ether's own room" in prompt
+        assert "Bitcoin's own room" in prompt and "ethtrader" not in prompt
         assert "the feed carries no upvote or comment counts" in prompt
-        assert "ETF flows, exchange or regulatory headlines" in prompt
-        assert "upcoming earnings" not in prompt
+        # One prompt must not say both: no engagement wording anywhere in it.
+        assert "Engagement signal via upvote" not in prompt
+        assert "Weight Reddit posts by substance" in prompt and "400-upvote" not in prompt
+        assert "ETF flows, exchange or regulatory headlines, " in prompt
+        assert "upcoming earnings" not in prompt and "etc.." not in prompt
 
     def test_a_coin_the_symbol_rules_do_not_know_is_still_treated_as_crypto(self, monkeypatch):
         # The asset type the graph was told decides, not the symbol: HYPE-USD
@@ -542,7 +545,27 @@ class TestSentimentAnalystAgent:
         captured = {}
         state = dict(_make_sentiment_state(), company_of_interest="HYPE-USD", asset_type="crypto")
         create_sentiment_analyst(_structured_sentiment_llm(captured))(state)
-        assert reddit_calls["subreddits"] == ("CryptoCurrency", "Bitcoin", "ethtrader", "CryptoMarkets")
+        # No room of its own: the two generic crypto rooms, never the stock ones.
+        assert reddit_calls["subreddits"] == ("CryptoCurrency", "CryptoMarkets")
+
+    def test_ether_gets_its_own_room_not_bitcoins(self, monkeypatch):
+        monkeypatch.setattr(
+            sentiment_analyst_mod,
+            "fetch_stocktwits_messages",
+            lambda *a, **k: pytest.fail("StockTwits must not be fetched for a coin"),
+        )
+        reddit_calls = {}
+        monkeypatch.setattr(
+            sentiment_analyst_mod,
+            "fetch_reddit_posts",
+            lambda ticker, **kwargs: reddit_calls.update(kwargs) or "REDDIT BLOCK",
+        )
+        captured = {}
+        state = dict(_make_sentiment_state(), company_of_interest="ETH-USD", asset_type="crypto")
+        create_sentiment_analyst(_structured_sentiment_llm(captured))(state)
+        assert reddit_calls["subreddits"] == ("ethtrader", "CryptoCurrency", "CryptoMarkets")
+        prompt = "\n".join(getattr(m, "content", str(m)) for m in captured["prompt"])
+        assert "Ether's own room" in prompt and "r/Bitcoin" not in prompt
 
     def test_a_stock_keeps_all_three_sources(self):
         captured = {}
@@ -550,8 +573,19 @@ class TestSentimentAnalystAgent:
         prompt = "\n".join(getattr(m, "content", str(m)) for m in captured["prompt"])
         assert "<start_of_stocktwits>" in prompt and "STOCKTWITS BLOCK" in prompt
         assert "three complementary data sources" in prompt
-        assert "r/wallstreetbets, r/stocks, r/investing" in prompt
+        # The stock prompt is the one it always was, sentence for sentence:
+        # the heading with its engagement line and the three rooms' character
+        # as the old literal spelled them, the engagement rule, the catalyst
+        # list ending in one period.
+        assert (
+            "### Reddit posts — r/wallstreetbets, r/stocks, r/investing (past 7 days)\n"
+            "Community discussion. Engagement signal via upvote score and comment count. "
+            "Subreddit character matters (r/wallstreetbets is often contrarian/exuberant; "
+            "r/stocks more measured; r/investing longer-term)."
+        ) in prompt
         assert "Read the StockTwits Bullish/Bearish ratio" in prompt
+        assert "3. **Weight Reddit posts by engagement.** A 400-upvote / 200-comment thread" in prompt
+        assert "competitive threats, macro headlines, etc.\n" in prompt and "etc.." not in prompt
 
     def test_stocktwits_prefetch_passes_trade_date_as_curr_date(self, monkeypatch):
         # Positive wiring check for the freshness note (#30): the node must

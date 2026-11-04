@@ -77,14 +77,30 @@ DEFAULT_SUBREDDITS = ("wallstreetbets", "stocks", "investing")
 # a few times a week at most — the paper trader's sentiment report ran on
 # zero to one Reddit post for six weeks once StockTwits went dark — where
 # these carry the retail conversation about it. CryptoCurrency is the
-# broad, noisy one (wallstreetbets' part), Bitcoin and ethtrader the
-# coin-specific rooms, CryptoMarkets the trading-minded one.
-CRYPTO_SUBREDDITS = ("CryptoCurrency", "Bitcoin", "ethtrader", "CryptoMarkets")
+# broad, noisy one (wallstreetbets' part), CryptoMarkets the trading-minded
+# one; a coin with a room of its own gets that room first, so no request
+# is spent on another coin's room (r/Bitcoin for ETH would be off-topic
+# chatter and one more request against Reddit's per-IP limit).
+CRYPTO_SUBREDDITS = ("CryptoCurrency", "CryptoMarkets")
+COIN_SUBREDDITS = {"BTC": ("Bitcoin",), "ETH": ("ethtrader",)}
 
 
-def subreddits_for(ticker: str) -> tuple[str, ...]:
-    """The subreddits searched for ``ticker`` when the caller names none: crypto's for a coin."""
-    return CRYPTO_SUBREDDITS if crypto_base(ticker) else DEFAULT_SUBREDDITS
+def subreddits_for(ticker: str, *, crypto: bool | None = None) -> tuple[str, ...]:
+    """The subreddits searched for ``ticker`` when the caller names none.
+
+    ``crypto`` says whether the asset is a coin — the caller's knowledge
+    (the graph's ``asset_type``) when it has it, else read off the symbol
+    (``crypto_base``). A coin gets its own room, when it has one, ahead of
+    the two generic crypto rooms; a coin the symbol rules do not know
+    (``HYPE-USD``) gets the generic rooms, never the stock ones.
+    """
+    if crypto is None:
+        crypto = crypto_base(ticker) is not None
+    if not crypto:
+        return DEFAULT_SUBREDDITS
+    base = crypto_base(ticker) or ticker.strip().upper().split("-")[0]
+    return COIN_SUBREDDITS.get(base, ()) + CRYPTO_SUBREDDITS
+
 
 # Rendered lengths for a post's two free-text fields. Until #233 the title had
 # no bound at ALL and neither field was flattened — both are written by whoever
@@ -324,8 +340,9 @@ def fetch_reddit_posts(
     """Fetch recent Reddit posts mentioning ``ticker`` across finance
     subreddits and return them as a formatted plaintext block.
 
-    ``subreddits`` left unset is :func:`subreddits_for`'s answer — the stock
-    rooms for a stock, the crypto rooms for a coin (#395).
+    ``subreddits`` left unset is :func:`subreddits_for`'s answer read off the
+    symbol — the stock rooms for a stock, the coin's room and the crypto
+    rooms for a coin (#395).
     ``inter_request_delay`` paces the (now RSS-only) per-subreddit requests to
     stay under Reddit's public per-IP rate limit; combined with the RSS-first
     path it makes 429s rare even when several analyses run back-to-back.

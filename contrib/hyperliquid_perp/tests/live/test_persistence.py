@@ -862,10 +862,10 @@ def test_a_read_only_open_refuses_a_behind_store_instead_of_upgrading_it(tmp_pat
     behind = sorted(MIGRATIONS)[-2]
     with migrations_up_to(behind), Database(path) as built:
         assert stored_schema_version(built.conn) == behind
-        # The LATEST migration's column (v14: ai_outputs.guardrail_side) is
-        # what a one-behind store must lack — re-point this when a new version
-        # lands.
-        assert "guardrail_side" not in _columns(built.conn, "ai_outputs")
+        # The LATEST migration's column (v15: ai_outputs.unavailable_inputs)
+        # is what a one-behind store must lack — re-point this when a new
+        # version lands.
+        assert "unavailable_inputs" not in _columns(built.conn, "ai_outputs")
 
     with pytest.raises(SchemaVersionError, match="will not migrate"):
         Database(path, migrate=False)
@@ -874,7 +874,7 @@ def test_a_read_only_open_refuses_a_behind_store_instead_of_upgrading_it(tmp_pat
     # byte-for-byte the version it was, so the daemon that owns it is unharmed.
     conn = connect(path)
     assert stored_schema_version(conn) == behind
-    assert "guardrail_side" not in _columns(conn, "ai_outputs")
+    assert "unavailable_inputs" not in _columns(conn, "ai_outputs")
     assert (
         conn.execute(
             "SELECT COUNT(*) FROM schema_migrations WHERE version > ?", (behind,)

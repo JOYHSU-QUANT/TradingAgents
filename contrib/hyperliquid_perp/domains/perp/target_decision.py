@@ -236,15 +236,37 @@ class ParsedDecision:
     otherwise the fail-closed maintain-current stand-in. ``raw_response``
     preserves the original engine text verbatim for the audit trail (a non-str
     under engine schema drift is preserved as its ``repr``) — an invalid output
-    is recorded, never reconstructed.
+    is recorded, never reconstructed. ``unavailable_inputs`` is a fact about
+    the run that produced the text, not about the text: the optional data
+    categories whose tool call ended in the router's ``could not be
+    retrieved`` sentinel (sorted, each once; the empty tuple when the run
+    recorded none), collected by ``integration/unavailable_inputs`` and kept
+    on the ``ai_outputs`` row so a feed that stays down is counted across
+    cycles (#399). ``None`` is "not recorded", which is not the same as
+    "none": a cycle resumed from its stored text after a restart re-parses
+    the text and knows nothing of the run's inputs, and the guardrail's own
+    no-decision ran no engine at all — both must not read as every input
+    having answered, or a live streak would clear on a restart.
     """
 
     decision: TargetDecision
     is_valid: bool
     invalid_reason: str | None
     raw_response: str
+    unavailable_inputs: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
+        # Sorted and unique, so the row's text is one spelling per set and a
+        # reader comparing cycles compares sets, not orders; non-empty text,
+        # because the row joins with commas and an empty word would read as
+        # a category with no name.
+        if self.unavailable_inputs is not None:
+            if not isinstance(self.unavailable_inputs, tuple) or any(
+                not isinstance(c, str) or not c or "," in c for c in self.unavailable_inputs
+            ):
+                raise ValueError("unavailable_inputs must be a tuple of category names")
+            if list(self.unavailable_inputs) != sorted(set(self.unavailable_inputs)):
+                raise ValueError("unavailable_inputs must be sorted and without repeats")
         # ``is_valid`` and ``invalid_reason`` are two halves of one fact: a valid
         # parse names no reason, an invalid one must. ``evaluate()`` trusts
         # ``is_valid`` before re-checking the decision, so a contradictory pair

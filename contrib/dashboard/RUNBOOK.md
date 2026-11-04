@@ -53,7 +53,7 @@ cp contrib/dashboard/configs/exporter.example.yaml contrib/dashboard/configs/exp
 
 - `run_id`：hyperliquid 的 `paper-BTC-<N>` 要是**現在這段**的 run（換段時要改，§5.1）；carry 腿 `carry-ETH-1`；uniswap 三個 run id；
 - uniswap 三個 `config`＝`/home/trader/uniswap-paper/contrib/uniswap_v3/configs/paper-*.local.yaml`；
-- `python`／`cwd`：hl 的線用 hl checkout 的 venv，uniswap 的線用 uniswap checkout 的 venv（兩個 checkout 版本分開升級，各用自己的）；
+- `python`／`cwd`：hl 的線用 hl checkout 的 venv，uniswap 的線用 uniswap checkout 的 venv（兩個 checkout 版本分開升級，各用自己的）。exporter 自己也跑在 hl checkout 上，所以 hl 的線與 exporter 是同一次 `deploy/paper` push 一起升（部署期間 timer 停著）；exporter 讀的文件版本是**精確比對**（`readers.KNOWN_SCHEMA_VERSIONS`），兩邊任一方新、另一方舊都會 `read_failed`，而且那段期間那條線的其他規則（safe_mode、cycle_overdue、guardrail…）都不會被評——手動 reset checkout 卻沒重啟 daemon（store 還是舊版）時會看到這個，重啟就好；
 - 門檻（`thresholds:`）與摘要時間（`digest_utc`）照 2026-10-14 拍板的預設，不用動。
 
 先試跑、不寫不寄：
@@ -133,6 +133,7 @@ systemctl list-timers dashboard-exporter.timer --no-pager
 | `<hl>:export_failed`／`export_stale` | export 失敗或 5 小時沒更新 | hyperliquid RUNBOOK §5（日常監控）；`REPLAY_UNVERIFIED` 看 `/paper-status` |
 | `<hl>:safe_mode` | run 鎖在 safe mode | hyperliquid RUNBOOK §7（`recoverable` 自動解、`manual` 要人） |
 | `<hl>:guardrail_unknown` | 趨勢護欄連續 6 個有判決的 cycle 讀到 `unknown`（不開新倉、規則也平不了倉） | 看伺服器上 producer 的 `guardrail-signal` 與 `fetch` 有沒有在跑；hyperliquid RUNBOOK §4 的趨勢護欄段 |
+| `<hl>:input_unavailable:<category>` | 那個 optional 資料類別（`news_data`／`macro_data`／`crypto_etf_flows`…）連續 6 個有判決的 cycle 都以 `DATA_UNAVAILABLE … could not be retrieved` sentinel 收尾；一類一盞燈（第二個來源在第一個還掛著時掛掉，會另外亮）；連續數以這條線的 `recent` 為上限，`N+` 表示整個視窗都是、真實長度可能更長；時好時壞的來源不會亮（與 `guardrail_unknown` 同理）。analyst 把那段寫成缺席、cycle 照常決策，所以沒別的地方會說某個來源已經掛一週（#399） | journald 找 `Optional <category> unavailable` 那行看是哪個 vendor、什麼錯；伺服器 IP 被擋（#395 的 StockTwits）或 vendor 改版都是這個形狀 |
 | `<hl>:event:kill_switch_cancel_triggered@...`、`emergency_kill_switch_triggered@...`、`safe_mode_entered@...` 等 | kill switch／safe mode 新事件（refresh 不算） | 看 journal 那個時間點 |
 | `<uni>:behind` | 日界線過了 3.5 小時還沒 decide（三個 visit 時段都過了） | visit log；手動 `paper-visit.sh` 一次 |
 | `<uni>:clock_ahead` | store 的 clock 跑在時鐘前面（不可能狀態） | 主機時鐘或 store 有問題，先 `validate` |

@@ -992,6 +992,36 @@ def test_the_only_optional_getter_from_a_module_raising_the_indicator_error_is_t
 
 
 @pytest.mark.unit
+def test_the_optional_sentinel_warning_carries_the_category_as_a_field(caplog):
+    # The perp daemon counts which optional inputs a run went without off
+    # this WARNING (#399): the category rides as a record attribute, so the
+    # count keys on a field and not on the line's words.
+    set_config({"data_vendors": {"crypto_sentiment": "alternative_me"}})
+    with (
+        mock.patch.dict(
+            interface.VENDOR_METHODS,
+            {"get_fear_greed": {"alternative_me": _raises(VendorUnavailableError("down"))}},
+            clear=False,
+        ),
+        caplog.at_level(logging.WARNING, logger="tradingagents.dataflows.interface"),
+    ):
+        out = interface.route_to_vendor("get_fear_greed", "2026-06-05")
+    assert out.startswith("DATA_UNAVAILABLE: optional crypto_sentiment")
+    [record] = [r for r in caplog.records if r.getMessage().startswith("Optional ")]
+    assert getattr(record, interface.UNAVAILABLE_CATEGORY_ATTR) == "crypto_sentiment"
+
+
+@pytest.mark.unit
+def test_every_optional_category_name_can_be_joined_with_commas():
+    # The perp store keeps a run's unavailable categories as one comma-joined
+    # cell (#399) and the decision dataclass refuses a name carrying a comma
+    # — after the engine run was paid for. Held here, so a new category name
+    # fails in CI rather than on the first cycle it ends in the sentinel.
+    for category in interface.OPTIONAL_CATEGORIES:
+        assert category and "," not in category and category == category.strip(), category
+
+
+@pytest.mark.unit
 class OptionalSentinelTests(unittest.TestCase):
     """What an optional category's failure may write into its sentinel.
 

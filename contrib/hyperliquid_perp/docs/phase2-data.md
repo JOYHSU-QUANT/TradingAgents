@@ -314,6 +314,7 @@ AI input
 | `order_created` | 本 output 是否產生 rebalance / flip order |
 | `no_order_reason` | `maintain_current` / `within_deadband` / `rejected` / `invalid_fail_closed` / 其他；有 order 時留空 |
 | `guardrail_side` | **schema v14 起**：趨勢護欄在這一輪讀到的方向（`long` / `short` / `flat` / `unknown`）；護欄沒開＝NULL（v14 之前的列也是 NULL，靠 run 的 `risk.trend_guardrail` 分辨）。說的是護欄「看到什麼」，`risk_action`／`risk_reason` 說它「做了什麼」 |
+| `unavailable_inputs` | **schema v15 起**：產生這個判決的那次引擎執行（§3.1 ladder 重試時＝最後一個 try）裡，哪些 optional 資料類別的工具呼叫以 router 的 `DATA_UNAVAILABLE: optional <category> could not be retrieved` sentinel 收尾（排序後以逗號相接，例如 `macro_data,news_data`；那次執行沒有任何一類＝空字串）。NULL＝「沒記」而不是「沒有」：v15 之前的列、重啟後從存起來的回答文字 resume 的 cycle（重新 parse 文字，不知道那次執行的輸入）、護欄自己的 no-decision（沒跑引擎）；讀連續數的一律跳過 NULL、不當作「有答」，否則重啟一次就把掛掉的來源清零。只數這一條 lane：設定關掉（`disabled by configuration`）是選擇，`NO_DATA_AVAILABLE` 是 vendor 有回答。analyst 把那段寫成缺席、cycle 照常決策，這欄記的是「連續幾個 cycle 沒有」——`status --json` 每個 recent cycle 帶一列，dashboard 的 `input_unavailable` 規則數連續數（issue #399）。 |
 
 `maintain_current` 的 requested / approved target、target margin / notional 與 target side 皆為空，`delta_notional = 0`，並記錄 `order_created = false` 與 `no_order_reason = maintain_current`。`flat` 則有明確 target：`target_side = flat`、requested / approved margin = `0`、`target_signed_notional = 0`。
 

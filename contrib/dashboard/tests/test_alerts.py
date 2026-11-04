@@ -653,3 +653,71 @@ def test_the_guardrail_read_unknown_on_six_decided_cycles_is_a_condition(tmp_pat
     # A verdict that lost the key is a document of another shape, said so.
     del doc["cycles"]["recent"][0]["verdict"]["guardrail_side"]
     assert _keys(_tick(tmp_path, docs)) == ["hl-paper:rules_failed"]
+
+
+def test_an_optional_input_unavailable_on_six_decided_cycles_is_a_condition(tmp_path):
+    docs = quiet_documents()
+    doc = docs[HL_KEY]
+    template = doc["cycles"]["recent"][0]
+
+    def cycle(hours_ago, inputs, status="completed"):
+        item = json.loads(json.dumps(template))
+        item["scheduled_at"] = item["timestamp"] = hl_instant(NOW - timedelta(hours=hours_ago))
+        item["status"] = status
+        item["verdict"] = (
+            None
+            if status == "api_failed"
+            else dict(template["verdict"], unavailable_inputs=inputs)
+        )
+        return item
+
+    # Newest first: five cycles without news, an api_failed cycle and a
+    # pre-v15 verdict (``None``) in between — neither counts nor breaks —
+    # a sixth without news (and macro), then one where news answered.
+    doc["cycles"]["recent"] = [
+        *[cycle(4 * i + 1, ["news_data"]) for i in range(5)],
+        cycle(21, None, status="api_failed"),
+        cycle(25, None),
+        cycle(29, ["macro_data", "news_data"]),
+        cycle(33, ["macro_data"]),
+    ]
+    # The host's own conditions (disk, memory) are not this rule's: read
+    # the line's keys only, so a full disk on the machine running the suite
+    # does not stand in for the rule.
+    def line_keys(evaluation):
+        return [key for key in _keys(evaluation) if key.startswith("hl-paper:")]
+
+    def line_text(evaluation, category="news_data"):
+        [condition] = [
+            c for c in evaluation.conditions if c.key == f"hl-paper:input_unavailable:{category}"
+        ]
+        return condition.text
+
+    evaluation = _tick(tmp_path, docs)
+    # One key per category: macro was down only on the oldest two cycles.
+    assert line_keys(evaluation) == ["hl-paper:input_unavailable:news_data"]
+    assert "news_data has been unavailable on the newest 6 decided cycles" in line_text(evaluation)
+    assert "6+" not in line_text(evaluation)  # the streak ended inside the window
+    # Five is not yet a condition, and the newest cycle answering clears it.
+    doc["cycles"]["recent"] = doc["cycles"]["recent"][1:]
+    assert line_keys(_tick(tmp_path, docs)) == []
+    doc["cycles"]["recent"] = [cycle(1, []), *doc["cycles"]["recent"]]
+    assert line_keys(_tick(tmp_path, docs)) == []
+    # Two categories down together are two conditions, and a streak that
+    # fills every recorded cycle is marked as possibly longer than the window.
+    doc["cycles"]["recent"] = [cycle(4 * i + 1, ["macro_data", "news_data"]) for i in range(7)]
+    evaluation = _tick(tmp_path, docs)
+    assert line_keys(evaluation) == [
+        "hl-paper:input_unavailable:macro_data",
+        "hl-paper:input_unavailable:news_data",
+    ]
+    assert "the newest 7+ decided cycles (every recorded cycle in the window" in line_text(
+        evaluation, "macro_data"
+    )
+    # A document from before store v15 (every verdict ``None``) never raises it.
+    doc["cycles"]["recent"] = [cycle(4 * i + 1, None) for i in range(8)]
+    assert line_keys(_tick(tmp_path, docs)) == []
+    # A verdict that lost the key is a document of another shape, said so.
+    doc["cycles"]["recent"] = [cycle(4 * i + 1, ["news_data"]) for i in range(8)]
+    del doc["cycles"]["recent"][0]["verdict"]["unavailable_inputs"]
+    assert line_keys(_tick(tmp_path, docs)) == ["hl-paper:rules_failed"]

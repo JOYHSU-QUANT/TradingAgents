@@ -28,7 +28,7 @@ from __future__ import annotations
 
 __all__ = ["LEASE_READABLE_SINCE", "MIGRATIONS", "SCHEMA_MIGRATIONS_DDL", "SCHEMA_VERSION"]
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 # The oldest schema an OWNING command (``paper``, ``live``, a real ``live-smoke``
 # run) can open AS-IS and consult the run lease in before it upgrades the store
@@ -806,4 +806,23 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
     # (``guardrail_unknown_streak``) — a state that leaves no other trace
     # when the model maintains or fails closed.
     14: ("ALTER TABLE ai_outputs ADD COLUMN guardrail_side TEXT",),
+    # v15: the optional data categories whose tool call ended in the router's
+    # ``DATA_UNAVAILABLE: optional <category> could not be retrieved``
+    # sentinel during the engine run that produced this verdict (#399) — the
+    # sorted category names joined with commas (``macro_data,news_data``),
+    # the empty string when the run recorded none, NULL where no run
+    # recorded a set: every row written before v15, a cycle resumed from its
+    # stored text after a restart (it re-parses the text and knows nothing
+    # of the run), and the guardrail's own no-decision, which ran no engine.
+    # NULL is "not recorded", never "none": a reader counting a streak skips
+    # it rather than letting a restart clear a feed that never came back.
+    # Only that one lane is counted — a category switched off by
+    # configuration ("disabled by configuration") is a choice, and the
+    # ``NO_DATA_AVAILABLE`` verdict is the vendor answering. The analyst
+    # already writes an absent section as absent and the cycle decides as
+    # usual; what no other column records is the streak — StockTwits
+    # answered the paper host a 403 on 227 cycles before anyone looked
+    # (#395) — which ``status --json`` carries per recent cycle and the
+    # dashboard's ``input_unavailable`` rule counts.
+    15: ("ALTER TABLE ai_outputs ADD COLUMN unavailable_inputs TEXT",),
 }

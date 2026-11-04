@@ -150,6 +150,7 @@ EXPORT_SPECS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
             "order_created",
             "no_order_reason",
             "guardrail_side",
+            "unavailable_inputs",
         ),
         (),
     ),

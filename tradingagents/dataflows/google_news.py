@@ -20,7 +20,8 @@ bound the search to the window (measured 2026-11-04: a week in October
 answered that week's headlines), so a backtest's past as-of date is served
 from the archive rather than from "the last N days", which is what
 ``when:Nd`` would have meant. Google reads the operator dates as US Pacific
-calendar days (measured: ``before:D`` answered items up to D 07:00 UTC), so
+calendar days (measured: ``before:D`` answered items up to D 07:00 UTC
+in Pacific daylight time, 08:00 in standard time), so
 the request is padded a day on each side and ``date_window.in_window`` then
 holds every item to ``[curr_date - N, curr_date]`` in UTC on the client
 side, as the yfinance path does (#1007): the filter, not the operator, is
@@ -41,9 +42,14 @@ refusing this client and a body that is not an RSS feed are the outage type
 rate-limit type the router latches, and any other answer about the request
 stays the module type. A feed that answers no items is not a failure — it is
 what Google serves for no matches — so the quiet outcomes are logged
-instead: one INFO line per call with what each query returned, and a WARNING
-when a feed carried items that none of which had a title (what a changed
-feed layout looks like) or when no query returned anything.
+instead: one INFO line per call with what each query returned (fetched,
+undated, in window), and a WARNING when a feed carried items without a
+title or without a readable date (what a changed feed layout looks like),
+when some queries answered nothing while others did, or when items were
+fetched and none fell inside the window. Every query answering an empty
+feed is the one quiet outcome that IS a failure: five broad searches over a
+week do not all come back empty when Google is serving, so that ends as the
+outage type rather than as a "quiet week" the analyst would read as fact.
 """
 
 from __future__ import annotations
@@ -68,7 +74,7 @@ from .utils import (
     sanitize_untrusted,
     wiring_gap,
 )
-from .vendor_common import window_start_dt
+from .vendor_common import MIN_WINDOW_YEAR, window_start_dt
 
 logger = logging.getLogger(__name__)
 
@@ -215,12 +221,27 @@ def _parse_feed(body: bytes) -> list[dict]:
                 "pub_date": _published(item.findtext("pubDate")),
             }
         )
-    if items and not rows:
+    # Each skipped or undated item is one the reader never sees and the
+    # window cannot judge; any of them is worth a line, all of them is what
+    # a changed feed layout looks like.
+    untitled = len(items) - len(rows)
+    undated = sum(row["pub_date"] is None for row in rows)
+    if untitled:
         logger.warning(
-            "%s feed carried %d items and none had a readable title; the feed layout "
-            "may have changed",
+            "%s feed carried %d items; %d had no readable title and were skipped%s",
             VENDOR,
             len(items),
+            untitled,
+            " (every item; the feed layout may have changed)" if not rows else "",
+        )
+    if undated:
+        logger.warning(
+            "%s feed carried %d items; %d had no readable date and are kept only "
+            "while the window reaches today%s",
+            VENDOR,
+            len(items),
+            undated,
+            " (every item; the feed layout may have changed)" if undated == len(rows) else "",
         )
     return rows
 
@@ -300,9 +321,10 @@ def _operator_days(start_dt: datetime, curr_dt: datetime) -> tuple[str, str]:
     ``before:`` is read against the day it names at Pacific midnight, so the
     day after the as-of day would cut the as-of day's last Pacific evening
     off and the day before the start would miss its first UTC morning; one
-    day of padding each side covers both, and ``in_window`` trims it. An
-    as-of day the calendar cannot pad past is refused as this vendor's own
-    type, as ``window_start_dt`` refuses the other side.
+    day of padding each side covers both, and ``in_window`` trims it. A
+    window the calendar cannot pad — an as-of day at its end, a start day
+    at the year-1000 floor ``window_start_dt`` keeps (glibc writes a
+    three-digit year below it) — is refused as this vendor's own type.
     """
     try:
         before = curr_dt + 2 * _OPERATOR_PAD
@@ -311,7 +333,13 @@ def _operator_days(start_dt: datetime, curr_dt: datetime) -> tuple[str, str]:
             f"curr_date {curr_dt:%Y-%m-%d} is too late for the feed window: the day "
             "after it cannot be written"
         ) from e
-    return (start_dt - _OPERATOR_PAD).strftime("%Y-%m-%d"), before.strftime("%Y-%m-%d")
+    after = start_dt - _OPERATOR_PAD
+    if after.year < MIN_WINDOW_YEAR:
+        raise GoogleNewsError(
+            f"the window opening {start_dt:%Y-%m-%d} is too early for the feed: the day "
+            f"before it is before the year {MIN_WINDOW_YEAR}"
+        )
+    return after.strftime("%Y-%m-%d"), before.strftime("%Y-%m-%d")
 
 
 def get_global_news(
@@ -367,7 +395,7 @@ def get_global_news(
     per_query = [
         [row for row in rows if in_window(row["pub_date"], start_dt, curr_dt)] for rows in fetched
     ]
-    # The quiet outcomes, said once per call: a query that answers nothing
+    # The quiet outcomes, said once per call: one query answering nothing
     # is not a failure (Google serves an empty channel for no matches), but
     # an operator reading "no news" for a week that had headlines needs the
     # per-query counts to tell a broken query from a quiet one.
@@ -376,22 +404,44 @@ def get_global_news(
         start_date,
         curr_date,
         "; ".join(
-            f"{query!r}: {len(rows)} fetched, {len(kept)} in window"
+            f"{query!r}: {len(rows)} fetched, "
+            f"{sum(row['pub_date'] is None for row in rows)} undated, {len(kept)} in window"
             for query, rows, kept in zip(queries, fetched, per_query, strict=True)
         ),
     )
     if not any(fetched):
+        # Every search empty is not a quiet week: the configured searches are
+        # broad, and Google answers a hundred items for each when it serves
+        # this client. The outage type, so the optional category ends in the
+        # sentinel the analyst reads as "input missing", not as a fact.
+        raise GoogleNewsUnavailableError(
+            f"{VENDOR} answered an empty feed for every one of the {len(queries)} "
+            f"queries between {start_date} and {curr_date}"
+        )
+    empty = [query for query, rows in zip(queries, fetched, strict=True) if not rows]
+    if empty:
         logger.warning(
-            "%s answered no items for any of the %d queries between %s and %s",
+            "%s answered no items for %d of %d queries between %s and %s: %s",
             VENDOR,
+            len(empty),
+            len(queries),
+            start_date,
+            curr_date,
+            ", ".join(repr(query) for query in empty),
+        )
+    chosen = _interleave(per_query, limit)
+    # Every candidate fell outside the window: say so rather than return an
+    # empty-bodied report (#993 at the yfinance path) — and say it in the
+    # log too, because in a backtest that is what a feed whose dates no
+    # longer parse, or whose operators Google stopped honouring, looks like.
+    if not chosen:
+        logger.warning(
+            "%s answered %d items for %d queries and none fell between %s and %s",
+            VENDOR,
+            sum(len(rows) for rows in fetched),
             len(queries),
             start_date,
             curr_date,
         )
-        return f"No global news found for {curr_date}"
-    chosen = _interleave(per_query, limit)
-    # Every candidate fell outside the window: say so rather than return an
-    # empty-bodied report (#993 at the yfinance path).
-    if not chosen:
         return f"No global news found between {start_date} and {curr_date}"
     return f"## Global Market News, from {start_date} to {curr_date}:\n\n{_render(chosen)}"

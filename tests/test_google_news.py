@@ -79,7 +79,23 @@ class TestParse:
         with caplog.at_level("WARNING", logger="tradingagents.dataflows.google_news"):
             rows = google_news._parse_feed(_feed(_item(""), _item("   ")))
         assert rows == []
-        assert "2 items and none had a readable title" in caplog.text
+        assert "2 items; 2 had no readable title" in caplog.text
+        assert "every item" in caplog.text
+
+    def test_a_partly_untitled_or_undated_feed_is_warned_about_too(self, caplog):
+        with caplog.at_level("WARNING", logger="tradingagents.dataflows.google_news"):
+            rows = google_news._parse_feed(
+                _feed(_item("Titled"), _item(""), _item("Undated", when=None))
+            )
+        assert [row["title"] for row in rows] == ["Titled", "Undated"]
+        assert "3 items; 1 had no readable title" in caplog.text
+        assert "3 items; 1 had no readable date" in caplog.text
+        assert "every item" not in caplog.text
+
+    def test_a_feed_whose_items_are_all_undated_is_warned_about(self, caplog):
+        with caplog.at_level("WARNING", logger="tradingagents.dataflows.google_news"):
+            google_news._parse_feed(_feed(_item("A", when=None), _item("B", when="junk")))
+        assert "2 had no readable date" in caplog.text and "every item" in caplog.text
 
     def test_an_empty_feed_is_not_warned_about_by_the_parser(self, caplog):
         with caplog.at_level("WARNING", logger="tradingagents.dataflows.google_news"):
@@ -267,27 +283,46 @@ class TestGetGlobalNews:
         past = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d")
         assert google_news.get_global_news(past).startswith("No global news found between")
 
-    def test_empty_feeds_say_so_for_the_day_and_in_the_log(self, monkeypatch, caplog):
+    def test_every_feed_empty_is_the_outage_type(self, monkeypatch, caplog):
+        # Five broad searches over a week do not all come back empty when
+        # Google is serving: that is a blocked or throttled client, not a
+        # quiet week, and the analyst must read "input missing", not a fact.
         set_config({"global_news_queries": ["a", "b"]})
         _serve(monkeypatch, default=_feed())
-        with caplog.at_level("INFO", logger="tradingagents.dataflows.google_news"):
-            assert google_news.get_global_news(GOOD) == f"No global news found for {GOOD}"
-        assert "'a': 0 fetched, 0 in window; 'b': 0 fetched, 0 in window" in caplog.text
-        assert "answered no items for any of the 2 queries" in caplog.text
+        with (
+            caplog.at_level("INFO", logger="tradingagents.dataflows.google_news"),
+            pytest.raises(google_news.GoogleNewsUnavailableError, match="every one of the 2"),
+        ):
+            google_news.get_global_news(GOOD)
+        assert "'a': 0 fetched, 0 undated, 0 in window; 'b': 0 fetched" in caplog.text
 
-    def test_each_query_s_counts_are_logged(self, monkeypatch, caplog):
+    def test_each_query_s_counts_and_the_empty_ones_are_logged(self, monkeypatch, caplog):
         set_config({"global_news_queries": ["a", "b"], "global_news_lookback_days": 2})
         _serve(
             monkeypatch,
             {
-                "a": _feed(_item("In"), _item("Old", when="Sun, 25 Oct 2026 12:00:00 GMT")),
+                "a": _feed(
+                    _item("In"),
+                    _item("Old", when="Sun, 25 Oct 2026 12:00:00 GMT"),
+                    _item("Undated", when=None),
+                ),
                 "b": _feed(),
             },
         )
         with caplog.at_level("INFO", logger="tradingagents.dataflows.google_news"):
-            google_news.get_global_news("2026-11-02")
-        assert "'a': 2 fetched, 1 in window; 'b': 0 fetched, 0 in window" in caplog.text
-        assert "answered no items" not in caplog.text
+            out = google_news.get_global_news("2026-11-02")
+        assert "'a': 3 fetched, 1 undated, 1 in window; 'b': 0 fetched" in caplog.text
+        assert "no items for 1 of 2 queries between 2026-10-31 and 2026-11-02: 'b'" in caplog.text
+        assert "none fell between" not in caplog.text
+        assert "### In " in out
+
+    def test_fetched_but_nothing_in_the_window_is_warned_about(self, monkeypatch, caplog):
+        set_config({"global_news_queries": ["a"], "global_news_lookback_days": 2})
+        _serve(monkeypatch, {"a": _feed(_item("Stale", when="Sun, 25 Oct 2026 12:00:00 GMT"))})
+        with caplog.at_level("WARNING", logger="tradingagents.dataflows.google_news"):
+            out = google_news.get_global_news(GOOD)
+        assert out == "No global news found between 2026-11-02 and 2026-11-04"
+        assert "answered 1 items for 1 queries and none fell between" in caplog.text
 
     def test_a_limit_below_the_query_count_is_warned_about(self, monkeypatch, caplog):
         set_config({"global_news_queries": ["a", "b", "c"], "global_news_article_limit": 2})
@@ -300,6 +335,14 @@ class TestGetGlobalNews:
         asked = _serve(monkeypatch, default=_feed(_item("T")))
         with pytest.raises(google_news.GoogleNewsError, match="too late"):
             google_news.get_global_news("9999-12-31")
+        assert asked == []
+
+    def test_a_start_day_at_the_year_floor_is_this_vendor_s_refusal(self, monkeypatch):
+        # ``window_start_dt`` keeps the start at year 1000 or later; the pad
+        # would write year 999, which glibc prints with three digits.
+        asked = _serve(monkeypatch, default=_feed(_item("T")))
+        with pytest.raises(google_news.GoogleNewsError, match="too early"):
+            google_news.get_global_news("1000-01-02", look_back_days=1)
         assert asked == []
 
     def test_the_call_s_own_window_and_limit_win_over_the_config(self, monkeypatch):
@@ -518,3 +561,9 @@ class TestRouting:
         out = interface.route_to_vendor("get_global_news", GOOD, None, None)
         assert out.startswith("DATA_UNAVAILABLE: optional news_data could not be retrieved")
         assert "google_news" in out and "Google News is down" in out
+
+    def test_every_feed_empty_ends_in_the_sentinel_not_a_quiet_week(self, monkeypatch):
+        _serve(monkeypatch, default=_feed())
+        out = interface.route_to_vendor("get_global_news", GOOD, None, None)
+        assert out.startswith("DATA_UNAVAILABLE: optional news_data could not be retrieved")
+        assert "empty feed for every one of the 5 queries" in out

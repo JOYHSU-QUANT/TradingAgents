@@ -39,12 +39,18 @@ Breaking changes within the 0.x line are called out explicitly.
   failure from a datacenter address, #395) and a non-feed body are the
   outage type (the optional `news_data` category then ends in its sentinel),
   a 429 the latched rate-limit type; an outage on any one query is the
-  verdict on the whole call. An empty feed is not a failure (Google serves
+  verdict on the whole call. One empty feed is not a failure (Google serves
   an empty channel for no matches), so the quiet outcomes are logged: one
-  INFO line per call with each query's fetched and in-window counts, and a
-  WARNING when a feed's items all lacked a title, when no query answered
-  anything, or when the limit is below the number of queries (round-robin
-  can then represent only the first queries). The tool is switched by `tool_vendors.get_global_news:
+  INFO line per call with each query's fetched, undated and in-window
+  counts, and a WARNING when a feed carried items without a title or a
+  readable date, when some queries answered nothing while others did, when
+  items were fetched and none fell inside the window, or when the limit is
+  below the number of queries (round-robin can then represent only the
+  first queries). Every query answering an empty feed is the one quiet
+  outcome treated as a failure — broad searches over a week do not all
+  come back empty when Google serves this client — so it ends as the
+  outage type and the sentinel, not as a "quiet week" the analyst would
+  read as fact. The tool is switched by `tool_vendors.get_global_news:
   "google_news"` in `DEFAULT_CONFIG` — the other two news tools stay on the
   category's yfinance — and per the `data_vendors` convention that default
   IS the Hyperliquid perp deployment's live value, so the first deploy
@@ -56,7 +62,8 @@ Breaking changes within the 0.x line are called out explicitly.
   perp's — and the deploy is its input-surface segmentation point as well.
   With `tool_vendors` no longer empty, `get_vendor` now lets a category's
   `"none"` outrank a tool-level entry, so `data_vendors.news_data: "none"`
-  still switches all three news tools off as the #393 entry promised. The perp's own searches
+  still switches all three news tools off as the #393 entry promised (through
+  the Python config; the perp bridge pipes neither table, as before). The perp's own searches
   are five groups with a transmission path to a BTC perp — crypto-market
   shocks, US crypto regulation, tariffs and trade, US rates and inflation,
   geopolitical war and sanctions (Google News search syntax: `OR`, quoted

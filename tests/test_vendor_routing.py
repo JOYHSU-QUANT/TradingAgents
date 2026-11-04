@@ -163,6 +163,15 @@ class VendorRoutingTests(unittest.TestCase):
         # The vendor leads the parenthesis; the words are sanitised (asterisks dropped).
         self.assertIn("(yfinance: YAHOO! FINANCE IS CURRENTLY DOWN!)", result)
 
+    def test_news_can_be_switched_off_like_any_optional_category(self):
+        # #393: ``"none"`` used to be refused for news (a core category could
+        # not be disabled); it now takes the optional categories' disabled
+        # lane, without a vendor call.
+        set_config({"data_vendors": {"news_data": "none"}})
+        with self._route_method("get_news", {"yfinance": _raises(AssertionError("called"))}):
+            result = interface.route_to_vendor("get_news", "BTC-USD", "2026-10-26", "2026-11-02")
+        self.assertTrue(result.startswith("DATA_UNAVAILABLE: optional news_data is disabled"))
+
     def test_alpha_vantage_indicator_rate_limit_reaches_the_fallback_vendor(self):
         # #60 end-to-end, through the REAL Alpha Vantage indicator getter: a 429
         # used to come back as an "Error retrieving ..." string, which the router

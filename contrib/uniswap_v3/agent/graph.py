@@ -114,16 +114,25 @@ _NEWS_UNAVAILABLE: Final = "Optional news_data unavailable"
 
 
 class _NewsWatch(logging.Handler):
-    """Collects the router's "news unavailable" lines emitted while attached."""
+    """Collects the router's "news unavailable" lines emitted while attached.
+
+    Each line is kept with the failure the router logged it for (the
+    record's last argument, the vendor's exception), so the judge can tell a
+    failure that may pass — an outage, a throttle — from one that will not:
+    a library bug, a key a deployment did not set.
+    """
 
     def __init__(self) -> None:
         super().__init__(level=logging.WARNING)
-        self.seen: list[str] = []
+        self.seen: list[tuple[str, BaseException | None]] = []
 
     def emit(self, record: logging.LogRecord) -> None:
         message = record.getMessage()
-        if message.startswith(_NEWS_UNAVAILABLE):
-            self.seen.append(message)
+        if not message.startswith(_NEWS_UNAVAILABLE):
+            return
+        args = record.args if isinstance(record.args, tuple) else ()
+        error = args[-1] if args and isinstance(args[-1], BaseException) else None
+        self.seen.append((message, error))
 
 
 # Provider statuses that say "later": an empty balance, a timeout, a rate limit.
@@ -344,9 +353,17 @@ class TradingAgentsJudge:
             router_logger.setLevel(level_before)
         if watch.seen:
             # The graph answered, on a news-less input; that answer is not
-            # recorded, as a raise from the router was not before #393.
-            raise JudgeUnavailable(
-                f"the judge did not answer on {ticker} (news unavailable: {watch.seen[0]})"
+            # recorded, as a raise from the router was not before #393 — and
+            # the failure is classed as the raise was: one that may pass says
+            # "later", one that will not says "for good".
+            message, error = watch.seen[0]
+            if error is None or _may_pass(error):
+                raise JudgeUnavailable(
+                    f"the judge did not answer on {ticker} (news unavailable: {message})"
+                )
+            raise AgentError(
+                f"the judge failed on {ticker} for good (news failed: {message}); asking "
+                f"again unchanged will not help"
             )
         return _answer(
             propagated, ticker, self._settings.selected_analysts, _time.monotonic() - started

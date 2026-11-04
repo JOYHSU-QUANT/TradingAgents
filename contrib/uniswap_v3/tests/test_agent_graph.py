@@ -101,8 +101,11 @@ class _StubGraph:
     built: list[_StubGraph] = []
     build_error: Exception | None = None
     answer_error: Exception | None = None
-    # Router log lines the graph "emits" while answering, as (category, words).
-    unavailable: list[tuple[str, str]] = []
+    # Router log lines the graph "emits" while answering, as (category, the
+    # vendor's exception) — the router logs the exception as the line's last argument.
+    unavailable: list[tuple[str, BaseException]] = []
+    # Categories the router would report as switched off (its INFO line).
+    disabled: list[str] = []
 
     def __init__(self, selected_analysts, debug, config):
         if _StubGraph.build_error is not None:
@@ -120,10 +123,14 @@ class _StubGraph:
         self.seen = self.resolve_instrument_context(ticker, asset_type)
         if _StubGraph.answer_error is not None:
             raise _StubGraph.answer_error
-        for category, words in _StubGraph.unavailable:
+        router_logger = logging.getLogger("tradingagents.dataflows.interface")
+        for category, error in _StubGraph.unavailable:
             # The router's optional-lane line, as tradingagents.dataflows.interface logs it.
-            logging.getLogger("tradingagents.dataflows.interface").warning(
-                "Optional %s unavailable for %s: %s", category, "get_news", words
+            router_logger.warning("Optional %s unavailable for %s: %s", category, "get_news", error)
+        for category in _StubGraph.disabled:
+            # The router's disabled-lane line: INFO, and not the watched prefix.
+            router_logger.info(
+                "Optional %s is disabled by configuration; skipping %s", category, "get_news"
             )
         return {"final_trade_decision": f"Decided on {trade_date}.\n\n**Rating**: Hold"}, "Hold"
 
@@ -131,7 +138,7 @@ class _StubGraph:
 @pytest.fixture
 def stub():
     _StubGraph.built, _StubGraph.build_error, _StubGraph.answer_error = [], None, None
-    _StubGraph.unavailable = []
+    _StubGraph.unavailable, _StubGraph.disabled = [], []
     return _StubGraph
 
 
@@ -190,7 +197,7 @@ def test_a_graph_that_answered_without_news_is_judge_unavailable_too(tmp_path, s
     # answer is not recorded — the judge says "later", as the router's raise
     # made it say before. Watched by the router's own log line, the one trace
     # both news paths leave.
-    stub.unavailable = [("news_data", "yfinance: YAHOO! FINANCE IS CURRENTLY DOWN!")]
+    stub.unavailable = [("news_data", ConnectionError("yfinance: YAHOO! FINANCE IS CURRENTLY DOWN!"))]
     judge = TradingAgentsJudge(AgentSettings(), tmp_path, graph_class=stub)
     with pytest.raises(
         JudgeUnavailable,
@@ -243,7 +250,10 @@ def test_the_news_watch_is_pinned_to_the_routers_real_logger_and_line():
         interface.logger.removeHandler(watch)
         set_config(before)
     assert out.startswith("DATA_UNAVAILABLE: optional news_data")
-    assert watch.seen and watch.seen[0].startswith(f"{_NEWS_UNAVAILABLE} for get_news")
+    (message, error), *_ = watch.seen
+    assert message.startswith(f"{_NEWS_UNAVAILABLE} for get_news")
+    # The record's last argument is the vendor's exception, which the judge classes.
+    assert isinstance(error, VendorUnavailableError)
 
 
 def test_the_news_watch_hears_the_line_even_when_the_routers_logger_is_silenced(tmp_path, stub):
@@ -252,7 +262,7 @@ def test_the_news_watch_hears_the_line_even_when_the_routers_logger_is_silenced(
     router_logger = logging.getLogger("tradingagents.dataflows.interface")
     router_logger.setLevel(logging.ERROR)
     try:
-        stub.unavailable = [("news_data", "yfinance: down")]
+        stub.unavailable = [("news_data", ConnectionError("yfinance: down"))]
         judge = TradingAgentsJudge(AgentSettings(), tmp_path, graph_class=stub)
         with pytest.raises(JudgeUnavailable, match="news unavailable"):
             judge.ask("ETH-USD", "2024-01-03", "context")
@@ -261,10 +271,33 @@ def test_the_news_watch_hears_the_line_even_when_the_routers_logger_is_silenced(
         router_logger.setLevel(logging.NOTSET)
 
 
+def test_a_news_failure_that_will_not_pass_fails_the_judge_for_good(tmp_path, stub):
+    # The failure behind the line is classed as the router's raise was: a
+    # library bug or an unset key is not "later" — asking again unchanged
+    # will not help, and the CLI's exit 1 tells the operator to fix it.
+    stub.unavailable = [("news_data", RuntimeError("pandas exploded"))]
+    judge = TradingAgentsJudge(AgentSettings(), tmp_path, graph_class=stub)
+    with pytest.raises(
+        AgentError,
+        match=r"failed on ETH-USD for good \(news failed: Optional news_data unavailable for "
+        r"get_news: pandas exploded\); asking again unchanged will not help",
+    ):
+        judge.ask("ETH-USD", "2024-01-03", "context")
+
+
 def test_another_optional_categorys_sentinel_still_lets_the_judge_answer(tmp_path, stub):
     # Only news is the judge's concern: macro, ETF flows and the rest were
     # optional before #393 and a verdict decided without them always stood.
-    stub.unavailable = [("macro_data", "fred: FRED 400: bad series")]
+    stub.unavailable = [("macro_data", ConnectionError("fred: FRED 400: bad series"))]
+    judge = TradingAgentsJudge(AgentSettings(), tmp_path, graph_class=stub)
+    assert judge.ask("ETH-USD", "2024-01-03", "context").rating is Rating.HOLD
+
+
+def test_a_news_feed_switched_off_on_purpose_still_lets_the_judge_answer(tmp_path, stub):
+    # ``news_data: "none"`` is a choice, not an outage: the router logs its
+    # disabled line at INFO, not the watched WARNING, and waiting for a feed
+    # nobody will turn on would wait forever.
+    stub.disabled = ["news_data"]
     judge = TradingAgentsJudge(AgentSettings(), tmp_path, graph_class=stub)
     assert judge.ask("ETH-USD", "2024-01-03", "context").rating is Rating.HOLD
 

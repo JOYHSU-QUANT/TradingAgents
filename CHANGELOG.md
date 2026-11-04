@@ -642,12 +642,18 @@ Breaking changes within the 0.x line are called out explicitly.
   `technical_indicators` (core, not loud) so what it pins is unchanged.
   The uniswap judge keeps its old semantics on purpose: a verdict is asked
   once per bar and never rewritten, so `TradingAgentsJudge.ask` watches the
-  router's `Optional news_data unavailable` line while the graph runs and
-  raises `JudgeUnavailable` if it fired — the bar is not recorded and a later
-  visit asks again, as the router's raise made it do before. (Watched by log
-  line because the sentinel reaches the model inside tool messages the graph
-  clears between analysts, and the sentiment analyst reads the same getter
-  outside any tool node.) A feed switched off on purpose
+  router's `Optional news_data unavailable` line while the graph runs and,
+  if it fired, classes the failure behind it as the router's raise was
+  classed before: one that may pass (an outage, a throttle, the network)
+  raises `JudgeUnavailable` — the bar is not recorded and a later visit asks
+  again — and one that will not (a vendor's library bug, a key a deployment
+  did not set) raises `AgentError`, the CLI's `failed:` and exit 1. (Watched
+  by log line because the sentinel reaches the model inside tool messages
+  the graph clears between analysts, and the sentiment analyst reads the
+  same getter outside any tool node; the record's last argument is the
+  vendor's exception.) Two costs of that shape: a down feed now costs a
+  full graph run per retry, up to three a day, where the raise used to stop
+  at the first analyst; and a feed switched off on purpose
   (`news_data: "none"`) logs a different, INFO line, so the judge answers on
   a news-less graph then — waiting would wait forever.
   Considered and declined: a third router tier that degrades only outages

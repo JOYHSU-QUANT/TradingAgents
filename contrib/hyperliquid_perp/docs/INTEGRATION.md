@@ -238,7 +238,7 @@ result = risk_gate.evaluate(
 | Trader | News Analyst |
 | Risk Manager | Technical Analyst |
 | Bull / Bear Researcher | Sentiment Analyst |
-| Portfolio Manager | Reflection |
+| Portfolio Manager | Reflection（#397 起 perp 不跑：memory log 關著，reflector 沒有 pending 條目可評） |
 
 ```python
 config["llm_provider"]    = "openrouter"

@@ -34,8 +34,10 @@ __all__ = ["REPORT_KEYS", "reports_record", "write_decision_reports"]
 #: the risk debate, and the decision text the parse seam reads. An allowlist,
 #: not ``final_state`` minus a denylist, so the replay format has a declared
 #: key set and ``messages`` (LangChain objects) stays out. ``past_context``
-#: (the upstream memory log's injection) is left out too: the contrib does
-#: not enable that log, and the key is not something an agent wrote this cycle.
+#: (the upstream memory log's injection) is left out too: the contrib switches
+#: that log off (``engine_bridge._build_engine_config`` sets ``memory_log_path``
+#: to ``None``, #397 — before that the engine default kept it running), so the
+#: key is always empty, and it is not something an agent wrote this cycle.
 #: These spell upstream ``AgentState``'s field names; ``tests/test_upstream_names.py``
 #: pins them to it so a rename there fails CI instead of quietly recording
 #: ``null`` forever. The last one is the parse seam's own key, shared.

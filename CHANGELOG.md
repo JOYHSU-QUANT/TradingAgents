@@ -683,6 +683,33 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **The perp daemon switches the engine's memory log off** (#397). Upstream's
+  `TradingMemoryLog` is on by default (`memory_log_path` under the home
+  directory) and the perp bridge never set it, so every paper cycle since
+  2026-07-11 ran a pass before the graph — a yfinance return fetch and a
+  reflector LLM call per pending entry, recorded by `completion_usage` with
+  no node — and injected "Lessons from prior decisions" into the Portfolio
+  Manager's prompt, while `integration/decision_reports.py` said the
+  contrib does not enable the log and the replay lane re-runs the lower
+  graph with no `past_context`. The server's log (1.2 MB, 175 entries,
+  checked 2026-11-04) graded each lesson on the ticker's own return over
+  the holding days: the Grayscale ETF's until #392. `_build_engine_config`
+  now sets `memory_log_path` to `None`, as the uniswap judge does: nothing
+  is read or written, the pre-graph pass makes no call, and the replay's
+  empty `past_context` is what the daemon had. A behaviour change on the
+  deployed box, so it ships with a new run-id (RUNBOOK §4) — the same
+  paper-BTC-10 deploy as #394, #396 and #398 — and, because the Portfolio
+  Manager's prompt loses a section the model read, `PROMPT_VERSION` is
+  bumped to `phase2-target-v8` (the format digest is still v5's), the v7
+  precedent for a change outside the perp-rendered text; the bridge says
+  `engine memory log: off` at startup beside the cap line, so an operator
+  who set `TRADINGAGENTS_MEMORY_LOG_PATH` sees why no file appears. The
+  file on the server is left where it is (a read-only copy was taken off
+  the box on 2026-11-04, since it is the only record of what the PM read as
+  `past_context` before v8); its pending `BTC` entries will never resolve,
+  which is harmless. The option the issue listed instead — keep the log and record
+  `past_context` in the reports sidecar — was not taken: the lesson text
+  is graded on an instrument the account never held.
 - **A news vendor's outage no longer aborts the decision cycle: `news_data`
   is an optional category** (#393). On 2026-11-02 Yahoo's ticker-news
   endpoint went down (`*** YAHOO! FINANCE IS CURRENTLY DOWN! ***`, while

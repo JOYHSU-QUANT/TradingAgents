@@ -1181,6 +1181,31 @@ def test_load_config_accepts_and_normalises_the_global_news_knobs(tmp_path):
     assert eng["global_news_lookback_days"] == 3
 
 
+def test_the_bridge_switches_the_memory_log_off(tmp_path, monkeypatch):
+    # The engine default is a path under the home directory and the log is
+    # live with any path: a perp run would resolve pending entries with a
+    # reflector call before every graph and inject ``past_context`` into the
+    # PM prompt (#397). ``None`` is the log's own no-op, measured here on the
+    # log class itself rather than on the key alone: nothing is written for
+    # a stored decision and nothing is read back.
+    from contrib.hyperliquid_perp import engine_bridge
+    from tradingagents.agents.utils.memory import TradingMemoryLog
+    from tradingagents.default_config import DEFAULT_CONFIG
+
+    # The engine default is resolved at import, so the home directory cannot
+    # be moved under the test; the default is pointed at a file the test
+    # owns instead, and a regression that left it in place would create it.
+    would_be = tmp_path / "memory" / "trading_memory.md"
+    monkeypatch.setitem(DEFAULT_CONFIG, "memory_log_path", str(would_be))
+    engine_config, _ = engine_bridge._build_engine_config({"engine": {}})
+    assert engine_config["memory_log_path"] is None
+    log = TradingMemoryLog(engine_config)
+    log.store_decision("BTC-USD", "2026-11-04", "Hold")
+    assert log.get_pending_entries() == []
+    assert log.get_past_context("BTC-USD") == ""
+    assert not would_be.exists() and not would_be.parent.exists()
+
+
 def test_the_bridge_searches_the_perp_groups_when_the_queries_are_omitted():
     # The engine's own default is the stock pipeline's macro list; a perp run
     # that sets nothing searches the five crypto-relevant groups instead,

@@ -605,6 +605,40 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
         eng_cfg["quick_think_llm"] or engine_config["quick_think_llm"]
     )
     engine_config["backend_url"] = None
+    # The upstream ``TradingMemoryLog`` is OFF for perp runs (#397), as it is
+    # for the uniswap judge. The engine default is a path
+    # (``~/.tradingagents/memory/trading_memory.md``), and with a path the
+    # engine runs a pass BEFORE every graph — ``_resolve_pending_entries``:
+    # a yfinance return fetch per pending entry and one reflector LLM call
+    # each, ``completion_usage`` records them with ``node=None`` — and
+    # injects ``past_context`` ("Lessons from prior decisions") into the
+    # Portfolio Manager's prompt. Neither belongs to this deployment: the
+    # outcome the reflector grades is the ticker's return over the entry's
+    # holding days (the ETF's, from 2026-07-11 to the #392 fix), not the
+    # account's, the replay lane re-runs the lower graph with no
+    # ``past_context`` (``contrib/replay/lower_graph.py``) so a daemon that
+    # has one is a parity gap the reports sidecar cannot close, and the log
+    # is keyed by ticker, so the #392 spelling change would have fed the
+    # ETF-era lessons on as "cross-ticker" ones. An empty path is the log's
+    # own no-op (``TradingMemoryLog.__init__``), so nothing is written or
+    # read. A behaviour change on the deployed box — the pass stops running,
+    # the PM prompt loses a section — so it ships with a new run-id and a
+    # ``PROMPT_VERSION`` bump (v8; RUNBOOK §4). ``None`` and ``""`` are both
+    # the log's off switch (``if path:``); ``None`` is the uniswap judge's
+    # spelling and reads as "no path" rather than "a blank one". Hard off,
+    # not an ``engine.memory_log_path`` YAML knob: a knob would let a YAML
+    # edit change what the model reads with no bump and no deploy (RUNBOOK
+    # §4's hazard), and the log is wrong for a perp at any path — its
+    # lessons are graded on the ticker's return, never the account's. Said
+    # at startup like the cap and its siblings: an operator who set
+    # ``TRADINGAGENTS_MEMORY_LOG_PATH`` on the host would otherwise find no
+    # file and no line saying why.
+    logger.info(
+        "engine memory log: off (the perp bridge sets memory_log_path to None; "
+        "the engine default %r is not used)",
+        engine_config["memory_log_path"],
+    )
+    engine_config["memory_log_path"] = None
     # The global news tool's knobs (#394): the loader has already held the
     # queries to a non-empty list of strings and the two counts to positive
     # integers. Omitted, the queries are the perp's own groups above (not

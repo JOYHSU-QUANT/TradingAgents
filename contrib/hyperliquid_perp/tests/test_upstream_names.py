@@ -37,11 +37,14 @@ def test_the_engine_config_keys_the_contrib_writes_exist_upstream():
     # A write is never a KeyError, so a renamed key would leave the engine on
     # its own default (structured_output back ON — the 2026-07-27 outage shape;
     # deep/quick_think_llm read the copy back only as an ``or`` fallback, so
-    # with a model in YAML they never raise either). Of the eight keys it
+    # with a model in YAML they never raise either). Of the twelve keys it
     # writes, one is left out on purpose: ``max_tokens`` is refused by name
     # when absent (engine_bridge, EngineConfigError), so that rename is loud.
-    # This proves the key still EXISTS upstream, not that upstream still
-    # reads it — the cheap half of the guarantee.
+    # ``memory_log_path`` (#397) is the one whose rename would be worst: the
+    # write would land on a dead key and the engine's own default would
+    # switch the memory log back ON, silently. This proves the key still
+    # EXISTS upstream, not that upstream still reads it — the cheap half of
+    # the guarantee.
     written = {
         "llm_provider",
         "deep_think_llm",
@@ -50,6 +53,10 @@ def test_the_engine_config_keys_the_contrib_writes_exist_upstream():
         "structured_output",
         "llm_max_retries",
         "temperature",
+        "memory_log_path",
+        "global_news_queries",
+        "global_news_article_limit",
+        "global_news_lookback_days",
     }
     missing = written - set(DEFAULT_CONFIG)
     assert not missing, f"no longer DEFAULT_CONFIG keys: {sorted(missing)}"

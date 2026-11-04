@@ -150,14 +150,16 @@ pending funding、accounting replay 驗證、gap SL 檢查；若這次重啟真�
 行為，所以調參 code 的部署必須與新 run-id 同批上線，不要讓舊段跨過部署點。
 （prompt v5 起 `format_fingerprint` 也不再跟著門檻走，所以門檻的 code 預設值改動在
 `ai_inputs`、drift 戳、`prompt_regime:` 三處**都看不到**——只剩 run-id 這一道。）
-prompt 的 context／format 契約改形狀**或改措辭**時（v5 就是純措辭的改版），另要 bump
+**模型讀到的 prompt 樣板**改了——context／format 契約改形狀**或改措辭**（v5 就是純措辭的改版）、
+加一段或少一段、身分行的代號拼法——而 `context_shape` 與 `format_fingerprint` 都看不到時，另要 bump
 `common/prompt_regime.py` 的 `PROMPT_VERSION`（issue #197 起住這裡，與 `prompt_regime:` 行的渲染同檔），
-讓 `ai_inputs.prompt_version` 在資料裡標出改版點。
+讓 `ai_inputs.prompt_version` 在資料裡標出改版點。只有**內容**變（換一個 vendor、翻開一個 ships-OFF
+的來源、工具回答的字變了）不 bump——那是 run-id 的事（見下）。
 **凡是跨越量測邊界的部署都要 bump，回滾也算**：回滾到舊 prompt 不算「改 shape」，
 但沿用已退役的舊值會讓 `GROUP BY prompt_version` 把 v3 之前與回滾之後併成同一桶，
 正好污染要拿來比的基線。退役過的值一律不得重用（回滾就給**下一個從未用過的值**，
 內容等不等於舊版無所謂；`v4` 已被 2026-08-27 的 `Position:` 段用掉、`v5` 已被 2026-09-01
-的「格式段不印門檻數字」用掉、`v6` 已被 2026-09-22 的「`Last fill:` 行年齡單位」（issue #288）用掉、`v7` 已被 2026-11-03 的「graph 拿到 `BTC-USD` 而非裸 coin」（issue #392；第一次為 perp 渲染文字**以外**的輸入面改動 bump——analyst 的整個輸入隨之改變）用掉、`v8` 已被 2026-11-04 的「perp 關掉引擎的 memory log」（issue #397；PM prompt 少掉上游注入的「Lessons from prior decisions」段，與 v7 同理）用掉，都不是回滾備用值）。另注意 `decision_format_instructions` 的文字（`domains/perp/target_decision.py`）與這個常數
+的「格式段不印門檻數字」用掉、`v6` 已被 2026-09-22 的「`Last fill:` 行年齡單位」（issue #288）用掉、`v7` 已被 2026-11-03 的「graph 拿到 `BTC-USD` 而非裸 coin」（issue #392；perp 渲染文字**以外**的樣板改動——身分行的代號拼法）用掉、`v8` 已被 2026-11-04 的「perp 關掉引擎的 memory log」（issue #397；PM prompt 少掉上游注入的「Lessons from prior decisions」段）用掉，都不是回滾備用值）。另注意 `decision_format_instructions` 的文字（`domains/perp/target_decision.py`）與這個常數
 （`common/prompt_regime.py`）不在同一個模組，也沒有任何東西讓常數跟著文字動——所以有一個測試把
 版本戳釘在渲染出來的區塊指紋上：改了 prompt 文字卻忘了改戳就會紅。
 
@@ -169,11 +171,9 @@ prompt 的 context／format 契約改形狀**或改措辭**時（v5 就是純措
 部署點的會是最後成交停在 2026-07-16、此後零成交、策略價值歸零的 `paper-BTC`。
 
 **這條例外附一個硬規則：量測窗內不得夾帶其他輸入面變更。** 切段鍵是
-`prompt_version`，而它只在 context／format **契約改形狀或改措辭**時才 bump（例外＝v7 與 v8：
-v7 是 graph 拿到的代號拼法改變、analyst 的整個輸入跟著變（issue #392），v8 是 PM prompt 少掉上游 memory log
-注入的一段（issue #397）——都是 perp 渲染文字以外、模型讀到的東西變了；都是一次部署、開了新 run-id，
-不是量測窗內的 A/B）；輸入面的**內容**
-變了（例如把某個 ships-OFF 的 vendor 翻成啟用）不改形狀、不會 bump，`input_payload_hash`
+`prompt_version`，而它只在**模型讀到的 prompt 樣板**變了時才 bump（上面那條規則；v7 的身分行拼法、
+v8 的 PM prompt 少一段都是樣板改動，各開了新 run-id，不是量測窗內的 A/B）；輸入面的**內容**
+變了（例如把某個 ships-OFF 的 vendor 翻成啟用，或 #394 那樣換掉一個工具背後的 vendor）不改樣板、不會 bump，`input_payload_hash`
 每個 cycle 本來就不同也切不了段——於是 after 段的前半後半是兩個不同的輸入制度，而資料
 裡完全看不出來。所以跨過 v3 邊界之後、量測窗結束之前，`deploy/paper` **只准**帶 prompt
 變更；若不得不夾帶（含 PR #21 macro／treasuries 那種需要第二個 cutover commit 才生效的

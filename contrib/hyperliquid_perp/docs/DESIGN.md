@@ -334,7 +334,7 @@ model reads context rather than re-deriving it.
 | `urgency` | enum | `low` / `medium` / `high` | Lets OrderPlanner choose limit vs market. |
 | `rationale` | string | 2–4 sentences explaining the decision. | Required audit-log field for post-mortems. |
 | `key_risks` | string[] | 1–3 main risks. | Gives the Risk Manager something concrete to review. |
-| `market_regime` | enum | `trending` / `ranging` / `volatile` | Used by the Reflection agent to judge whether the strategy fit the regime. |
+| `market_regime` | enum | `trending` / `ranging` / `volatile` | Makes the model's regime read explicit for the record. (It was meant for the Reflection agent, which never read it; since #397 no reflection runs for a perp run at all.) |
 | `funding_view` | enum | `favorable` / `neutral` / `headwind` | Makes the funding judgement explicit rather than leaving it to interpret numbers. |
 
 ### Not in the decision — decided downstream

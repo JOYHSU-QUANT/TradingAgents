@@ -704,9 +704,10 @@ Breaking changes within the 0.x line are called out explicitly.
   precedent for a change outside the perp-rendered text; the bridge says
   `engine memory log: off` at startup beside the cap line, so an operator
   who set `TRADINGAGENTS_MEMORY_LOG_PATH` sees why no file appears. The
-  file on the server is
-  left where it is; its pending `BTC` entries will never resolve, which is
-  harmless. The option the issue listed instead — keep the log and record
+  file on the server is left where it is (a read-only copy was taken off
+  the box on 2026-11-04, since it is the only record of what the PM read as
+  `past_context` before v8); its pending `BTC` entries will never resolve,
+  which is harmless. The option the issue listed instead — keep the log and record
   `past_context` in the reports sidecar — was not taken: the lesson text
   is graded on an instrument the account never held.
 - **A news vendor's outage no longer aborts the decision cycle: `news_data`

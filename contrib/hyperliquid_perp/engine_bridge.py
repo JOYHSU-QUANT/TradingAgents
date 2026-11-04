@@ -625,8 +625,12 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
     # the PM prompt loses a section — so it ships with a new run-id and a
     # ``PROMPT_VERSION`` bump (v8; RUNBOOK §4). ``None`` and ``""`` are both
     # the log's off switch (``if path:``); ``None`` is the uniswap judge's
-    # spelling and reads as "no path" rather than "a blank one". Said at
-    # startup like the cap and its siblings: an operator who set
+    # spelling and reads as "no path" rather than "a blank one". Hard off,
+    # not an ``engine.memory_log_path`` YAML knob: a knob would let a YAML
+    # edit change what the model reads with no bump and no deploy (RUNBOOK
+    # §4's hazard), and the log is wrong for a perp at any path — its
+    # lessons are graded on the ticker's return, never the account's. Said
+    # at startup like the cap and its siblings: an operator who set
     # ``TRADINGAGENTS_MEMORY_LOG_PATH`` on the host would otherwise find no
     # file and no line saying why.
     logger.info(

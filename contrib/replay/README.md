@@ -545,7 +545,9 @@ completion 前面的 system message**，上游 PM 自己的 prompt 仍在 human 
 variant（那是 simple 模式整份指示，會讓模型讀到兩份）；`extra_context` 在 graph 模式進 `instrument_context`，五個 node
 都看得到，不只 PM。
 
-與 daemon 已知的兩處差異：instrument 身分行不走網路查詢（`build_instrument_context(ticker, "crypto")`，`ticker` 是 payload 記下的 `graph_ticker`——daemon 當時交給 graph 的字，#392 起是 `BTC-USD`；沒有這個鍵的舊 payload 給裸 coin），倉位段的
+與 daemon 已知的三處差異：**`prompt_version` 在 v8 之前的題目，daemon 的 PM prompt 多一段上游 memory log 注入的
+「Lessons from prior decisions」，replay 一律給空的 `past_context`**（#397 起 daemon 也關掉了，v8 之後兩邊一致；3b 驗收 (a) 在
+run 7 量到的配對差異為零，所以這段的影響在那個樣本上量不出來）；instrument 身分行不走網路查詢（`build_instrument_context(ticker, "crypto")`，`ticker` 是 payload 記下的 `graph_ticker`——daemon 當時交給 graph 的字，#392 起是 `BTC-USD`；沒有這個鍵的舊 payload 給裸 coin），倉位段的
 holding cost 用研究 store 的結算 rate（daemon 用當下的預測 rate）。風險辯論一輪（上游預設，daemon 沒改）。
 
 ### store 與輸出
@@ -576,7 +578,7 @@ holding cost 用研究 store 的結算 rate（daemon 用當下的預測 rate）�
 ## 還沒有的
 
 - `--ask` 不問 holdout：graph variant 的 holdout 要等它過了 §5 四條才有意義（3c），這一版沒有那條路。
-- 不重跑分析師、不重抓資料（考古題的定義）；上游的 reflection／memory log 不給（母計畫 §7 否決）。
+- 不重跑分析師、不重抓資料（考古題的定義）；上游的 reflection／memory log 不給（母計畫 §7 否決；#397 起 daemon 也不用，v8 之後這點不再是差異）。
 - 停損／止盈不在回測裡（第一版拍板不帶）；paper 的 TWAP 分批也沒有（一題一單）。
 
 ## 測試

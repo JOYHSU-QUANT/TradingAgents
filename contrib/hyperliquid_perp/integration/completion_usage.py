@@ -20,8 +20,9 @@ on the calling thread and the base graph runs its agents in sequence, so no
 lock guards the lists below.
 
 Calls made outside any graph node (the base engine's ``process_signal``
-after the graph, its pending-reflection pass before it) arrive with no
-``langgraph_node`` and are recorded with ``node=None``: they are paid for
+after the graph, its pending-reflection pass before it — the latter makes
+no call for a perp run since #397 switched the memory log off) arrive with
+no ``langgraph_node`` and are recorded with ``node=None``: they are paid for
 and count toward the cycle's total, but no cap policy is attached to them.
 
 Only completions that RETURNED are recorded. A call that ends in an

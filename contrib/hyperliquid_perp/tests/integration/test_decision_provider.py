@@ -1234,8 +1234,10 @@ def test_the_prompt_version_is_pinned_to_the_block_it_versions():
     # v6 (2026-09-22) bumped for the CONTEXT again — the Last fill: line's
     # age unit (issue #288) — so v6's digest is v5's. v7 (2026-11-03) bumped
     # for the graph's input — the coin spelled ``BTC-USD`` (issue #392) — so
-    # v7's digest is still v5's.
-    assert (prompt_regime.PROMPT_VERSION, digest) == ("phase2-target-v7", "947e85a9b7b750f1")
+    # v7's digest is still v5's. v8 (2026-11-04) bumped for the PM prompt
+    # losing the memory log's "Lessons" section (issue #397) — v5's digest
+    # still.
+    assert (prompt_regime.PROMPT_VERSION, digest) == ("phase2-target-v8", "947e85a9b7b750f1")
     # The daemon's spelling (``integration.decision_provider``) is the same
     # object as ``prompt_regime``'s, not a second declaration that would keep
     # equal today and fork the next time one side moves.

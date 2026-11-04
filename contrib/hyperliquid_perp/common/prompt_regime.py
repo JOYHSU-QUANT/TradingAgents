@@ -66,10 +66,18 @@ __all__ = [
 # the first bump for a change outside the perp-rendered text (the identity
 # line is the system prompt's first sentence). The per-row fact rides in
 # the payload's ``graph_ticker`` key (``integration/decision_provider``).
+# v8 (2026-11-04): the engine's memory log is switched off for perp runs
+# (issue #397, ``engine_bridge._build_engine_config``) — the Portfolio
+# Manager's prompt loses the "Lessons from prior decisions and outcomes"
+# section upstream injected from it every cycle since 2026-07-11; the perp
+# context and the format block are unchanged (v8's digest is v5's). Bumped
+# for the same reason as v7: a change to what the model reads, outside the
+# perp-rendered text, that the context shape and the format fingerprint
+# cannot see.
 # The text this versions is rendered in ``domains/perp/target_decision``; a
 # test pins this value to that block's digest so an edit there that forgot
 # the bump fails (tests/integration/test_decision_provider.py).
-PROMPT_VERSION = "phase2-target-v7"
+PROMPT_VERSION = "phase2-target-v8"
 
 # The grep handle. ``validate`` has printed it since schema v11 (issue #129,
 # when the third key landed); the daemon log and ``--context-only`` now carry

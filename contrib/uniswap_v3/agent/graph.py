@@ -99,6 +99,31 @@ _RATING_LINE: Final = re.compile(
 logger = logging.getLogger(__name__)
 #: The engine's ``propagate`` argument that selects its crypto pipeline.
 _ASSET_TYPE: Final = "crypto"
+# The engine's router degrades a news vendor's failure to a sentinel the
+# analysts read on (news is an optional category since #393) and logs this
+# line for it. The perp daemon wants exactly that; a verdict asked once per
+# bar and never rewritten does not: a bar judged on a news-less graph would
+# stand for good, where the raise the router used to make let a later visit
+# ask again. So the judge watches the router's logger for the line while the
+# graph runs and answers "later" if it fired. The log line is the one trace
+# both news paths leave: the news analyst's tool result lives in messages the
+# graph clears between analysts, and the sentiment analyst reads the same
+# getter directly, outside any tool node.
+_ROUTER_LOGGER: Final = "tradingagents.dataflows.interface"
+_NEWS_UNAVAILABLE: Final = "Optional news_data unavailable"
+
+
+class _NewsWatch(logging.Handler):
+    """Collects the router's "news unavailable" lines emitted while attached."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.seen: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        message = record.getMessage()
+        if message.startswith(_NEWS_UNAVAILABLE):
+            self.seen.append(message)
 # Provider statuses that say "later": an empty balance, a timeout, a rate limit.
 _PASSING_STATUSES: Final = frozenset({402, 408, 429})
 # Error classes that say "later", by name, matched anywhere in an error's class
@@ -292,6 +317,15 @@ class TradingAgentsJudge:
     def ask(self, ticker: str, trade_date: str, context: str) -> Answer:
         started = _time.monotonic()
         graph = self._graph(context)
+        watch = _NewsWatch()
+        router_logger = logging.getLogger(_ROUTER_LOGGER)
+        # The line is a WARNING; a logging setup that silences the router's
+        # warnings would silence the watch with them, so the level is held
+        # at WARNING for the question and put back after.
+        level_before = router_logger.level
+        if not router_logger.isEnabledFor(logging.WARNING):
+            router_logger.setLevel(logging.WARNING)
+        router_logger.addHandler(watch)
         try:
             propagated = graph.propagate(ticker, trade_date, asset_type=_ASSET_TYPE)
         except Exception as exc:
@@ -303,6 +337,15 @@ class TradingAgentsJudge:
                 f"the judge failed on {ticker} for good ({type(exc).__name__}: {exc}); asking "
                 f"again unchanged will not help"
             ) from exc
+        finally:
+            router_logger.removeHandler(watch)
+            router_logger.setLevel(level_before)
+        if watch.seen:
+            # The graph answered, on a news-less input; that answer is not
+            # recorded, as a raise from the router was not before #393.
+            raise JudgeUnavailable(
+                f"the judge did not answer on {ticker} (news unavailable: {watch.seen[0]})"
+            )
         return _answer(
             propagated, ticker, self._settings.selected_analysts, _time.monotonic() - started
         )

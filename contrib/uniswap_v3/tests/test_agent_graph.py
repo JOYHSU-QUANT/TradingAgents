@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from contrib.uniswap_v3.agent.errors import AgentError, JudgeUnavailable
@@ -99,6 +101,8 @@ class _StubGraph:
     built: list[_StubGraph] = []
     build_error: Exception | None = None
     answer_error: Exception | None = None
+    # Router log lines the graph "emits" while answering, as (category, words).
+    unavailable: list[tuple[str, str]] = []
 
     def __init__(self, selected_analysts, debug, config):
         if _StubGraph.build_error is not None:
@@ -116,12 +120,18 @@ class _StubGraph:
         self.seen = self.resolve_instrument_context(ticker, asset_type)
         if _StubGraph.answer_error is not None:
             raise _StubGraph.answer_error
+        for category, words in _StubGraph.unavailable:
+            # The router's optional-lane line, as tradingagents.dataflows.interface logs it.
+            logging.getLogger("tradingagents.dataflows.interface").warning(
+                "Optional %s unavailable for %s: %s", category, "get_news", words
+            )
         return {"final_trade_decision": f"Decided on {trade_date}.\n\n**Rating**: Hold"}, "Hold"
 
 
 @pytest.fixture
 def stub():
     _StubGraph.built, _StubGraph.build_error, _StubGraph.answer_error = [], None, None
+    _StubGraph.unavailable = []
     return _StubGraph
 
 
@@ -171,6 +181,51 @@ def test_a_graph_that_does_not_answer_is_judge_unavailable(tmp_path, stub):
         JudgeUnavailable, match=r"did not answer on ETH-USD \(ConnectionError: the gateway"
     ):
         judge.ask("ETH-USD", "2024-01-03", "context")
+
+
+def test_a_graph_that_answered_without_news_is_judge_unavailable_too(tmp_path, stub):
+    # #393 made news an optional category: the router no longer raises on a
+    # news vendor's outage, the analysts read a sentinel and the graph
+    # answers. A verdict is asked once per bar and never rewritten, so that
+    # answer is not recorded — the judge says "later", as the router's raise
+    # made it say before. Watched by the router's own log line, the one trace
+    # both news paths leave.
+    stub.unavailable = [("news_data", "yfinance: YAHOO! FINANCE IS CURRENTLY DOWN!")]
+    judge = TradingAgentsJudge(AgentSettings(), tmp_path, graph_class=stub)
+    with pytest.raises(
+        JudgeUnavailable,
+        match=r"did not answer on ETH-USD \(news unavailable: Optional news_data unavailable "
+        r"for get_news: yfinance: YAHOO! FINANCE IS CURRENTLY DOWN!\)",
+    ):
+        judge.ask("ETH-USD", "2024-01-03", "context")
+    # The watcher is detached after the question, whichever way it ended.
+    assert all(
+        type(handler).__name__ != "_NewsWatch"
+        for handler in logging.getLogger("tradingagents.dataflows.interface").handlers
+    )
+
+
+def test_the_news_watch_hears_the_line_even_when_the_routers_logger_is_silenced(tmp_path, stub):
+    # A logging setup above WARNING on the router's logger would silence the
+    # watch with it; the judge holds the level for the question and puts it back.
+    router_logger = logging.getLogger("tradingagents.dataflows.interface")
+    router_logger.setLevel(logging.ERROR)
+    try:
+        stub.unavailable = [("news_data", "yfinance: down")]
+        judge = TradingAgentsJudge(AgentSettings(), tmp_path, graph_class=stub)
+        with pytest.raises(JudgeUnavailable, match="news unavailable"):
+            judge.ask("ETH-USD", "2024-01-03", "context")
+        assert router_logger.level == logging.ERROR
+    finally:
+        router_logger.setLevel(logging.NOTSET)
+
+
+def test_another_optional_categorys_sentinel_still_lets_the_judge_answer(tmp_path, stub):
+    # Only news is the judge's concern: macro, ETF flows and the rest were
+    # optional before #393 and a verdict decided without them always stood.
+    stub.unavailable = [("macro_data", "fred: FRED 400: bad series")]
+    judge = TradingAgentsJudge(AgentSettings(), tmp_path, graph_class=stub)
+    assert judge.ask("ETH-USD", "2024-01-03", "context").rating is Rating.HOLD
 
 
 class _ProviderError(Exception):

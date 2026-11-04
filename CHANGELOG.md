@@ -640,6 +640,14 @@ Breaking changes within the 0.x line are called out explicitly.
   gating them is a prompt change left out of this fix. The library-failure
   policy suite, which used news as its core-category example, now drives
   `technical_indicators` (core, not loud) so what it pins is unchanged.
+  The uniswap judge keeps its old semantics on purpose: a verdict is asked
+  once per bar and never rewritten, so `TradingAgentsJudge.ask` watches the
+  router's `Optional news_data unavailable` line while the graph runs and
+  raises `JudgeUnavailable` if it fired — the bar is not recorded and a later
+  visit asks again, as the router's raise made it do before. (Watched by log
+  line because the sentinel reaches the model inside tool messages the graph
+  clears between analysts, and the sentiment analyst reads the same getter
+  outside any tool node.)
   Considered and declined: a third router tier that degrades only outages
   and keeps a news wiring gap loud (a gap no deployed config can reach,
   pinned at the leaves already, in the file that is a whole-file conflict

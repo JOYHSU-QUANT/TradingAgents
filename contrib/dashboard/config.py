@@ -99,6 +99,11 @@ class Thresholds:
     # could never fire); ``api_failed`` cycles inside the window carry no
     # verdict and do not count, so leave slack above the threshold.
     guardrail_unknown_cycles: int = 6
+    # Decided cycles in a row whose verdict names one optional data category
+    # as unavailable (the router's sentinel, #399): six is a day of 4h
+    # cycles, the same slack the guardrail rule keeps. Read off the same
+    # ``recent`` window, with the same refusal at load.
+    input_unavailable_cycles: int = 6
     handoff_due_utc: time = time(0, 30)
     disk_used_pct: int = 85
     memory_available_mb: int = 200
@@ -373,6 +378,7 @@ THRESHOLD_PARSERS: dict[str, Callable[[Mapping[str, Any], str, str, Any], Any]] 
     "uniswap_behind_hours": _hours,
     "uniswap_no_decision_hours": _hours,
     "guardrail_unknown_cycles": _int,
+    "input_unavailable_cycles": _int,
     "handoff_due_utc": _clock,
     "disk_used_pct": _pct,
     "memory_available_mb": _int,
@@ -523,13 +529,20 @@ def load_config(path: Path) -> ExporterConfig:
     thresholds = _thresholds(top.get("thresholds", {}), f"{where}.thresholds")
     for index, line in enumerate(lines):
         # A window shorter than the streak it is judged by is a rule that can
-        # never fire, with nothing to say so: refused here, by name.
-        if isinstance(line, HyperliquidLine) and line.recent < thresholds.guardrail_unknown_cycles:
-            raise ConfigError(
-                f"{where}.lines[{index}].recent is {line.recent}, below "
-                f"thresholds.guardrail_unknown_cycles ({thresholds.guardrail_unknown_cycles}): the "
-                "guardrail_unknown rule reads the recent cycles and could never fire"
-            )
+        # never fire, with nothing to say so: refused here, by name, for each
+        # of the two streak rules that read the recent cycles.
+        if not isinstance(line, HyperliquidLine):
+            continue
+        for rule, threshold in (
+            ("guardrail_unknown", thresholds.guardrail_unknown_cycles),
+            ("input_unavailable", thresholds.input_unavailable_cycles),
+        ):
+            if line.recent < threshold:
+                raise ConfigError(
+                    f"{where}.lines[{index}].recent is {line.recent}, below "
+                    f"thresholds.{rule}_cycles ({threshold}): the {rule} rule reads the "
+                    "recent cycles and could never fire"
+                )
     return ExporterConfig(
         status_dir=_path(top, "status_dir", where, base),
         lines=lines,

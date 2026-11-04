@@ -100,6 +100,7 @@ def hyperliquid_document(**overrides: Any) -> dict[str, Any]:
         "no_order_reason": None,
         "decision_reason": f"trend up; wallet {WALLET} fine",
         "guardrail_side": None,
+        "unavailable_inputs": [],
     }
     cycle = {
         "scheduled_at": hl_instant(NOW - timedelta(hours=1)),
@@ -143,14 +144,14 @@ def hyperliquid_document(**overrides: Any) -> dict[str, Any]:
         "fill_reason": "target",
     }
     document = {
-        "schema_version": 1,
+        "schema_version": 2,
         "source": "hyperliquid_perp",
         "generated_at": hl_instant(NOW),
         "run_id": "paper-BTC-8",
         "mode": "paper",
         "created_at": HL_CREATED,
         "initial_balance_usdc": "10000",
-        "store_schema_version": 13,
+        "store_schema_version": 15,
         "scheduler": scheduler,
         "safe_mode": None,
         "cycles": {

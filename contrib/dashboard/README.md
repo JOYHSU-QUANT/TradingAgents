@@ -103,6 +103,7 @@ Thresholds are the YAML's `thresholds:`; the defaults were decided 2026-10-14.
 | `<hl line>:export_failed` / `:export_stale` | the export breadcrumb `failed`, or older than `export_stale_hours` (5) |
 | `<hl line>:safe_mode` | the run is latched in safe mode |
 | `<hl line>:guardrail_unknown` | the newest `guardrail_unknown_cycles` (6) decided cycles all read the trend guardrail as `unknown` (`api_failed` cycles skipped; a run with the guardrail off never raises it). The rule reads the line's `recent` cycles: a `recent` below the threshold is refused at load, and `api_failed` cycles inside the window do not count, so keep slack above it (the default 10 leaves room for 4) |
+| `<hl line>:input_unavailable` | an optional data category (news, macro, ETF flows, …) ended in the router's `DATA_UNAVAILABLE` sentinel on the newest `input_unavailable_cycles` (6) decided cycles in a row (`api_failed` cycles and verdicts written before store v15 skipped); the text names each such category with its streak. The analyst writes the section as absent and the cycle decides without it, which is why nothing else says a feed has been down for a week (#399). Same `recent` window and load-time refusal as `guardrail_unknown` |
 | `<hl line>:event:<type>@<instant>` | a kill-switch row (but `kill_switch_refreshed`) or a safe-mode row |
 | `<uni line>:behind` | the clock is `behind` and the latest boundary passed more than `uniswap_behind_hours` (3.5) ago |
 | `<uni line>:clock_ahead` | the clock is `ahead` |

@@ -119,6 +119,7 @@ def _stage_a_busy_run(db: Database) -> None:
             no_order_reason=None,
             decision_reason="Momentum\tis  up.\n" + "x" * 200,
             guardrail_side="unknown",
+            unavailable_inputs="macro_data,news_data",
         )
         insert_minimal_ai_output(
             conn, run_id="r", attempt_id=second, timestamp=_at(4), confidence=D("0.6")
@@ -525,7 +526,7 @@ _SNAPSHOT_FIELDS = (
 # The document's shape at SCHEMA_VERSION 1. A path added, removed or moved
 # changes this set; change it together with ``status.SCHEMA_VERSION``, and the
 # exporter and the page that read the document with it.
-_SCHEMA_1_PATHS = {
+_SCHEMA_2_PATHS = {
     "schema_version",
     "source",
     "generated_at",
@@ -586,6 +587,7 @@ _SCHEMA_1_PATHS = {
     "cycles.recent[].verdict.no_order_reason",
     "cycles.recent[].verdict.decision_reason",
     "cycles.recent[].verdict.guardrail_side",
+    "cycles.recent[].verdict.unavailable_inputs",
     "models",
     "models[].model",
     "models[].prompt_version",
@@ -647,15 +649,22 @@ def test_a_verdict_carries_what_the_guardrail_read(db):
         None,
         "unknown",
     ]
+    # v15 (#399): the oldest verdict's run went without two optional inputs,
+    # the next one's row was staged with no value for the column (NULL, as
+    # a row from before v15 reads), and the newest cycle has no verdict —
+    # the document keeps a list, ``null`` and no verdict apart.
+    assert [
+        None if c["verdict"] is None else c["verdict"]["unavailable_inputs"] for c in recent
+    ] == [None, None, ["macro_data", "news_data"]]
 
 
-def test_the_document_has_exactly_the_schema_1_paths(db):
+def test_the_document_has_exactly_the_schema_2_paths(db):
     _stage_a_busy_run(db)
     document = json.loads(status_json(_read(db)))
-    assert SCHEMA_VERSION == 1
+    assert SCHEMA_VERSION == 2
     assert document["schema_version"] == SCHEMA_VERSION
     assert list(document)[:3] == ["schema_version", "source", "generated_at"]
-    assert _paths(document) == _SCHEMA_1_PATHS
+    assert _paths(document) == _SCHEMA_2_PATHS
 
 
 def test_the_document_keeps_decimals_exact_and_free_text_up_to_the_limit(db):

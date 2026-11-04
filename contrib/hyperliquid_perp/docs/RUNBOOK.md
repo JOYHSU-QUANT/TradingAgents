@@ -367,6 +367,9 @@ run 的 store 升到 v14——護欄開不開都一樣，不是只有開了才�
 本機 checkout 比伺服器新時，對快照跑 `validate`／`export`／`status` 會具名拒絕（store 落後、不升級），
 那不是壞掉，是伺服器還沒部署到這一版（上面那個例外照舊：`safe-mode --status` 開檔就升級——對快照副本無妨，
 對正式 store 就是花掉退路）。
+**v15（2026-11-04，`ai_outputs.unavailable_inputs`，issue #399）同一條規則**：帶它的 build 一部署就把 store 升到 v15，
+同樣先備份、同樣排在換段（paper-BTC-10 與 #394／#396／#397／#398 同批）；`status --json` 的文件版本同時升到 2，
+dashboard 的 exporter 要同一批更新（它釘住自己讀得懂的版本，舊 exporter 對新文件會拒讀）。
 
 判讀時**主判準是提案率**（`requested_target_margin_pct` 非 null 的佔比）。**但這一欄
 會低估**：fail-closed 的 cycle 一律把它寫成 NULL，模型實際要求了什麼在 parse 接縫就被

@@ -126,7 +126,13 @@ class _StubGraph:
         router_logger = logging.getLogger("tradingagents.dataflows.interface")
         for category, error in _StubGraph.unavailable:
             # The router's optional-lane line, as tradingagents.dataflows.interface logs it.
-            router_logger.warning("Optional %s unavailable for %s: %s", category, "get_news", error)
+            router_logger.warning(
+                "Optional %s unavailable for %s: %s",
+                category,
+                "get_news",
+                error,
+                extra={"unavailable_category": category},
+            )
         for category in _StubGraph.disabled:
             # The router's disabled-lane line: INFO, and not the watched prefix.
             router_logger.info(
@@ -229,12 +235,18 @@ def test_the_news_watch_is_pinned_to_the_routers_real_logger_and_line():
     # router.py — goes red here instead of blinding the judge.
     from unittest import mock
 
-    from contrib.uniswap_v3.agent.graph import _NEWS_UNAVAILABLE, _ROUTER_LOGGER, _NewsWatch
+    from contrib.uniswap_v3.agent.graph import (
+        _NEWS_UNAVAILABLE,
+        _ROUTER_LOGGER,
+        _UNAVAILABLE_ATTR,
+        _NewsWatch,
+    )
     from tradingagents.dataflows import interface
     from tradingagents.dataflows.config import get_config, set_config
     from tradingagents.dataflows.errors import VendorUnavailableError
 
     assert interface.logger.name == _ROUTER_LOGGER
+    assert interface.UNAVAILABLE_CATEGORY_ATTR == _UNAVAILABLE_ATTR
 
     def down(*args, **kwargs):
         raise VendorUnavailableError("*** YAHOO! FINANCE IS CURRENTLY DOWN! ***")

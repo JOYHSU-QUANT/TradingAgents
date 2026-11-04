@@ -468,6 +468,30 @@ def test_parsed_decision_rejects_invalid_with_live_target():
         ParsedDecision(decision=live, is_valid=False, invalid_reason="x", raw_response="raw")
 
 
+def test_parsed_decision_unavailable_inputs_default_to_not_recorded_and_are_held_sorted():
+    # ``None`` is "not recorded" — the resumed cycle's and the guardrail's own
+    # no-decision's spelling — never the empty tuple that means "none" (#399).
+    stand_in = TargetDecision.fail_closed()
+    parsed = ParsedDecision(decision=stand_in, is_valid=False, invalid_reason="x", raw_response="")
+    assert parsed.unavailable_inputs is None
+    assert ParsedDecision(
+        decision=stand_in,
+        is_valid=False,
+        invalid_reason="x",
+        raw_response="",
+        unavailable_inputs=("macro_data", "news_data"),
+    ).unavailable_inputs == ("macro_data", "news_data")
+    for bad in (["news_data"], ("news_data", "macro_data"), ("news_data", "news_data"), ("",), ("a,b",)):
+        with pytest.raises(ValueError, match="unavailable_inputs"):
+            ParsedDecision(
+                decision=stand_in,
+                is_valid=False,
+                invalid_reason="x",
+                raw_response="",
+                unavailable_inputs=bad,
+            )
+
+
 def test_parsed_decision_rejects_a_non_str_raw_response():
     # raw_response is what the §3.1 store persists (repo.store_pending_response
     # refuses a non-str); caught at construction, a hand-built instance fails

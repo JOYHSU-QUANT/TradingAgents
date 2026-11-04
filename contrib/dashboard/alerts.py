@@ -309,8 +309,52 @@ def _hyperliquid(
                 "(guardrail-signal) and its fetch",
             )
         )
+    unavailable = _unavailable_input_streaks(doc["cycles"]["recent"], th.input_unavailable_cycles)
+    if unavailable:
+        conditions.append(
+            _condition(
+                line.name,
+                "input_unavailable",
+                "an optional data input has been unavailable on every one of the newest "
+                "decided cycles: "
+                + ", ".join(f"{category} ({streak} cycles)" for category, streak in unavailable)
+                + " — the analyst writes the section as absent and the cycle decides "
+                "without it; check the vendor and the host's reach to it",
+            )
+        )
     events, newest = _new_events(line.name, doc, seen, now)
     return _Outcome(conditions, events, newest, notes)
+
+
+def _unavailable_input_streaks(
+    recent: Sequence[Mapping[str, Any]], threshold: int
+) -> list[tuple[str, int]]:
+    """Each category unavailable on the newest ``threshold`` or more decided cycles in a row, with its streak.
+
+    Over the cycles the status document carries (newest first): a cycle
+    without a verdict (``api_failed``) neither counts nor breaks a streak,
+    and neither does a verdict whose set was not recorded (``None``: a row
+    from before store v15, a cycle resumed from its stored text after a
+    restart, the guardrail's own no-decision — not the same as the input
+    answering); the first verdict whose list lacks the category ends it.
+    Only categories named by the newest recorded set can be on a streak,
+    so those are the ones counted. Sorted by name, so the condition's text
+    is one spelling. The keys are subscripted, not ``.get``, as the
+    guardrail rule's are: a document that lost one is ``rules_failed``.
+    """
+    recorded = [
+        cycle["verdict"]["unavailable_inputs"]
+        for cycle in recent
+        if cycle["verdict"] is not None and cycle["verdict"]["unavailable_inputs"] is not None
+    ]
+    if not recorded or not recorded[0]:
+        return []
+    found = []
+    for category in sorted(recorded[0]):
+        streak = next((i for i, inputs in enumerate(recorded) if category not in inputs), len(recorded))
+        if streak >= threshold:
+            found.append((category, streak))
+    return found
 
 
 def _guardrail_unknown_streak(recent: Sequence[Mapping[str, Any]]) -> int:

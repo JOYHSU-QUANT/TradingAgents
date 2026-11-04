@@ -10,6 +10,37 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **An optional data input that stays down is counted, not just degraded**
+  (#399). The router's sentinel is the right ending for one cycle — the
+  analyst writes the section as absent and the cycle decides — and the
+  wrong silence for forty of them: StockTwits answered the paper host a 403
+  on 227 cycles in a row before anyone looked (#395). Now the router's
+  `Optional <category> unavailable` WARNING (the `could not be retrieved`
+  lane only — a category switched off by configuration is a choice, and
+  the `NO_DATA_AVAILABLE` verdict is the vendor answering) carries the
+  category as a record attribute (`interface.UNAVAILABLE_CATEGORY_ATTR`),
+  the perp engine run collects those attributes for exactly its own
+  duration (`integration/unavailable_inputs`, a handler on the router's
+  logger, the logger's level held at WARNING meanwhile as the uniswap
+  judge's news watch does — which now keys on the same attribute instead
+  of the line's words), the parsed decision carries the sorted set
+  (`ParsedDecision.unavailable_inputs`; `None` where no run recorded one: a
+  cycle resumed from its stored text after a restart, the guardrail's own
+  no-decision), the `ai_outputs` row keeps it (**schema v15**,
+  `unavailable_inputs`: comma-joined names, the empty string when the run
+  recorded none, NULL where none was recorded and on every row before v15;
+  exported with the row), `status --json` carries it per recent cycle
+  (**status document v2**, `cycles.recent[].verdict.unavailable_inputs`: a
+  list, `[]`, or `null`), and the dashboard's new `input_unavailable` rule
+  (threshold `input_unavailable_cycles`, default 6 decided cycles, the same
+  `recent` window and load-time refusal as `guardrail_unknown`) names each
+  category down on every one of the newest decided cycles with its streak.
+  `api_failed` cycles and unrecorded (`null`) verdicts neither count nor
+  break a streak, so a restart cannot clear a feed that never came back. The deploy carrying this build upgrades the store to v15 on the
+  daemon's first restart (RUNBOOK §4: back up, and ship it with the segment
+  switch) and the dashboard exporter must move in the same batch, since it
+  pins the status document version it reads. `validate` and the
+  `/paper-review` weekly table do not print the per-category rate yet.
 - **Global news comes from Google News search: a `google_news` vendor for
   `get_global_news`, every configured query represented, and the three
   global-news knobs settable from the perp `local.yaml`** (#394). The

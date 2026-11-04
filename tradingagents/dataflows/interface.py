@@ -153,6 +153,12 @@ TOOLS_CATEGORIES = {
 # see the vendor-hygiene notes.
 DISABLED_VENDOR = "none"
 
+# The attribute the optional-lane WARNING below carries the category in
+# (``logger.warning(..., extra=...)``), so a handler counting which optional
+# inputs a run went without keys on a field, never on the line's words
+# (#399; ``contrib/hyperliquid_perp/integration/unavailable_inputs``).
+UNAVAILABLE_CATEGORY_ATTR = "unavailable_category"
+
 VENDOR_LIST = [
     "yfinance",
     "fred",
@@ -1095,7 +1101,13 @@ def _resolve_outcome(state: _ChainState, category: str, method: str) -> str:
     # abort the run.
     if failed is not None:
         if category in OPTIONAL_CATEGORIES:
-            logger.warning("Optional %s unavailable for %s: %s", category, method, failed.error)
+            logger.warning(
+                "Optional %s unavailable for %s: %s",
+                category,
+                method,
+                failed.error,
+                extra={UNAVAILABLE_CATEGORY_ATTR: category},
+            )
             # The vendor ahead of the words (#203): the lane's log line names
             # it, but the sentinel is what the report artifacts keep, and a
             # multi-vendor category's reader should not need the log to tell

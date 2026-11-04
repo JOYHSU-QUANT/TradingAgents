@@ -111,6 +111,11 @@ def test_a_relative_path_is_taken_from_the_yaml_directory_and_a_bare_program_fro
             lambda t: t.replace("    run_id: paper-BTC-8\n", "    run_id: paper-BTC-8\n    recent: 5\n"),
             "recent is 5, below thresholds.guardrail_unknown_cycles \\(6\\)",
         ),
+        (
+            lambda t: t.replace("    run_id: paper-BTC-8\n", "    run_id: paper-BTC-8\n    recent: 7\n")
+            + "thresholds:\n  input_unavailable_cycles: 8\n",
+            "recent is 7, below thresholds.input_unavailable_cycles \\(8\\)",
+        ),
     ],
 )
 def test_a_setting_that_cannot_be_used_is_refused_by_name(tmp_path, edit, words):

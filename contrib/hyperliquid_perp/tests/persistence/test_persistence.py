@@ -167,6 +167,22 @@ def test_v14_adds_a_nullable_guardrail_side_to_ai_outputs(tmp_path):
     assert db.conn.execute("SELECT guardrail_side FROM ai_outputs").fetchone()[0] == "unknown"
     with pytest.raises(ValueError, match="^guardrail_side must be one of"), db.transaction() as conn:
         repo.insert_ai_output(conn, **{**_ai_output_kwargs("live"), "guardrail_side": "sideways"})
+
+
+def test_v15_adds_a_nullable_unavailable_inputs_to_ai_outputs(tmp_path):
+    # The optional categories the run went without (#399): free text the
+    # writer spells as sorted comma-joined names, NULL on rows from before
+    # v15, and the empty string for a run that went without nothing.
+    db = Database(tmp_path / "v15.db")
+    columns = {r[1] for r in db.conn.execute("PRAGMA table_info(ai_outputs)")}
+    assert "unavailable_inputs" in columns
+    with db.transaction() as conn:
+        repo.insert_ai_output(
+            conn, **{**_ai_output_kwargs("paper"), "unavailable_inputs": "macro_data,news_data"}
+        )
+    assert db.conn.execute("SELECT unavailable_inputs FROM ai_outputs").fetchone()[0] == (
+        "macro_data,news_data"
+    )
     db.close()
 
 

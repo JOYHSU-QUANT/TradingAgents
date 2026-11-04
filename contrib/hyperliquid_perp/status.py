@@ -84,7 +84,7 @@ __all__ = [
 # The document's version, scoped to SOURCE. Bump it when a field is added,
 # removed, renamed, moved or re-typed; the field-path pin in
 # tests/test_status.py changes with it.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 # What the document says produced it, so a reader handed the file alone
 # knows which package's schema (and version) to read it with.
 SOURCE = "hyperliquid_perp"
@@ -187,6 +187,13 @@ class Verdict:
     # ``flat`` / ``unknown``); ``None`` with the guardrail off. (A store older
     # than v14 never reaches here: a reporting open refuses it by version.)
     guardrail_side: str | None = None
+    # The optional data categories whose tool call ended in the router's
+    # ``could not be retrieved`` sentinel during the engine run behind this
+    # verdict (#399; document v2, store v15): sorted names, empty when the
+    # run recorded none, ``None`` where no run recorded a set — a row written
+    # before store v15, a cycle resumed from its stored text, the guardrail's
+    # own no-decision.
+    unavailable_inputs: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -479,7 +486,15 @@ def _verdict(row: sqlite3.Row) -> Verdict | None:
         no_order_reason=_text_or_none(row["no_order_reason"]),
         decision_reason=_text_or_none(row["decision_reason"]),
         guardrail_side=_str_or_none(row["guardrail_side"]),
+        unavailable_inputs=_categories_or_none(row["unavailable_inputs"]),
     )
+
+
+def _categories_or_none(value: Any) -> tuple[str, ...] | None:
+    """The ``unavailable_inputs`` cell as names: ``None`` for NULL, ``()`` for the empty string."""
+    if value is None:
+        return None
+    return tuple(word for word in str(value).split(",") if word)
 
 
 def _cycle(row: sqlite3.Row) -> Cycle:

@@ -62,15 +62,15 @@ def test_a_timeout_a_non_document_and_another_schema_are_named(tmp_path):
     a_list = read_line(line, runner=FakeRunner({HL_KEY: CommandResult(0, "[1]", "")}), timeout=1)
     assert a_list.failure == "no JSON document on stdout"
     newer = read_line(
-        line, runner=FakeRunner({HL_KEY: hyperliquid_document(schema_version=2)}), timeout=1
+        line, runner=FakeRunner({HL_KEY: hyperliquid_document(schema_version=3)}), timeout=1
     )
     assert newer.failure == (
-        "document is 'hyperliquid_perp' schema 2; this exporter reads 'hyperliquid_perp' schema 1"
+        "document is 'hyperliquid_perp' schema 3; this exporter reads 'hyperliquid_perp' schema 2"
     )
     other = read_line(
         line, runner=FakeRunner({HL_KEY: hyperliquid_document(source="uniswap_v3")}), timeout=1
     )
-    assert other.failure.startswith("document is 'uniswap_v3' schema 1")
+    assert other.failure.startswith("document is 'uniswap_v3' schema 2")
 
 
 def test_a_uniswap_line_is_keyed_by_its_run_id_too(tmp_path):

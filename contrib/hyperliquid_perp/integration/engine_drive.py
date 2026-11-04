@@ -15,6 +15,7 @@ module at load time, and ``--context-only`` must not pull in the engine tree
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # annotation-only: the engine-side imports stay function-local
@@ -103,6 +104,7 @@ class EngineRun:
             report_usage,
         )
         from .decision_reports import write_decision_reports
+        from .unavailable_inputs import collect_unavailable_inputs
 
         usage, cap = self._usage, self._cap
 
@@ -113,7 +115,13 @@ class EngineRun:
 
         try:
             # Yahoo's spelling, not the bare coin (#392; see common/graph_ticker).
-            propagated = self._graph.propagate(graph_ticker(coin), trade_date, asset_type="crypto")
+            # Under the collector (#399): the optional categories whose tool
+            # call ended in the router's sentinel during this run, read off
+            # the router's own WARNING; the parsed decision carries them.
+            with collect_unavailable_inputs() as unavailable:
+                propagated = self._graph.propagate(
+                    graph_ticker(coin), trade_date, asset_type="crypto"
+                )
         except Exception as exc:  # noqa: BLE001 — every engine-side failure is the caller's to word
             raise EngineRunFailed(exc, unparsed_note()) from exc
         finally:
@@ -154,7 +162,7 @@ class EngineRun:
         )
         if truncated and decision_call is not None:
             log_decision_truncation(decision_call, parsed, cap=cap)
-        return parsed
+        return replace(parsed, unavailable_inputs=tuple(sorted(unavailable)))
 
 
 def build_engine_run(

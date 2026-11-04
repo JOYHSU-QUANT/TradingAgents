@@ -111,6 +111,12 @@ _ASSET_TYPE: Final = "crypto"
 # getter directly, outside any tool node.
 _ROUTER_LOGGER: Final = "tradingagents.dataflows.interface"
 _NEWS_UNAVAILABLE: Final = "Optional news_data unavailable"
+# The record attribute the router stamps the category on (#399,
+# ``interface.UNAVAILABLE_CATEGORY_ATTR``): the watch keys on this field and
+# the category's name, never on the line's words. A literal for the same
+# reason as ``_ROUTER_LOGGER``; the test beside it pins both to the module.
+_UNAVAILABLE_ATTR: Final = "unavailable_category"
+_NEWS_CATEGORY: Final = "news_data"
 
 
 class _NewsWatch(logging.Handler):
@@ -127,9 +133,9 @@ class _NewsWatch(logging.Handler):
         self.seen: list[tuple[str, BaseException | None]] = []
 
     def emit(self, record: logging.LogRecord) -> None:
-        message = record.getMessage()
-        if not message.startswith(_NEWS_UNAVAILABLE):
+        if getattr(record, _UNAVAILABLE_ATTR, None) != _NEWS_CATEGORY:
             return
+        message = record.getMessage()
         args = record.args if isinstance(record.args, tuple) else ()
         error = args[-1] if args and isinstance(args[-1], BaseException) else None
         self.seen.append((message, error))

@@ -687,22 +687,33 @@ def test_an_optional_input_unavailable_on_six_decided_cycles_is_a_condition(tmp_
     def line_keys(evaluation):
         return [key for key in _keys(evaluation) if key.startswith("hl-paper:")]
 
-    def line_text(evaluation):
-        [condition] = [c for c in evaluation.conditions if c.key == "hl-paper:input_unavailable"]
+    def line_text(evaluation, category="news_data"):
+        [condition] = [
+            c for c in evaluation.conditions if c.key == f"hl-paper:input_unavailable:{category}"
+        ]
         return condition.text
 
     evaluation = _tick(tmp_path, docs)
-    assert line_keys(evaluation) == ["hl-paper:input_unavailable"]
-    assert "news_data (6 cycles)" in line_text(evaluation)
-    assert "macro_data" not in line_text(evaluation)  # only on the oldest two
+    # One key per category: macro was down only on the oldest two cycles.
+    assert line_keys(evaluation) == ["hl-paper:input_unavailable:news_data"]
+    assert "news_data has been unavailable on the newest 6 decided cycles" in line_text(evaluation)
+    assert "6+" not in line_text(evaluation)  # the streak ended inside the window
     # Five is not yet a condition, and the newest cycle answering clears it.
     doc["cycles"]["recent"] = doc["cycles"]["recent"][1:]
     assert line_keys(_tick(tmp_path, docs)) == []
     doc["cycles"]["recent"] = [cycle(1, []), *doc["cycles"]["recent"]]
     assert line_keys(_tick(tmp_path, docs)) == []
-    # Two categories down together are one condition naming both.
+    # Two categories down together are two conditions, and a streak that
+    # fills every recorded cycle is marked as possibly longer than the window.
     doc["cycles"]["recent"] = [cycle(4 * i + 1, ["macro_data", "news_data"]) for i in range(7)]
-    assert "macro_data (7 cycles), news_data (7 cycles)" in line_text(_tick(tmp_path, docs))
+    evaluation = _tick(tmp_path, docs)
+    assert line_keys(evaluation) == [
+        "hl-paper:input_unavailable:macro_data",
+        "hl-paper:input_unavailable:news_data",
+    ]
+    assert "the newest 7+ decided cycles (every recorded cycle in the window" in line_text(
+        evaluation, "macro_data"
+    )
     # A document from before store v15 (every verdict ``None``) never raises it.
     doc["cycles"]["recent"] = [cycle(4 * i + 1, None) for i in range(8)]
     assert line_keys(_tick(tmp_path, docs)) == []

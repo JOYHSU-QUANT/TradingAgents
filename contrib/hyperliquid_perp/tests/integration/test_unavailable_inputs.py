@@ -20,26 +20,34 @@ def _warn(category: str | None, message: str = "Optional x unavailable for y: z"
 
 
 def test_the_collector_keys_on_the_record_attribute_not_the_words():
-    with collect_unavailable_inputs() as seen:
+    with collect_unavailable_inputs() as collector:
         _warn("news_data")
         _warn("news_data")  # once per run, however many tool calls ended there
         _warn("macro_data", message="some other wording entirely")
         _warn(None, message="Optional news_data unavailable for get_news: the words alone")
         _warn("", message="an empty attribute is no category")
-    assert seen == {"news_data", "macro_data"}
+    assert collector.categories == {"news_data", "macro_data"}
+    assert collector.recorded == ("macro_data", "news_data")
+    assert not collector.deaf
+
+
+def test_a_run_that_went_without_nothing_records_the_empty_set_not_none():
+    with collect_unavailable_inputs() as collector:
+        pass
+    assert collector.recorded == ()
 
 
 def test_the_collector_listens_only_for_the_block_and_detaches_on_a_raise():
     router = logging.getLogger(ROUTER_LOGGER)
     before = list(router.handlers)
     _warn("options_data")  # before the block: not this run's
-    with pytest.raises(RuntimeError), collect_unavailable_inputs() as seen:
+    with pytest.raises(RuntimeError), collect_unavailable_inputs() as collector:
         _warn("news_data")
         raise RuntimeError("the engine raised")
-    assert seen == {"news_data"}
+    assert collector.categories == {"news_data"}
     assert router.handlers == before
     _warn("macro_data")  # after the block: not this run's either
-    assert seen == {"news_data"}
+    assert collector.categories == {"news_data"}
 
 
 def test_the_collector_hears_the_line_even_when_the_routers_logger_is_silenced():
@@ -49,13 +57,33 @@ def test_the_collector_hears_the_line_even_when_the_routers_logger_is_silenced()
     before = router.level
     router.setLevel(logging.ERROR)
     try:
-        with collect_unavailable_inputs() as seen:
+        with collect_unavailable_inputs() as collector:
             assert router.isEnabledFor(logging.WARNING)
             _warn("news_data")
-        assert seen == {"news_data"}
+        assert collector.recorded == ("news_data",)
         assert router.level == logging.ERROR
     finally:
         router.setLevel(before)
+
+
+def test_a_collector_the_logger_would_not_feed_records_unknown_and_says_so(caplog):
+    # What a level cannot repair — ``logging.disable`` here — makes the
+    # collector deaf: the run's set is "not recorded", never the empty set
+    # that reads as every input having answered, and the journal says why.
+    logging.disable(logging.ERROR)
+    try:
+        with (
+            caplog.at_level(
+                logging.ERROR, logger="contrib.hyperliquid_perp.integration.unavailable_inputs"
+            ),
+            collect_unavailable_inputs() as collector,
+        ):
+            _warn("news_data")
+    finally:
+        logging.disable(logging.NOTSET)
+    assert collector.deaf and collector.recorded is None
+    assert collector.categories == set()
+    assert "recorded as unknown, not as none" in caplog.text
 
 
 def test_the_router_logger_name_is_the_modules_own():

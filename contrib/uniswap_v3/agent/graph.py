@@ -110,6 +110,8 @@ _ASSET_TYPE: Final = "crypto"
 # graph clears between analysts, and the sentiment analyst reads the same
 # getter directly, outside any tool node.
 _ROUTER_LOGGER: Final = "tradingagents.dataflows.interface"
+# The line's wording, kept for the test that drives the real router and
+# reads the message back; the watch itself keys on the attribute below.
 _NEWS_UNAVAILABLE: Final = "Optional news_data unavailable"
 # The record attribute the router stamps the category on (#399,
 # ``interface.UNAVAILABLE_CATEGORY_ATTR``): the watch keys on this field and

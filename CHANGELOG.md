@@ -31,12 +31,17 @@ Breaking changes within the 0.x line are called out explicitly.
   recorded none, NULL where none was recorded and on every row before v15;
   exported with the row), `status --json` carries it per recent cycle
   (**status document v2**, `cycles.recent[].verdict.unavailable_inputs`: a
-  list, `[]`, or `null`), and the dashboard's new `input_unavailable` rule
-  (threshold `input_unavailable_cycles`, default 6 decided cycles, the same
-  `recent` window and load-time refusal as `guardrail_unknown`) names each
-  category down on every one of the newest decided cycles with its streak.
-  `api_failed` cycles and unrecorded (`null`) verdicts neither count nor
-  break a streak, so a restart cannot clear a feed that never came back. The deploy carrying this build upgrades the store to v15 on the
+  list, `[]`, or `null`), and the dashboard's new
+  `input_unavailable:<category>` rule (threshold `input_unavailable_cycles`,
+  default 6 decided cycles, the same `recent` window and load-time refusal
+  as `guardrail_unknown`) raises one condition per category down on every
+  one of the newest decided cycles, with its streak — `N+` when the streak
+  fills every recorded cycle in the window, since the true length may be
+  longer. `api_failed` cycles and unrecorded (`null`) verdicts neither count
+  nor break a streak, so a restart cannot clear a feed that never came
+  back; and a collector the router's logger would not feed at all
+  (`logging.disable`, a disabled logger, a filter) records `null` and says
+  so once at ERROR rather than a quiet "none unavailable" every cycle. The deploy carrying this build upgrades the store to v15 on the
   daemon's first restart (RUNBOOK §4: back up, and ship it with the segment
   switch) and the dashboard exporter must move in the same batch, since it
   pins the status document version it reads. `validate` and the

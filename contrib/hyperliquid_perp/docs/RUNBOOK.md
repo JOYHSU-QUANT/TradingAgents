@@ -367,9 +367,11 @@ run 的 store 升到 v14——護欄開不開都一樣，不是只有開了才�
 本機 checkout 比伺服器新時，對快照跑 `validate`／`export`／`status` 會具名拒絕（store 落後、不升級），
 那不是壞掉，是伺服器還沒部署到這一版（上面那個例外照舊：`safe-mode --status` 開檔就升級——對快照副本無妨，
 對正式 store 就是花掉退路）。
-**v15（2026-11-04，`ai_outputs.unavailable_inputs`，issue #399）同一條規則**：帶它的 build 一部署就把 store 升到 v15，
-同樣先備份、同樣排在換段（paper-BTC-10 與 #394／#396／#397／#398 同批）；`status --json` 的文件版本同時升到 2，
-dashboard 的 exporter 要同一批更新（它釘住自己讀得懂的版本，舊 exporter 對新文件會拒讀）。
+**v15（2026-11-04，`ai_outputs.unavailable_inputs`，issue #399）同一條規則**：帶它的 build 一部署就把**兩個** perp store
+（paper 的與 carry 腿的 `/home/trader/data/carry/paper_trading.db`，同一次 push 兩個 daemon 都重啟）升到 v15，同樣先備份、
+同樣排在換段（paper-BTC-10 與 #394／#396／#397／#398 同批）。`status --json` 的文件版本同時升到 2：dashboard 的 exporter 跑在
+同一個 hl checkout、同一次 push 一起升（deploy.yml 部署期間停 timer），不用另外做；只有手動 reset checkout 卻沒重啟 daemon 時，
+exporter 會對落後的 store 拒讀（`read_failed`），重啟 daemon 就好。
 
 判讀時**主判準是提案率**（`requested_target_margin_pct` 非 null 的佔比）。**但這一欄
 會低估**：fail-closed 的 cycle 一律把它寫成 NULL，模型實際要求了什麼在 parse 接縫就被
@@ -406,7 +408,7 @@ PnL，正是跨段對照要避免的汙染。等 cycle 自然回到空倉（或 
 1. 確認空倉後，SSH 上伺服器 `sudo systemctl stop hl-paper`，把 unit 的
    `ExecStart` 改成新段參數（`--run-id paper-BTC-2 --create`），
    `sudo systemctl daemon-reload`，**先不要啟動**。
-2. **這次部署若帶 schema migration（例如 v13、v14，見 §4），在這裡備份 DB。**
+2. **這次部署若帶 schema migration（例如 v13、v14、v15，見 §4），在這裡備份 DB——兩個 perp store 都要（paper 的與 carry 腿的，同一次 push 兩個 daemon 都重啟、都升級）。**
    停了、還沒 push，是唯一一個「舊 code 與舊 schema 都還在」的時點；一旦下一步
    的新 binary 開過 store 把它升上去，要退回舊 binary 就只剩還原備份這條路。
    沒有 migration 的部署跳過這步。

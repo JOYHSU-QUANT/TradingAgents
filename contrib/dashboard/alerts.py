@@ -309,15 +309,25 @@ def _hyperliquid(
                 "(guardrail-signal) and its fetch",
             )
         )
-    unavailable = _unavailable_input_streaks(doc["cycles"]["recent"], th.input_unavailable_cycles)
-    if unavailable:
+    # One condition per category (the key carries the name, as an event's
+    # carries its type): a second feed going quiet while a first is still
+    # down is its own raise, and the first coming back its own clear — one
+    # shared key would change its text and say nothing for either.
+    for category, streak, whole_window in _unavailable_input_streaks(
+        doc["cycles"]["recent"], th.input_unavailable_cycles
+    ):
+        count = f"{streak}+" if whole_window else str(streak)
         conditions.append(
             _condition(
                 line.name,
-                "input_unavailable",
-                "an optional data input has been unavailable on every one of the newest "
-                "decided cycles: "
-                + ", ".join(f"{category} ({streak} cycles)" for category, streak in unavailable)
+                f"input_unavailable:{category}",
+                f"the optional data input {category} has been unavailable on the newest "
+                f"{count} decided cycles"
+                + (
+                    " (every recorded cycle in the window; the true streak may be longer)"
+                    if whole_window
+                    else ""
+                )
                 + " — the analyst writes the section as absent and the cycle decides "
                 "without it; check the vendor and the host's reach to it",
             )
@@ -328,8 +338,13 @@ def _hyperliquid(
 
 def _unavailable_input_streaks(
     recent: Sequence[Mapping[str, Any]], threshold: int
-) -> list[tuple[str, int]]:
-    """Each category unavailable on the newest ``threshold`` or more decided cycles in a row, with its streak.
+) -> list[tuple[str, int, bool]]:
+    """Each category unavailable on the newest ``threshold`` or more decided cycles in a row: name, streak, whether it fills the window.
+
+    The streak is counted over the ``recent`` cycles the document carries,
+    so it is capped by that window: the third item says the category was
+    in every recorded set, which means the true streak may be longer (the
+    store, not the document, knows — ``validate`` would).
 
     Over the cycles the status document carries (newest first): a cycle
     without a verdict (``api_failed``) neither counts nor breaks a streak,
@@ -351,9 +366,11 @@ def _unavailable_input_streaks(
         return []
     found = []
     for category in sorted(recorded[0]):
-        streak = next((i for i, inputs in enumerate(recorded) if category not in inputs), len(recorded))
+        streak = next(
+            (i for i, inputs in enumerate(recorded) if category not in inputs), len(recorded)
+        )
         if streak >= threshold:
-            found.append((category, streak))
+            found.append((category, streak, streak == len(recorded)))
     return found
 
 

@@ -118,7 +118,7 @@ class EngineRun:
             # Under the collector (#399): the optional categories whose tool
             # call ended in the router's sentinel during this run, read off
             # the router's own WARNING; the parsed decision carries them.
-            with collect_unavailable_inputs() as unavailable:
+            with collect_unavailable_inputs() as collector:
                 propagated = self._graph.propagate(
                     graph_ticker(coin), trade_date, asset_type="crypto"
                 )
@@ -162,7 +162,7 @@ class EngineRun:
         )
         if truncated and decision_call is not None:
             log_decision_truncation(decision_call, parsed, cap=cap)
-        return replace(parsed, unavailable_inputs=tuple(sorted(unavailable)))
+        return replace(parsed, unavailable_inputs=collector.recorded)
 
 
 def build_engine_run(

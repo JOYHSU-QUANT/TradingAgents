@@ -167,6 +167,7 @@ def test_v14_adds_a_nullable_guardrail_side_to_ai_outputs(tmp_path):
     assert db.conn.execute("SELECT guardrail_side FROM ai_outputs").fetchone()[0] == "unknown"
     with pytest.raises(ValueError, match="^guardrail_side must be one of"), db.transaction() as conn:
         repo.insert_ai_output(conn, **{**_ai_output_kwargs("live"), "guardrail_side": "sideways"})
+    db.close()
 
 
 def test_v15_adds_a_nullable_unavailable_inputs_to_ai_outputs(tmp_path):

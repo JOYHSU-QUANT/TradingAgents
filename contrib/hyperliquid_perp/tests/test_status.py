@@ -523,7 +523,7 @@ _SNAPSHOT_FIELDS = (
     "margin_ratio",
 )
 
-# The document's shape at SCHEMA_VERSION 1. A path added, removed or moved
+# The document's shape at SCHEMA_VERSION 2. A path added, removed or moved
 # changes this set; change it together with ``status.SCHEMA_VERSION``, and the
 # exporter and the page that read the document with it.
 _SCHEMA_2_PATHS = {

@@ -87,6 +87,8 @@ def _edited(**changes):
         ({"world.seed_set": "test"}, "not the id of test seed 0"),
         ({"world.world_seed": 1}, "not the id of dev seed 1"),
         ({"world.origin_ms": 1}, "not a UTC midnight"),
+        # Zero is a midnight and not a venue stamp (the candle type refuses it).
+        ({"world.origin_ms": 0}, "world.origin_ms"),
         ({"world.funding.sigma": 0}, "world.funding.sigma"),
         ({"world.price.vol": 0}, "world.price.vol"),
         ({"world.bars.interval": "1h"}, "world.bars.interval"),

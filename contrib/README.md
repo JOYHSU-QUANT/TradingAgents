@@ -21,7 +21,7 @@ replay 拿它把同一題重問別的模型（考古題）；**sidecar**＝寫�
 | [`replay`](./replay/README.md) | 事後評估：已記錄決策的成績單、同一題重問別的模型（考古題）、配對比較、帶模擬帳戶的回測（含從 `.reports.json` 重跑下半段 graph）與 §5 門檻 | 讀 `paper_trading.db`＋payload＋`autoresearch.sqlite` → 報表、`replay.sqlite` | README 內 |
 | [`carry`](./carry/README.md) | funding carry 的協調者：讀 funding 歷史、套一條規則、寫一份交接檔說兩條腿該持有什麼；`report` 唯讀對帳 | `autoresearch.sqlite`（`signal` 預設先經 autoresearch 的回補介面補 funding，`--no-fetch` 才純讀；可選讀兩腿 store 的 equity）→ 交接檔 JSON；`report` 唯讀兩顆交易帳本，`--json` | [RUNBOOK](./carry/RUNBOOK.md) |
 | [`dashboard`](./dashboard/README.md) | 狀態匯出、告警、唯讀網頁 | 三條線的 `--json` CLI 輸出＋主機狀態 → status 目錄的 JSON、email、網頁 | README 內 |
-| [`discovery`](./discovery/README.md) | 研究迴圈的 benchmark：造有標準答案的合成世界，用 autoresearch 自己的 port 與 `search()` 考它找不找得到埋的規律、會不會在雜訊裡硬掰。離線、不下單、不碰別的套件擁有的任何 store；**骨架（PR 1）已落地：manifest、最終判定、隔離棘輪；生成器與各臂在後續 PR** | 合成世界（自造）→ 每臂一顆自己的 `autoresearch.sqlite`、manifest／verdicts JSON | README 內 |
+| [`discovery`](./discovery/README.md) | 研究迴圈的 benchmark：造有標準答案的合成世界，用 autoresearch 自己的 port 與 `search()` 考它找不找得到埋的規律、會不會在雜訊裡硬掰。離線、不下單、不碰別的套件擁有的任何 store；**骨架（PR 1）與世界生成器＋`generate` 指令（PR 2）已落地；各臂、oracle 判定、評分在後續 PR** | 合成世界（自造，`generate` 落成 `world.sqlite`）→ 每臂一顆自己的 `autoresearch.sqlite`、manifest／verdicts JSON | README 內 |
 | [`core`](./core/) | 共用地板：instants、decimal context、digest、enum guard、atomic io。只依賴標準庫（有測試）、不含策略（慣例） | | |
 | [`tests/`](./tests/) | 跨套件的架構限制：套件圖 `test_package_graph.py` | | |
 
@@ -140,4 +140,4 @@ funding 歷史 → 一條規則（z-score 進出場）→ 日線邊界前寫交�
 | 看部署狀態與告警 | [dashboard README](./dashboard/README.md) |
 | 加一個現貨策略 | [uniswap_v3 README「加一個策略」](./uniswap_v3/README.md#加一個策略) |
 | 改套件之間的邊 | [tests/test_package_graph.py](./tests/test_package_graph.py) 的 `ALLOWED`、`_PERP_REACH` 與註解 |
-| 考研究迴圈找不找得到埋的規律 | [discovery README](./discovery/README.md)：scope statement、manifest 格式、最終判定；生成器與各臂的指令隨後續 PR 補上 |
+| 考研究迴圈找不找得到埋的規律 | [discovery README](./discovery/README.md)：scope statement、manifest 格式、最終判定、generator v1 的定義與 `generate` 指令；各臂的指令隨後續 PR 補上 |

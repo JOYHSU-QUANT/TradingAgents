@@ -28,8 +28,10 @@ establish general autonomous scientific discovery capability. Track B（開放�
 
 ## 現況
 
-**PR 1（骨架，已落地）**：套件、借用漏斗、manifest 格式、最終判定、oracle 的讀取原語、隔離規則的測試。世界生成器（PR 2）、
-Random／Grid 臂與 oracle 的其餘部分（PR 3）、評分器（PR 4）、LLM 臂（PR 5）、replay 消融（PR 6）都還沒有。
+**PR 1（骨架，已落地）**：套件、借用漏斗、manifest 格式、最終判定、oracle 的讀取原語、隔離規則的測試。
+**PR 2（世界生成器，已落地）**：`worlds.py`（generator v1 與 `SyntheticHistory` port）、`landing.py`（經 autoresearch 的
+backfill 落地＋驗收）、`generate` 指令。Random／Grid 臂與 oracle 的其餘部分（PR 3）、評分器（PR 4）、LLM 臂（PR 5）、
+replay 消融（PR 6）都還沒有。
 
 已經有的東西：
 
@@ -49,6 +51,48 @@ Random／Grid 臂與 oracle 的其餘部分（PR 3）、評分器（PR 4）、LL
 - [`records.py`](./records.py)：兩份 JSON 紀錄共用的嚴格讀取器（`Reader`，各模組帶自己的 error class）；`from_dict` 管
   鍵集合與只有原始文件才能做的檢查（版本、寫出的 id／hash 對衍生值、parser），每個欄位自己的值一律在 `__post_init__`
   驗（與 autoresearch 的 `Penalty.from_dict` 同款）；重複的 JSON key 拒絕。
+- [`worlds.py`](./worlds.py)：`generate(manifest)` 把一個 seed 變成一份 `WorldHistory`（4h bars、1d 聚合、hourly funding、
+  每根 bar 帶的埋入方向；吃整份 manifest 是因為 `indicator_lookback` 也決定 conditional 世界的持倉 bar）；
+  `SyntheticHistory` 把它包成 autoresearch 的 `HistoryMarketData` port。定義見下一節。
+- [`landing.py`](./landing.py)：`land()` 走 autoresearch 自己的 `backfill_candles`／`backfill_funding` 把世界落進一顆
+  research store（三條 walk 都要走到頭，否則拒絕）；`verify()` 跑 PR 2 的驗收清單並回 `Landing`；`split_of()`＝manifest
+  的 `count` 根決策 bar 按 shares 切（`Split.by_shares`），`experiment_for()` 把 manifest 的條件綁成各臂 ledger 要建的
+  `Experiment`；`world_dir()`／`land_world()`＝run 目錄的配置與分段落地（見「檔案配置」）。
+- [`cli.py`](./cli.py)：`python -m contrib.discovery generate --manifest <path> [--root <dir>]`。
+
+## 世界生成器（generator v1）
+
+一個世界由 manifest 的 `world` 區塊完全決定；`generator_version` 不是 `"1"` 的 manifest 直接拒絕。
+
+- **亂數流**：三條（`price`／`wicks`／`funding`），都從不透明 id 派生（`random.Random(f"{id}/{name}")`），**kind 不進種子**，
+  所以同 seed 的 Null 與 Conditional 共用同一組抽樣、只差埋入效果。每根 bar 的抽樣按 bar 順序消耗，短世界是長世界的
+  prefix＝生成器內無前視。
+- **Null-v1**：`log P[t] = log P[t-1] + drift + vol·Z[t] − vol²/2`，`Z` i.i.d. N(0,1)，`vol` 以一根 4h bar 為單位；`−vol²/2`
+  讓 `drift = 0` 時下一根收盤的條件期望等於現價。每根 bar 的 open＝前一根 close（連續路徑、無跳空）；high／low＝實體兩端
+  各加一段半常態 wick（`WICK_SCALE·vol·|N(0,1)|`，log 空間）；volume 常數 1。funding：`f[k] = sigma·W[k]`，`W` i.i.d.
+  N(0,1)，每小時一筆、戳記在整點後 `SETTLEMENT_LAG_MS`（50 ms，與 venue 的貼出延遲同型），從第一根 open 到最後一根
+  close 應結的那一筆（共 `4n+1` 筆）。1d 由同一條 4h 路徑聚合（只出完整日）。venue 時鐘＝最後一筆 funding 貼出後 1 ms。
+- **Conditional-v1**：同一組抽樣，再在「埋的規則持倉中的 bar」的 log 報酬加上 `beta`（short 側＝`−beta`）。哪些 bar 持倉由
+  autoresearch 自己的 `replay_sides` 在**未加效果的路徑**（同 seed 的 null 世界）上判定：收盤決策、下一根開盤成交、
+  `max_bars`／exit 規則／反手；效果從成交那根起算，**決策當根不加**。價格衍生的 gate（`realized_vol_*`、`regime`）在最終
+  路徑上可能在門檻邊緣差幾根，這是 v1 的定義（單趟、不做 fixed point）；oracle 量的是最終路徑，β 的校準以它為準。
+- **價格的寫法**：float 路徑以 `repr` 轉 Decimal（最短可逆串），不貼 tick；同一個 float 同一個 Decimal，所以 open＝前一根
+  close 在 store 裡也精確相等。
+- **落地**：`land()` 用 `SyntheticHistory` 當 venue、以世界自己的時鐘切視窗，三條 walk 分別必須以 `reached_since`／
+  `reached_since`／`reached_end` 結束。`verify()`＝`require_clean_history` → `FeatureFrame` → `first_measurable_index ≤
+  warmup_bars`（否則句子裡告訴你要把 `warmup_bars` 提到幾） → `require_measurable_tail` → `Split.by_shares` 三段長度加總
+  ＝`count`。split 從 manifest 切而不用 `plan_experiment`，因為後者會把 train 起點往前挪到第一根可量測的 bar。
+- **暖身要多長**：由 `verify()` 量，不是推導；`sma_1d_200` 要有 ≥ 180 個日收盤（覆蓋率 0.9）才有值，所以 warm-up 至少
+  約 185 天（≈1,110 根）；範例 manifest 用 200 天（1,200 根）。
+
+```
+python -m contrib.discovery generate --manifest dev-seed-0.json --root data/discovery
+```
+
+成功時 `<root>/<world id>-<manifest digest>/` 有 `world.sqlite`（唯讀 artifact，各臂複製它）與 `manifest.json`（canonical
+bytes）。落地先在同一個 root 下的 staging 目錄做（`.<name>.partial-*`），驗收通過、manifest 寫好才 rename 到定位；任何原因
+中途結束都把 staging 整個移除，最終路徑永遠不會出現半成品。同一份 manifest 已落地就拒絕（exit 1）。stdout 印三條 walk 的
+結果、量到的第一根可量測 bar、三段 split 與各自的 bar 數；這些只給操作者看，不進任何 prompt。
 
 ## 測試釘住的隔離規則
 
@@ -59,6 +103,9 @@ Random／Grid 臂與 oracle 的其餘部分（PR 3）、評分器（PR 4）、LL
 | 同一個 coin 名、每臂一顆 sqlite：rules_tried／holdout pin／penalty pin 互不影響 | `tests/test_isolation.py` (b) |
 | system＋user prompt 含 opaque id、不含 `COND`（精確）／null／planted／世界類型值；manifest 本身沒有任何路徑進 prompt | `tests/test_isolation.py` (c) |
 | 最終判定與 promote 前的 `ledger.verdict` 一致；promote 後從快照重建不變；零 trial 回空集合 | `tests/test_verdict.py` |
+| 同 seed bit-exact 重現；短世界是長世界的 prefix；funding 不讀價格；Null-v1 公式對得上亂數流；candle 形狀（close＝next open − 1 ms、OHLC、open＝前 close）；1d 由同一路徑聚合；funding 格線無洞無重複；效果＝null 雙胞胎＋β、從決策下一根起 | `tests/test_worlds.py` |
+| store 的三條序列逐筆等於生成結果；`first_measurable_index ≤ warmup`；tail 通過；三段長度＝manifest；walk 沒走到頭拒絕 | `tests/test_landing.py` |
+| `generate` 寫出 canonical manifest、第二次拒絕、失敗不留半成品 | `tests/test_cli.py` |
 
 ## Manifest 格式（v1）
 
@@ -71,8 +118,8 @@ Random／Grid 臂與 oracle 的其餘部分（PR 3）、評分器（PR 4）、LL
     "id": "SYN-EB3BC030",
     "kind": "null-v1 | conditional-v1",
     "seed_set": "dev | test", "world_seed": 0, "generator_version": "1",
-    "origin_ms": 0, "initial_price": 30000.0,
-    "bars": {"interval": "4h", "count": 400, "warmup_bars": 1440},
+    "origin_ms": 1682640000000, "initial_price": 30000.0,
+    "bars": {"interval": "4h", "count": 400, "warmup_bars": 1200},
     "price": {"vol": 0.01, "drift": 0.0},
     "funding": {"sigma": 0.0001},
     "planted": {"spec": {}, "beta": 0.001, "difficulty": "tight | easy | trivial"}
@@ -113,17 +160,22 @@ runner 遇到「有 llm 區塊但本世界不在子集」應拒絕。
   第一個；零 trial 時為空、不呼叫 `threshold(0)`。
 - `first_eligible_round`：診斷用（當時過門檻的第一輪），不是成功。
 
-## 檔案配置（計畫 §2，PR 2 起落地）
+## 檔案配置（計畫 §2）
 
 ```
-<bench-root>/<world-id>/
-  manifest.json              世界與 benchmark 參數
-  world.sqlite               生成器落地的 candles／funding（唯讀 artifact，各臂從這裡 backfill）
-  oracle.json                各臂跑完後才寫
-  arms/{random,grid,llm}/replicate-<k>.sqlite
-  verdicts.json              每臂每 replicate 的快照與最終判定
-  scores.json
+<bench-root>/<world-id>-<manifest-digest>/
+  manifest.json              世界與 benchmark 參數（generate 寫，canonical）
+  world.sqlite               生成器落地的 candles／funding（generate 寫；唯讀 artifact，各臂複製它）
+  oracle.json                各臂跑完後才寫（PR 3）
+  arms/{random,grid,llm}/replicate-<k>.sqlite   （PR 3／PR 5）
+  verdicts.json              每臂每 replicate 的快照與最終判定（PR 3）
+  scores.json                （PR 4）
 ```
+
+目錄用 **manifest 的 digest**（`sha256(manifest.dumps())` 前 8 碼）而不只用 world id 命名：id 只是 seed_set＋seed 的函數
+（計畫 §1 #7），同 seed 的 null 雙胞胎、或校準時同 seed 三檔 β 的三份 manifest 共用一個 id，要能並存；目錄名不進任何
+prompt，store 裡的 coin 名仍是 id。與計畫 §2 寫的 `<world-id>/` 不同，記在計畫 §9。預設 `<bench-root>`＝
+`<repo>/data/discovery`（`.gitignore` 已排除）。
 
 ## 不做清單
 

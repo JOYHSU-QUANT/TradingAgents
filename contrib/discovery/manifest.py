@@ -329,7 +329,10 @@ class World:
         object.__setattr__(self, "seed_set", _read.enum(SeedSet, self.seed_set, "world.seed_set"))
         _read.whole(self.world_seed, "world.world_seed", minimum=0)
         _read.text(self.generator_version, "world.generator_version")
-        _read.whole(self.origin_ms, "world.origin_ms", minimum=0)
+        # At least one: a venue stamp is strictly positive (the candle type
+        # refuses zero), and with the midnight rule below the first legal
+        # origin is the first day after the epoch.
+        _read.whole(self.origin_ms, "world.origin_ms", minimum=1)
         if self.origin_ms % MS_PER_DAY:
             raise ManifestError(
                 f"world.origin_ms: {self.origin_ms} is not a UTC midnight; the world grid starts "

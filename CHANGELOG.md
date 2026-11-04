@@ -10,6 +10,44 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **The research-loop benchmark's world generator and `generate` command**
+  (discovery plan 2026-10-21, PR 2). `contrib/discovery/worlds.py` turns a
+  manifest's seed into the three series a research store holds — 4h bars
+  on a midnight-anchored grid closing a millisecond before the next open,
+  the daily backdrop aggregated from the same path, hourly funding posted
+  50 ms past the hour — as generator version `1`: Null-v1 is the stated
+  martingale (`log P[t] = log P[t-1] + drift + vol·Z − vol²/2`, i.i.d.
+  zero-mean funding from its own stream), Conditional-v1 the same draws
+  plus `beta` on every bar the planted rule holds a position on, which bars
+  being the research package's own `replay_sides` over the pre-effect path
+  (decide at close, fill next open, `max_bars`, reversal) — never the
+  decision bar itself. The three streams are seeded from the opaque id, so
+  the null and conditional worlds of one seed share every draw, and a
+  shorter world is a prefix of a longer one (the generator's no-look-ahead,
+  held as a prefix). `SyntheticHistory` serves a world through the
+  `HistoryMarketData` port; `landing.py` lands it through the research
+  package's own `backfill_candles`/`backfill_funding` and `verify` measures
+  plan PR 2's acceptance list with that package's instruments (clean grid,
+  `first_measurable_index` at or before the warm-up's end, the tail, the
+  manifest's shares tiling exactly the decision bars via `Split.by_shares`
+  — cut from the manifest, not `plan_experiment`, so every arm measures the
+  same `count` bars); `experiment_for` binds a manifest into the experiment
+  an arm's ledger creates. `python -m contrib.discovery generate --manifest
+  <path> [--root <dir>]` writes `<root>/<world id>-<manifest digest>/`
+  (`world.sqlite` and the canonical `manifest.json`): the directory is
+  keyed by the manifest, since the id is a function of the seed alone and
+  the null twin or the β bands of one seed share it; the landing is staged
+  in a sibling directory and renamed into place only once verified, so
+  nothing half-made is ever at the final path, and a manifest already
+  landed is refused. The example manifest's warm-up
+  is 200 days (1,200 bars; the measured first measurable bar is about
+  1,100, from `sma_1d_200`'s coverage). Known trade-offs: the planted
+  rule's price-derived gate can sit a few bars differently on the final
+  path than on the pre-effect path it was keyed to (a single pass, by
+  definition; the oracle measures the final path); the ledger-level test
+  suites keep their hand-written 400-bar history because the frame's
+  indicator walk (≈1.3 ms a bar) is rebuilt every search round. `data/discovery/`
+  is ignored.
 - **An optional data input that stays down is counted, not just degraded**
   (#399). The router's sentinel is the right ending for one cycle — the
   analyst writes the section as absent and the cycle decides — and the

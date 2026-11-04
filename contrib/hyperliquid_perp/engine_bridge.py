@@ -487,6 +487,27 @@ class EngineImportError(EngineConfigError):
     """
 
 
+# The global news searches a BTC perp run makes when ``engine.global_news_queries``
+# is omitted (#394): the engine's own default is the upstream stock pipeline's
+# macro list (Fed, S&P earnings, ECB/BOJ, commodities), kept there so the
+# shared file stays upstream's; this is the perp's. Five groups with a
+# transmission path to a BTC perp, in Google News search syntax (``OR``,
+# quoted phrases, parentheses): crypto-market shocks, US crypto regulation,
+# tariffs and trade, US rates and inflation, geopolitical war and sanctions.
+# Every group is represented in the report in turn (the vendor interleaves
+# them), so the order is not a priority. The perp deployment replaces the
+# list from its local.yaml without a redeploy; changing THIS list is a code
+# change and an input-surface segmentation point (RUNBOOK §4).
+PERP_GLOBAL_NEWS_QUERIES = (
+    "(bitcoin OR crypto) (hack OR exploit OR liquidations OR stablecoin OR bankruptcy OR selloff)",
+    "(crypto OR bitcoin OR stablecoin) (SEC OR CFTC OR Congress OR regulation OR ETF)",
+    'tariffs OR "trade war" OR "trade deal" OR "export controls"',
+    '"Federal Reserve" OR FOMC OR inflation OR "rate cut" OR "jobs report" OR "Treasury yields"',
+    "(war OR missile OR invasion OR ceasefire OR sanctions) "
+    "(Iran OR Israel OR Russia OR Ukraine OR Taiwan OR China)",
+)
+
+
 class _EngineBlock(dict):
     """The ``engine:`` block projected onto ``ENGINE_KEYS``, read by subscript only.
 
@@ -584,6 +605,17 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
         eng_cfg["quick_think_llm"] or engine_config["quick_think_llm"]
     )
     engine_config["backend_url"] = None
+    # The global news tool's knobs (#394): the loader has already held the
+    # queries to a non-empty list of strings and the two counts to positive
+    # integers. Omitted, the queries are the perp's own groups above (not
+    # the engine's stock-pipeline list) and the two counts keep the engine
+    # default, as every other data knob does.
+    engine_config["global_news_queries"] = list(
+        eng_cfg["global_news_queries"] or PERP_GLOBAL_NEWS_QUERIES
+    )
+    for key in ("global_news_article_limit", "global_news_lookback_days"):
+        if eng_cfg[key] is not None:
+            engine_config[key] = eng_cfg[key]
     # Cap precedence: YAML > TRADINGAGENTS_MAX_TOKENS (already overlaid onto
     # DEFAULT_CONFIG, like every sibling env knob) > perp default. ``or``
     # matches the string keys above: present-but-null falls through, never to

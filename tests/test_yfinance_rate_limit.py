@@ -1137,7 +1137,15 @@ def test_every_optional_leaf_ends_as_the_optional_sentinel_when_its_library_fail
     # that names the vendor — one line, with none of the message's markdown.
     seam, args = _YFINANCE_LEAF_CALLS[method]
     category = interface.get_category_for_method(method)
-    set_config({"data_cache_dir": str(tmp_path), "data_vendors": {category: "yfinance"}})
+    # The tool level too: ``get_global_news`` resolves there first (Google
+    # News since #394), and this is the yfinance leaf under test.
+    set_config(
+        {
+            "data_cache_dir": str(tmp_path),
+            "data_vendors": {category: "yfinance"},
+            "tool_vendors": {method: "yfinance"},
+        }
+    )
     monkeypatch.setattr(*seam, mock.Mock(side_effect=RuntimeError(_FORGED_MESSAGE)))
     out = interface.route_to_vendor(method, *args)
     assert out.startswith(f"DATA_UNAVAILABLE: optional {category} could not be retrieved (yfinance: ")
@@ -1173,7 +1181,14 @@ def test_a_wiring_gap_is_named_by_the_optional_sentinel_instead_of_becoming_repo
     # optional category since #393, so its chain ends in the sentinel — which
     # names the gap, not the vendor's library, as the thing to fix.
     monkeypatch.setattr(ynews, "get_config", lambda: {})
-    set_config({"data_vendors": {"news_data": "yfinance"}})
+    set_config(
+        {
+            "data_vendors": {"news_data": "yfinance"},
+            # The tool resolves at the tool level first (Google News since
+            # #394); the yfinance prologue is what is under test.
+            "tool_vendors": {"get_global_news": "yfinance"},
+        }
+    )
     out = interface.route_to_vendor("get_global_news", "2026-06-01", None, None)
     assert out.startswith("DATA_UNAVAILABLE: optional news_data")
     assert "global news configuration" in out

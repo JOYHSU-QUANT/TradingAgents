@@ -10,6 +10,76 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **Global news comes from Google News search: a `google_news` vendor for
+  `get_global_news`, every configured query represented, and the three
+  global-news knobs settable from the perp `local.yaml`** (#394). The
+  yfinance path behind the tool was a symbol finder, not a keyword search:
+  `yf.Search` answers the stories of the tickers it fuzzy-matched, so
+  `trade war` returned The Trade Desk, `exchange hack` the ICE exchange and
+  `Federal Reserve rate decision` a rare-earth miner's earnings preview, and
+  its loop broke as soon as the first query filled the limit, so the later
+  queries — the geopolitical one among them — never ran at all; the
+  2026-10-29 Binance theft (the largest in history) reached the news report
+  through one Reddit post. `tradingagents/dataflows/google_news.py` GETs the
+  public RSS search feed (`news.google.com/rss/search?q=<query>
+  after:<start> before:<end>`, keyless; the date operators bound the search
+  to the window itself, so a backtest's past as-of date is served from the
+  archive rather than from "the last N days" — Google reads them as Pacific
+  calendar days, so the request is padded a day each side and the client
+  filter is the as-of bound) once per query, parses
+  `<title>`/`<source>`/`<pubDate>` reading the body in chunks under a 5 MB
+  cap, holds every item to the look-ahead-safe window
+  (`date_window.in_window`, as the yfinance path does), interleaves the
+  queries round-robin in feed order
+  (Google's relevance ranking) up to `global_news_article_limit`, and
+  renders one heading and one `Published:` line per headline (the feed's
+  link is a ~250-character Google redirect the citation rule would drop, and
+  its description is the title again). Failures take the router's taxonomy:
+  an unreached vendor, a 5xx, a 401/403 refusing this client (the realistic
+  failure from a datacenter address, #395) and a non-feed body are the
+  outage type (the optional `news_data` category then ends in its sentinel),
+  a 429 the latched rate-limit type; an outage on any one query is the
+  verdict on the whole call. One empty feed is not a failure (Google serves
+  an empty channel for no matches), so the quiet outcomes are logged: one
+  INFO line per call with each query's fetched, undated and in-window
+  counts, and a WARNING when a feed carried items without a title or a
+  readable date, when some queries answered nothing while others did, when
+  items were fetched and none fell inside the window, or when the limit is
+  below the number of queries (round-robin can then represent only the
+  first queries). Every query answering an empty feed is the one quiet
+  outcome treated as a failure — broad searches over a week do not all
+  come back empty when Google serves this client — so it ends as the
+  outage type and the sentinel, not as a "quiet week" the analyst would
+  read as fact. The tool is switched by `tool_vendors.get_global_news:
+  "google_news"` in `DEFAULT_CONFIG` — the other two news tools stay on the
+  category's yfinance — and per the `data_vendors` convention that default
+  IS the Hyperliquid perp deployment's live value, so the first deploy
+  carrying this commit is a dated input-surface segmentation point (a new
+  run-id; `PROMPT_VERSION` is not bumped — the prompt's text and shape are
+  unchanged, only the content of one tool answer). The uniswap_v3 judge
+  builds its engine config from the same defaults, so it too moves to
+  Google News on that deploy — with the engine's macro query list, not the
+  perp's — and the deploy is its input-surface segmentation point as well.
+  With `tool_vendors` no longer empty, `get_vendor` now lets a category's
+  `"none"` outrank a tool-level entry, so `data_vendors.news_data: "none"`
+  still switches all three news tools off as the #393 entry promised (through
+  the Python config; the perp bridge pipes neither table, as before). The perp's own searches
+  are five groups with a transmission path to a BTC perp — crypto-market
+  shocks, US crypto regulation, tariffs and trade, US rates and inflation,
+  geopolitical war and sanctions (Google News search syntax: `OR`, quoted
+  phrases, parentheses) — held in `engine_bridge.PERP_GLOBAL_NEWS_QUERIES`
+  and used when the YAML sets none, while the engine's shared default
+  (`global_news_queries` in `default_config.py`) stays upstream's macro
+  list, which keyword search now actually serves. The three keys
+  `global_news_queries`, `global_news_article_limit`,
+  `global_news_lookback_days` join the perp `engine:` block
+  (`ENGINE_KEYS`): the loader holds the queries to a non-empty list of
+  non-blank strings and the two counts to positive integers (written back
+  normalised), the bridge overlays whichever are set, so a query or cap
+  change is a `local.yaml` edit, not a redeploy.
+  Also moved: the routed-refusal test helper removes the tool-level
+  override for the tool under test, since `tool_vendors` no longer ships
+  empty.
 - **`backtest --ask`: the lower half of the paper trader's graph re-run from
   each cycle's recorded reports, question by question from the simulated
   account's own book** (replay plan PR 3b). A graph variant (`mode: graph`,

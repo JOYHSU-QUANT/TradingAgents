@@ -699,6 +699,9 @@ def test_every_engine_key_the_loader_accepts_lands_in_the_bridge_output():
         # value proves the key was read (its warning is expected here).
         "structured_output": (True, "structured_output"),
         "max_completion_tokens": (4321, "max_tokens"),
+        "global_news_queries": (["one query", "two"], "global_news_queries"),
+        "global_news_article_limit": (17, "global_news_article_limit"),
+        "global_news_lookback_days": (3, "global_news_lookback_days"),
     }
     # ``selected_analysts`` lands in the second return value, not engine_config.
     assert set(landing) | {"selected_analysts"} == set(ENGINE_KEYS)
@@ -1132,3 +1135,62 @@ def test_int_from_yaml_is_bounded_by_the_platform_integer_range():
     for huge in (sys.maxsize + 1, str(2**63), -(sys.maxsize + 1)):
         with pytest.raises(ValueError, match="within the platform integer range"):
             int_from_yaml(huge)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "engine:\n  global_news_queries: []\n",
+        'engine:\n  global_news_queries: "one bare string"\n',
+        'engine:\n  global_news_queries: ["ok", "   "]\n',
+        "engine:\n  global_news_queries: [1, 2]\n",
+    ],
+)
+def test_load_config_rejects_bad_global_news_queries(tmp_path, text):
+    # A bare string is iterable — one search per character at the vendor —
+    # and an empty list is a search of nothing; both would be reported as a
+    # wiring gap on every decision cycle instead of once, here (#394).
+    bad = tmp_path / "news.yaml"
+    bad.write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match="engine.global_news_queries"):
+        load_config(bad)
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["global_news_article_limit", "global_news_lookback_days"],
+)
+@pytest.mark.parametrize("value", ["0", "-3", "true", "2.5", '"ten"'])
+def test_load_config_rejects_bad_global_news_counts(tmp_path, key, value):
+    bad = tmp_path / "news.yaml"
+    bad.write_text(f"engine:\n  {key}: {value}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=f"engine.{key}"):
+        load_config(bad)
+
+
+def test_load_config_accepts_and_normalises_the_global_news_knobs(tmp_path):
+    good = tmp_path / "news.yaml"
+    good.write_text(
+        'engine:\n  global_news_queries: ["tariffs OR \\"trade war\\"", "FOMC"]\n'
+        '  global_news_article_limit: "15"\n  global_news_lookback_days: 3\n',
+        encoding="utf-8",
+    )
+    eng = load_config(good)["engine"]
+    assert eng["global_news_queries"] == ['tariffs OR "trade war"', "FOMC"]
+    assert eng["global_news_article_limit"] == 15
+    assert eng["global_news_lookback_days"] == 3
+
+
+def test_the_bridge_searches_the_perp_groups_when_the_queries_are_omitted():
+    # The engine's own default is the stock pipeline's macro list; a perp run
+    # that sets nothing searches the five crypto-relevant groups instead,
+    # and the two counts keep the engine default (#394).
+    from contrib.hyperliquid_perp import engine_bridge
+    from tradingagents.default_config import DEFAULT_CONFIG
+
+    engine_config, _ = engine_bridge._build_engine_config({"engine": {}})
+    queries = engine_config["global_news_queries"]
+    assert queries == list(engine_bridge.PERP_GLOBAL_NEWS_QUERIES)
+    assert queries != DEFAULT_CONFIG["global_news_queries"]
+    for key in ("global_news_article_limit", "global_news_lookback_days"):
+        assert engine_config[key] == DEFAULT_CONFIG[key], key

@@ -38,6 +38,7 @@ import tradingagents.dataflows.deribit as deribit
 import tradingagents.dataflows.farside as farside
 import tradingagents.dataflows.fear_greed as fear_greed
 import tradingagents.dataflows.fred as fred
+import tradingagents.dataflows.google_news as google_news
 import tradingagents.dataflows.hyperliquid_whales as hyperliquid_whales
 import tradingagents.dataflows.polymarket as polymarket
 import tradingagents.dataflows.sosovalue as sosovalue
@@ -246,6 +247,9 @@ DATE_CALLS: dict[tuple[str, str], Row | None] = {
     ),
     ("get_news", "alpha_vantage"): _window(avn.get_news, "news"),
     ("get_news", "yfinance"): _window(yfnews.get_news_yfinance, "news"),
+    ("get_global_news", "google_news"): _point(
+        google_news.get_global_news, lambda d: (d["curr_date"], 7), "global news"
+    ),
     ("get_global_news", "yfinance"): _point(
         yfnews.get_global_news_yfinance, lambda d: (d["curr_date"], 7), "global news"
     ),
@@ -387,6 +391,7 @@ def no_network(monkeypatch):
         cme_basis, "_utc_now", lambda: datetime(2026, 6, 6, 12, tzinfo=timezone.utc)
     )
     monkeypatch.setattr(fred, "_request", _reached)
+    monkeypatch.setattr(google_news, "_request", _reached)
     monkeypatch.setattr(polymarket, "_request", _reached)
     return reached
 

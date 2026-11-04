@@ -1503,7 +1503,8 @@ def _shipped_off_categories():
     Through ``is_category_disabled``, not ``get_vendor(category)``: the gate the
     analysts actually consult takes BOTH axes, and a tool-level ``tool_vendors``
     entry of "none" disables a tool while the category-level lookup still names
-    a vendor. ``tool_vendors`` ships empty today, so the two agree - which is
+    a vendor. ``tool_vendors`` ships with one entry (``get_global_news`` on
+    Google News, #394) and no "none", so the two agree today - which is
     exactly when a narrower reading goes unnoticed.
 
     A category counts as off only when EVERY tool of it is: one tool disabled

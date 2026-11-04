@@ -52,6 +52,7 @@ _IN_SCOPE = frozenset(
         "failures",
         "farside",
         "fear_greed",
+        "google_news",
         "hyperliquid_whales",
         "interface",
         "lag_notes",

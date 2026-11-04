@@ -41,7 +41,8 @@ def get_global_news(
 ) -> str:
     """
     Retrieve global news data.
-    Uses the configured news_data vendor. Defaults for look_back_days and
+    Uses the vendor configured for this tool (``tool_vendors``, Google News
+    search by default) or else the news_data category's. Defaults for look_back_days and
     limit come from DEFAULT_CONFIG (global_news_lookback_days,
     global_news_article_limit); pass explicit values to override.
 

@@ -246,7 +246,7 @@ def test_the_prologue_guard_passes_a_verdict_and_a_transport_failure_through(pas
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("vendor", ["yfinance", "alpha_vantage"])
+@pytest.mark.parametrize("vendor", ["yfinance", "alpha_vantage", "google_news"])
 def test_both_global_news_vendors_name_an_unusable_window_alike(vendor, monkeypatch):
     # The property this whole change is about, at the one value both vendors
     # coerce: an unusable window names the same guard whichever serves, so
@@ -254,6 +254,7 @@ def test_both_global_news_vendors_name_an_unusable_window_alike(vendor, monkeypa
     # side's configuration guard and the Alpha Vantage side's window guard,
     # which is the sibling divergence in miniature (#219).
     import tradingagents.dataflows.alpha_vantage_news as avn
+    import tradingagents.dataflows.google_news as gnews
     import tradingagents.dataflows.yfinance_news as ynews
 
     set_config(
@@ -266,9 +267,11 @@ def test_both_global_news_vendors_name_an_unusable_window_alike(vendor, monkeypa
     )
     monkeypatch.setattr(ynews.yf, "Search", lambda *a, **k: pytest.fail("no fetch may be made"))
     monkeypatch.setattr(avn, "_make_api_request", lambda *a, **k: pytest.fail("no fetch"))
+    monkeypatch.setattr(gnews, "_request", lambda *a, **k: pytest.fail("no fetch"))
     getter = {
         "yfinance": ynews.get_global_news_yfinance,
         "alpha_vantage": avn.get_global_news,
+        "google_news": gnews.get_global_news,
     }[vendor]
     with pytest.raises(WiringGapError, match="global news lookback window"):
         getter("2026-06-01")

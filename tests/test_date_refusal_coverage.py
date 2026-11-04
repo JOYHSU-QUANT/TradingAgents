@@ -26,6 +26,7 @@ import itertools
 
 import pytest
 
+import tradingagents.dataflows.config as config_module
 from tests._date_refusal_table import (
     DATE_CALLS,
     GOOD,
@@ -165,9 +166,15 @@ class TestEveryRowRefuses:
 
 
 def _configure_chain(method, *vendors):
-    """The category-level vendor chain production runs on (``tool_vendors``
-    ships empty and the perp engine pipes neither through), so the router
-    resolves the pair under test the way it does in a deployment."""
+    """The category-level vendor chain, with any tool-level override for
+    ``method`` removed, so the router resolves the pair under test through
+    the chain named here. ``tool_vendors`` is no longer empty by default
+    (``get_global_news`` ships on Google News, #394), and the perp engine
+    pipes neither table through, so the category chain is still what every
+    other tool runs on in a deployment."""
+    # On the module global, not a ``get_config()`` copy; the autouse
+    # fixture restores the default table after each test.
+    config_module._config["tool_vendors"].pop(method, None)
     set_config({"data_vendors": {interface.get_category_for_method(method): ",".join(vendors)}})
 
 

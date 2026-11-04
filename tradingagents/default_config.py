@@ -362,6 +362,16 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Tool-level configuration (takes precedence over category-level)
     "tool_vendors": {
         # Example: "get_stock_data": "alpha_vantage",  # Override category default
+        #
+        # Global news comes from Google News search rather than the
+        # category's yfinance, whose ``yf.Search`` fuzzy-matches symbols and
+        # answered ``trade war`` with The Trade Desk (#394); the other two
+        # news tools stay on the category vendor. Per the ``data_vendors``
+        # note above this default IS the Hyperliquid perp deployment's live
+        # value, so the first deploy carrying it is a dated input-surface
+        # segmentation point (a new run-id), and switching back to the
+        # category vendor is a code change: ``"yfinance"`` here.
+        "get_global_news": "google_news",  # Options: google_news (keyless), yfinance, alpha_vantage
     },
     # Benchmark for alpha calculation in the reflection layer.
     # ``benchmark_ticker`` (when set) overrides the suffix map for all

@@ -42,6 +42,11 @@ ENGINE_KEYS = frozenset(
         "selected_analysts",
         "structured_output",
         "max_completion_tokens",
+        # The global news tool's three knobs (#394): the queries the Google
+        # News vendor searches, the headline cap across them, and the window.
+        "global_news_queries",
+        "global_news_article_limit",
+        "global_news_lookback_days",
     }
 )
 
@@ -367,25 +372,46 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
         analysts = eng.get("selected_analysts")
         if analysts is not None and not isinstance(analysts, list):
             raise ValueError(f"'engine.selected_analysts' must be a list, got {analysts!r}")
-        # Its one *int* key: goes through the shared coercion seam so YAML
-        # bools, non-integral floats, and junk strings fail with the same
-        # error shape as its siblings; only the positivity check is local
-        # (0 would re-open the uncapped path the key exists to close, #177).
-        # Unlike its siblings this one writes back: without it the value's type
-        # would follow its quoting ("8192" would stay a str all the way to the
-        # LLM client), so normalise once, here, where it is parsed.
-        raw_mct = eng.get("max_completion_tokens")
-        if raw_mct is not None:
+        # Its *int* keys — the completion cap and the two global news counts
+        # (#394) — go through the shared coercion seam so YAML bools,
+        # non-integral floats, and junk strings fail with the same error
+        # shape as their siblings; only the positivity check is local (a cap
+        # of 0 would re-open the uncapped path the key exists to close,
+        # #177). Unlike the string keys these write back: without it the
+        # value's type would follow its quoting ("8192" would stay a str all
+        # the way to the LLM client), so normalise once, here, where parsed.
+        for key in (
+            "max_completion_tokens",
+            "global_news_article_limit",
+            "global_news_lookback_days",
+        ):
+            raw = eng.get(key)
+            if raw is None:
+                continue
             try:
-                mct = int_from_yaml(raw_mct)
+                value = int_from_yaml(raw)
             except ValueError as exc:
-                raise ValueError(f"config key 'engine.max_completion_tokens': {exc}") from None
-            if mct <= 0:
+                raise ValueError(f"config key 'engine.{key}': {exc}") from None
+            if value <= 0:
                 raise ValueError(
-                    f"config key 'engine.max_completion_tokens': expected a "
-                    f"positive integer, got {raw_mct!r}"
+                    f"config key 'engine.{key}': expected a positive integer, got {raw!r}"
                 )
-            eng["max_completion_tokens"] = mct
+            eng[key] = value
+        # The global news queries (#394): a list of non-blank strings. A bare
+        # string would reach the vendor's own guard as "one search per
+        # character" every cycle, and an empty list is a search of nothing,
+        # both of which the engine would then report as a wiring gap on
+        # every decision instead of here, once.
+        queries = eng.get("global_news_queries")
+        if queries is not None and (
+            not isinstance(queries, list)
+            or not queries
+            or not all(isinstance(q, str) and q.strip() for q in queries)
+        ):
+            raise ValueError(
+                f"'engine.global_news_queries' must be a non-empty list of "
+                f"non-blank strings, got {queries!r}"
+            )
     # A present live: block is deep-validated on EVERY load, not just by the
     # live subcommand: a staged-but-broken block (deploy workflow: edit config,
     # restart under systemd) would otherwise ride along with paper for days and

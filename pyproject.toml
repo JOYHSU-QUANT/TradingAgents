@@ -122,6 +122,7 @@ files = [
     "tradingagents/dataflows/failures.py",
     "tradingagents/dataflows/farside.py",
     "tradingagents/dataflows/fear_greed.py",
+    "tradingagents/dataflows/google_news.py",
     "tradingagents/dataflows/hyperliquid_whales.py",
     "tradingagents/dataflows/interface.py",
     "tradingagents/dataflows/lag_notes.py",

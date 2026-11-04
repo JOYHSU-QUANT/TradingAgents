@@ -30,6 +30,7 @@ from .errors import (
 from .farside import get_etf_flow_data as get_farside_etf_flows
 from .fear_greed import get_fear_greed_data as get_alternative_me_fear_greed
 from .fred import get_macro_data as get_fred_macro_data
+from .google_news import get_global_news as get_google_news_global_news
 from .hyperliquid_whales import get_whale_positions_data as get_hyperliquid_whale_positions
 from .polymarket import get_prediction_markets as get_polymarket_prediction_markets
 from .sosovalue import get_etf_flow_data as get_sosovalue_etf_flows
@@ -163,6 +164,7 @@ VENDOR_LIST = [
     "deribit",
     "hyperliquid_stats",
     "cftc",
+    "google_news",
 ]
 
 # Optional enrichment categories. These add macro/event/positioning context to
@@ -271,6 +273,7 @@ VENDOR_METHODS = {
         "yfinance": get_news_yfinance,
     },
     "get_global_news": {
+        "google_news": get_google_news_global_news,
         "yfinance": get_global_news_yfinance,
         "alpha_vantage": get_alpha_vantage_global_news,
     },

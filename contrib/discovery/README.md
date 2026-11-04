@@ -62,14 +62,16 @@ replay 消融（PR 6）都還沒有。
 
 ## 世界生成器（generator v1）
 
-一個世界由 manifest 的 `world` 區塊完全決定；`generator_version` 不是 `"1"` 的 manifest 直接拒絕。
+一個世界由 manifest 決定（`world` 區塊，加上 conditional 世界才讀的 `indicator_lookback`）；`generator_version` 不是 `"1"`、
+`price.drift` 不是 0（有價格漂移的世界是另一種世界，不是這種世界的參數）的 manifest 直接拒絕；價格路徑衝出 float 範圍也拒絕。
 
 - **亂數流**：三條（`price`／`wicks`／`funding`），都從不透明 id 派生（`random.Random(f"{id}/{name}")`），**kind 不進種子**，
   所以同 seed 的 Null 與 Conditional 共用同一組抽樣、只差埋入效果。每根 bar 的抽樣按 bar 順序消耗，短世界是長世界的
   prefix＝生成器內無前視。
-- **Null-v1**：`log P[t] = log P[t-1] + drift + vol·Z[t] − vol²/2`，`Z` i.i.d. N(0,1)，`vol` 以一根 4h bar 為單位；`−vol²/2`
-  讓 `drift = 0` 時下一根收盤的條件期望等於現價。每根 bar 的 open＝前一根 close（連續路徑、無跳空）；high／low＝實體兩端
-  各加一段半常態 wick（`WICK_SCALE·vol·|N(0,1)|`，log 空間）；volume 常數 1。funding：`f[k] = sigma·W[k]`，`W` i.i.d.
+- **Null-v1**：`log P[t] = log P[t-1] + vol·Z[t] − vol²/2`，`Z` i.i.d. N(0,1)，`vol` 以一根 4h bar 為單位；`−vol²/2`
+  讓下一根收盤的條件期望等於現價（martingale）。每根 bar 的 open＝前一根 close（連續路徑、無跳空）；high／low＝bar 內
+  Brownian 路徑的最高／最低，給定兩端精確抽樣（bridge 的 overshoot：`m = (move + sqrt(move² − 2·vol²·ln U))/2`，`U` 均勻於
+  (0,1]，下方同法反射），所以 range 與 bar 的漲跌相關、像真實 bar；volume 常數 1。funding：`f[k] = sigma·W[k]`，`W` i.i.d.
   N(0,1)，每小時一筆、戳記在整點後 `SETTLEMENT_LAG_MS`（50 ms，與 venue 的貼出延遲同型），從第一根 open 到最後一根
   close 應結的那一筆（共 `4n+1` 筆）。1d 由同一條 4h 路徑聚合（只出完整日）。venue 時鐘＝最後一筆 funding 貼出後 1 ms。
 - **Conditional-v1**：同一組抽樣，再在「埋的規則持倉中的 bar」的 log 報酬加上 `beta`（short 側＝`−beta`）。哪些 bar 持倉由
@@ -79,9 +81,10 @@ replay 消融（PR 6）都還沒有。
 - **價格的寫法**：float 路徑以 `repr` 轉 Decimal（最短可逆串），不貼 tick；同一個 float 同一個 Decimal，所以 open＝前一根
   close 在 store 裡也精確相等。
 - **落地**：`land()` 用 `SyntheticHistory` 當 venue、以世界自己的時鐘切視窗，三條 walk 分別必須以 `reached_since`／
-  `reached_since`／`reached_end` 結束。`verify()`＝`require_clean_history` → `FeatureFrame` → `first_measurable_index ≤
-  warmup_bars`（否則句子裡告訴你要把 `warmup_bars` 提到幾） → `require_measurable_tail` → `Split.by_shares` 三段長度加總
-  ＝`count`。split 從 manifest 切而不用 `plan_experiment`，因為後者會把 train 起點往前挪到第一根可量測的 bar。
+  `reached_since`／`reached_end` 結束，而且 store 的列數要等於世界的列數（走到頭但掉頁也拒絕）。`verify()`＝store 的
+  bar 數與 origin 對得上 manifest → `require_clean_history`（autoresearch 只數 funding 的洞，這個世界沒有洞，所以數到
+  就拒絕）→ `FeatureFrame` → `first_measurable_index ≤ warmup_bars`（否則句子裡告訴你要把 `warmup_bars` 提到幾）→
+  `require_measurable_tail` → `Split.by_shares` 切三段（構造上加總＝`count`）。split 從 manifest 切而不用 `plan_experiment`，因為後者會把 train 起點往前挪到第一根可量測的 bar。
 - **暖身要多長**：由 `verify()` 量，不是推導；`sma_1d_200` 要有 ≥ 180 個日收盤（覆蓋率 0.9）才有值，所以 warm-up 至少
   約 185 天（≈1,110 根）；範例 manifest 用 200 天（1,200 根）。
 
@@ -92,7 +95,8 @@ python -m contrib.discovery generate --manifest dev-seed-0.json --root data/disc
 成功時 `<root>/<world id>-<manifest digest>/` 有 `world.sqlite`（唯讀 artifact，各臂複製它）與 `manifest.json`（canonical
 bytes）。落地先在同一個 root 下的 staging 目錄做（`.<name>.partial-*`），驗收通過、manifest 寫好才 rename 到定位；任何原因
 中途結束都把 staging 整個移除，最終路徑永遠不會出現半成品。同一份 manifest 已落地就拒絕（exit 1）。stdout 印三條 walk 的
-結果、量到的第一根可量測 bar、三段 split 與各自的 bar 數；這些只給操作者看，不進任何 prompt。
+結果、量到的第一根可量測 bar、三段 split 與各自的 bar 數、conditional 世界還有埋的規則在決策 bar 上持倉的根數與比例
+（規則在決策 bar 上從不持倉的 conditional 世界在生成時就拒絕）；這些只給操作者看，不進任何 prompt。
 
 ## 測試釘住的隔離規則
 
@@ -172,7 +176,8 @@ runner 遇到「有 llm 區塊但本世界不在子集」應拒絕。
   scores.json                （PR 4）
 ```
 
-目錄用 **manifest 的 digest**（`sha256(manifest.dumps())` 前 8 碼）而不只用 world id 命名：id 只是 seed_set＋seed 的函數
+目錄用 **manifest 的 digest**（`search_space.pool_size` 置空後的 `sha256(manifest.dumps())` 前 8 碼——PR 3 回填池大小時
+目錄名不變）而不只用 world id 命名：id 只是 seed_set＋seed 的函數
 （計畫 §1 #7），同 seed 的 null 雙胞胎、或校準時同 seed 三檔 β 的三份 manifest 共用一個 id，要能並存；目錄名不進任何
 prompt，store 裡的 coin 名仍是 id。與計畫 §2 寫的 `<world-id>/` 不同，記在計畫 §9。預設 `<bench-root>`＝
 `<repo>/data/discovery`（`.gitignore` 已排除）。

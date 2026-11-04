@@ -16,9 +16,13 @@ what makes the conditional expectation of the next close the current one
 at ``drift = 0``; without it a zero-mean log return carries a long-side
 edge of half the variance, and the null world would not be null. Each bar
 opens at the previous close (one continuous path, no gap for a rule to
-earn from a close-to-open jump), and its high and low are one half-normal
-wick each, scaled by ``WICK_SCALE·vol``, above the higher and below the
-lower of its open and close. Funding is exogenous and i.i.d.:
+earn from a close-to-open jump), and its high and low are the running
+maximum and minimum of the Brownian path INSIDE the bar, drawn exactly
+from the bridge between its open and close (the comment at ``_path``), so
+a bar's range is correlated with its move as a real bar's is. ``drift``
+is refused unless zero: a null world is the martingale, and a world with a
+long-side edge in its price alone is another kind of world, not this one
+with a knob turned. Funding is exogenous and i.i.d.:
 ``f[k] = sigma·W[k]``, ``W`` standard normal, drawn from its own stream —
 conditional expectation zero at every bar, variance non-zero (a constant
 zero would leave ``funding_zscore`` with nothing to standardise by; an
@@ -102,7 +106,6 @@ __all__ = [
     "GENERATOR_VERSION",
     "PATH_INTERVAL",
     "SETTLEMENT_LAG_MS",
-    "WICK_SCALE",
     "SyntheticHistory",
     "WorldError",
     "WorldHistory",
@@ -126,17 +129,11 @@ PATH_INTERVAL: Final = "4h"
 # package), and the research package reads settlements by that fact: a
 # settlement stamped exactly ON a bar's open would belong to no bar under the
 # evaluator's ``(open, close]`` rule, and one stamped exactly on the close
-# would be read as that bar's rate where the venue's would not. Fifty, so a
-# generated series sits where a real one does.
+# would be read as that bar's rate where the venue's would not. A fixed
+# fifty: inside the venue's measured range and well inside the scan's
+# tolerance, off both exact edges. The venue jitters; this does not — the
+# tolerance path is the research package's to exercise, not this world's.
 SETTLEMENT_LAG_MS: Final = 50
-
-# Each wick is ``|N(0, 1)|·WICK_SCALE·vol`` in log price beyond the body. A
-# half: a Brownian path with one bar of variance ``vol²`` overshoots the
-# higher of its two ends by about ``0.4·vol`` on average, and a half-normal
-# at this scale has that mean. Nothing planted reads a high or a low; the
-# wicks exist so ``atr_14``, the regime and the Donchian channels have a
-# range to measure that is not the body alone.
-WICK_SCALE: Final = 0.5
 
 # A synthetic market has no volume to speak of. Constant and positive, so
 # the bar is a bar; nothing in the vocabulary reads it.
@@ -169,38 +166,61 @@ class WorldHistory:
     held nothing.
     """
 
-    world: World
+    manifest: Manifest
     bars: tuple[Candle, ...]
     daily: tuple[Candle, ...]
     funding: tuple[FundingPoint, ...]
     planted_sides: tuple[Side | None, ...]
 
     def __post_init__(self) -> None:
-        expected = self.world.bars.warmup_bars + self.world.bars.count
+        world = self.world
+        expected = world.bars.warmup_bars + world.bars.count
         if len(self.bars) != expected:
             raise WorldError(
-                f"{self.world.id}: {len(self.bars)} bars for a world of {expected} "
-                f"({self.world.bars.warmup_bars} warm-up + {self.world.bars.count})"
+                f"{world.id}: {len(self.bars)} bars for a world of {expected} "
+                f"({world.bars.warmup_bars} warm-up + {world.bars.count})"
             )
         if len(self.planted_sides) != len(self.bars):
             raise WorldError(
-                f"{self.world.id}: {len(self.planted_sides)} planted sides for {len(self.bars)} bars"
+                f"{world.id}: {len(self.planted_sides)} planted sides for {len(self.bars)} bars"
             )
-        carried = any(side is not None for side in self.planted_sides)
-        if self.world.planted is None and carried:
-            raise WorldError(f"{self.world.id}: a {self.world.kind.value} world carries no effect")
-        if self.world.planted is not None and not carried:
-            # The other pairing the manifest cannot see: a rule that never
-            # holds a position on this seed plants nothing, and the world
-            # would be a null world filed as conditional — every arm's
-            # "did not find it" counted against a rule that was not there.
+        # The three series are ONE world: the daily bars are the path's own
+        # days and the settlements its own hourly grid, checked here rather
+        # than trusted, so a history assembled by hand (a test double, a
+        # later caller) cannot serve a backdrop the path did not make.
+        if self.daily != _daily(self.bars):
+            raise WorldError(f"{world.id}: the daily bars are not the path's complete days")
+        stamps = [point.time for point in self.funding]
+        if stamps != [
+            world.origin_ms + k * FUNDING_INTERVAL_MS + SETTLEMENT_LAG_MS
+            for k in range(len(self.bars) * _SETTLEMENTS_PER_BAR + 1)
+        ]:
             raise WorldError(
-                f"{self.world.id}: the planted rule never holds a position on this seed, so "
-                f"nothing is planted; a {self.world.kind.value} world carries an effect "
-                f"somewhere — change the rule, its thresholds or the seed"
+                f"{world.id}: the settlements are not one per hour from the first open through "
+                f"the one due at the last close"
             )
-        if not self.funding:
-            raise WorldError(f"{self.world.id}: a world has at least one settlement")
+        if world.planted is None and any(side is not None for side in self.planted_sides):
+            raise WorldError(f"{world.id}: a {world.kind.value} world carries no effect")
+        if world.planted is not None and self.planted_exposure == 0:
+            # The other pairing the manifest cannot see: a rule that holds
+            # nothing on the DECISION bars plants nothing an arm could find,
+            # and the world would be a null world filed as conditional —
+            # every arm's "did not find it" counted against a rule that was
+            # not there. The warm-up does not count: no window measures it.
+            raise WorldError(
+                f"{world.id}: the planted rule never holds a position on this seed's decision "
+                f"bars, so nothing is planted; a {world.kind.value} world carries an effect "
+                f"where it is measured — change the rule, its thresholds or the seed"
+            )
+
+    @property
+    def world(self) -> World:
+        return self.manifest.world
+
+    @property
+    def planted_exposure(self) -> int:
+        """How many DECISION bars carry the effect: the plant as an arm could meet it."""
+        return sum(side is not None for side in self.planted_sides[self.world.bars.warmup_bars :])
 
     @property
     def clock_ms(self) -> int:
@@ -284,7 +304,7 @@ class _Draws:
 
     Drawn first and kept, so the null path and the conditional path of one
     world are built from the SAME numbers and differ by the effect alone.
-    ``ups``/``downs`` are the wick draws, already half-normal.
+    ``ups``/``downs`` are the wick draws: uniforms on ``(0, 1]``.
     """
 
     steps: tuple[float, ...]
@@ -308,9 +328,11 @@ def _draw(world: World) -> _Draws:
     # One bar's two wicks before the next bar's: a shorter world of the same
     # seed is then a prefix of a longer one (the module docstring).
     ups, downs = [], []
+    # ``1 - random()`` is on ``(0, 1]``: the bridge draw takes a logarithm,
+    # and ``random()`` itself can return exactly zero.
     for _ in range(bars):
-        ups.append(abs(wicks.gauss(0.0, 1.0)))
-        downs.append(abs(wicks.gauss(0.0, 1.0)))
+        ups.append(1.0 - wicks.random())
+        downs.append(1.0 - wicks.random())
     # One settlement per hour from the first open through the one due at
     # the last close: ``per_bar`` per bar, plus that last one.
     settlements = tuple(funding.gauss(0.0, 1.0) for _ in range(bars * _SETTLEMENTS_PER_BAR + 1))
@@ -337,27 +359,55 @@ def _path(world: World, draws: _Draws, sides: tuple[Side | None, ...]) -> tuple[
     # "each bar opens at the last close" holds in the store by construction.
     open_decimal = _decimal(opened)
     bars: list[Candle] = []
-    for index, (z, up, down) in enumerate(zip(draws.steps, draws.ups, draws.downs, strict=True)):
-        side = sides[index]
-        effect = 0.0 if side is None else (beta if side is Side.LONG else -beta)
-        log_price += drift + vol * z - vol * vol / 2 + effect
-        closed = math.exp(log_price)
-        high = max(opened, closed) * math.exp(vol * WICK_SCALE * up)
-        low = min(opened, closed) * math.exp(-vol * WICK_SCALE * down)
-        open_time = world.origin_ms + index * step
-        close_decimal = _decimal(closed)
-        bars.append(
-            Candle(
-                open_time=open_time,
-                close_time=open_time + span,
-                open=open_decimal,
-                high=_decimal(high),
-                low=_decimal(low),
-                close=close_decimal,
-                volume=_VOLUME,
+    try:
+        for index, (z, up, down) in enumerate(
+            zip(draws.steps, draws.ups, draws.downs, strict=True)
+        ):
+            side = sides[index]
+            effect = 0.0 if side is None else (beta if side is Side.LONG else -beta)
+            move = drift + vol * z - vol * vol / 2 + effect
+            log_price += move
+            closed = math.exp(log_price)
+            # The bar's high and low are the running maximum and minimum of
+            # the Brownian path inside the bar, given its two ends: for a
+            # bridge of variance ``vol²`` from 0 to ``move``, the overshoot
+            # ``m`` above the start has ``P(M > m) = exp(-2m(m - move)/vol²)``
+            # for ``m >= max(0, move)``, so ``m = (move + sqrt(move² -
+            # 2·vol²·ln U))/2`` with ``U`` uniform on (0, 1]; the undershoot
+            # is the same law on the reflected path. ``m`` is at or above
+            # both ends by construction, so the OHLC order holds without a
+            # clamp.
+            above = (move + math.sqrt(move * move - 2.0 * vol * vol * math.log(up))) / 2.0
+            below = (-move + math.sqrt(move * move - 2.0 * vol * vol * math.log(down))) / 2.0
+            high = opened * math.exp(above)
+            low = opened * math.exp(-below)
+            if low <= 0.0 or math.isinf(high):
+                # Off the bottom (a price that rounds to zero) or the top
+                # (an infinity ``exp`` returned rather than raised): either
+                # is the overflow below, met one bar before the exception.
+                raise OverflowError("the price left the range of a float")
+            open_time = world.origin_ms + index * step
+            close_decimal = _decimal(closed)
+            bars.append(
+                Candle(
+                    open_time=open_time,
+                    close_time=open_time + span,
+                    open=open_decimal,
+                    high=_decimal(high),
+                    low=_decimal(low),
+                    close=close_decimal,
+                    volume=_VOLUME,
+                )
             )
-        )
-        opened, open_decimal = closed, close_decimal
+            opened, open_decimal = closed, close_decimal
+    except OverflowError as exc:
+        # ``math.exp`` past a float: a manifest whose vol or beta runs the
+        # walk off the top. The manifest bounds none of them, so the walk
+        # refuses by name rather than dying inside a library call.
+        raise WorldError(
+            f"{world.id}: the price walk left the range of a number at bar {len(bars)}; vol and "
+            f"beta are per-bar log returns, and these run the price past what a number holds"
+        ) from exc
     return tuple(bars)
 
 
@@ -452,6 +502,13 @@ def generate(manifest: Manifest) -> WorldHistory:
     run directory by it).
     """
     world = manifest.world
+    if world.price.drift != 0:
+        raise WorldError(
+            f"{world.id}: generator {GENERATOR_VERSION} makes the martingale world and the "
+            f"planted one over it; a price drift of {world.price.drift!r} is a world with a "
+            f"long-side edge in its price alone, which is another kind (plan §4.1), not a "
+            f"parameter of this one"
+        )
     if world.generator_version != GENERATOR_VERSION:
         raise WorldError(
             f"{world.id}: this build generates version {GENERATOR_VERSION!r}, the manifest "
@@ -483,5 +540,5 @@ def generate(manifest: Manifest) -> WorldHistory:
     # own rule (``World`` refuses the other pairing), and ``planted`` is the
     # half that says what to do.
     return WorldHistory(
-        world=world, bars=bars, daily=_daily(bars), funding=funding, planted_sides=sides
+        manifest=manifest, bars=bars, daily=_daily(bars), funding=funding, planted_sides=sides
     )

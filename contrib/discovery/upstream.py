@@ -68,8 +68,9 @@ What is borrowed and why:
   ``describe_stop``/``render_fetch``), the store itself (``ResearchStore``,
   ``StoreError``, and ``default_db_path`` — the one statement of where
   ``data/`` is, which the bench root sits beside),
-  the measured start of the span (``first_measurable_index``) and the two
-  refusals a landed world can meet (``EvaluationError``, ``FeatureError``);
+  the measured start of the span (``first_measurable_index``) and the
+  refusals a landed world can meet (``EvaluationError``, ``FeatureError``,
+  and ``SplitError`` for a decision span too short to cut);
 - from the floor, the ``VocabEnum`` base every vocabulary here is spelled in
   and the venue's time form (``epoch_ms``, ``from_epoch_ms``).
 """
@@ -132,6 +133,7 @@ from contrib.autoresearch.split import (
     DEFAULT_TRAIN_SHARE,
     DEFAULT_VALIDATION_SHARE,
     Split,
+    SplitError,
     studied_interval,
 )
 from contrib.autoresearch.store import ResearchStore, StoreError, default_db_path
@@ -169,6 +171,7 @@ __all__ = [
     "Side",
     "SpecError",
     "Split",
+    "SplitError",
     "SplitResult",
     "StopReason",
     "StoreError",
@@ -252,6 +255,7 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.split", "DEFAULT_TRAIN_SHARE"),
     ("contrib.autoresearch.split", "DEFAULT_VALIDATION_SHARE"),
     ("contrib.autoresearch.split", "Split"),
+    ("contrib.autoresearch.split", "SplitError"),
     ("contrib.autoresearch.split", "studied_interval"),
     ("contrib.autoresearch.store", "ResearchStore"),
     ("contrib.autoresearch.store", "StoreError"),

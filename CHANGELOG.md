@@ -16,8 +16,10 @@ Breaking changes within the 0.x line are called out explicitly.
   on a midnight-anchored grid closing a millisecond before the next open,
   the daily backdrop aggregated from the same path, hourly funding posted
   50 ms past the hour — as generator version `1`: Null-v1 is the stated
-  martingale (`log P[t] = log P[t-1] + drift + vol·Z − vol²/2`, i.i.d.
-  zero-mean funding from its own stream), Conditional-v1 the same draws
+  martingale (`log P[t] = log P[t-1] + vol·Z − vol²/2`, the bar's high and
+  low drawn exactly from the Brownian bridge between its ends, i.i.d.
+  zero-mean funding from its own stream; a non-zero `price.drift` is refused
+  as another kind of world), Conditional-v1 the same draws
   plus `beta` on every bar the planted rule holds a position on, which bars
   being the research package's own `replay_sides` over the pre-effect path
   (decide at close, fill next open, `max_bars`, reversal) — never the
@@ -39,7 +41,13 @@ Breaking changes within the 0.x line are called out explicitly.
   the null twin or the β bands of one seed share it; the landing is staged
   in a sibling directory and renamed into place only once verified, so
   nothing half-made is ever at the final path, and a manifest already
-  landed is refused. The example manifest's warm-up
+  landed is refused (the digest leaves `search_space.pool_size` out, so
+  PR 3's backfill keeps the directory's name). A landed store must hold
+  exactly the world's rows, with no funding hole; a conditional world whose
+  rule holds nothing on the decision bars is refused as a null world filed
+  under the wrong kind, and `generate` prints the plant's exposure. The
+  example rule's thresholds were chosen so its gate binds (78 of 400
+  decision bars). The example manifest's warm-up
   is 200 days (1,200 bars; the measured first measurable bar is about
   1,100, from `sma_1d_200`'s coverage). Known trade-offs: the planted
   rule's price-derived gate can sit a few bars differently on the final

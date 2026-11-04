@@ -100,12 +100,16 @@ SHORT = {
     "sizing": SIZING,
 }
 # The rule the example world plants: an exogenous-funding entry, a volatility
-# gate under ``filters`` (plan §4.1), a ``max_bars`` exit.
+# gate under ``filters`` (plan §4.1), a ``max_bars`` exit. The thresholds
+# were chosen on the example seed so the gate BINDS (``realized_vol_20``
+# sits around 0.0099 at ``vol`` 0.01, so 0.0095 passes about half the bars)
+# and the rule holds about a fifth of the decision bars — a plant an arm has
+# to find, not one that buy-and-hold earns (measured 2026-11-04: 78 of 400).
 PLANTED = {
     "family": "funding_filter",
-    "entry": {"long": [{"left": "funding_zscore_14", "op": "<", "right": -1.0}]},
-    "filters": [{"left": "realized_vol_20", "op": ">", "right": 0.004}],
-    "exit": {"max_bars": 12},
+    "entry": {"long": [{"left": "funding_zscore_14", "op": "<", "right": -1.5}]},
+    "filters": [{"left": "realized_vol_20", "op": ">", "right": 0.0095}],
+    "exit": {"max_bars": 6},
     "sizing": SIZING,
 }
 

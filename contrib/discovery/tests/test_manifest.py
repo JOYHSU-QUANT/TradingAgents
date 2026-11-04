@@ -39,7 +39,7 @@ def test_a_null_world_writes_no_rule_and_a_conditional_one_writes_the_parsed_rul
     null = example_manifest(kind=WorldKind.NULL_V1).to_dict()
     conditional = example_manifest().to_dict()
     assert null["world"]["planted"] is None
-    assert conditional["world"]["planted"]["spec"]["exit"] == {"max_bars": 12}
+    assert conditional["world"]["planted"]["spec"]["exit"] == {"max_bars": 6}
     # The two worlds share nothing a prompt could see: the same seed gives
     # the same id whatever is planted.
     assert null["world"]["id"] == conditional["world"]["id"]

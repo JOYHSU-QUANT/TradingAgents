@@ -32,8 +32,8 @@ from pathlib import Path
 
 from .landing import ARTIFACT_FILENAME, MANIFEST_FILENAME, default_root, land_world
 from .manifest import Manifest, ManifestError
-from .upstream import EvaluationError, FeatureError, StoreError, render_fetch
-from .worlds import generate
+from .upstream import EvaluationError, FeatureError, SplitError, StoreError, render_fetch
+from .worlds import WorldError, generate
 
 __all__ = ["main"]
 
@@ -64,7 +64,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def _read_manifest(path: Path) -> Manifest:
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise ManifestError(f"cannot read the manifest at {path}: {exc}") from exc
     return Manifest.loads(text)
 
@@ -75,12 +75,18 @@ def _cmd_generate(args: argparse.Namespace) -> int:
     # The world is built before anything is written, so a manifest the
     # generator refuses leaves nothing behind.
     history = generate(manifest)
-    target, fetched, landing = land_world(root, manifest, history)
+    target, fetched, landing = land_world(root, history)
     print(f"store: {target / ARTIFACT_FILENAME}")
     for result in fetched:
         print(render_fetch(result))
     for line in landing.describe():
         print(line)
+    if manifest.world.planted is not None:
+        count = manifest.world.bars.count
+        print(
+            f"planted rule: holds a position on {history.planted_exposure} of {count} decision "
+            f"bars ({history.planted_exposure / count:.1%})"
+        )
     print(f"manifest: {target / MANIFEST_FILENAME}")
     return 0
 
@@ -98,14 +104,23 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         return 130
-    except (StoreError, EvaluationError, FeatureError, ValueError, OSError) as exc:
+    except (
+        ManifestError,
+        WorldError,
+        SplitError,
+        StoreError,
+        EvaluationError,
+        FeatureError,
+        OSError,
+    ) as exc:
         # The families a well-formed invocation can still meet, each
-        # carrying a sentence written for an operator. ``ValueError`` is the
-        # manifest's and the generator's refusals and a split that cannot be
-        # cut; the two ``RuntimeError`` families are the research package's
-        # named measurement refusals, listed by class so any other
-        # ``RuntimeError`` propagates as the defect it is. ``OSError`` is on
-        # the list, unlike in the research package's CLI, because nothing
+        # carrying a sentence written for an operator: the manifest's, the
+        # generator's and the split's refusals (listed by class, not as
+        # ``ValueError`` — a bare one is a defect and propagates), the
+        # store that cannot be opened and the research package's two named
+        # measurement refusals (likewise listed, so any other
+        # ``RuntimeError`` propagates as the defect it is). ``OSError`` is
+        # on the list, unlike in the research package's CLI, because nothing
         # here speaks to a network: an ``OSError`` can only be the manifest
         # or the run directory.
         print(f"error: {exc}", file=sys.stderr)

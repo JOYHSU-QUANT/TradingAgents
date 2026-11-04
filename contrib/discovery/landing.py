@@ -45,12 +45,15 @@ never visible at the final path, whatever ended the run.
 from __future__ import annotations
 
 import hashlib
+import logging
+import os
 import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 from .manifest import Manifest, Shares, World
+from .records import dumps
 from .upstream import (
     DAILY_INTERVAL,
     Experiment,
@@ -86,6 +89,8 @@ __all__ = [
     "world_dir",
 ]
 
+logger = logging.getLogger(__name__)
+
 # What a run directory holds (plan §2's layout). Named once: the landing
 # writes them and the runner (plan PR 3) reads them.
 ARTIFACT_FILENAME = "world.sqlite"
@@ -109,8 +114,19 @@ def default_root() -> Path:
 
 
 def manifest_digest(manifest: Manifest) -> str:
-    """The first hex digits of the SHA-256 of the manifest's canonical text."""
-    return hashlib.sha256(manifest.dumps().encode("utf-8")).hexdigest()[:_DIGEST_DIGITS]
+    """The first hex digits of the SHA-256 of the manifest's canonical text, ``pool_size`` set aside.
+
+    ``search_space.pool_size`` is the one field a later step fills in (the
+    pool is enumerated by plan PR 3 and the count written back), so it is
+    nulled before hashing: the run directory keeps its name when its
+    ``manifest.json`` gains the count, and the filled manifest names the
+    same directory it was filled in.
+    """
+    record = manifest.to_dict()
+    search_space = dict(record["search_space"])  # type: ignore[call-overload]
+    search_space["pool_size"] = None
+    record["search_space"] = search_space
+    return hashlib.sha256(dumps(record).encode("utf-8")).hexdigest()[:_DIGEST_DIGITS]
 
 
 def world_dir(root: Path, manifest: Manifest) -> Path:
@@ -124,8 +140,10 @@ def land(history: WorldHistory, store: ResearchStore) -> tuple[SeriesFetch, ...]
     Every window is cut at the world's own clock, as a real fetch cuts at
     the venue's. Each walk has to end where a complete walk ends — at the
     requested start for the two backward candle walks, at the requested
-    end for the forward funding walk — or the artifact is not the world,
-    and it is refused by name rather than left for the scans to describe.
+    end for the forward funding walk — and leave the store holding exactly
+    the rows the history has, or the artifact is not the world, and it is
+    refused by name rather than left for the scans to describe: a walk that
+    lost a page can still end where it meant to.
     """
     market = SyntheticHistory(history)
     coin = history.world.id
@@ -138,15 +156,21 @@ def land(history: WorldHistory, store: ResearchStore) -> tuple[SeriesFetch, ...]
         backfill_candles(market, store, coin=coin, interval=DAILY_INTERVAL, since=since, end=end),
         backfill_funding(market, store, coin=coin, since=since, end=end),
     )
-    for result, complete in zip(
+    for result, complete, rows in zip(
         fetched,
         (StopReason.REACHED_SINCE, StopReason.REACHED_SINCE, StopReason.REACHED_END),
+        (len(history.bars), len(history.daily), len(history.funding)),
         strict=True,
     ):
         if result.stopped is not complete:
             raise WorldError(
                 f"{result.label}: the walk stopped because {describe_stop(result.stopped)}, "
                 f"not because it {describe_stop(complete)}; the store does not hold the world"
+            )
+        if result.rows_after != rows:
+            raise WorldError(
+                f"{result.label}: the store holds {result.rows_after} row(s) after the walk and "
+                f"the world has {rows}; the store does not hold the world"
             )
     return fetched
 
@@ -195,7 +219,6 @@ class Landing:
     bars: int
     daily_bars: int
     settlements: int
-    funding_holes: int
     first_measurable_index: int
     first_measurable_ms: int
     decision_start_index: int
@@ -208,7 +231,7 @@ class Landing:
             f"world {self.world_id}: {self.bars} {self.split.interval} bars "
             f"({self.decision_start_index} warm-up + {self.bars - self.decision_start_index} "
             f"decision), {self.daily_bars} {DAILY_INTERVAL} bars, {self.settlements} "
-            f"settlements, {self.funding_holes} funding hole(s)",
+            f"settlements",
             f"every feature has a value from bar {self.first_measurable_index} "
             f"({from_epoch_ms(self.first_measurable_ms).isoformat()}); the decision bars "
             f"begin at bar {self.decision_start_index} "
@@ -241,6 +264,15 @@ def verify(store: ResearchStore, manifest: Manifest) -> Landing:
             f"{from_epoch_ms(world.origin_ms).isoformat()} — this is not that world's artifact"
         )
     holes = require_clean_history(bundle, interval)
+    if holes:
+        # The research package counts a missing settlement rather than
+        # refusing it, because a venue skips one now and then. This world's
+        # grid has no skips, so a hole is a row the landing lost, and a
+        # world with one is not the world that was generated.
+        raise WorldError(
+            f"{world.id}: the store's funding settlements have {holes} hole(s); the world "
+            f"has none, so the store does not hold the world"
+        )
     frame = FeatureFrame(bundle, indicator_lookback=manifest.indicator_lookback)
     first = first_measurable_index(frame)
     start = world.bars.warmup_bars
@@ -264,7 +296,6 @@ def verify(store: ResearchStore, manifest: Manifest) -> Landing:
         bars=len(bundle.bars),
         daily_bars=len(bundle.daily),
         settlements=len(bundle.funding),
-        funding_holes=holes,
         first_measurable_index=first,
         first_measurable_ms=bundle.bars[first].open_time,
         decision_start_index=start,
@@ -273,10 +304,8 @@ def verify(store: ResearchStore, manifest: Manifest) -> Landing:
     )
 
 
-def land_world(
-    root: Path, manifest: Manifest, history: WorldHistory
-) -> tuple[Path, tuple[SeriesFetch, ...], Landing]:
-    """Land ``history`` as ``manifest``'s run directory under ``root``; return it and what was measured.
+def land_world(root: Path, history: WorldHistory) -> tuple[Path, tuple[SeriesFetch, ...], Landing]:
+    """Land ``history`` as its manifest's run directory under ``root``; return it and what was measured.
 
     Built in a staging directory beside the final one and renamed into
     place only after the landing is verified and the canonical manifest
@@ -286,11 +315,7 @@ def land_world(
     world, landed before: refused, since an artifact is landed once and
     copied, and whatever was measured beside it was measured on that copy.
     """
-    if history.world != manifest.world:
-        raise WorldError(
-            f"the history is {history.world.id}'s and the manifest is {manifest.world.id}'s "
-            f"(or the same id under other parameters); a run directory holds one world"
-        )
+    manifest = history.manifest
     target = world_dir(root, manifest)
     if target.exists():
         raise WorldError(
@@ -299,15 +324,34 @@ def land_world(
         )
     root.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(dir=root, prefix=f".{target.name}.partial-"))
+    if os.name != "nt":
+        # ``mkdtemp`` makes a private (0700) directory and the rename keeps
+        # the mode; a run directory is an ordinary one under the umask.
+        mask = os.umask(0)
+        os.umask(mask)
+        staging.chmod(0o777 & ~mask)
     try:
         with ResearchStore(staging / ARTIFACT_FILENAME) as store:
             fetched = land(history, store)
             landing = verify(store, manifest)
+        # The store's close suppresses its own errors, and a close that
+        # failed can leave a journal beside the file; an arm copies the one
+        # file, so a directory holding more than the artifact is not one.
+        leftover = sorted(p.name for p in staging.iterdir() if p.name != ARTIFACT_FILENAME)
+        if leftover:
+            raise WorldError(
+                f"{staging / ARTIFACT_FILENAME} did not close cleanly: {leftover} left beside it"
+            )
         # Bytes, not text: the canonical manifest's newlines are its own,
         # not the platform's.
         (staging / MANIFEST_FILENAME).write_bytes(manifest.dumps().encode("utf-8"))
         staging.rename(target)
     except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
+        try:
+            shutil.rmtree(staging)
+        except OSError:
+            # The failure propagating is the one to report; the orphan is
+            # named so it is not mistaken for a world next time.
+            logger.warning("could not remove the staging directory %s", staging, exc_info=True)
         raise
     return target, fetched, landing

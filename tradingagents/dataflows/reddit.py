@@ -73,6 +73,18 @@ _ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 # discussion. wallstreetbets has the most volume but most noise; stocks /
 # investing trend more measured. Caller can override.
 DEFAULT_SUBREDDITS = ("wallstreetbets", "stocks", "investing")
+# The crypto equivalents (#395): the three stock subreddits mention a coin
+# a few times a week at most — the paper trader's sentiment report ran on
+# zero to one Reddit post for six weeks once StockTwits went dark — where
+# these carry the retail conversation about it. CryptoCurrency is the
+# broad, noisy one (wallstreetbets' part), Bitcoin and ethtrader the
+# coin-specific rooms, CryptoMarkets the trading-minded one.
+CRYPTO_SUBREDDITS = ("CryptoCurrency", "Bitcoin", "ethtrader", "CryptoMarkets")
+
+
+def subreddits_for(ticker: str) -> tuple[str, ...]:
+    """The subreddits searched for ``ticker`` when the caller names none: crypto's for a coin."""
+    return CRYPTO_SUBREDDITS if crypto_base(ticker) else DEFAULT_SUBREDDITS
 
 # Rendered lengths for a post's two free-text fields. Until #233 the title had
 # no bound at ALL and neither field was flattened — both are written by whoever
@@ -302,7 +314,7 @@ def _fetch_subreddit(
 
 def fetch_reddit_posts(
     ticker: str,
-    subreddits: Iterable[str] = DEFAULT_SUBREDDITS,
+    subreddits: Iterable[str] | None = None,
     limit_per_sub: int = 5,
     timeout: float = 10.0,
     inter_request_delay: float = 1.0,
@@ -312,6 +324,8 @@ def fetch_reddit_posts(
     """Fetch recent Reddit posts mentioning ``ticker`` across finance
     subreddits and return them as a formatted plaintext block.
 
+    ``subreddits`` left unset is :func:`subreddits_for`'s answer — the stock
+    rooms for a stock, the crypto rooms for a coin (#395).
     ``inter_request_delay`` paces the (now RSS-only) per-subreddit requests to
     stay under Reddit's public per-IP rate limit; combined with the RSS-first
     path it makes 429s rare even when several analyses run back-to-back.
@@ -320,6 +334,8 @@ def fetch_reddit_posts(
     that window so a historical run does not leak current discussion into a
     backtest (#1220).
     """
+    if subreddits is None:
+        subreddits = subreddits_for(ticker)
     # Crypto reaches us as a Yahoo pair (BTC-USD); search Reddit for the base
     # ("BTC") so the query actually matches discussion instead of near-nothing.
     ticker = crypto_base(ticker) or ticker

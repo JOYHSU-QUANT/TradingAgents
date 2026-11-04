@@ -720,6 +720,37 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **A crypto asset's sentiment report no longer asks StockTwits, and Reddit
+  searches the crypto rooms for it** (#395). StockTwits' public API answers
+  the paper host's datacenter address with a Cloudflare 403 — 227 of 227
+  cycles from 2026-09-23 to 2026-11-02 read "StockTwits: HTTPError", while
+  the same request from a residential address returned thirty messages —
+  and the sentiment analyst's prompt called that section the leading
+  retail signal, so for six weeks the report leaned on a placeholder and
+  the one source left, three stock subreddits, carried a coin a few times a
+  week at most. For a crypto asset the sentiment analyst now does not fetch
+  StockTwits at all (no request to be refused), its prompt has two sources
+  rather than three — the StockTwits section and every instruction that
+  reads it are left out, the retail read is the subreddits' — and Reddit's
+  default rooms become `r/CryptoCurrency`, `r/Bitcoin`, `r/ethtrader` and
+  `r/CryptoMarkets` (`reddit.CRYPTO_SUBREDDITS`; the analyst decides both
+  the skip and the rooms from the asset type the graph was told, so a coin
+  outside the symbol rules' base list is treated as a coin too, while a
+  direct caller of `fetch_reddit_posts` gets `reddit.subreddits_for`'s
+  symbol-based default or the rooms it names). The crypto prompt's retail
+  rule reads post titles and bodies, not engagement — the RSS path carries
+  no scores — and its catalyst vocabulary is the coin's (ETF flows,
+  exchange and regulatory headlines, protocol upgrades, liquidations). A
+  stock keeps all three sources unchanged, which leaves one known gap: a
+  stock analysed from a datacenter address still fetches StockTwits and
+  still reads its placeholder under a prompt that calls it the leading
+  signal — the two-source prompt is keyed on the asset type, not on the
+  placeholder. Not taken: changing the User-Agent to get past the block —
+  spoofing is not a vendor relationship. An
+  input-surface content change for the paper trader (an analyst's prompt
+  and sources, not the perp's own context or format block, so no
+  `PROMPT_VERSION` bump — the same reading as #394), shipped in the
+  paper-BTC-10 deploy with #394, #396, #397, #398 and #399.
 - **The perp daemon switches the engine's memory log off** (#397). Upstream's
   `TradingMemoryLog` is on by default (`memory_log_path` under the home
   directory) and the perp bridge never set it, so every paper cycle since

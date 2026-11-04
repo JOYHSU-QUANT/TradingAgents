@@ -491,6 +491,68 @@ class TestSentimentAnalystAgent:
         create_sentiment_analyst(_structured_sentiment_llm(captured))(_make_sentiment_state())
         assert any("NVDA" in str(m) for m in captured["prompt"])
 
+    def test_a_crypto_asset_skips_stocktwits_and_the_prompt_says_two_sources(self, monkeypatch):
+        # #395: the public API refuses the deployment's address, so a coin's
+        # report ran on a placeholder for six weeks; now the fetch is not made
+        # and the prompt neither shows the section nor tells the model to
+        # read a ratio it was never given — and Reddit searches the crypto rooms.
+        monkeypatch.setattr(
+            sentiment_analyst_mod,
+            "fetch_stocktwits_messages",
+            lambda *a, **k: pytest.fail("StockTwits must not be fetched for a coin"),
+        )
+        reddit_calls = {}
+
+        def _reddit(ticker, **kwargs):
+            reddit_calls["ticker"] = ticker
+            reddit_calls.update(kwargs)
+            return "REDDIT BLOCK"
+
+        monkeypatch.setattr(sentiment_analyst_mod, "fetch_reddit_posts", _reddit)
+        captured = {}
+        state = dict(_make_sentiment_state(), company_of_interest="BTC-USD", asset_type="crypto")
+        create_sentiment_analyst(_structured_sentiment_llm(captured))(state)
+        prompt = "\n".join(getattr(m, "content", str(m)) for m in captured["prompt"])
+        assert "StockTwits" not in prompt and "<start_of_stocktwits>" not in prompt
+        assert "two complementary data sources" in prompt
+        assert "r/CryptoCurrency, r/Bitcoin, r/ethtrader, r/CryptoMarkets" in prompt
+        assert "Read the Reddit posts as the retail-sentiment signal" in prompt
+        assert reddit_calls["subreddits"] == ("CryptoCurrency", "Bitcoin", "ethtrader", "CryptoMarkets")
+        assert reddit_calls["ticker"] == "BTC-USD"
+        assert "Bitcoin's own room" in prompt and "Ether's own room" in prompt
+        assert "the feed carries no upvote or comment counts" in prompt
+        assert "ETF flows, exchange or regulatory headlines" in prompt
+        assert "upcoming earnings" not in prompt
+
+    def test_a_coin_the_symbol_rules_do_not_know_is_still_treated_as_crypto(self, monkeypatch):
+        # The asset type the graph was told decides, not the symbol: HYPE-USD
+        # is outside the symbol rules' base list, and must not lose StockTwits
+        # while being searched in the stock rooms.
+        monkeypatch.setattr(
+            sentiment_analyst_mod,
+            "fetch_stocktwits_messages",
+            lambda *a, **k: pytest.fail("StockTwits must not be fetched for a coin"),
+        )
+        reddit_calls = {}
+        monkeypatch.setattr(
+            sentiment_analyst_mod,
+            "fetch_reddit_posts",
+            lambda ticker, **kwargs: reddit_calls.update(kwargs) or "REDDIT BLOCK",
+        )
+        captured = {}
+        state = dict(_make_sentiment_state(), company_of_interest="HYPE-USD", asset_type="crypto")
+        create_sentiment_analyst(_structured_sentiment_llm(captured))(state)
+        assert reddit_calls["subreddits"] == ("CryptoCurrency", "Bitcoin", "ethtrader", "CryptoMarkets")
+
+    def test_a_stock_keeps_all_three_sources(self):
+        captured = {}
+        create_sentiment_analyst(_structured_sentiment_llm(captured))(_make_sentiment_state())
+        prompt = "\n".join(getattr(m, "content", str(m)) for m in captured["prompt"])
+        assert "<start_of_stocktwits>" in prompt and "STOCKTWITS BLOCK" in prompt
+        assert "three complementary data sources" in prompt
+        assert "r/wallstreetbets, r/stocks, r/investing" in prompt
+        assert "Read the StockTwits Bullish/Bearish ratio" in prompt
+
     def test_stocktwits_prefetch_passes_trade_date_as_curr_date(self, monkeypatch):
         # Positive wiring check for the freshness note (#30): the node must
         # hand its trade_date to the fetcher, or the lag check silently never

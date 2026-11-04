@@ -54,7 +54,10 @@ class UnavailableInputCollector(logging.Handler):
     at or above WARNING, the logger disabled by a ``dictConfig`` that did
     not keep existing loggers, a filter on it — so the caller records "not
     recorded" (``None``) rather than the empty set that reads as "every
-    input answered"; the one value that would clear a live streak.
+    input answered"; the one value that would clear a live streak. Said at
+    ERROR once per run while it lasts — where ERROR is still audible; a
+    global disable at ERROR or above silences that line too, and the row
+    still reads NULL.
     """
 
     def __init__(self) -> None:
@@ -86,10 +89,12 @@ def collect_unavailable_inputs() -> Iterator[UnavailableInputCollector]:
     level is held at WARNING for the block and put back after (as the
     uniswap judge's news watch does). What a level cannot repair —
     ``logging.disable``, a disabled logger, a filter — is probed once with a
-    WARNING-shaped record: a logger that would drop it makes the collector
-    ``deaf``, said once at ERROR, so the row reads "not recorded" and the
-    journal says why, instead of a quiet "every input answered" every
-    cycle. Detached in ``finally`` so a run that raises leaves no handler
+    WARNING-shaped record carrying the category attribute (as the real line
+    does, so a filter that admits only stamped records is not misread as
+    deaf): a logger that would drop it makes the collector ``deaf``, said
+    at ERROR once per run where ERROR is still audible, so the row reads
+    "not recorded" rather than a quiet "every input answered" every cycle.
+    Detached in ``finally`` so a run that raises leaves no handler
     behind to collect the next run's categories into this one's.
     """
     collector = UnavailableInputCollector()
@@ -98,7 +103,12 @@ def collect_unavailable_inputs() -> Iterator[UnavailableInputCollector]:
     if not router.isEnabledFor(logging.WARNING):
         router.setLevel(logging.WARNING)
     probe = logging.makeLogRecord(
-        {"name": ROUTER_LOGGER, "levelno": logging.WARNING, "levelname": "WARNING"}
+        {
+            "name": ROUTER_LOGGER,
+            "levelno": logging.WARNING,
+            "levelname": "WARNING",
+            UNAVAILABLE_CATEGORY_ATTR: "probe",
+        }
     )
     if not router.isEnabledFor(logging.WARNING) or not router.filter(probe):
         collector.deaf = True

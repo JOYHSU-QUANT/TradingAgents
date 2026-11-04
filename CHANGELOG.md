@@ -41,7 +41,8 @@ Breaking changes within the 0.x line are called out explicitly.
   nor break a streak, so a restart cannot clear a feed that never came
   back; and a collector the router's logger would not feed at all
   (`logging.disable`, a disabled logger, a filter) records `null` and says
-  so once at ERROR rather than a quiet "none unavailable" every cycle. The deploy carrying this build upgrades the store to v15 on the
+  so at ERROR, once per run while it lasts and where ERROR is still
+  audible, rather than a quiet "none unavailable" every cycle. The deploy carrying this build upgrades the store to v15 on the
   daemon's first restart (RUNBOOK §4: back up, and ship it with the segment
   switch) and the dashboard exporter must move in the same batch, since it
   pins the status document version it reads. `validate` and the

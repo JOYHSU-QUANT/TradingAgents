@@ -124,6 +124,8 @@ class _NewsWatch(logging.Handler):
         message = record.getMessage()
         if message.startswith(_NEWS_UNAVAILABLE):
             self.seen.append(message)
+
+
 # Provider statuses that say "later": an empty balance, a timeout, a rate limit.
 _PASSING_STATUSES: Final = frozenset({402, 408, 429})
 # Error classes that say "later", by name, matched anywhere in an error's class

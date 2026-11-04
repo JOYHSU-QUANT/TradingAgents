@@ -647,7 +647,9 @@ Breaking changes within the 0.x line are called out explicitly.
   visit asks again, as the router's raise made it do before. (Watched by log
   line because the sentinel reaches the model inside tool messages the graph
   clears between analysts, and the sentiment analyst reads the same getter
-  outside any tool node.)
+  outside any tool node.) A feed switched off on purpose
+  (`news_data: "none"`) logs a different, INFO line, so the judge answers on
+  a news-less graph then — waiting would wait forever.
   Considered and declined: a third router tier that degrades only outages
   and keeps a news wiring gap loud (a gap no deployed config can reach,
   pinned at the leaves already, in the file that is a whole-file conflict

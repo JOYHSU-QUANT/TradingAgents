@@ -198,11 +198,52 @@ def test_a_graph_that_answered_without_news_is_judge_unavailable_too(tmp_path, s
         r"for get_news: yfinance: YAHOO! FINANCE IS CURRENTLY DOWN!\)",
     ):
         judge.ask("ETH-USD", "2024-01-03", "context")
-    # The watcher is detached after the question, whichever way it ended.
-    assert all(
+    # The watcher is detached after the question, whichever way it ended:
+    # here the graph answered; below it raised.
+    assert _no_news_watch_attached()
+    stub.answer_error = ConnectionError("the gateway is down")
+    with pytest.raises(JudgeUnavailable, match="ConnectionError"):
+        judge.ask("ETH-USD", "2024-01-03", "context")
+    assert _no_news_watch_attached()
+
+
+def _no_news_watch_attached() -> bool:
+    return all(
         type(handler).__name__ != "_NewsWatch"
         for handler in logging.getLogger("tradingagents.dataflows.interface").handlers
     )
+
+
+def test_the_news_watch_is_pinned_to_the_routers_real_logger_and_line():
+    # The watch names the router's logger and its line as literals: the
+    # engine is imported lazily, so the judge cannot read them off the module
+    # at import. This drives the REAL router with a failing news vendor, so a
+    # rename of either — the next upstream sync renames interface.py to
+    # router.py — goes red here instead of blinding the judge.
+    from unittest import mock
+
+    from contrib.uniswap_v3.agent.graph import _NEWS_UNAVAILABLE, _ROUTER_LOGGER, _NewsWatch
+    from tradingagents.dataflows import interface
+    from tradingagents.dataflows.config import get_config, set_config
+    from tradingagents.dataflows.errors import VendorUnavailableError
+
+    assert interface.logger.name == _ROUTER_LOGGER
+
+    def down(*args, **kwargs):
+        raise VendorUnavailableError("*** YAHOO! FINANCE IS CURRENTLY DOWN! ***")
+
+    before = dict(get_config())
+    watch = _NewsWatch()
+    interface.logger.addHandler(watch)
+    try:
+        set_config({"data_vendors": {"news_data": "yfinance"}})
+        with mock.patch.dict(interface.VENDOR_METHODS, {"get_news": {"yfinance": down}}):
+            out = interface.route_to_vendor("get_news", "ETH-USD", "2024-01-01", "2024-01-03")
+    finally:
+        interface.logger.removeHandler(watch)
+        set_config(before)
+    assert out.startswith("DATA_UNAVAILABLE: optional news_data")
+    assert watch.seen and watch.seen[0].startswith(f"{_NEWS_UNAVAILABLE} for get_news")
 
 
 def test_the_news_watch_hears_the_line_even_when_the_routers_logger_is_silenced(tmp_path, stub):

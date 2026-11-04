@@ -168,8 +168,8 @@ _SUBREDDIT_CHARACTER = {
     "stocks": "more measured",
     "investing": "longer-term",
     "cryptocurrency": "broad and noisy, the retail crowd across coins",
-    "bitcoin": "Bitcoin's own room (BTC holders and maximalists)",
-    "ethtrader": "Ether's own room (ETH holders and traders)",
+    "bitcoin": "is Bitcoin's own room (BTC holders and maximalists)",
+    "ethtrader": "is Ether's own room (ETH holders and traders)",
     "cryptomarkets": "trading-minded, shorter horizon, across coins",
 }
 
@@ -230,6 +230,11 @@ Fast-moving signal. Each message carries a user-labeled sentiment tag (Bullish /
         if with_stocktwits
         else "If news framing is bearish but the subreddits are overwhelmingly bullish, that mismatch is itself a signal"
     )
+    event_example = (
+        'A news headline ("Nvidia announces $500M Corning deal")'
+        if with_stocktwits
+        else 'A news headline ("spot ETFs record their largest daily inflow")'
+    )
     opinion_example = (
         'a StockTwits post ("buying NVDA, this is going to moon")'
         if with_stocktwits
@@ -275,7 +280,7 @@ Institutional framing. Fact-driven, slower-moving signal.
 
 {weighting_rule}
 
-4. **Distinguish opinion from event.** A news headline ("Nvidia announces $500M Corning deal") is an event; {opinion_example} is opinion. Both are inputs but should be weighted differently in your conclusions.
+4. **Distinguish opinion from event.** {event_example} is an event; {opinion_example} is opinion. Both are inputs but should be weighted differently in your conclusions.
 
 5. **Identify recurring narrative themes.** What topic keeps coming up across sources? That's the dominant narrative driving current sentiment.
 

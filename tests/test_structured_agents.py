@@ -526,6 +526,7 @@ class TestSentimentAnalystAgent:
         assert "Weight Reddit posts by substance" in prompt and "400-upvote" not in prompt
         assert "ETF flows, exchange or regulatory headlines, " in prompt
         assert "upcoming earnings" not in prompt and "etc.." not in prompt
+        assert "spot ETFs record their largest daily inflow" in prompt and "Corning" not in prompt
 
     def test_a_coin_the_symbol_rules_do_not_know_is_still_treated_as_crypto(self, monkeypatch):
         # The asset type the graph was told decides, not the symbol: HYPE-USD
@@ -585,6 +586,7 @@ class TestSentimentAnalystAgent:
         ) in prompt
         assert "Read the StockTwits Bullish/Bearish ratio" in prompt
         assert "3. **Weight Reddit posts by engagement.** A 400-upvote / 200-comment thread" in prompt
+        assert 'A news headline ("Nvidia announces $500M Corning deal") is an event' in prompt
         assert "competitive threats, macro headlines, etc.\n" in prompt and "etc.." not in prompt
 
     def test_stocktwits_prefetch_passes_trade_date_as_curr_date(self, monkeypatch):

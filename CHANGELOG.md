@@ -723,7 +723,8 @@ Breaking changes within the 0.x line are called out explicitly.
 - **A crypto asset's sentiment report no longer asks StockTwits, and Reddit
   searches the crypto rooms for it** (#395). StockTwits' public API answers
   the paper host's datacenter address with a Cloudflare 403 — 227 of 227
-  cycles from 2026-09-23 to 2026-11-02 read "StockTwits: HTTPError", while
+  cycles from 2026-09-23 to 2026-11-02 read `<stocktwits unavailable:
+  HTTPError>`, while
   the same request from a residential address returned thirty messages —
   and the sentiment analyst's prompt called that section the leading
   retail signal, so for six weeks the report leaned on a placeholder and
@@ -748,7 +749,8 @@ Breaking changes within the 0.x line are called out explicitly.
   the RSS path carries no scores, and the heading's engagement sentence is
   left out of that prompt too — and its catalyst vocabulary is the coin's
   (ETF flows, exchange and regulatory headlines, protocol upgrades,
-  liquidations). The uniswap_v3 judge (ETH-USD, the same analyst) moves
+  liquidations). The uniswap_v3 judge (ETH-USD and BTC-USD, the same
+  analyst) moves
   with it on the same deploy, an input-surface segment for paper-ai-1 as
   well as for the perp run. A stock keeps all three sources byte-for-byte
   as they were (a test pins the heading, the engagement rule and the

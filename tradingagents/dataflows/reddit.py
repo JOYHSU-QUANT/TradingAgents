@@ -98,8 +98,22 @@ def subreddits_for(ticker: str, *, crypto: bool | None = None) -> tuple[str, ...
         crypto = crypto_base(ticker) is not None
     if not crypto:
         return DEFAULT_SUBREDDITS
-    base = crypto_base(ticker) or ticker.strip().upper().split("-")[0]
-    return COIN_SUBREDDITS.get(base, ()) + CRYPTO_SUBREDDITS
+    return COIN_SUBREDDITS.get(search_term(ticker), ()) + CRYPTO_SUBREDDITS
+
+
+def search_term(ticker: str) -> str:
+    """What Reddit is searched for: the coin for a USD-quoted pair, else the symbol as given.
+
+    Crypto reaches us as a Yahoo pair (``BTC-USD``); searching for the base
+    is what matches discussion instead of near-nothing. A pair the symbol
+    rules do not know (``HYPE-USD``) is read the same way off its quote, so
+    a coin outside ``CRYPTO_BASES`` is not searched as a literal nobody writes.
+    """
+    base = crypto_base(ticker)
+    if base:
+        return base
+    head, dash, quote = ticker.strip().upper().partition("-")
+    return head if dash and quote in ("USD", "USDT", "USDC") else ticker
 
 
 # Rendered lengths for a post's two free-text fields. Until #233 the title had
@@ -353,9 +367,7 @@ def fetch_reddit_posts(
     """
     if subreddits is None:
         subreddits = subreddits_for(ticker)
-    # Crypto reaches us as a Yahoo pair (BTC-USD); search Reddit for the base
-    # ("BTC") so the query actually matches discussion instead of near-nothing.
-    ticker = crypto_base(ticker) or ticker
+    ticker = search_term(ticker)
     # What the search could see: the live endpoint reaches only the past
     # week, so under an analysis window an empty answer says nothing of that
     # week fell in the window - not that the window itself was silent

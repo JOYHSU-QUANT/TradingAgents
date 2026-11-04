@@ -732,15 +732,18 @@ Breaking changes within the 0.x line are called out explicitly.
   StockTwits at all (no request to be refused), its prompt has two sources
   rather than three — the StockTwits section and every instruction that
   reads it are left out, the retail read is the subreddits' — and Reddit's
-  default rooms become `r/CryptoCurrency`, `r/Bitcoin`, `r/ethtrader` and
+  default rooms become the generic crypto rooms `r/CryptoCurrency` and
   `r/CryptoMarkets` (`reddit.CRYPTO_SUBREDDITS`), with the coin's own room
   ahead of them when it has one (`r/Bitcoin` for BTC, `r/ethtrader` for
-  ETH; `reddit.COIN_SUBREDDITS`) — three requests per cycle as before and
-  none spent on another coin's room. `reddit.subreddits_for` is the one
-  chooser: the analyst hands it the asset type the graph was told, so a
-  coin outside the symbol rules' base list gets the generic crypto rooms
-  rather than the stock ones, while a direct caller of `fetch_reddit_posts`
-  gets the symbol-based default or the rooms it names. The crypto prompt's
+  ETH; `reddit.COIN_SUBREDDITS`) — three requests per cycle for BTC or
+  ETH, two for any other coin, none spent on another coin's room.
+  `reddit.subreddits_for` is the one chooser: the analyst hands it the
+  asset type the graph was told, so a coin outside the symbol rules' base
+  list gets the generic crypto rooms rather than the stock ones, while a
+  direct caller of `fetch_reddit_posts` gets the symbol-based default or
+  the rooms it names; such a coin is also searched by its base
+  (`reddit.search_term`: `HYPE-USD` → `HYPE`), not the literal pair nobody
+  writes. The crypto prompt's
   retail and weighting rules read post titles and bodies, not engagement —
   the RSS path carries no scores, and the heading's engagement sentence is
   left out of that prompt too — and its catalyst vocabulary is the coin's

@@ -39,6 +39,37 @@ def test_a_stock_is_searched_in_the_stock_rooms_by_default(ticker):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "ticker, term",
+    [
+        ("BTC-USD", "BTC"),
+        ("hype-usd", "HYPE"),  # outside the symbol rules' base list, still a pair
+        ("SUI-USDT", "SUI"),
+        ("NVDA", "NVDA"),
+        ("BRK-B", "BRK-B"),  # a dash that is not a quote
+        ("7203.T", "7203.T"),
+    ],
+)
+def test_the_search_term_is_the_coin_for_a_pair_and_the_symbol_otherwise(ticker, term):
+    assert reddit.search_term(ticker) == term
+
+
+@pytest.mark.unit
+def test_an_unknown_coin_is_searched_by_its_base_in_the_rooms_the_caller_names():
+    asked = []
+
+    def _fetch(ticker, sub, limit, timeout, _retry=True):
+        asked.append((ticker, sub))
+        return []
+
+    with patch.object(reddit, "_fetch_subreddit", side_effect=_fetch):
+        reddit.fetch_reddit_posts(
+            "HYPE-USD", subreddits=reddit.subreddits_for("HYPE-USD", crypto=True), inter_request_delay=0
+        )
+    assert asked == [("HYPE", "CryptoCurrency"), ("HYPE", "CryptoMarkets")]
+
+
+@pytest.mark.unit
 def test_the_fetcher_picks_the_rooms_from_the_symbol_when_none_are_named():
     asked = []
 

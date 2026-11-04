@@ -720,6 +720,50 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **A crypto asset's sentiment report no longer asks StockTwits, and Reddit
+  searches the crypto rooms for it** (#395). StockTwits' public API answers
+  the paper host's datacenter address with a Cloudflare 403 — 227 of 227
+  cycles from 2026-09-23 to 2026-11-02 read `<stocktwits unavailable:
+  HTTPError>`, while
+  the same request from a residential address returned thirty messages —
+  and the sentiment analyst's prompt called that section the leading
+  retail signal, so for six weeks the report leaned on a placeholder and
+  the one source left, three stock subreddits, carried a coin a few times a
+  week at most. For a crypto asset the sentiment analyst now does not fetch
+  StockTwits at all (no request to be refused), its prompt has two sources
+  rather than three — the StockTwits section and every instruction that
+  reads it are left out, the retail read is the subreddits' — and Reddit's
+  default rooms become the generic crypto rooms `r/CryptoCurrency` and
+  `r/CryptoMarkets` (`reddit.CRYPTO_SUBREDDITS`), with the coin's own room
+  ahead of them when it has one (`r/Bitcoin` for BTC, `r/ethtrader` for
+  ETH; `reddit.COIN_SUBREDDITS`) — three requests per cycle for BTC or
+  ETH, two for any other coin, none spent on another coin's room.
+  `reddit.subreddits_for` is the one chooser: the analyst hands it the
+  asset type the graph was told, so a coin outside the symbol rules' base
+  list gets the generic crypto rooms rather than the stock ones, while a
+  direct caller of `fetch_reddit_posts` gets the symbol-based default or
+  the rooms it names; such a coin is also searched by its base
+  (`reddit.search_term`: `HYPE-USD` → `HYPE`), not the literal pair nobody
+  writes. The crypto prompt's
+  retail and weighting rules read post titles and bodies, not engagement —
+  the RSS path carries no scores, and the heading's engagement sentence is
+  left out of that prompt too — and its catalyst vocabulary is the coin's
+  (ETF flows, exchange and regulatory headlines, protocol upgrades,
+  liquidations). The uniswap_v3 judge (ETH-USD and BTC-USD, the same
+  analyst) moves
+  with it on the same deploy, an input-surface segment for paper-ai-1 as
+  well as for the perp run. A stock keeps all three sources byte-for-byte
+  as they were (a test pins the heading, the engagement rule and the
+  catalyst list), which leaves one known gap: a
+  stock analysed from a datacenter address still fetches StockTwits and
+  still reads its placeholder under a prompt that calls it the leading
+  signal — the two-source prompt is keyed on the asset type, not on the
+  placeholder. Not taken: changing the User-Agent to get past the block —
+  spoofing is not a vendor relationship. An
+  input-surface content change for the paper trader (an analyst's prompt
+  and sources, not the perp's own context or format block, so no
+  `PROMPT_VERSION` bump — the same reading as #394), shipped in the
+  paper-BTC-10 deploy with #394, #396, #397, #398 and #399.
 - **The perp daemon switches the engine's memory log off** (#397). Upstream's
   `TradingMemoryLog` is on by default (`memory_log_path` under the home
   directory) and the perp bridge never set it, so every paper cycle since

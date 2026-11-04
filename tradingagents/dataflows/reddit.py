@@ -73,6 +73,48 @@ _ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 # discussion. wallstreetbets has the most volume but most noise; stocks /
 # investing trend more measured. Caller can override.
 DEFAULT_SUBREDDITS = ("wallstreetbets", "stocks", "investing")
+# The crypto equivalents (#395): the three stock subreddits mention a coin
+# a few times a week at most — the paper trader's sentiment report ran on
+# zero to one Reddit post for six weeks once StockTwits went dark — where
+# these carry the retail conversation about it. CryptoCurrency is the
+# broad, noisy one (wallstreetbets' part), CryptoMarkets the trading-minded
+# one; a coin with a room of its own gets that room first, so no request
+# is spent on another coin's room (r/Bitcoin for ETH would be off-topic
+# chatter and one more request against Reddit's per-IP limit).
+CRYPTO_SUBREDDITS = ("CryptoCurrency", "CryptoMarkets")
+COIN_SUBREDDITS = {"BTC": ("Bitcoin",), "ETH": ("ethtrader",)}
+
+
+def subreddits_for(ticker: str, *, crypto: bool | None = None) -> tuple[str, ...]:
+    """The subreddits searched for ``ticker`` when the caller names none.
+
+    ``crypto`` says whether the asset is a coin — the caller's knowledge
+    (the graph's ``asset_type``) when it has it, else read off the symbol
+    (``crypto_base``). A coin gets its own room, when it has one, ahead of
+    the two generic crypto rooms; a coin the symbol rules do not know
+    (``HYPE-USD``) gets the generic rooms, never the stock ones.
+    """
+    if crypto is None:
+        crypto = crypto_base(ticker) is not None
+    if not crypto:
+        return DEFAULT_SUBREDDITS
+    return COIN_SUBREDDITS.get(search_term(ticker), ()) + CRYPTO_SUBREDDITS
+
+
+def search_term(ticker: str) -> str:
+    """What Reddit is searched for: the coin for a USD-quoted pair, else the symbol as given.
+
+    Crypto reaches us as a Yahoo pair (``BTC-USD``); searching for the base
+    is what matches discussion instead of near-nothing. A pair the symbol
+    rules do not know (``HYPE-USD``) is read the same way off its quote, so
+    a coin outside ``CRYPTO_BASES`` is not searched as a literal nobody writes.
+    """
+    base = crypto_base(ticker)
+    if base:
+        return base
+    head, dash, quote = ticker.strip().upper().partition("-")
+    return head if dash and quote in ("USD", "USDT", "USDC") else ticker
+
 
 # Rendered lengths for a post's two free-text fields. Until #233 the title had
 # no bound at ALL and neither field was flattened — both are written by whoever
@@ -302,7 +344,7 @@ def _fetch_subreddit(
 
 def fetch_reddit_posts(
     ticker: str,
-    subreddits: Iterable[str] = DEFAULT_SUBREDDITS,
+    subreddits: Iterable[str] | None = None,
     limit_per_sub: int = 5,
     timeout: float = 10.0,
     inter_request_delay: float = 1.0,
@@ -312,6 +354,9 @@ def fetch_reddit_posts(
     """Fetch recent Reddit posts mentioning ``ticker`` across finance
     subreddits and return them as a formatted plaintext block.
 
+    ``subreddits`` left unset is :func:`subreddits_for`'s answer read off the
+    symbol — the stock rooms for a stock, the coin's room and the crypto
+    rooms for a coin (#395).
     ``inter_request_delay`` paces the (now RSS-only) per-subreddit requests to
     stay under Reddit's public per-IP rate limit; combined with the RSS-first
     path it makes 429s rare even when several analyses run back-to-back.
@@ -320,9 +365,9 @@ def fetch_reddit_posts(
     that window so a historical run does not leak current discussion into a
     backtest (#1220).
     """
-    # Crypto reaches us as a Yahoo pair (BTC-USD); search Reddit for the base
-    # ("BTC") so the query actually matches discussion instead of near-nothing.
-    ticker = crypto_base(ticker) or ticker
+    if subreddits is None:
+        subreddits = subreddits_for(ticker)
+    ticker = search_term(ticker)
     # What the search could see: the live endpoint reaches only the past
     # week, so under an analysis window an empty answer says nothing of that
     # week fell in the window - not that the window itself was silent

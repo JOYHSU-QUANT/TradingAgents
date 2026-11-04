@@ -318,10 +318,11 @@ def _configured(look_back_days, limit) -> tuple[int, int, list[str]]:
 def _operator_days(start_dt: datetime, curr_dt: datetime) -> tuple[str, str]:
     """The ``after:``/``before:`` days for a UTC window, padded a day each side.
 
-    ``before:`` is read against the day it names at Pacific midnight, so the
-    day after the as-of day would cut the as-of day's last Pacific evening
-    off and the day before the start would miss its first UTC morning; one
-    day of padding each side covers both, and ``in_window`` trims it. A
+    ``after:`` starts at Pacific midnight of the day it names, so the start
+    day itself would miss its first UTC morning: the day before it is the
+    pad that matters. ``before:`` ends at Pacific midnight of its day, so
+    the day after the as-of day already covers it; the second day there is
+    a margin, not a correction. ``in_window`` trims both. A
     window the calendar cannot pad — an as-of day at its end, a start day
     at the year-1000 floor ``window_start_dt`` keeps (glibc writes a
     three-digit year below it) — is refused as this vendor's own type.
@@ -330,8 +331,8 @@ def _operator_days(start_dt: datetime, curr_dt: datetime) -> tuple[str, str]:
         before = curr_dt + 2 * _OPERATOR_PAD
     except OverflowError as e:
         raise GoogleNewsError(
-            f"curr_date {curr_dt:%Y-%m-%d} is too late for the feed window: the day "
-            "after it cannot be written"
+            f"curr_date {curr_dt:%Y-%m-%d} is too late for the feed window: the padded "
+            "window end cannot be written"
         ) from e
     after = start_dt - _OPERATOR_PAD
     if after.year < MIN_WINDOW_YEAR:

@@ -1012,6 +1012,16 @@ def test_the_optional_sentinel_warning_carries_the_category_as_a_field(caplog):
 
 
 @pytest.mark.unit
+def test_every_optional_category_name_can_be_joined_with_commas():
+    # The perp store keeps a run's unavailable categories as one comma-joined
+    # cell (#399) and the decision dataclass refuses a name carrying a comma
+    # — after the engine run was paid for. Held here, so a new category name
+    # fails in CI rather than on the first cycle it ends in the sentinel.
+    for category in interface.OPTIONAL_CATEGORIES:
+        assert category and "," not in category and category == category.strip(), category
+
+
+@pytest.mark.unit
 class OptionalSentinelTests(unittest.TestCase):
     """What an optional category's failure may write into its sentinel.
 

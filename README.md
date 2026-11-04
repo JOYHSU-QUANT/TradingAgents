@@ -599,6 +599,11 @@ An optional category then returns the no-data sentinel without opening a
 connection, and the analyst stops binding that tool at all. This is the only way
 to disable a keyless vendor, which has no API key to unset. Core data categories
 reject `"none"` rather than silently running without prices or fundamentals.
+News (`news_data`) is an optional category since #393: a dead headline feed
+degrades to a `DATA_UNAVAILABLE` sentinel in the news and sentiment reports
+instead of failing the run, and `"none"` is accepted — though the news analyst
+still binds and calls its two news tools, which then answer the disabled
+sentinel.
 
 The ETF-flow vendors' fetch throttle (a 6-hour cache TTL) relies on
 `data_cache_dir` persisting between runs; pointing it at a temporary filesystem

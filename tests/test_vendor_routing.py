@@ -152,6 +152,26 @@ class VendorRoutingTests(unittest.TestCase):
         self.assertIn("DATA_UNAVAILABLE", result)
         self.assertIn("macro_data", result)
 
+    def test_a_news_vendor_outage_degrades_instead_of_aborting_the_cycle(self):
+        # #393: a news vendor's outage must not abort the cycle. The router
+        # ends the chain in the sentinel, naming the vendor and its words.
+        set_config({"data_vendors": {"news_data": "yfinance"}})
+        outage = VendorUnavailableError("*** YAHOO! FINANCE IS CURRENTLY DOWN! ***")
+        with self._route_method("get_news", {"yfinance": _raises(outage)}):
+            result = interface.route_to_vendor("get_news", "BTC-USD", "2026-10-26", "2026-11-02")
+        self.assertTrue(result.startswith("DATA_UNAVAILABLE: optional news_data"))
+        # The vendor leads the parenthesis; the words are sanitised (asterisks dropped).
+        self.assertIn("(yfinance: YAHOO! FINANCE IS CURRENTLY DOWN!)", result)
+
+    def test_news_can_be_switched_off_like_any_optional_category(self):
+        # #393: ``"none"`` used to be refused for news (a core category could
+        # not be disabled); it now takes the optional categories' disabled
+        # lane, without a vendor call.
+        set_config({"data_vendors": {"news_data": "none"}})
+        with self._route_method("get_news", {"yfinance": _raises(AssertionError("called"))}):
+            result = interface.route_to_vendor("get_news", "BTC-USD", "2026-10-26", "2026-11-02")
+        self.assertTrue(result.startswith("DATA_UNAVAILABLE: optional news_data is disabled"))
+
     def test_alpha_vantage_indicator_rate_limit_reaches_the_fallback_vendor(self):
         # #60 end-to-end, through the REAL Alpha Vantage indicator getter: a 429
         # used to come back as an "Error retrieving ..." string, which the router
@@ -940,27 +960,35 @@ def _modules_raising_unsupported_indicator() -> set[str]:
 
 
 @pytest.mark.unit
-def test_no_optional_category_registers_a_getter_from_a_module_raising_the_indicator_error():
+def test_the_only_optional_getter_from_a_module_raising_the_indicator_error_is_the_insider_feed():
     # ``route_to_vendor``'s lane for the caller's indicator error keeps a
     # branch for an optional category — "should an optional category ever
     # compute one" — that no chain reaches today: only the two indicator
-    # getters' modules raise the type, and every getter registered from them
-    # serves a core category (#203). The branch stays as a defence; this pins
-    # the fact that makes it one, read off the source and the registry rather
-    # than asserted by hand, at module granularity: a raise anywhere in a
-    # module that also registers an optional getter fails here, as does a
-    # raise appearing in a third module, which the exact set below catches.
+    # getters' modules raise the type, and the getters registered from them
+    # serve core categories (#203) with one exception that computes no
+    # indicator. The branch stays as a defence; this pins the fact that makes
+    # it one, read off the source and the registry rather than asserted by
+    # hand, at module granularity: a raise appearing in a third module fails
+    # the exact set below, and an optional getter registered from a raising
+    # module fails the exact set at the end — the one allowed is the yfinance
+    # insider feed (``y_finance.get_insider_transactions``), whose category
+    # became optional with the rest of news in #393; it never raises the
+    # type, so the branch stays unreachable, and naming it means a second
+    # one cannot hide behind it.
     raising = _modules_raising_unsupported_indicator()
     assert raising == {
         "tradingagents.dataflows.alpha_vantage_indicator",
         "tradingagents.dataflows.y_finance",
     }
+    optional_from_raising = set()
     for method, impls in interface.VENDOR_METHODS.items():
         for impl in impls.values():
             func = impl[0] if isinstance(impl, list) else impl
             if func.__module__ in raising:
                 category = interface.get_category_for_method(method)
-                assert category not in interface.OPTIONAL_CATEGORIES, (method, category)
+                if category in interface.OPTIONAL_CATEGORIES:
+                    optional_from_raising.add((method, category))
+    assert optional_from_raising == {("get_insider_transactions", "news_data")}
 
 
 @pytest.mark.unit

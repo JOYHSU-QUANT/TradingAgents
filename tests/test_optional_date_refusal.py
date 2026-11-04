@@ -2,7 +2,7 @@
 getters as from the core ones (#119), and the two loose ends PR #118 left on the
 same theme are closed (#120).
 
-The seven date-bounded getters behind the optional categories
+The seven date-bounded getters behind the optional categories (as they stood then; news joined the set in #393)
 (``interface.OPTIONAL_CATEGORIES``) used to answer ``""``/``"abc"``/``"2026/08/18"`` with a raise — a bare
 ``strptime`` ValueError from four of them, a vendor-typed error from Deribit and
 the two SoSoValue twins — which ``route_to_vendor``'s optional lane rendered as

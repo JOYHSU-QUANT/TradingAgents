@@ -356,7 +356,7 @@ def no_network(monkeypatch):
         reached.append(a)
         raise VendorReached("the vendor was asked before the date was judged")
 
-    # The core categories' vendors (news, OHLCV, indicators, fundamentals).
+    # The yfinance vendors behind news (optional since #393), OHLCV, indicators, fundamentals.
     monkeypatch.setattr(yfnews.yf, "Ticker", _reached)
     monkeypatch.setattr(yfnews.yf, "Search", _reached)
     monkeypatch.setattr(yfin.yf, "Ticker", _reached)

@@ -169,9 +169,16 @@ VENDOR_LIST = [
 # the analysts but are not core to a decision, so a vendor failure here degrades
 # to a sentinel instead of aborting the run (a bad LLM-supplied indicator, a
 # missing key, or a network blip should not crash an analysis over flavour data).
-# Core categories (prices, fundamentals, news) still raise so a broken primary is
-# loud.
+# Core categories (prices, indicators, fundamentals) still raise so a broken
+# primary is loud.
+#
+# News is optional since #393: it was core by inheritance from the upstream
+# stock pipeline, where a headline feed is a primary input; for this fork's
+# perp trader it is one input to weigh, on a vendor that fails on its own
+# schedule, and its raise took whole decision cycles with it (the CHANGELOG
+# has the incident).
 OPTIONAL_CATEGORIES = {
+    "news_data",
     "macro_data",
     "prediction_markets",
     "crypto_etf_flows",
@@ -198,12 +205,12 @@ OPTIONAL_CATEGORIES = {
 # reported (#219). Declared here so it is one auditable line, and mirrored by
 # the test that holds each yfinance leaf to its ending.
 #
-# The other three core categories keep the report line, and that is a choice
-# now rather than an inheritance: fundamentals and news reach the analyst as
-# prose either way, so a line saying the vendor's parser broke reads as the
-# absence it is, where a report line standing in for prices does not. Making
-# them loud would also let one vendor's parser bug abort a paper cycle the
-# sibling vendor could have served.
+# The other two core categories (indicators, fundamentals) keep the report
+# line, and that is a choice now rather than an inheritance: fundamentals
+# reach the analyst as prose either way, so a line saying the vendor's parser
+# broke reads as the absence it is, where a report line standing in for
+# prices does not. Making them loud would also let one vendor's parser bug
+# abort a paper cycle the sibling vendor could have served.
 #
 # "Never rendered as that line" rather than "always raises": a chain where
 # another vendor reported clean no-data ends in the no-data sentinel, which

@@ -37,15 +37,17 @@ from tradingagents.dataflows.errors import (
     WiringGapError,
 )
 
-# One routed tool, one vendor, so the ending is the failure's alone. news_data
-# is a core category: nothing here degrades to an optional category's sentinel.
-_METHOD = "get_news"
-_ARGS = ("AAPL", "2026-06-01", "2026-06-05")
-_SUBJECT = "news for AAPL"
+# One routed tool, one vendor, so the ending is the failure's alone.
+# technical_indicators is a core category that is not loud: nothing here
+# degrades to an optional category's sentinel, and a library failure ends as
+# the report line.
+_METHOD = "get_indicators"
+_ARGS = ("AAPL", "rsi", "2026-06-05", 30)
+_SUBJECT = "rsi values for AAPL"
 
 
 def _route(impl):
-    set_config({"data_vendors": {"news_data": "yfinance"}})
+    set_config({"data_vendors": {"technical_indicators": "yfinance"}})
     with mock.patch.dict(interface.VENDOR_METHODS, {_METHOD: {"yfinance": impl}}):
         return interface.route_to_vendor(_METHOD, *_ARGS)
 
@@ -81,7 +83,7 @@ _NOT_THE_LIBRARY = {
     # The measured transport family, from the suite that documents why these
     # three pin it — not a second copy of the table.
     **_PROPAGATED_OSERRORS,
-    "wiring": WiringGapError("news configuration: 'news_article_limit'"),
+    "wiring": WiringGapError("indicator configuration: 'look_back_days'"),
 }
 
 
@@ -116,7 +118,7 @@ def test_the_failure_carries_the_whole_message_and_its_cause():
     # itself carries it whole, and the library's own exception rides along as
     # __cause__ for whoever reads the failure rather than the report.
     cause = RuntimeError("boom")
-    failure = interface._as_library_failure("news_data", _METHOD, _ARGS, cause)
+    failure = interface._as_library_failure("technical_indicators", _METHOD, _ARGS, cause)
     assert isinstance(failure, VendorLibraryError)
     assert failure.what == _SUBJECT
     assert failure.detail == "boom"
@@ -151,7 +153,7 @@ def test_the_lane_reserves_that_level_for_the_library(caplog):
         caplog.at_level(logging.WARNING, logger="tradingagents.dataflows.interface"),
         pytest.raises(WiringGapError),
     ):
-        _route(_raises(WiringGapError("news configuration: 'global_news_queries'")))
+        _route(_raises(WiringGapError("indicator configuration: 'look_back_days'")))
     [record] = [r for r in caplog.records if r.exc_info is not None]
     assert record.levelno == logging.WARNING
 
@@ -278,17 +280,17 @@ def test_a_wiring_gap_outranks_a_sibling_library_failure_in_a_core_chain(order):
     # Whichever met first: our own breakage is the one someone can fix, and
     # handing the analyst the other vendor's parser bug as the answer would
     # leave the missing key unmentioned in everything but a WARNING (#219).
-    gap = _raises(WiringGapError("news configuration: 'news_article_limit'"))
+    gap = _raises(WiringGapError("indicator configuration: 'look_back_days'"))
     library = _raises(RuntimeError("pandas exploded"))
     chain = {"yfinance": gap, "alpha_vantage": library}
     if order == "library first":
         chain = {"yfinance": library, "alpha_vantage": gap}
-    set_config({"data_vendors": {"news_data": "yfinance,alpha_vantage"}})
+    set_config({"data_vendors": {"technical_indicators": "yfinance,alpha_vantage"}})
     with (
-        mock.patch.dict(interface.VENDOR_METHODS, {"get_news": chain}),
-        pytest.raises(WiringGapError, match="news_article_limit"),
+        mock.patch.dict(interface.VENDOR_METHODS, {_METHOD: chain}),
+        pytest.raises(WiringGapError, match="look_back_days"),
     ):
-        interface.route_to_vendor("get_news", "AAPL", "2026-06-01", "2026-06-05")
+        interface.route_to_vendor(_METHOD, *_ARGS)
 
 
 @pytest.mark.unit
@@ -300,19 +302,19 @@ def test_the_first_wiring_gap_met_is_the_one_raised():
     meets our breakage twice before a library failure names the gap the
     operator meets first in the log.
     """
-    first = WiringGapError("news configuration: 'news_article_limit'")
-    second = WiringGapError("news configuration: 'global_news_queries'")
+    first = WiringGapError("indicator configuration: 'look_back_days'")
+    second = WiringGapError("indicator configuration: 'data_cache_dir'")
     chain = {
         "yfinance": _raises(first),
         "alpha_vantage": _raises(second),
         "third": _raises(RuntimeError("pandas exploded")),
     }
-    set_config({"data_vendors": {"news_data": "yfinance,alpha_vantage,third"}})
+    set_config({"data_vendors": {"technical_indicators": "yfinance,alpha_vantage,third"}})
     with (
-        mock.patch.dict(interface.VENDOR_METHODS, {"get_news": chain}),
+        mock.patch.dict(interface.VENDOR_METHODS, {_METHOD: chain}),
         pytest.raises(WiringGapError) as info,
     ):
-        interface.route_to_vendor("get_news", "AAPL", "2026-06-01", "2026-06-05")
+        interface.route_to_vendor(_METHOD, *_ARGS)
     assert info.value is first
 
 
@@ -336,18 +338,18 @@ def test_a_wiring_gap_outranks_nothing_but_the_report_line(sibling, expected):
     # The sibling first, so what is asserted is that the gap does not jump
     # ahead of it. Met first the gap would win the vendors' own slot on the
     # ordinary first-met rule, which is a different fact.
-    set_config({"data_vendors": {"news_data": "yfinance,alpha_vantage"}})
+    set_config({"data_vendors": {"technical_indicators": "yfinance,alpha_vantage"}})
     chain = {
         "yfinance": _raises(sibling),
-        "alpha_vantage": _raises(WiringGapError("news configuration: 'news_article_limit'")),
+        "alpha_vantage": _raises(WiringGapError("indicator configuration: 'look_back_days'")),
     }
-    with mock.patch.dict(interface.VENDOR_METHODS, {"get_news": chain}):
+    with mock.patch.dict(interface.VENDOR_METHODS, {_METHOD: chain}):
         if expected is None:
             with pytest.raises(type(sibling)) as info:
-                interface.route_to_vendor("get_news", "AAPL", "2026-06-01", "2026-06-05")
+                interface.route_to_vendor(_METHOD, *_ARGS)
             assert info.value is sibling
         else:
-            out = interface.route_to_vendor("get_news", "AAPL", "2026-06-01", "2026-06-05")
+            out = interface.route_to_vendor(_METHOD, *_ARGS)
             assert out.startswith(expected)
 
 

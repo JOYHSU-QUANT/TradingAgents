@@ -747,20 +747,22 @@ def test_an_outage_page_reaches_the_fallback_vendor(monkeypatch, tmp_path, caplo
 
 
 @pytest.mark.unit
-def test_an_outage_page_on_a_single_vendor_chain_fails_loud(monkeypatch, tmp_path):
-    # news_data is a core category: with no other vendor to serve it, the
-    # outage itself surfaces — not "No news found", and not prose.
+def test_an_outage_page_on_a_single_news_chain_degrades_to_the_sentinel(monkeypatch, tmp_path):
+    # news_data is an optional category (#393): with no other vendor to serve
+    # it, the outage ends in the router's sentinel — not "No news found", not
+    # prose, and not a raise that would take the decision cycle with it. The
+    # outage's own words ride in the parenthesis, so the report still says
+    # which vendor was down.
     set_config({"data_cache_dir": str(tmp_path), "data_vendors": {"news_data": "yfinance"}})
     _yahoo_answers(monkeypatch, *_OUTAGE_PAGES["5xx_html"])
-    with (
-        mock.patch.dict(
-            interface.VENDOR_METHODS,
-            {"get_news": {"yfinance": ynews.get_news_yfinance}},
-            clear=False,
-        ),
-        pytest.raises(VendorUnavailableError),
+    with mock.patch.dict(
+        interface.VENDOR_METHODS,
+        {"get_news": {"yfinance": ynews.get_news_yfinance}},
+        clear=False,
     ):
-        interface.route_to_vendor("get_news", "AAPL", "2026-06-01", "2026-06-05")
+        out = interface.route_to_vendor("get_news", "AAPL", "2026-06-01", "2026-06-05")
+    assert out.startswith("DATA_UNAVAILABLE: optional news_data could not be retrieved (yfinance: ")
+    assert "No news found" not in out and "Error retrieving" not in out
 
 
 @pytest.mark.unit
@@ -873,9 +875,9 @@ _YFINANCE_LEAF_CALLS = {
     "get_global_news": ((ynews, "yf_fetch_unhidden"), ("2026-06-01",)),
     "get_insider_transactions": ((yfin, "yf_fetch_unhidden"), ("AAPL",)),
     # Today, for the fundamentals row's reason: a date older than Yahoo's
-    # hourly reach is withheld before the seam. The first yfinance leaf in an
-    # OPTIONAL category, which is why the prose table below is not simply
-    # "every leaf but the loud ones" any more.
+    # hourly reach is withheld before the seam. A yfinance leaf in an OPTIONAL
+    # category, like the three news leaves above, which is why the prose
+    # table below is not simply "every leaf but the loud ones".
     "get_futures_basis": ((cme, "yf_fetch_unhidden"), ("BTC", _TODAY)),
 }
 
@@ -1000,9 +1002,6 @@ _PROSE_LEAF_PREFIXES = {
     "get_balance_sheet": "Error retrieving balance sheet for AAPL: ",
     "get_cashflow": "Error retrieving cash flow for AAPL: ",
     "get_income_statement": "Error retrieving income statement for AAPL: ",
-    "get_news": "Error retrieving news for AAPL: ",
-    "get_global_news": "Error retrieving global news: ",
-    "get_insider_transactions": "Error retrieving insider transactions for AAPL: ",
 }
 
 
@@ -1045,8 +1044,14 @@ def test_the_prose_table_covers_every_leaf_but_the_loud_and_the_optional_ones():
         set(_PROSE_LEAF_PREFIXES)
         == set(_YFINANCE_LEAF_CALLS) - _PROPAGATING_LEAVES - _OPTIONAL_LEAVES
     )
-    # Pinned as a fact too, so the third class cannot empty or grow unnoticed.
-    assert {"get_futures_basis"} == _OPTIONAL_LEAVES
+    # Pinned as a fact too, so the third class cannot empty or grow unnoticed:
+    # the CME basis leaf, and the three news leaves since #393.
+    assert {
+        "get_futures_basis",
+        "get_news",
+        "get_global_news",
+        "get_insider_transactions",
+    } == _OPTIONAL_LEAVES
 
 
 @pytest.mark.unit
@@ -1057,15 +1062,16 @@ def test_the_loud_category_is_ohlcv_and_the_mirror_follows_it():
     # price claim is checked against, so a report line in its place would
     # leave the run reasoning from nothing while looking answered.
     assert {"get_stock_data"} == _PROPAGATING_LEAVES
+    # Fundamentals stands in as the hypothetical second loud category.
     with mock.patch.object(
-        interface, "LOUD_LIBRARY_CATEGORIES", frozenset({"core_stock_apis", "news_data"})
+        interface, "LOUD_LIBRARY_CATEGORIES", frozenset({"core_stock_apis", "fundamental_data"})
     ):
         loud = _propagating_leaves()
         # The partition the test above asserts stops holding: the leaf the
         # second declaration claims is still in the prose table, so a
         # category added without revisiting that table fails there.
         assert set(_PROSE_LEAF_PREFIXES) != set(_YFINANCE_LEAF_CALLS) - loud - _OPTIONAL_LEAVES
-    assert "get_news" in loud
+    assert "get_fundamentals" in loud
 
 
 @pytest.mark.unit
@@ -1144,8 +1150,9 @@ def test_what_the_global_news_leaf_runs_before_yahoo_still_fails_loudly(monkeypa
     # #200 placed the cache forget above the broad handler so a yfinance that
     # drops the attribute fails the call rather than freezing again behind a
     # report. Placement said that while the getter did its own converting;
-    # with the conversion at the router (#219) the prologue says it by type,
-    # and the router's untyped lane lets WiringGapError through to the raise.
+    # with the conversion at the router (#219) the prologue says it by type
+    # (what the router makes of the type for this optional category is the
+    # next test's).
     monkeypatch.setattr(ynews.YfData, "cache_get", object())
     with caplog.at_level(logging.ERROR), pytest.raises(WiringGapError) as info:
         ynews.get_global_news_yfinance("2026-06-01")
@@ -1157,28 +1164,21 @@ def test_what_the_global_news_leaf_runs_before_yahoo_still_fails_loudly(monkeypa
 
 
 @pytest.mark.unit
-def test_a_wiring_gap_aborts_the_call_instead_of_becoming_report_text(monkeypatch):
-    # The property the type buys, through the router: the same chain that
-    # renders a library bug as one line raises this one, so a key a
-    # deployment did not set cannot come back looking like a vendor's bad day.
+def test_a_wiring_gap_is_named_by_the_optional_sentinel_instead_of_becoming_report_text(
+    monkeypatch,
+):
+    # The property the type buys, through the router: a key a deployment did
+    # not set cannot come back looking like a vendor's bad day. In a core
+    # chain the gap is raised (test_library_failure_policy); news is an
+    # optional category since #393, so its chain ends in the sentinel — which
+    # names the gap, not the vendor's library, as the thing to fix.
     monkeypatch.setattr(ynews, "get_config", lambda: {})
     set_config({"data_vendors": {"news_data": "yfinance"}})
-    with pytest.raises(WiringGapError, match="global news configuration"):
-        interface.route_to_vendor("get_global_news", "2026-06-01", None, None)
+    out = interface.route_to_vendor("get_global_news", "2026-06-01", None, None)
+    assert out.startswith("DATA_UNAVAILABLE: optional news_data")
+    assert "global news configuration" in out
+    assert "Error retrieving" not in out
 
-
-@pytest.mark.unit
-def test_an_unusable_window_ends_this_vendor_the_way_its_sibling_ends(monkeypatch):
-    # One routed tool's two vendors must end alike (#219). Alpha Vantage
-    # coerces the window where it reads it; this one used to carry an
-    # unusable value two hundred lines to ``relativedelta``, outside every
-    # guard, where the router read the TypeError as Yahoo's library and
-    # rendered it as the news report. Pinned through the router, since that
-    # is where the two endings differed.
-    monkeypatch.setattr(ynews.yf, "Search", lambda *a, **k: pytest.fail("no fetch may be made"))
-    set_config({"data_vendors": {"news_data": "yfinance"}})
-    with pytest.raises(WiringGapError, match="global news lookback window"):
-        interface.route_to_vendor("get_global_news", "2026-06-01", "ten", None)
 
 
 

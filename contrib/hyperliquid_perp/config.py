@@ -338,7 +338,8 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     if addr is not None and not isinstance(addr, str):
         raise ValueError(f"'wallet_address' must be a string, got {addr!r}")
     # The engine: block's string keys stay lenient (``or`` fallbacks in
-    # engine_bridge._build_engine_config); these are its three deliberate exceptions.
+    # engine_bridge._build_engine_config); the bool, list and int keys below
+    # are its deliberate exceptions.
     eng = config.get("engine")
     if eng is not None:
         # Unlike its sibling blocks (which go through config_overrides and
@@ -363,7 +364,7 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
                 bool_from_yaml(eng["structured_output"])
             except ValueError as exc:
                 raise ValueError(f"config key 'engine.structured_output': {exc}") from None
-        # Its one *list* key: a bare string would be ``list()``-exploded
+        # The analysts *list* key: a bare string would be ``list()``-exploded
         # per-character by _build_engine_config into bogus analyst keys that
         # only detonate deep inside build_graph (in the daemon: an endless
         # retry ladder on a pure typo). Elements are not vocabulary-checked —

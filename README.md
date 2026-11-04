@@ -603,7 +603,9 @@ News (`news_data`) is an optional category since #393: a dead headline feed
 degrades to a `DATA_UNAVAILABLE` sentinel in the news and sentiment reports
 instead of failing the run, and `"none"` is accepted — though the news analyst
 still binds and calls its two news tools, which then answer the disabled
-sentinel.
+sentinel. A category's `"none"` covers every tool of it, including one that
+`tool_vendors` routes elsewhere (`get_global_news` ships on Google News,
+#394): the off switch outranks a tool-level vendor.
 
 The ETF-flow vendors' fetch throttle (a 6-hour cache TTL) relies on
 `data_cache_dir` persisting between runs; pointing it at a temporary filesystem

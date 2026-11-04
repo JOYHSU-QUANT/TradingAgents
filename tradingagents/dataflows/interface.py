@@ -433,18 +433,28 @@ def get_category_for_method(method: str) -> str:
 
 def get_vendor(category: str, method: str = None) -> str:  # type: ignore[assignment]
     """Get the configured vendor for a data category or specific tool method.
-    Tool-level configuration takes precedence over category-level.
+    Tool-level configuration takes precedence over category-level — except
+    that a category switched off (``"none"``) is off for every tool of it:
+    the off switch is documented as the one way to stop a keyless vendor, and
+    ``tool_vendors`` has shipped with an entry since #394, so a tool-level
+    vendor must not quietly re-enable a tool the category turned off.
     """
     config = get_config()
+    category_vendor = config.get("data_vendors", {}).get(category, "default")
 
     # Check tool-level configuration first (if method provided)
-    if method:
+    if method and not _is_disabled_chain(category_vendor):
         tool_vendors = config.get("tool_vendors", {})
         if method in tool_vendors:
             return tool_vendors[method]
 
     # Fall back to category-level configuration
-    return config.get("data_vendors", {}).get(category, "default")
+    return category_vendor
+
+
+def _is_disabled_chain(vendor_config: str) -> bool:
+    """Whether a comma chain names the ``"none"`` sentinel anywhere."""
+    return any(v.strip().lower() == DISABLED_VENDOR for v in vendor_config.split(","))
 
 
 def is_category_disabled(category: str, method: str = None) -> bool:  # type: ignore[assignment]
@@ -453,9 +463,7 @@ def is_category_disabled(category: str, method: str = None) -> bool:  # type: ig
     Lets a caller skip binding a tool altogether rather than binding one that
     could only ever return the disabled sentinel.
     """
-    return any(
-        v.strip().lower() == DISABLED_VENDOR for v in get_vendor(category, method).split(",")
-    )
+    return _is_disabled_chain(get_vendor(category, method))
 
 
 def _library_failure_prose(e: VendorLibraryError) -> str:

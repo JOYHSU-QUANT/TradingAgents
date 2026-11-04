@@ -24,7 +24,9 @@ Breaking changes within the 0.x line are called out explicitly.
   public RSS search feed (`news.google.com/rss/search?q=<query>
   after:<start> before:<end>`, keyless; the date operators bound the search
   to the window itself, so a backtest's past as-of date is served from the
-  archive rather than from "the last N days") once per query, parses
+  archive rather than from "the last N days" — Google reads them as Pacific
+  calendar days, so the request is padded a day each side and the client
+  filter is the as-of bound) once per query, parses
   `<title>`/`<source>`/`<pubDate>` reading the body in chunks under a 5 MB
   cap, holds every item to the look-ahead-safe window
   (`date_window.in_window`, as the yfinance path does), interleaves the
@@ -37,13 +39,24 @@ Breaking changes within the 0.x line are called out explicitly.
   failure from a datacenter address, #395) and a non-feed body are the
   outage type (the optional `news_data` category then ends in its sentinel),
   a 429 the latched rate-limit type; an outage on any one query is the
-  verdict on the whole call. The tool is switched by `tool_vendors.get_global_news:
+  verdict on the whole call. An empty feed is not a failure (Google serves
+  an empty channel for no matches), so the quiet outcomes are logged: one
+  INFO line per call with each query's fetched and in-window counts, and a
+  WARNING when a feed's items all lacked a title, when no query answered
+  anything, or when the limit is below the number of queries (round-robin
+  can then represent only the first queries). The tool is switched by `tool_vendors.get_global_news:
   "google_news"` in `DEFAULT_CONFIG` — the other two news tools stay on the
   category's yfinance — and per the `data_vendors` convention that default
   IS the Hyperliquid perp deployment's live value, so the first deploy
   carrying this commit is a dated input-surface segmentation point (a new
   run-id; `PROMPT_VERSION` is not bumped — the prompt's text and shape are
-  unchanged, only the content of one tool answer). The perp's own searches
+  unchanged, only the content of one tool answer). The uniswap_v3 judge
+  builds its engine config from the same defaults, so it too moves to
+  Google News on that deploy — with the engine's macro query list, not the
+  perp's — and the deploy is its input-surface segmentation point as well.
+  With `tool_vendors` no longer empty, `get_vendor` now lets a category's
+  `"none"` outrank a tool-level entry, so `data_vendors.news_data: "none"`
+  still switches all three news tools off as the #393 entry promised. The perp's own searches
   are five groups with a transmission path to a BTC perp — crypto-market
   shocks, US crypto regulation, tariffs and trade, US rates and inflation,
   geopolitical war and sanctions (Google News search syntax: `OR`, quoted

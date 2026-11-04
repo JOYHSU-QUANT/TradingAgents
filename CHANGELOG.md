@@ -613,6 +613,45 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **A news vendor's outage no longer aborts the decision cycle: `news_data`
+  is an optional category** (#393). On 2026-11-02 Yahoo's ticker-news
+  endpoint went down (`*** YAHOO! FINANCE IS CURRENTLY DOWN! ***`, while
+  prices and search still answered) and, with news a core category, the
+  router's raise ended the news analyst's tool call, the graph and the
+  cycle: three consecutive `api_failed` cycles on paper-BTC-9 — twelve hours
+  without a decision, an open position would have ridden its stops alone —
+  and the uniswap judge went unanswered the same way. News was core by
+  inheritance from the upstream stock pipeline, where a headline feed is a
+  primary input; for this fork's perp trader it is one input to weigh, on a
+  vendor that fails on its own schedule. `OPTIONAL_CATEGORIES` now holds
+  `news_data`, so `get_news`, `get_global_news` and `get_insider_transactions`
+  end a failed chain in the router's `DATA_UNAVAILABLE: optional news_data
+  could not be retrieved (<vendor>: <words>). Proceed without it; do not
+  fabricate values.` sentinel and the analyst writes the section as absent.
+  What else moves with the category: a library failure below a news vendor
+  ends in that sentinel rather than the `Error retrieving ...` report line
+  (the optional lane's ranking); a wiring gap met beside it — a news config
+  key a deployment did not set — is named by the sentinel and a WARNING
+  instead of raised, as for every optional category, so a misconfigured
+  news feed now runs on without news rather than failing the cycle (watch
+  the `Optional news_data unavailable` WARNING); and the router accepts
+  `data_vendors.news_data: "none"`, though the news analyst still advertises
+  and calls its two news tools, which then answer the disabled sentinel —
+  gating them is a prompt change left out of this fix. The library-failure
+  policy suite, which used news as its core-category example, now drives
+  `technical_indicators` (core, not loud) so what it pins is unchanged.
+  Considered and declined: a third router tier that degrades only outages
+  and keeps a news wiring gap loud (a gap no deployed config can reach,
+  pinned at the leaves already, in the file that is a whole-file conflict
+  at the next upstream sync); a tool-node catch-all (contradicts the loud
+  OHLCV category, is per-analyst not per-category, and misses the sentiment
+  analyst's direct `get_news.func` call, which this change does cover); and
+  relabelling the daemon's `api_failed` (no decision exists to degrade to).
+  Known gap, not closed here: nothing counts the news sentinel across
+  cycles, so a feed that stays down now looks like the StockTwits feed did
+  (#395) — quiet for weeks — until someone reads the reports or the
+  `Optional news_data unavailable` WARNINGs.
+
 - **The perp engine hands the graph Yahoo's spelling of the coin
   (`BTC-USD`), not the bare `BTC`** (#392). The analysts carry the word
   they are given to the yfinance-backed tools unchanged, and on Yahoo

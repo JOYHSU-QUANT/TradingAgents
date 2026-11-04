@@ -68,21 +68,11 @@ def create_sentiment_analyst(llm):
 
         # Pre-fetch all three sources. StockTwits and Reddit degrade to a
         # placeholder string on any failure, so the LLM always sees something
-        # from them. News is the one that can raise: it goes through
-        # route_to_vendor, and news_data is a core category (not in
-        # OPTIONAL_CATEGORIES), so a chain exhausted by TYPED vendor failures
-        # re-raises the first one and aborts the node — an unset key on a
-        # configured Alpha Vantage chain is the everyday case, which the shipped
-        # single-vendor yfinance default does not have. Two lanes still answer
-        # a string even on a chain that can reach that raise: a vendor
-        # that reported no data returns the router's NO_DATA_AVAILABLE sentinel
-        # before that raise, and a vendor's own library bugs are read as
-        # such by the router, which renders "Error retrieving news for ..."
-        # (#187, #219). A dead network is not in that lane any more:
-        # yfinance re-raises OSError, so it aborts this node like any other
-        # core failure (#116). Aborting on a core failure is the decided
-        # outcome; what this comment used to claim — that nothing here can
-        # raise — was not (#108).
+        # from them. News goes through route_to_vendor; news_data is optional
+        # since #393, so an exhausted chain never raises here: it ends in
+        # NO_DATA_AVAILABLE or the ``DATA_UNAVAILABLE: optional news_data
+        # ...`` sentinel naming the vendor, and the report says the section
+        # is absent.
         news_block = get_news.func(ticker, start_date, end_date)
         # Pass the analysis window so a historical run trims social posts to it
         # instead of leaking today's chatter into a backtest (#1220).

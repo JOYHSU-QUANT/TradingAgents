@@ -170,7 +170,16 @@ def test_no_source_or_test_reaches_a_forbidden_package():
 def test_the_scan_has_sources_to_walk():
     """Guard the scans above: an empty walk would pass them all vacuously."""
     names = {path.name for path in _sources(_PACKAGE, include_tests=False)}
-    assert names >= {"upstream.py", "records.py", "manifest.py", "verdict.py", "oracle.py"}
+    assert names >= {
+        "upstream.py",
+        "records.py",
+        "manifest.py",
+        "verdict.py",
+        "oracle.py",
+        "worlds.py",
+        "landing.py",
+        "cli.py",
+    }
 
 
 # -- the reverse edge ----------------------------------------------------------

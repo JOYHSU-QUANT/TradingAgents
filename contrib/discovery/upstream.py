@@ -57,12 +57,34 @@ What is borrowed and why:
   ``require_amount``, ``SpecError``), the studied intervals
   (``studied_interval``) and the day the world grid is laid on
   (``MS_PER_DAY``);
-- from the floor, the ``VocabEnum`` base every vocabulary here is spelled in.
+- what a world is made of and lands through (plan PR 2): the port's own
+  value types (``Candle``, ``FundingPoint``, reached as the research package
+  reaches them, through its ``upstream``), the grid facts a generated series
+  is held to (``DAILY_INTERVAL``, ``FUNDING_INTERVAL_MS``, ``bar_span_ms``,
+  ``interval_to_ms``), the replay that says which bars a planted rule holds
+  a position on (``replay_sides``, over a ``SeriesBundle``), the research
+  package's own walk into its own store (``backfill_candles``,
+  ``backfill_funding`` and their ``SeriesFetch``/``StopReason``/
+  ``describe_stop``/``render_fetch``, and ``FUNDING_PAGE_DAYS``, how far
+  past a clock that walk's last window reaches), the store itself (``ResearchStore``,
+  ``StoreError``, and ``default_db_path`` — the one statement of where
+  ``data/`` is, which the bench root sits beside),
+  the measured start of the span (``first_measurable_index``) and the
+  refusals a landed world can meet (``EvaluationError``, ``FeatureError``,
+  and ``SplitError`` for a decision span too short to cut);
+- from the floor, the ``VocabEnum`` base every vocabulary here is spelled in
+  and the venue's time form (``epoch_ms``, ``from_epoch_ms``, and its upper
+  edge ``MAX_EPOCH_MS``, which bounds the last stamp a world may write).
 """
 
 from __future__ import annotations
 
-from contrib.autoresearch.constants import MS_PER_DAY
+from contrib.autoresearch.constants import (
+    DAILY_INTERVAL,
+    FUNDING_INTERVAL_MS,
+    MS_PER_DAY,
+    bar_span_ms,
+)
 from contrib.autoresearch.costs import CostModel, require_amount
 from contrib.autoresearch.dsl import (
     MAX_HOLD_BARS,
@@ -73,8 +95,28 @@ from contrib.autoresearch.dsl import (
     spec_hash,
     spec_to_document,
 )
-from contrib.autoresearch.evaluator import SplitResult, evaluate_split, load_bundle
-from contrib.autoresearch.features import MIN_INDICATOR_LOOKBACK, FeatureFrame
+from contrib.autoresearch.evaluator import (
+    EvaluationError,
+    SplitResult,
+    evaluate_split,
+    load_bundle,
+    replay_sides,
+)
+from contrib.autoresearch.features import (
+    MIN_INDICATOR_LOOKBACK,
+    FeatureError,
+    FeatureFrame,
+    SeriesBundle,
+)
+from contrib.autoresearch.fetch import (
+    FUNDING_PAGE_DAYS,
+    SeriesFetch,
+    StopReason,
+    backfill_candles,
+    backfill_funding,
+    describe_stop,
+    render_fetch,
+)
 from contrib.autoresearch.hypothesis import INTERRUPTED, SearchReport
 from contrib.autoresearch.ledger import (
     Experiment,
@@ -85,46 +127,79 @@ from contrib.autoresearch.ledger import (
     promotion_verdict,
 )
 from contrib.autoresearch.metrics import SegmentMetrics
-from contrib.autoresearch.research import require_clean_history, require_measurable_tail
+from contrib.autoresearch.research import (
+    first_measurable_index,
+    require_clean_history,
+    require_measurable_tail,
+)
 from contrib.autoresearch.split import (
     DEFAULT_TRAIN_SHARE,
     DEFAULT_VALIDATION_SHARE,
     Split,
+    SplitError,
     studied_interval,
 )
+from contrib.autoresearch.store import ResearchStore, StoreError, default_db_path
+from contrib.autoresearch.upstream import Candle, FundingPoint, interval_to_ms
 from contrib.autoresearch.vocabulary import SpecError, parse_feature_name, require_number
 from contrib.core.enum_guard import VocabEnum
+from contrib.core.instants import MAX_EPOCH_MS, epoch_ms, from_epoch_ms
 
 __all__ = [
     "BORROWED",
+    "DAILY_INTERVAL",
     "DEFAULT_TRAIN_SHARE",
     "DEFAULT_VALIDATION_SHARE",
+    "FUNDING_INTERVAL_MS",
+    "FUNDING_PAGE_DAYS",
     "INTERRUPTED",
+    "MAX_EPOCH_MS",
     "MAX_HOLD_BARS",
     "MIN_INDICATOR_LOOKBACK",
     "MS_PER_DAY",
     "UPSTREAM_PACKAGES",
+    "Candle",
     "CostModel",
+    "EvaluationError",
     "Experiment",
+    "FeatureError",
     "FeatureFrame",
+    "FundingPoint",
     "Ledger",
     "Op",
     "Penalty",
+    "ResearchStore",
     "SearchReport",
     "SegmentMetrics",
+    "SeriesBundle",
+    "SeriesFetch",
     "Side",
     "SpecError",
     "Split",
+    "SplitError",
     "SplitResult",
+    "StopReason",
+    "StoreError",
     "StrategySpec",
     "Trial",
     "TrialStatus",
     "VocabEnum",
+    "backfill_candles",
+    "backfill_funding",
+    "bar_span_ms",
+    "default_db_path",
+    "describe_stop",
+    "epoch_ms",
     "evaluate_split",
+    "first_measurable_index",
+    "from_epoch_ms",
+    "interval_to_ms",
     "load_bundle",
     "parse_feature_name",
     "parse_spec",
     "promotion_verdict",
+    "render_fetch",
+    "replay_sides",
     "require_amount",
     "require_clean_history",
     "require_measurable_tail",
@@ -142,7 +217,10 @@ UPSTREAM_PACKAGES = ("contrib.autoresearch", "contrib.core")
 # ``(module, attribute)`` for every borrowed name: the audit list. Every entry
 # is checked to still exist upstream and to be the upstream object itself.
 BORROWED: tuple[tuple[str, str], ...] = (
+    ("contrib.autoresearch.constants", "DAILY_INTERVAL"),
+    ("contrib.autoresearch.constants", "FUNDING_INTERVAL_MS"),
     ("contrib.autoresearch.constants", "MS_PER_DAY"),
+    ("contrib.autoresearch.constants", "bar_span_ms"),
     ("contrib.autoresearch.costs", "CostModel"),
     ("contrib.autoresearch.costs", "require_amount"),
     ("contrib.autoresearch.dsl", "MAX_HOLD_BARS"),
@@ -152,11 +230,22 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.dsl", "parse_spec"),
     ("contrib.autoresearch.dsl", "spec_hash"),
     ("contrib.autoresearch.dsl", "spec_to_document"),
+    ("contrib.autoresearch.evaluator", "EvaluationError"),
     ("contrib.autoresearch.evaluator", "SplitResult"),
     ("contrib.autoresearch.evaluator", "evaluate_split"),
     ("contrib.autoresearch.evaluator", "load_bundle"),
+    ("contrib.autoresearch.evaluator", "replay_sides"),
+    ("contrib.autoresearch.features", "FeatureError"),
     ("contrib.autoresearch.features", "FeatureFrame"),
     ("contrib.autoresearch.features", "MIN_INDICATOR_LOOKBACK"),
+    ("contrib.autoresearch.features", "SeriesBundle"),
+    ("contrib.autoresearch.fetch", "FUNDING_PAGE_DAYS"),
+    ("contrib.autoresearch.fetch", "SeriesFetch"),
+    ("contrib.autoresearch.fetch", "StopReason"),
+    ("contrib.autoresearch.fetch", "backfill_candles"),
+    ("contrib.autoresearch.fetch", "backfill_funding"),
+    ("contrib.autoresearch.fetch", "describe_stop"),
+    ("contrib.autoresearch.fetch", "render_fetch"),
     ("contrib.autoresearch.hypothesis", "INTERRUPTED"),
     ("contrib.autoresearch.hypothesis", "SearchReport"),
     ("contrib.autoresearch.ledger", "Experiment"),
@@ -166,14 +255,28 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.ledger", "TrialStatus"),
     ("contrib.autoresearch.ledger", "promotion_verdict"),
     ("contrib.autoresearch.metrics", "SegmentMetrics"),
+    ("contrib.autoresearch.research", "first_measurable_index"),
     ("contrib.autoresearch.research", "require_clean_history"),
     ("contrib.autoresearch.research", "require_measurable_tail"),
     ("contrib.autoresearch.split", "DEFAULT_TRAIN_SHARE"),
     ("contrib.autoresearch.split", "DEFAULT_VALIDATION_SHARE"),
     ("contrib.autoresearch.split", "Split"),
+    ("contrib.autoresearch.split", "SplitError"),
     ("contrib.autoresearch.split", "studied_interval"),
+    ("contrib.autoresearch.store", "ResearchStore"),
+    ("contrib.autoresearch.store", "StoreError"),
+    ("contrib.autoresearch.store", "default_db_path"),
+    # The port's value types and the interval arithmetic are the perp
+    # package's, reached the one way this package may reach them: as the
+    # research package re-exports them for its own port.
+    ("contrib.autoresearch.upstream", "Candle"),
+    ("contrib.autoresearch.upstream", "FundingPoint"),
+    ("contrib.autoresearch.upstream", "interval_to_ms"),
     ("contrib.autoresearch.vocabulary", "SpecError"),
     ("contrib.autoresearch.vocabulary", "parse_feature_name"),
     ("contrib.autoresearch.vocabulary", "require_number"),
     ("contrib.core.enum_guard", "VocabEnum"),
+    ("contrib.core.instants", "MAX_EPOCH_MS"),
+    ("contrib.core.instants", "epoch_ms"),
+    ("contrib.core.instants", "from_epoch_ms"),
 )

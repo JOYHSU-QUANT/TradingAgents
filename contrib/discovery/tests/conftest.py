@@ -1,12 +1,22 @@
-"""A hand-written synthetic history, the arms built over it, and a scripted hypothesist.
+"""Two histories under one coin, the arms built over them, and a scripted hypothesist.
 
-The history is the shape the venue's is — 400 midnight-anchored 4h bars
-closing a millisecond before the next open, 240 days of daily bars before
-them, hourly funding from forty days before — because the research
-package's measurement refuses anything else, and an arm here IS one of
-those measurements. It is built once per session and copied per test,
-since every arm writes to its own ledger. Plan PR 2's generator replaces
-the builder with the world it describes; the fixtures around it stay.
+The ledger-level suites (isolation, verdict) run their arms over a
+HAND-WRITTEN history: 400 midnight-anchored 4h bars closing a millisecond
+before the next open, 200 days of daily bars before them, hourly funding
+from forty days before — the shape the research package's measurement
+refuses anything else of, and no more. It is built once per session and
+copied per test, since every arm writes to its own ledger. It is kept
+beside the generator on purpose: the vocabulary's daily reach makes a
+generated world at least 1,100 bars of warm-up before its decision bars,
+every search round rebuilds the feature frame over the whole store, and
+the frame's indicator walk was measured at 1.3 ms a bar — so the arm
+suites, which care about ledger state and not about the bars, would pay
+several seconds a round for a world they never read.
+
+The generated world is the example manifest's, built once per session
+(``example_world``) and landed once (``landed_world``) for the suites
+that are about the world itself: the generator, the landing and the
+command.
 
 The example manifest is a conditional world over the same coin, so the
 isolation tests can hold the one thing the manifest and the prompts share
@@ -17,7 +27,7 @@ from __future__ import annotations
 
 import random
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -31,6 +41,7 @@ from contrib.autoresearch.ports import HypothesistError
 from contrib.autoresearch.research import open_experiment
 from contrib.autoresearch.store import ResearchStore
 from contrib.autoresearch.upstream import Candle, FundingPoint, interval_to_ms
+from contrib.discovery.landing import Landing, land, verify
 from contrib.discovery.manifest import (
     Arms,
     Bars,
@@ -53,6 +64,7 @@ from contrib.discovery.manifest import (
     WorldKind,
     opaque_world_id,
 )
+from contrib.discovery.worlds import GENERATOR_VERSION, WorldHistory, generate
 
 MS_PER_HOUR = 60 * 60_000
 STEP_MS = interval_to_ms("4h")
@@ -60,7 +72,11 @@ DAY_MS = 24 * MS_PER_HOUR
 # A UTC midnight: on the 4h grid and the 1d grid both.
 START_MS = 1_700_000_000_000 - 1_700_000_000_000 % DAY_MS
 BARS = 400
-WARMUP_DAYS = 240
+# Two hundred days: the longest daily mean (``sma_1d_200``) has a value
+# once nine tenths of its window is there, so the generated world's first
+# measurable bar sits about 185 days in, and the example manifest's warm-up
+# clears it with a fortnight to spare (``test_landing`` measures it).
+WARMUP_DAYS = 200
 LOOKBACK = 50  # the engine's floor: the indicator walk is what every frame here pays for
 
 # The coin every arm in this suite files under: world 0 of the development set.
@@ -84,21 +100,26 @@ SHORT = {
     "sizing": SIZING,
 }
 # The rule the example world plants: an exogenous-funding entry, a volatility
-# gate under ``filters`` (plan §4.1), a ``max_bars`` exit.
+# gate under ``filters`` (plan §4.1), a ``max_bars`` exit. The thresholds
+# were chosen on the example seed so the gate BINDS (``realized_vol_20``
+# sits around 0.0099 at ``vol`` 0.01, so 0.0095 passes about half the bars)
+# and the rule holds about a fifth of the decision bars — a plant an arm has
+# to find, not one that buy-and-hold earns (measured 2026-11-04: 78 of 400).
 PLANTED = {
     "family": "funding_filter",
-    "entry": {"long": [{"left": "funding_zscore_14", "op": "<", "right": -1.0}]},
-    "filters": [{"left": "realized_vol_20", "op": ">", "right": 0.004}],
-    "exit": {"max_bars": 12},
+    "entry": {"long": [{"left": "funding_zscore_14", "op": "<", "right": -1.5}]},
+    "filters": [{"left": "realized_vol_20", "op": ">", "right": 0.0095}],
+    "exit": {"max_bars": 6},
     "sizing": SIZING,
 }
 
 
-# -- the history -------------------------------------------------------------------------
+# -- the hand-written history ------------------------------------------------------------
 #
 # A copy of the builder in ``contrib/autoresearch/tests/test_research.py``
 # (``_prices``, ``_fill``), which is private to that module; the two drift
-# knowingly until plan PR 2's generator replaces this one.
+# knowingly. Kept beside the generator for the reason the module docstring
+# gives.
 
 
 def _prices(count: int, *, seed: int, start: float, drift: float) -> tuple[list, list]:
@@ -187,6 +208,54 @@ def arm(history, tmp_path):
         yield Ledger(store)
 
 
+# -- the generated world ----------------------------------------------------------------------
+
+
+def small_manifest(
+    kind: WorldKind = WorldKind.NULL_V1,
+    *,
+    seed: int = 0,
+    seed_set: SeedSet = SeedSet.DEV,
+    warmup: int = 0,
+    count: int = 60,
+    vol: float = 0.01,
+    drift: float = 0.0,
+    sigma: float = 1e-4,
+    beta: float = 0.001,
+) -> Manifest:
+    """The example manifest over a small world: the generator's unit tests need no warm-up.
+
+    A null one is instant (no frame is built for it); a conditional one
+    needs enough bars for the planted rule's features to have a value.
+    """
+    base = example_manifest(kind=kind, seed_set=seed_set, world_seed=seed)
+    world = replace(
+        base.world,
+        origin_ms=START_MS,
+        bars=Bars(interval="4h", count=count, warmup_bars=warmup),
+        price=PriceModel(vol=vol, drift=drift),
+        funding=FundingModel(sigma=sigma),
+        planted=None if base.world.planted is None else replace(base.world.planted, beta=beta),
+    )
+    return replace(base, world=world, indicator_lookback=LOOKBACK)
+
+
+@pytest.fixture(scope="session")
+def example_world() -> WorldHistory:
+    """The example manifest's world — the conditional world of development seed 0 — built once."""
+    return generate(example_manifest())
+
+
+@pytest.fixture(scope="session")
+def landed_world(example_world, tmp_path_factory) -> tuple[Path, Landing]:
+    """That world landed in its own store through the backfill and verified, once; read-only after."""
+    path = tmp_path_factory.mktemp("world") / "world.sqlite"
+    with ResearchStore(path) as store:
+        land(example_world, store)
+        landing = verify(store, example_manifest())
+    return path, landing
+
+
 # -- the hypothesist ----------------------------------------------------------------------
 
 
@@ -244,7 +313,7 @@ def example_manifest(
         kind=kind,
         seed_set=seed_set,
         world_seed=world_seed,
-        generator_version="1",
+        generator_version=GENERATOR_VERSION,
         origin_ms=START_MS - WARMUP_DAYS * DAY_MS,
         initial_price=30000.0,
         bars=Bars(interval="4h", count=BARS, warmup_bars=WARMUP_DAYS * 6),

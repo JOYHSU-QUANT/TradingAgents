@@ -84,6 +84,11 @@ db.sqlite3-journal
 *.sqlite-wal
 *.sqlite-shm
 *.sqlite-journal
+# contrib/discovery lands its synthetic worlds under data/discovery/<world id>-<digest>/:
+# the store is covered above, the JSON records beside it (manifest, oracle,
+# verdicts, scores) are rebuilt from the manifest by the bench and are not
+# source either.
+data/discovery/
 
 # Flask stuff:
 instance/

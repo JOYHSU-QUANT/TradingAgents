@@ -39,10 +39,21 @@ def test_a_null_world_writes_no_rule_and_a_conditional_one_writes_the_parsed_rul
     null = example_manifest(kind=WorldKind.NULL_V1).to_dict()
     conditional = example_manifest().to_dict()
     assert null["world"]["planted"] is None
-    assert conditional["world"]["planted"]["spec"]["exit"] == {"max_bars": 12}
+    assert conditional["world"]["planted"]["spec"]["exit"] == {"max_bars": 6}
     # The two worlds share nothing a prompt could see: the same seed gives
     # the same id whatever is planted.
     assert null["world"]["id"] == conditional["world"]["id"]
+
+
+def test_the_identity_text_is_the_canonical_text_with_the_pool_count_set_aside():
+    manifest = example_manifest()
+    # Unfilled, the identity IS the file; filled, it is still the unfilled file.
+    assert manifest.identity() == manifest.dumps()
+    filled = replace(manifest, search_space=replace(manifest.search_space, pool_size=16))
+    assert filled.identity() == manifest.dumps()
+    assert Manifest.loads(filled.identity()).search_space.pool_size is None
+    # Any other field is part of the identity.
+    assert replace(manifest, indicator_lookback=201).identity() != manifest.identity()
 
 
 def test_a_manifest_without_a_model_arm_is_a_complete_run_of_the_other_two():
@@ -87,6 +98,8 @@ def _edited(**changes):
         ({"world.seed_set": "test"}, "not the id of test seed 0"),
         ({"world.world_seed": 1}, "not the id of dev seed 1"),
         ({"world.origin_ms": 1}, "not a UTC midnight"),
+        # Zero is a midnight and not a venue stamp (the candle type refuses it).
+        ({"world.origin_ms": 0}, "world.origin_ms"),
         ({"world.funding.sigma": 0}, "world.funding.sigma"),
         ({"world.price.vol": 0}, "world.price.vol"),
         ({"world.bars.interval": "1h"}, "world.bars.interval"),

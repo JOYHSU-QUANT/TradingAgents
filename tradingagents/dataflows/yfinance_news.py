@@ -252,12 +252,14 @@ def _get_news_read_on_the_wire(stock: yf.Ticker, count: int) -> list:
     answer as a quiet week, and the renderer would claim it as "No news
     found" (the shape #136 exists to keep out). The singleton ``YfData``'s
     ``post`` is shadowed for this one call so the answers are seen; an empty
-    list is then believed only when the last answer carried the list, and
-    is a ``YFDataException`` otherwise — the same exception the library
-    raises for its "Will be right back" page, mapped by the caller to the
-    vendor-unavailable lane. Any non-JSON body has already left as the
-    library's own raise (``hide_exceptions`` is off inside the boundary).
-    A fake ``Ticker`` with no wire (tests) is called as it was.
+    list is then believed only when the last answer carried the list's
+    container (``data.lightyearList.main``) and no ``errors``, and is a
+    ``YFDataException`` otherwise — the same exception the library raises
+    for its "Will be right back" page, mapped by the caller to the
+    vendor-unavailable lane. A JSON body that is not an object fails inside
+    the library and is read as an outage too; a non-JSON body has already
+    left as the library's own raise (``hide_exceptions`` is off inside the
+    boundary). A fake ``Ticker`` with no wire (tests) is called as it was.
     """
     data = getattr(stock, "_data", None)
     if data is None or not callable(getattr(data, "post", None)):
@@ -270,10 +272,22 @@ def _get_news_read_on_the_wire(stock: yf.Ticker, count: int) -> list:
         answers.append(answer)
         return answer
 
+    # The shadow is safe because yf_fetch_unhidden holds _UNHIDE_LOCK around
+    # this call, so no other yfinance call can post through the singleton
+    # meanwhile — answers[-1] is this call's. Delete the shadow once the
+    # yfinance floor includes a get_news that raises on an ``errors`` body.
     had_own_post = "post" in vars(data)
     data.post = recording_post
     try:
         news = stock.get_news(count=count)
+    except (AttributeError, TypeError) as exc:
+        # The library reads ``body.get("data")`` before anything else, so a
+        # JSON body that is not an object (a list, a scalar) fails inside it
+        # with one of these — read as an outage here, not as the empty
+        # answer the boundary's broad handler would make of it.
+        if answers and not isinstance(_json_or_none(answers[-1]), dict):
+            raise YFDataException("news GraphQL answered without an object body") from exc
+        raise
     finally:
         if had_own_post:
             data.post = real_post
@@ -281,17 +295,32 @@ def _get_news_read_on_the_wire(stock: yf.Ticker, count: int) -> list:
             del data.post
     if news or not answers:
         return news
-    try:
-        body = answers[-1].json()
-    except ValueError:
-        return news  # the library's own raise would have left first
-    if not isinstance(body, dict) or "errors" in body or "data" not in body:
-        errors = body.get("errors") if isinstance(body, dict) else None
+    body = _json_or_none(answers[-1])
+    if body is None:
+        return news  # not JSON: the library's own raise would have left first
+    errors = body.get("errors") if isinstance(body, dict) else None
+    main = (
+        ((body.get("data") or {}).get("lightyearList") or {}).get("main")
+        if isinstance(body, dict)
+        else None
+    )
+    if errors or not isinstance(main, dict):
         detail = ""
         if isinstance(errors, list) and errors and isinstance(errors[0], dict):
-            detail = f": {str(errors[0].get('message', ''))[:160]}"
+            # Vendor words quoted in a raised message: flattened and capped
+            # like every other vendor fragment this module quotes.
+            said = sanitize_untrusted(_vendor_text(errors[0].get("message")), limit=160)
+            detail = f": {said}" if said else ""
         raise YFDataException(f"news GraphQL answered without the list{detail}")
     return news
+
+
+def _json_or_none(answer: object) -> object:
+    """``answer.json()``, or ``None`` when the body is not JSON."""
+    try:
+        return answer.json()  # type: ignore[attr-defined]
+    except (ValueError, AttributeError):
+        return None
 
 
 def get_news_yfinance(

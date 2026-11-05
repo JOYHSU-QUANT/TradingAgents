@@ -778,14 +778,22 @@ Breaking changes within the 0.x line are called out explicitly.
   `input_unavailable:news_data` rule would never fire). `get_news_yfinance`
   now reads the last wire answer back (the singleton `YfData.post` is
   shadowed for the one call) and believes an empty list only when the
-  answer carried the list; otherwise it is the library's own
-  `YFDataException`, mapped as before to `Yahoo Finance answered without
-  data: …` and the optional sentinel. That sentence now ends with
-  `(yfinance x.y.z)`: "CURRENTLY DOWN" is yfinance's wording for any
+  answer carried the list's container (`data.lightyearList.main`) and no
+  `errors`; otherwise — an error body, a nulled list, a body that is not an
+  object — it is the library's own
+  `YFDataException`, mapped as before to the optional sentinel; the error
+  detail is flattened and capped like every other vendor fragment the
+  module quotes. That sentence — for every yfinance answer that is not
+  data, the history, info and statements lanes included — now reads
+  `Yahoo Finance answered without data (yfinance x.y.z): …`, the version
+  ahead of the vendor's words because the router caps the sentinel's
+  clause from the end: "CURRENTLY DOWN" is yfinance's wording for any
   unreadable answer, and a library too old for an endpoint Yahoo retired
   reads exactly like an outage — #405 cost three days on that — so the
   version is the first thing to check and RUNBOOK §7's news-vendor row
   says so (and no longer calls cross-cycle counting a gap: #402 closed it).
+  The shadow is to be deleted once the yfinance floor includes a
+  `get_news` that raises on an `errors` body.
 
 - **`get_news` answers again: yfinance's floor is 1.8.0** (#405). Yahoo
   retired the `/xhr/ncp` news endpoint around 2026-11-02 18:50Z, and every

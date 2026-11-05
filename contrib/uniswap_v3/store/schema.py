@@ -30,7 +30,7 @@ a send that never ended.
 
 ``verdicts`` is what an outside judge said of a token at a bar, keyed by
 (source, time, symbol), in that order so that a bar's verdicts are one
-seek; like ``bars`` it belongs to no run, and a row is never rewritten. ``rating`` carries no CHECK of its values, for the same
+seek; like ``bars`` it belongs to no run, and a row is never rewritten; ``news_missing`` (#408) marks a verdict given without the news input. ``judge_declines`` keeps every visit on which the judge said "later" about a token at a bar, keyed by (source, symbol, time, asked_at): telemetry the status document counts, never read by a strategy. ``rating`` carries no CHECK of its values, for the same
 reason as ``outcome``. ``decisions.verdict_digests`` is JSON text of the
 verdict digests the decision saw, by symbol, and NULL for a run that reads
 no verdicts or a decision stored before the column existed.

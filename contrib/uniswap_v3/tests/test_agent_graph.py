@@ -636,6 +636,14 @@ def test_past_the_patience_a_news_failure_for_good_still_fails_for_good(tmp_path
         judge.ask("ETH-USD", "2024-01-03", "context", accept_news_less=True)
 
 
+def test_a_graph_without_the_news_analyst_is_not_probed(tmp_path, stub, monkeypatch):
+    calls = _probe(monkeypatch, down=True)
+    settings = AgentSettings(selected_analysts=("market", "social"))
+    judge = TradingAgentsJudge(settings, tmp_path, graph_class=stub, probe_news=True)
+    assert judge.ask("ETH-USD", "2024-01-03", "context").rating is Rating.HOLD
+    assert calls == [] and len(stub.built) == 1
+
+
 def test_a_judge_built_without_the_probe_asks_as_it_always_did(tmp_path, stub, monkeypatch):
     calls = _probe(monkeypatch, down=True)
     judge = TradingAgentsJudge(AgentSettings(), tmp_path, graph_class=stub)

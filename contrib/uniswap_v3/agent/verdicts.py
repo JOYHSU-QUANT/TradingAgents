@@ -181,6 +181,10 @@ def ask_verdicts(
     ``agent.ask_within_seconds`` of the boundary; later, the tokens it has
     not been asked about are left unasked and named in the summary's
     ``late``, while the verdicts the store already holds are found as usual.
+    Past ``agent.news_patience_seconds`` the judge is asked with
+    ``accept_news_less`` and a news-less answer is kept with its flag
+    (#408); every "later" it gives is kept as a decline row, telemetry
+    that never changes the visit's outcome.
     """
     source = verdict_source(config)
     tickers = tickers_for(config.traded_symbols)

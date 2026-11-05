@@ -98,6 +98,9 @@ agent:
   selected_analysts: [market, social, news]
   max_tokens: 16384
   ask_within_seconds: 14400
+  # how long "news unavailable" stays "later" before a news-less verdict is kept
+  # (#408); unset = 2 hours, or an hour less than a shorter window
+  news_patience_seconds: 7200
 
 # fixed_weights is a placeholder that drives the engine: hold these shares of
 # portfolio value, and rebalance when one is more than `band` (absolute

@@ -208,6 +208,7 @@ def usable_rating(verdict: Verdict | None) -> Rating | None:
     """
     return None if verdict is None or verdict.rating.is_review else verdict.rating
 
+
 @dataclass(frozen=True)
 class JudgeDecline:
     """One visit on which the judge said "later" about ``symbol`` at the bar ``time`` (#408).

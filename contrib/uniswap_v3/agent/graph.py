@@ -105,8 +105,11 @@ _ASSET_TYPE: Final = "crypto"
 # bar and never rewritten does not: a bar judged on a news-less graph would
 # stand for good, where the raise the router used to make let a later visit
 # ask again. So the judge watches the router's logger for the line while the
-# graph runs and answers "later" if it fired. The log line is the one trace
-# both news paths leave: the news analyst's tool result lives in messages the
+# graph runs and answers "later" if it fired — inside the caller's patience;
+# past it the answer is kept with ``news_missing`` set, and the ``verdict``
+# command probes the two news tools before any graph runs, so that "later"
+# usually costs no model call (#408). The log line is the one trace both
+# news paths leave: the news analyst's tool result lives in messages the
 # graph clears between analysts, and the sentiment analyst reads the same
 # getter directly, outside any tool node.
 _ROUTER_LOGGER: Final = "tradingagents.dataflows.interface"
@@ -345,19 +348,18 @@ class TradingAgentsJudge:
                 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
                 self._graph_class = _spot_graph(TradingAgentsGraph)
-            if self._config is None:
-                self._config = engine_config(self._settings, self._home)
         except Exception as exc:
             # An engine that is not installed, or one that refuses an environment
             # override (TRADINGAGENTS_*) as it imports.
             raise AgentError(
                 f"the tradingagents engine cannot be set up ({type(exc).__name__}: {exc})"
             ) from exc
+        config = self._engine_config()
         try:
             graph = self._graph_class(
                 selected_analysts=list(self._settings.selected_analysts),
                 debug=False,
-                config=self._config,
+                config=config,
             )
         except Exception as exc:
             # A missing key or an unknown provider: the engine refuses before any call.
@@ -439,9 +441,11 @@ class TradingAgentsJudge:
         self, ticker: str, trade_date: str, context: str, *, accept_news_less: bool = False
     ) -> Answer:
         started = _time.monotonic()
-        if self._probing and not accept_news_less:
+        if self._probing and not accept_news_less and "news" in self._settings.selected_analysts:
             # Inside the caller's patience: "later" (or "for good") before
-            # any model call, since a news-less answer would not be kept.
+            # any model call, since a news-less answer would not be kept. A
+            # graph set up without the news analyst reads no news, so there
+            # is nothing to probe for it.
             self._probe_news(ticker, trade_date)
         graph = self._graph(context)
         watch = _NewsWatch()

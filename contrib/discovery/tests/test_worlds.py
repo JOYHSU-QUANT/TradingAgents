@@ -310,6 +310,40 @@ def test_a_rule_that_holds_nothing_on_the_decision_bars_plants_nothing_and_is_re
         replace(example_world, planted_sides=only_warm)
 
 
+def test_a_history_of_another_generator_or_interval_is_refused_by_the_type():
+    # The type reads the path as this generator lays it, so it refuses what
+    # ``generate`` refuses — a history built by hand under another manifest
+    # does not get through on the lengths being right.
+    made = null(count=60)
+    with pytest.raises(WorldError, match="generates version"):
+        replace(made, manifest=_with_world(made.manifest, generator_version="2"))
+    daily = Bars(interval="1d", count=60, warmup_bars=0)
+    with pytest.raises(WorldError, match="lays the path on 4h bars"):
+        replace(made, manifest=_with_world(made.manifest, bars=daily))
+
+
+def test_the_generator_names_the_version_before_this_version_s_rules():
+    # A manifest of another version is told that, whatever else is wrong
+    # with it under this version's rules.
+    other = _with_world(small_manifest(drift=0.0005), generator_version="2")
+    with pytest.raises(WorldError, match="generates version"):
+        generate(other)
+    daily = _with_world(small_manifest(drift=0.0005), bars=Bars("1d", 60, 0))
+    with pytest.raises(WorldError, match="lays the path on 4h bars"):
+        generate(daily)
+
+
+def test_the_stamp_bound_leaves_room_for_the_funding_walk_s_last_page():
+    # Sixty bars are ten days. An origin ten days before the last midnight
+    # ends inside the venue's time form, but the walk's twenty-day page past
+    # the clock does not; thirty-one days before, both fit.
+    last_midnight = (MAX_EPOCH_MS // DAY_MS) * DAY_MS
+    with pytest.raises(WorldError, match="funding walk's 20-day page"):
+        generate(_with_world(small_manifest(), origin_ms=last_midnight - 10 * DAY_MS))
+    inside = generate(_with_world(small_manifest(), origin_ms=last_midnight - 31 * DAY_MS))
+    assert inside.clock_ms + 20 * DAY_MS <= MAX_EPOCH_MS
+
+
 def test_a_history_holds_its_own_shape():
     made = null(count=60)
     with pytest.raises(WorldError, match="bars for a world of"):

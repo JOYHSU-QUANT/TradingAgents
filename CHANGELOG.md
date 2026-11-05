@@ -780,8 +780,9 @@ Breaking changes within the 0.x line are called out explicitly.
   shadowed for the one call) and believes an empty list only when the
   answer carried the list's container (`data.lightyearList.main`) and no
   `errors`; otherwise — an error body, a nulled list, a body of another
-  shape that fails inside the library — it is the library's own
-  `YFDataException`, mapped as before to the optional sentinel; the error
+  shape that fails inside the library — it is a `YFDataException`, the
+  library's own class, raised from the wire read and mapped as before to
+  the optional sentinel; the error
   detail is flattened and capped like every other vendor fragment the
   module quotes. That sentence — for every yfinance answer that is not
   data, the history, info and statements lanes included — now reads

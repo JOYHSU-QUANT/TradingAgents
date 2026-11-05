@@ -130,11 +130,23 @@ def test_a_body_whose_list_container_is_missing_is_an_outage(monkeypatch, body):
 
 
 @pytest.mark.unit
-def test_a_null_or_empty_errors_key_beside_the_list_is_not_an_outage(monkeypatch):
+@pytest.mark.parametrize("errors", [None, []])
+def test_a_null_or_empty_errors_key_beside_the_list_is_not_an_outage(monkeypatch, errors):
     body = _list_body([])
-    body["errors"] = None
+    body["errors"] = errors
     _wire(monkeypatch, body)
     assert ynews.get_news_yfinance("NVDA", "2026-11-01", "2026-11-05").startswith("No news found")
+
+
+@pytest.mark.unit
+def test_the_singleton_post_is_put_back_when_the_call_raises(monkeypatch):
+    import yfinance.data as yfdata
+
+    posted = _wire(monkeypatch, [1, 2, 3])  # fails inside the library: the outage path
+    with pytest.raises(VendorUnavailableError, match=r"another shape \(AttributeError\)"):
+        ynews.get_news_yfinance("NVDA", "2026-11-01", "2026-11-05")
+    data = yfdata.YfData()
+    assert "post" not in vars(data) and data.post is posted
 
 
 @pytest.mark.unit

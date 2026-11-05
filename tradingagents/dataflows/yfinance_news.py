@@ -288,7 +288,11 @@ def _get_news_read_on_the_wire(stock: yf.Ticker, count: int) -> list:
         # empty answer the boundary's broad handler would make of it; with
         # no answer recorded the error is the library's own and left alone.
         if answers:
-            raise YFDataException("news GraphQL answered with a body of another shape") from exc
+            # The class is named so an operator can tell a parse failure from
+            # a transport one once the router has made the sentinel of it.
+            raise YFDataException(
+                f"news GraphQL answered with a body of another shape ({type(exc).__name__})"
+            ) from exc
         raise
     finally:
         if had_own_post:

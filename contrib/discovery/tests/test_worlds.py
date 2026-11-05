@@ -28,6 +28,7 @@ from contrib.autoresearch.features import FeatureFrame, SeriesBundle
 from contrib.autoresearch.gaps import scan_bars, scan_stamps
 from contrib.autoresearch.upstream import from_epoch_ms
 from contrib.autoresearch.vocabulary import FeatureRef, parse_feature_name
+from contrib.core.instants import MAX_EPOCH_MS
 from contrib.discovery.manifest import Bars, SeedSet, WorldKind
 from contrib.discovery.worlds import (
     SETTLEMENT_LAG_MS,
@@ -220,6 +221,12 @@ def test_a_two_sided_rule_carries_beta_in_the_direction_of_the_side_held(null_tw
     planted = replace(manifest.world.planted, spec=both)
     two_sided = generate(_with_world(manifest, planted=planted))
     assert set(two_sided.planted_sides) == {None, Side.LONG, Side.SHORT}
+    # And the rule reverses somewhere: a short held straight after a long.
+    sides = two_sided.planted_sides
+    assert any(
+        earlier is Side.LONG and later is Side.SHORT
+        for earlier, later in zip(sides, sides[1:], strict=False)
+    )
     _effect_is_beta_on_the_held_bars(two_sided, null_twin, planted.beta)
 
 
@@ -263,6 +270,10 @@ def test_the_generator_refuses_what_it_does_not_make():
     # A walk that runs off either end of a float is refused by name.
     with pytest.raises(WorldError, match="past what a number holds"):
         generate(small_manifest(vol=50.0, count=200))
+    # A world whose last stamp would fall past the venue's time form.
+    at_the_edge = _with_world(small_manifest(), origin_ms=(MAX_EPOCH_MS // DAY_MS) * DAY_MS)
+    with pytest.raises(WorldError, match="past the last instant a venue stamp can hold"):
+        generate(at_the_edge)
     # A conditional world too short for its own rule's window: the rule
     # would read as never firing, so it is refused rather than planted.
     with pytest.raises(WorldError, match="cannot be read on this world"):
@@ -305,6 +316,14 @@ def test_a_history_holds_its_own_shape():
         replace(made, funding=made.funding[:-1])
     with pytest.raises(WorldError, match="not one per hour"):
         replace(made, funding=())
+    # Content, not only length: a day that is not the path's own, a stamp a
+    # millisecond off the grid.
+    altered_day = replace(made.daily[0], high=made.daily[0].high + 1)
+    with pytest.raises(WorldError, match="not the path's complete days"):
+        replace(made, daily=(altered_day, *made.daily[1:]))
+    shifted = replace(made.funding[5], time=made.funding[5].time + 1)
+    with pytest.raises(WorldError, match="not one per hour"):
+        replace(made, funding=(*made.funding[:5], shifted, *made.funding[6:]))
 
 
 # -- the port -------------------------------------------------------------------------

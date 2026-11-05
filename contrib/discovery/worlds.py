@@ -86,6 +86,7 @@ from .manifest import Manifest, Planted, World
 from .upstream import (
     DAILY_INTERVAL,
     FUNDING_INTERVAL_MS,
+    MAX_EPOCH_MS,
     MS_PER_DAY,
     Candle,
     CostModel,
@@ -379,8 +380,12 @@ def _path(world: World, draws: _Draws, sides: tuple[Side | None, ...]) -> tuple[
             # clamp.
             above = (move + math.sqrt(move * move - 2.0 * vol * vol * math.log(up))) / 2.0
             below = (-move + math.sqrt(move * move - 2.0 * vol * vol * math.log(down))) / 2.0
-            high = opened * math.exp(above)
-            low = opened * math.exp(-below)
+            # Clamped to the body as well: in exact arithmetic the overshoot
+            # is at or above both ends, but ``exp(log(p))`` is a float's
+            # round trip, and on a bar whose move and wick are both below an
+            # ulp the close can land past the high by that ulp.
+            high = max(opened, closed, opened * math.exp(above))
+            low = min(opened, closed, opened * math.exp(-below))
             if low <= 0.0 or math.isinf(high):
                 # Off the bottom (a price that rounds to zero) or the top
                 # (an infinity ``exp`` returned rather than raised): either
@@ -508,6 +513,17 @@ def generate(manifest: Manifest) -> WorldHistory:
             f"planted one over it; a price drift of {world.price.drift!r} is a world with a "
             f"long-side edge in its price alone, which is another kind (plan §4.1), not a "
             f"parameter of this one"
+        )
+    total = world.bars.warmup_bars + world.bars.count
+    last_stamp = world.origin_ms + total * interval_to_ms(PATH_INTERVAL) + SETTLEMENT_LAG_MS
+    if last_stamp > MAX_EPOCH_MS:
+        # The manifest bounds the origin below; the venue's stamp type bounds
+        # every stamp above, and the last one this world writes is the
+        # settlement due at its final close. Refused here, by name, rather
+        # than by that type at the first bar past the edge.
+        raise WorldError(
+            f"{world.id}: {total} bars from {from_epoch_ms(world.origin_ms).isoformat()} end "
+            f"past the last instant a venue stamp can hold; fewer bars, or an earlier origin"
         )
     if world.generator_version != GENERATOR_VERSION:
         raise WorldError(

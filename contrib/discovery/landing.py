@@ -324,13 +324,15 @@ def land_world(root: Path, history: WorldHistory) -> tuple[Path, tuple[SeriesFet
         )
     root.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(dir=root, prefix=f".{target.name}.partial-"))
-    if os.name != "nt":
-        # ``mkdtemp`` makes a private (0700) directory and the rename keeps
-        # the mode; a run directory is an ordinary one under the umask.
-        mask = os.umask(0)
-        os.umask(mask)
-        staging.chmod(0o777 & ~mask)
     try:
+        if os.name != "nt":
+            # ``mkdtemp`` makes a private (0700) directory and the rename
+            # keeps the mode; a run directory is an ordinary one under the
+            # umask. Inside the ``try``: a mode that cannot be set is a run
+            # that did not happen, and its staging goes with it.
+            mask = os.umask(0)
+            os.umask(mask)
+            staging.chmod(0o777 & ~mask)
         with ResearchStore(staging / ARTIFACT_FILENAME) as store:
             fetched = land(history, store)
             landing = verify(store, manifest)

@@ -72,7 +72,8 @@ What is borrowed and why:
   refusals a landed world can meet (``EvaluationError``, ``FeatureError``,
   and ``SplitError`` for a decision span too short to cut);
 - from the floor, the ``VocabEnum`` base every vocabulary here is spelled in
-  and the venue's time form (``epoch_ms``, ``from_epoch_ms``).
+  and the venue's time form (``epoch_ms``, ``from_epoch_ms``, and its upper
+  edge ``MAX_EPOCH_MS``, which bounds the last stamp a world may write).
 """
 
 from __future__ import annotations
@@ -140,7 +141,7 @@ from contrib.autoresearch.store import ResearchStore, StoreError, default_db_pat
 from contrib.autoresearch.upstream import Candle, FundingPoint, interval_to_ms
 from contrib.autoresearch.vocabulary import SpecError, parse_feature_name, require_number
 from contrib.core.enum_guard import VocabEnum
-from contrib.core.instants import epoch_ms, from_epoch_ms
+from contrib.core.instants import MAX_EPOCH_MS, epoch_ms, from_epoch_ms
 
 __all__ = [
     "BORROWED",
@@ -149,6 +150,7 @@ __all__ = [
     "DEFAULT_VALIDATION_SHARE",
     "FUNDING_INTERVAL_MS",
     "INTERRUPTED",
+    "MAX_EPOCH_MS",
     "MAX_HOLD_BARS",
     "MIN_INDICATOR_LOOKBACK",
     "MS_PER_DAY",
@@ -270,6 +272,7 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.vocabulary", "parse_feature_name"),
     ("contrib.autoresearch.vocabulary", "require_number"),
     ("contrib.core.enum_guard", "VocabEnum"),
+    ("contrib.core.instants", "MAX_EPOCH_MS"),
     ("contrib.core.instants", "epoch_ms"),
     ("contrib.core.instants", "from_epoch_ms"),
 )

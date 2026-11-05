@@ -126,6 +126,18 @@ def test_a_defect_is_not_dressed_as_a_refusal(tmp_path, monkeypatch):
         main(argv)
 
 
+def test_a_root_that_cannot_be_written_is_a_named_refusal(tmp_path, capsys):
+    # A file where the bench root should be: the run directory cannot be
+    # made, and the OSError is the operator's, named rather than traced.
+    blocker = tmp_path / "bench"
+    blocker.write_text("not a directory", encoding="utf-8")
+    path = tmp_path / "small.json"
+    path.write_bytes(small_manifest(count=30).dumps().encode("utf-8"))
+    assert main(["generate", "--manifest", str(path), "--root", str(blocker)]) == 1
+    assert "error:" in capsys.readouterr().err
+    assert blocker.read_text(encoding="utf-8") == "not a directory"
+
+
 def test_usage_errors_exit_2():
     with pytest.raises(SystemExit) as usage:
         main([])

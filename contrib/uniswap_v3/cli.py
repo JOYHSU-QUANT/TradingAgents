@@ -838,9 +838,10 @@ def _asked_line(asked: Asked) -> str:
         if record.sidecar_path is None
         else f"words in {one_ascii_line(record.sidecar_path)}"
     )
+    news = ", without news" if record.news_missing else ""
     return (
         f"{asked.symbol} ({asked.ticker}): {rating}, model {one_ascii_line(record.model)}, "
-        f"{asked.elapsed_seconds:.0f} s, {words}"
+        f"{asked.elapsed_seconds:.0f} s, {words}{news}"
     )
 
 
@@ -871,7 +872,7 @@ def _verdict(args: argparse.Namespace, out: Callable[[str], None], now: Callable
     else:
         from .agent.graph import TradingAgentsJudge
 
-        judge = TradingAgentsJudge(config.agent, home / "tradingagents")
+        judge = TradingAgentsJudge(config.agent, home / "tradingagents", probe_news=True)
 
     def recorded(asked: Asked) -> None:
         # Told as each verdict lands, so that a later token's failure loses no line.

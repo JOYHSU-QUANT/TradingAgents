@@ -33,6 +33,7 @@ __all__ = [
     "RATINGS",
     "Rating",
     "Verdict",
+    "JudgeDecline",
     "VerdictRecord",
     "VerdictSettings",
     "bytes_digest",
@@ -165,8 +166,12 @@ class VerdictRecord:
     asked_at: int
     sidecar_path: str | None = None
     sidecar_digest: str | None = None
+    #: Given on a news-less input and kept anyway (#408).
+    news_missing: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.news_missing, bool):
+            raise ValueError(f"news_missing must be a bool, got {self.news_missing!r}")
         if not isinstance(self.verdict, Verdict):
             raise ValueError(f"verdict must be a Verdict, got {self.verdict!r}")
         require_text(self.model, "model")
@@ -202,3 +207,26 @@ def usable_rating(verdict: Verdict | None) -> Rating | None:
     replay that counts bars decided without a rating both go through it.
     """
     return None if verdict is None or verdict.rating.is_review else verdict.rating
+
+
+@dataclass(frozen=True)
+class JudgeDecline:
+    """One visit on which the judge said "later" about ``symbol`` at the bar ``time`` (#408).
+
+    ``asked_at`` is when, in epoch seconds; ``reason`` the sentence it
+    gave. Kept so a day on which every visit was declined can be told
+    from one that was never visited.
+    """
+
+    source: str
+    symbol: str
+    time: int
+    asked_at: int
+    reason: str
+
+    def __post_init__(self) -> None:
+        require_source(self.source)
+        require_text(self.symbol, "symbol")
+        require_count(self.time, "time")
+        require_count(self.asked_at, "asked_at")
+        require_text(self.reason, "reason")

@@ -74,6 +74,7 @@ __all__ = [
     "CurveStatus",
     "DecisionStatus",
     "Holdings",
+    "JudgeStatus",
     "Metrics",
     "PoolExtent",
     "RunStatus",
@@ -95,7 +96,7 @@ __all__ = [
 ]
 
 # The document's version, scoped to SOURCE.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SOURCE = "uniswap_v3"
 # The longest a decision's reason or a metrics error runs in the model.
 TEXT_LIMIT = 1000
@@ -345,6 +346,28 @@ class ValuationPoint:
 
 
 @dataclass(frozen=True)
+class JudgeStatus:
+    """The judge at the latest boundary that has passed, for a paper run that reads verdicts (#408).
+
+    ``expected`` is how many traded tokens the run asks about,
+    ``verdicts`` how many hold a verdict at that boundary, ``news_missing``
+    how many of those were given without the news input, ``declined`` how
+    many visits the judge said "later" on (over every token),
+    ``last_decline`` the sentence of the newest one. Read before the run's
+    first decision too, since a judge that declines keeps the first bar
+    from ever being decided.
+    """
+
+    source: str
+    boundary: str
+    expected: int
+    verdicts: int
+    news_missing: int
+    declined: int
+    last_decline: str | None
+
+
+@dataclass(frozen=True)
 class RunStatus:
     """A run's state: what it is, what it decided, where it stands and what it holds.
 
@@ -388,6 +411,8 @@ class RunStatus:
     verdicts_seen: VerdictsSeen | None
     recent_decisions: tuple[DecisionStatus, ...]
     recent_valuations: tuple[ValuationPoint, ...]
+    #: The judge at the latest boundary, for a paper run that reads verdicts (#408).
+    judge: JudgeStatus | None = None
 
     def __post_init__(self) -> None:
         if self.mode not in _MODES:
@@ -712,6 +737,22 @@ def _decision(store: Store, config: UniswapConfig, decision: Decision) -> Decisi
     )
 
 
+def _judge(store: Store, source: str, expected: int, interval: int, now: int) -> JudgeStatus:
+    """The judge of ``source`` at the latest boundary that has passed by ``now`` (#408)."""
+    boundary = now - now % interval
+    held = store.verdicts_at(source, boundary)
+    declines = store.judge_declines_at(source, boundary)
+    return JudgeStatus(
+        source=source,
+        boundary=utc_text(boundary),
+        expected=expected,
+        verdicts=len(held),
+        news_missing=sum(1 for record in held if record.news_missing),
+        declined=len(declines),
+        last_decline=_text(declines[-1].reason) if declines else None,
+    )
+
+
 def _read_run(store: Store, run_id: str, latest: int, now: int) -> RunStatus:
     run = stored_run(store, run_id)
     decisions = store.decisions(run_id)
@@ -723,16 +764,27 @@ def _read_run(store: Store, run_id: str, latest: int, now: int) -> RunStatus:
     metrics: Metrics | None = None
     metrics_error: str | None = None
     seen: VerdictsSeen | None = None
+    judge: JudgeStatus | None = None
     recent: tuple[DecisionStatus, ...] = ()
     values: tuple[ValuationPoint, ...] = ()
+    # The run's own config: the sources it reads, not the ones the caller's config names.
+    config = config_from_snapshot(run.config)
+    if config.verdicts is not None and run.mode is RunMode.PAPER:
+        # Read whether or not a bar is decided: a judge that declines keeps
+        # the first bar from ever being decided, which is when it matters.
+        judge = _judge(
+            store,
+            config.verdicts.source,
+            len(config.traded_symbols),
+            config.bars.interval_seconds,
+            now,
+        )
     if decisions:
         valuations = store.valuations(run_id)
         if not valuations or valuations[-1].time != decisions[-1].time:
             raise StoreError(
                 f"the decision of run {run_id!r} at {decisions[-1].time} has no valuation"
             )
-        # The run's own config: the sources it reads, not the ones the caller's config names.
-        config = config_from_snapshot(run.config)
         last = valuations[-1]
         if run.mode is RunMode.PAPER:
             clock = _clock(config, decisions[-1].time, now)
@@ -774,6 +826,7 @@ def _read_run(store: Store, run_id: str, latest: int, now: int) -> RunStatus:
         metrics=metrics,
         metrics_error=metrics_error,
         verdicts_seen=seen,
+        judge=judge,
         recent_decisions=recent,
         recent_valuations=values,
     )

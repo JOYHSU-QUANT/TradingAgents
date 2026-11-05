@@ -30,6 +30,7 @@ thresholds:
   export_stale_hours: 5            # hyperliquid: export breadcrumb this old
   uniswap_behind_hours: 3.5        # uniswap: clock behind, latest boundary this far past (the three visit slots done)
   uniswap_no_decision_hours: 48    # uniswap: no bar decided this long after the run was created
+  uniswap_judge_declines: 3        # uniswap: the judge said "later" on this many visits at the latest boundary while a traded token is unrated
   guardrail_unknown_cycles: 6      # hyperliquid: the newest decided cycles all read the trend guardrail as unknown (needs recent >= this)
   input_unavailable_cycles: 6     # hyperliquid: an optional data input ended in the router's sentinel on the newest decided cycles in a row (#399)
   handoff_due_utc: "00:30"         # carry: a handoff for a day before today is stale from this hour

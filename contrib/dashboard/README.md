@@ -108,6 +108,8 @@ Thresholds are the YAML's `thresholds:`; the defaults were decided 2026-10-14.
 | `<uni line>:behind` | the clock is `behind` and the latest boundary passed more than `uniswap_behind_hours` (3.5) ago |
 | `<uni line>:clock_ahead` | the clock is `ahead` |
 | `<uni line>:no_decision` | no bar decided `uniswap_no_decision_hours` (48) after the run was created |
+| `<uni line>:judge_declined` | the judge said "later" on `uniswap_judge_declines` (3) or more visits at the latest boundary while a traded token is still unrated there (a run that reads verdicts; #408) |
+| `<uni line>:news_missing` | a verdict at the latest boundary was given without the news input (the judge's patience was over; #408) |
 | `<uni line>:no_run` | the document carries no run: `status` ran without `--run-id`, which the exporter never does (a run id the store does not hold is `read_failed`) |
 | `carry:handoff_stale` | the handoff decides a day before today and the clock is past `handoff_due_utc` (00:30) |
 | `carry:handoff_unreadable` | the report could not read the handoff |

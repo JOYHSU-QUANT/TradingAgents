@@ -493,3 +493,172 @@ def test_the_fake_judge_answers_at_once_and_keeps_no_words():
     assert judge.asked == [("ETH-USD", "2024-01-03", "context")]
     with pytest.raises(ValueError, match="rating must be a Rating"):
         FakeJudge("Sell")  # type: ignore[arg-type]
+
+# --- #408: the news probe before asking, and the patience ------------------------------
+
+
+def _probe(monkeypatch, *, down: bool):
+    """The router's ``get_news`` as the probe sees it: the optional-lane line when ``down``."""
+    import tradingagents.dataflows.interface as interface
+
+    calls: list[tuple[str, str, str]] = []
+
+    def route_to_vendor(method, ticker, start, end):
+        calls.append((method, start, end))
+        if down:
+            logging.getLogger("tradingagents.dataflows.interface").warning(
+                "Optional %s unavailable for %s: %s",
+                "news_data",
+                method,
+                ConnectionError("yfinance: YAHOO! FINANCE IS CURRENTLY DOWN!"),
+                extra={"unavailable_category": "news_data"},
+            )
+            return "DATA_UNAVAILABLE: optional news_data could not be retrieved"
+        return "## ETH-USD News"
+
+    monkeypatch.setattr(interface, "route_to_vendor", route_to_vendor)
+    monkeypatch.setattr("tradingagents.dataflows.config.set_config", lambda config: None)
+    return calls
+
+
+def test_a_down_news_input_is_later_before_any_graph_is_built(tmp_path, stub, monkeypatch):
+    calls = _probe(monkeypatch, down=True)
+    judge = TradingAgentsJudge(AgentSettings(), tmp_path, graph_class=stub, probe_news=True)
+    with pytest.raises(
+        JudgeUnavailable,
+        match=r"was not asked on ETH-USD \(news unavailable before asking: Optional news_data "
+        r"unavailable for get_news: yfinance: YAHOO! FINANCE IS CURRENTLY DOWN!; no model call",
+    ):
+        judge.ask("ETH-USD", "2024-01-03", "context")
+    assert stub.built == []
+    # The global news is not asked once the ticker's news said it is down.
+    assert calls == [("get_news", "2023-12-27", "2024-01-03")]
+    assert _no_news_watch_attached()
+
+
+def test_a_news_input_that_answers_lets_the_graph_be_asked(tmp_path, stub, monkeypatch):
+    calls = _probe(monkeypatch, down=False)
+    judge = TradingAgentsJudge(AgentSettings(), tmp_path, graph_class=stub, probe_news=True)
+    answer = judge.ask("ETH-USD", "2024-01-03", "context")
+    assert answer.rating is Rating.HOLD and answer.news_missing is False
+    # Both of the graph's news tools are probed when the first answers.
+    assert len(stub.built) == 1
+    assert calls == [("get_news", "2023-12-27", "2024-01-03"), ("get_global_news", None, None)]
+
+
+def test_a_probe_that_raises_is_classed_as_the_graphs_answer_would_be(tmp_path, stub, monkeypatch):
+    import tradingagents.dataflows.interface as interface
+
+    monkeypatch.setattr("tradingagents.dataflows.config.set_config", lambda config: None)
+    judge = TradingAgentsJudge(AgentSettings(), tmp_path, graph_class=stub, probe_news=True)
+
+    def passing(method, *args):
+        raise ConnectionError("the wire is on fire")
+
+    monkeypatch.setattr(interface, "route_to_vendor", passing)
+    with pytest.raises(
+        JudgeUnavailable, match="the news probe raised ConnectionError: the wire is on fire"
+    ):
+        judge.ask("ETH-USD", "2024-01-03", "context")
+
+    def for_good(method, *args):
+        raise ValueError("Configured vendor(s) for get_news not available")
+
+    monkeypatch.setattr(interface, "route_to_vendor", for_good)
+    with pytest.raises(AgentError, match="for good .*news failed before asking: the news probe raised ValueError"):
+        judge.ask("ETH-USD", "2024-01-03", "context")
+    assert stub.built == []
+    assert _no_news_watch_attached()
+
+
+def test_a_news_failure_that_will_not_pass_is_for_good_from_the_probe(tmp_path, stub, monkeypatch):
+    import tradingagents.dataflows.interface as interface
+
+    def route_to_vendor(method, *args):
+        logging.getLogger("tradingagents.dataflows.interface").warning(
+            "Optional %s unavailable for %s: %s",
+            "news_data",
+            method,
+            ValueError("API key for provider 'x' is not set"),
+            extra={"unavailable_category": "news_data"},
+        )
+        return "DATA_UNAVAILABLE: optional news_data could not be retrieved"
+
+    monkeypatch.setattr(interface, "route_to_vendor", route_to_vendor)
+    monkeypatch.setattr("tradingagents.dataflows.config.set_config", lambda config: None)
+    judge = TradingAgentsJudge(AgentSettings(), tmp_path, graph_class=stub, probe_news=True)
+    with pytest.raises(AgentError, match="for good .*news failed before asking: Optional news_data"):
+        judge.ask("ETH-USD", "2024-01-03", "context")
+    assert stub.built == []
+
+
+def test_a_global_news_outage_alone_is_later_before_asking(tmp_path, stub, monkeypatch):
+    import tradingagents.dataflows.interface as interface
+
+    def route_to_vendor(method, *args):
+        if method == "get_global_news":
+            logging.getLogger("tradingagents.dataflows.interface").warning(
+                "Optional %s unavailable for %s: %s",
+                "news_data",
+                method,
+                ConnectionError("Google News could not be reached"),
+                extra={"unavailable_category": "news_data"},
+            )
+            return "DATA_UNAVAILABLE: optional news_data could not be retrieved"
+        return "## ETH-USD News"
+
+    monkeypatch.setattr(interface, "route_to_vendor", route_to_vendor)
+    monkeypatch.setattr("tradingagents.dataflows.config.set_config", lambda config: None)
+    judge = TradingAgentsJudge(AgentSettings(), tmp_path, graph_class=stub, probe_news=True)
+    with pytest.raises(JudgeUnavailable, match="unavailable for get_global_news: Google News could not be reached"):
+        judge.ask("ETH-USD", "2024-01-03", "context")
+    assert stub.built == []
+
+
+def test_past_the_patience_a_news_less_answer_is_kept_with_the_flag(tmp_path, stub, monkeypatch, caplog):
+    calls = _probe(monkeypatch, down=True)
+    stub.unavailable = [("news_data", ConnectionError("yfinance: YAHOO! FINANCE IS CURRENTLY DOWN!"))]
+    judge = TradingAgentsJudge(AgentSettings(), tmp_path, graph_class=stub, probe_news=True)
+    with caplog.at_level(logging.WARNING):
+        answer = judge.ask("ETH-USD", "2024-01-03", "context", accept_news_less=True)
+    # The probe is skipped: the answer is wanted whatever the news does.
+    assert calls == []
+    assert answer.rating is Rating.HOLD and answer.news_missing is True
+    assert answer.news_missing_reason.startswith("Optional news_data unavailable for get_news")
+    assert "answered on ETH-USD without news and the answer is kept" in caplog.text
+    assert _no_news_watch_attached()
+
+
+def test_past_the_patience_a_news_failure_for_good_still_fails_for_good(tmp_path, stub):
+    stub.unavailable = [("news_data", ValueError("API key for provider 'x' is not set"))]
+    judge = TradingAgentsJudge(AgentSettings(), tmp_path, graph_class=stub)
+    with pytest.raises(AgentError, match="for good"):
+        judge.ask("ETH-USD", "2024-01-03", "context", accept_news_less=True)
+
+
+def test_a_graph_without_the_news_analyst_is_not_probed(tmp_path, stub, monkeypatch):
+    calls = _probe(monkeypatch, down=True)
+    settings = AgentSettings(selected_analysts=("market", "social"))
+    judge = TradingAgentsJudge(settings, tmp_path, graph_class=stub, probe_news=True)
+    assert judge.ask("ETH-USD", "2024-01-03", "context").rating is Rating.HOLD
+    assert calls == [] and len(stub.built) == 1
+
+
+def test_a_judge_built_without_the_probe_asks_as_it_always_did(tmp_path, stub, monkeypatch):
+    calls = _probe(monkeypatch, down=True)
+    judge = TradingAgentsJudge(AgentSettings(), tmp_path, graph_class=stub)
+    assert judge.ask("ETH-USD", "2024-01-03", "context").rating is Rating.HOLD
+    assert calls == [] and len(stub.built) == 1
+
+
+def test_the_answer_carries_the_flag_as_a_bool_only_and_the_reason_with_the_flag():
+    with pytest.raises(ValueError, match="news_missing must be a bool"):
+        Answer(decision="Rating: Hold", rating=Rating.HOLD, reports=None, elapsed_seconds=0.0, news_missing=1)
+    with pytest.raises(ValueError, match="only given with news_missing"):
+        Answer(
+            decision="Rating: Hold",
+            rating=Rating.HOLD,
+            reports=None,
+            elapsed_seconds=0.0,
+            news_missing_reason="the line",
+        )

@@ -143,6 +143,7 @@ _AGENT_KEYS: Final = frozenset(
         "selected_analysts",
         "max_tokens",
         "ask_within_seconds",
+        "news_patience_seconds",
     }
 )
 _FORK_KEYS: Final = frozenset({"account", "deadline_seconds"})

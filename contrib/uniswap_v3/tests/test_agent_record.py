@@ -50,7 +50,7 @@ def test_the_sidecar_path_names_the_source_the_token_and_the_bar():
 def test_the_sidecar_record_keeps_what_was_asked_and_everything_that_came_back():
     record = _record(_answer(reports={"market_report": "a report", "news_report": None}))
     assert record == {
-        "schema": 1,
+        "schema": 2,
         "source": "judge-v1",
         "symbol": "WETH",
         "ticker": "ETH-USD",
@@ -62,6 +62,8 @@ def test_the_sidecar_record_keeps_what_was_asked_and_everything_that_came_back()
         "asked_at": _ASKED_AT,
         "elapsed_seconds": 12.346,
         "rating": "Buy",
+        "news_missing": False,
+        "news_missing_reason": None,
         "spot_context": "the spot context",
         "decision": _DECISION,
         "decision_digest": text_digest(_DECISION),

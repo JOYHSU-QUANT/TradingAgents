@@ -138,6 +138,8 @@ systemctl list-timers dashboard-exporter.timer --no-pager
 | `<uni>:behind` | 日界線過了 3.5 小時還沒 decide（三個 visit 時段都過了） | visit log；手動 `paper-visit.sh` 一次 |
 | `<uni>:clock_ahead` | store 的 clock 跑在時鐘前面（不可能狀態） | 主機時鐘或 store 有問題，先 `validate` |
 | `<uni>:no_decision` | run 開了 48 小時一根都沒 decide | run 開錯 id 或 visit 根本沒跑 |
+| `<uni>:judge_declined` | 最新邊界評審說了 3 次「later」、而且還有交易代幣沒判斷（#408；文字帶最後一次的原因） | 看 visit log 的 `try again later: the judge ...` 原因：新聞來源掛了就看 perp 那邊的 `input_unavailable:news_data`；閘道／額度問題看 `.env` 與 OpenRouter |
+| `<uni>:news_missing` | 最新邊界有判斷是「沒新聞」給的（耐心過了才問，#408） | 不是故障、是設計：新聞來源連續缺席；要查為什麼缺席（同上） |
 | `<uni>:no_run` | 文件裡沒有 run：`status` 沒帶 `--run-id` 才會這樣，exporter 一定會帶（run id 不在 store 是 `read_failed`） | 套件行為變了，回報 |
 | `carry:handoff_stale` | 00:30Z 過了交接檔還是昨天的 | 協調者沒跑成：`carry-signal.log`；兩腿照舊維持（D5） |
 | `carry:handoff_unreadable` | report 讀不到交接檔 | 路徑／權限；協調者第一次還沒跑完也會 |

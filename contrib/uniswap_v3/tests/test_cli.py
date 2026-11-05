@@ -607,9 +607,9 @@ def _paths(document) -> set[str]:
 
 _CURVE = ("start", "end", "total_return", "max_drawdown")
 _OUTCOMES = ("skipped_suspect", "hold", "no_trade", "filled", "rejected", "partial")
-# The document's shape at status.SCHEMA_VERSION 1. A path added, removed or
+# The document's shape at status.SCHEMA_VERSION 2. A path added, removed or
 # moved changes this set; change it together with the version.
-_SCHEMA_1_PATHS = {
+_SCHEMA_2_PATHS = {
     "schema_version",
     "source",
     "generated_at",
@@ -694,6 +694,7 @@ _SCHEMA_1_PATHS = {
     "run.verdicts_seen.every",
     "run.verdicts_seen.some",
     "run.verdicts_seen.none",
+    "run.judge",
     "run.recent_decisions",
     "run.recent_decisions[].time",
     "run.recent_decisions[].outcome",
@@ -733,10 +734,10 @@ def test_status_json_is_the_lines_model_as_one_document(node, tmp_path):
     assert code == cli.EXIT_OK
     document = json.loads(lines[0])
     assert list(document)[:3] == ["schema_version", "source", "generated_at"]
-    assert document["schema_version"] == status_module.SCHEMA_VERSION == 1
+    assert document["schema_version"] == status_module.SCHEMA_VERSION == 2
     assert document["source"] == "uniswap_v3"
     assert document["generated_at"] == "2024-01-03T00:10:00Z"  # the clock _run reads
-    assert _paths(document) == _SCHEMA_1_PATHS
+    assert _paths(document) == _SCHEMA_2_PATHS
     store = document["store"]
     assert [p["pool"] for p in store["pools"]] == ["USDC/WETH-500", "WBTC/WETH-500"]
     assert store["pools"][0]["readings"] == 3
@@ -1109,3 +1110,44 @@ def test_reason_codes_are_counted_per_outcome_in_code_order():
     assert list(found) == ["skipped_suspect", "rejected", "partial"]
     assert list(found["skipped_suspect"].items()) == [("close_block_mismatch", 1), ("reorged", 2)]
     assert (found["rejected"], found["partial"]) == ({}, {})
+
+
+def test_the_judge_is_read_for_a_paper_run_that_reads_verdicts_before_its_first_decision(tmp_path):
+    # #408: a judge that declines keeps the first bar from ever being decided,
+    # so the status carries the judge section with no decision at all.
+    from contrib.uniswap_v3.config import config_snapshot
+    from contrib.uniswap_v3.domain.records import FillSource, RunRecord
+    from contrib.uniswap_v3.domain.types import RunMode
+    from contrib.uniswap_v3.domain.verdicts import JudgeDecline
+    from contrib.uniswap_v3.tests.fakes.engine import DAY, FIRST_DAY, ledger
+    from contrib.uniswap_v3.tests.fakes.verdicts import SOURCE, config as verdict_config
+
+    config = verdict_config()
+    boundary = FIRST_DAY + 2 * DAY
+    with open_store(tmp_path / "store.db") as store:
+        store.insert_run(
+            RunRecord(
+                run_id="ai",
+                mode=RunMode.PAPER,
+                fills=FillSource.QUOTER,
+                chain_id=config.chain_id,
+                quote="USDC",
+                strategy="fixed_weights",
+                config=config_snapshot(config),
+                ledger=ledger(),
+                created_at=FIRST_DAY,
+            )
+        )
+        store.insert_judge_decline(
+            JudgeDecline(source=SOURCE, symbol="WBTC", time=boundary, asked_at=boundary + 600, reason="later")
+        )
+        document = status_module.read_status(
+            store, config, bars=3, run_id="ai", now=lambda: boundary + 700
+        )
+    judge = document.run.judge
+    assert document.run.decided == 0 and judge is not None
+    assert (judge.source, judge.expected, judge.verdicts, judge.news_missing, judge.declined) == (
+        SOURCE, len(config.traded_symbols), 0, 0, 1
+    )
+    assert judge.last_decline == "later"
+    assert judge.boundary == status_module.utc_text(boundary)

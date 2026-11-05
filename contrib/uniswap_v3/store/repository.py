@@ -52,7 +52,7 @@ from ..domain.records import (
 )
 from ..domain.targets import Target, TargetRecord
 from ..domain.types import Fill, RunMode, TargetWeights
-from ..domain.verdicts import Rating, Verdict, VerdictRecord
+from ..domain.verdicts import JudgeDecline, Rating, Verdict, VerdictRecord
 from .schema import SchemaError, migrate, transaction
 
 __all__ = ["Store", "StoreBusy", "StoreError", "open_store"]
@@ -234,8 +234,11 @@ _VERDICT_COLUMNS: Final = (
     "text_digest",
     "sidecar_path",
     "sidecar_digest",
+    "news_missing",
 )
 _SELECT_VERDICT: Final = f"SELECT {', '.join(_VERDICT_COLUMNS)} FROM verdicts"
+_DECLINE_COLUMNS: Final = ("source", "symbol", "time", "asked_at", "reason")
+_SELECT_DECLINE: Final = f"SELECT {', '.join(_DECLINE_COLUMNS)} FROM judge_declines"
 _TARGET_COLUMNS: Final = ("source", "symbol", "time", "weight", "written_at", "digest")
 _SELECT_TARGET: Final = f"SELECT {', '.join(_TARGET_COLUMNS)} FROM targets"
 
@@ -258,12 +261,25 @@ def _verdict_row(record: VerdictRecord) -> tuple[Any, ...]:
         verdict.digest,
         record.sidecar_path,
         record.sidecar_digest,
+        int(record.news_missing),
     )
 
 
 def _verdict_record(row: Sequence[Any]) -> VerdictRecord:
     """A row of :data:`_VERDICT_COLUMNS` read back."""
-    source, symbol, time, rating, model, prompt_version, asked_at, digest, path, path_digest = row
+    (
+        source,
+        symbol,
+        time,
+        rating,
+        model,
+        prompt_version,
+        asked_at,
+        digest,
+        path,
+        path_digest,
+        news_missing,
+    ) = row
     return VerdictRecord(
         verdict=Verdict(
             source=source, symbol=symbol, time=time, rating=Rating(rating), digest=digest
@@ -273,7 +289,18 @@ def _verdict_record(row: Sequence[Any]) -> VerdictRecord:
         asked_at=asked_at,
         sidecar_path=path,
         sidecar_digest=path_digest,
+        news_missing=bool(news_missing),
     )
+
+
+def _decline_row(record: JudgeDecline) -> tuple[Any, ...]:
+    return (record.source, record.symbol, record.time, record.asked_at, record.reason)
+
+
+def _decline_record(row: Sequence[Any]) -> JudgeDecline:
+    """A row of :data:`_DECLINE_COLUMNS` read back."""
+    source, symbol, time, asked_at, reason = row
+    return JudgeDecline(source=source, symbol=symbol, time=time, asked_at=asked_at, reason=reason)
 
 
 def _target_row(record: TargetRecord) -> tuple[Any, ...]:
@@ -570,6 +597,38 @@ class Store:
                 "SELECT DISTINCT model FROM verdicts WHERE source = ? ORDER BY model", (source,)
             ).fetchall()
         return [model for (model,) in rows]
+
+    def insert_judge_decline(self, record: JudgeDecline) -> None:
+        """Write ``record``, one visit's "later" on a token at a bar (#408); a second at the same second raises."""
+        placeholders = ", ".join("?" for _ in _DECLINE_COLUMNS)
+        with _sqlite_errors("writing a judge decline"):
+            try:
+                with transaction(self._connection):
+                    self._connection.execute(
+                        f"INSERT INTO judge_declines ({', '.join(_DECLINE_COLUMNS)}) "
+                        f"VALUES ({placeholders})",
+                        _decline_row(record),
+                    )
+            except sqlite3.IntegrityError as exc:
+                if "UNIQUE constraint failed" not in str(exc):
+                    raise
+                raise StoreError(
+                    f"the judge's decline of {record.source!r} on {record.symbol} at "
+                    f"{record.time}, asked at {record.asked_at}, is already stored"
+                ) from exc
+
+    def judge_declines_at(self, source: str, time: int) -> list[JudgeDecline]:
+        """Every visit on which the judge of ``source`` declined a token at the bar ``time``, oldest first."""
+        with _sqlite_errors("reading judge declines"):
+            rows = self._connection.execute(
+                f"{_SELECT_DECLINE} WHERE source = ? AND time = ? ORDER BY asked_at, symbol",
+                (source, time),
+            ).fetchall()
+        records = []
+        for row in rows:
+            with _stored(f"judge decline of {source!r} on {row[1]} at {time}"):
+                records.append(_decline_record(row))
+        return records
 
     def insert_target(self, record: TargetRecord) -> None:
         """Write ``record``; a target of its source, token and bar that is already stored raises.

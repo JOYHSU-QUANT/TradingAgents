@@ -10,6 +10,42 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **The uniswap_v3 judge probes the news input before asking, keeps a
+  news-less answer once its patience is over, and records every "later"**
+  (#408). Three days of the judge paying for a graph run and dropping
+  the answer at every visit (#405) came from a policy that had only
+  "later": an answer given without news was never recorded, and a bar
+  whose news never came back was never rated. Now `verdict` builds the
+  judge with `probe_news=True`: one `get_news` and one `get_global_news`
+  through the engine's router — the two tools the graph's news analyst
+  has — under the same watch `ask` keeps on the router's logger, say
+  whether the news input answers, and inside
+  `agent.news_patience_seconds` (two hours, or an hour less than a
+  shorter `ask_within_seconds`; the last hourly visit inside the window,
+  02:10 UTC under the defaults, is the last chance) a down vendor is
+  "later" before any model call, with the router's line in the reason.
+  The probe classes a failure as the graph's watch does: one that will
+  not pass (a key not set, a vendor not configured) is "for good" from
+  the first visit. Past the
+  patience `ask_verdicts` asks with `accept_news_less=True` and a
+  news-less answer is kept with `news_missing` set — on the `Answer`
+  (with the router's line as `news_missing_reason`), in the sidecar
+  (schema 2), in `verdicts.news_missing` (store schema +1) and on the
+  `verdict` line (`without news`); a strategy reads the rating as any
+  other. Every "later" is a row of the new `judge_declines` table — a
+  row the store refuses is logged and the visit's outcome unchanged — and
+  the status document (schema 2) carries `run.judge` for a paper run that
+  reads verdicts, before its first decision too: the latest boundary's
+  `expected` (traded tokens), `verdicts`, `news_missing`, `declined` and
+  `last_decline`. The dashboard reads it as two conditions,
+  `<uni line>:judge_declined` (`uniswap_judge_declines`, default 3, visits
+  declined while a traded token is still unrated) and
+  `<uni line>:news_missing`; both are states of the latest boundary, so
+  they clear when the day rolls over, not on a recovery. Not changed: a
+  judge built by hand or in tests does not probe; `coverage` counts a
+  news-less verdict as seen (a split by `news_missing` in `report` is a
+  follow-up, not an issue).
+
 - **The research-loop benchmark's world generator and `generate` command**
   (discovery plan 2026-10-21, PR 2). `contrib/discovery/worlds.py` turns a
   manifest's seed into the three series a research store holds — 4h bars

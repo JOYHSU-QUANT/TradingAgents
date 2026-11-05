@@ -115,7 +115,7 @@ def test_the_schema_refuses_a_sidecar_path_without_its_digest(tmp_path):
     for path_value, digest in (("x.json", None), (None, _DIGEST)):
         with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
             connection.execute(
-                "INSERT INTO verdicts VALUES (?, 'WETH', ?, 'Buy', 'm', 'v', 0, ?, ?, ?)",
+                "INSERT INTO verdicts VALUES (?, 'WETH', ?, 'Buy', 'm', 'v', 0, ?, ?, ?, 0)",
                 (SOURCE, FIRST_DAY, _DIGEST, path_value, digest),
             )
     connection.close()
@@ -253,3 +253,30 @@ def test_a_stored_verdict_that_no_longer_reads_stops_the_load(tmp_path):
 def test_the_fakes_config_reads_the_test_source_over_the_engine_fakes():
     assert _CONFIG.verdicts is not None and _CONFIG.verdicts.source == SOURCE
     assert replace(_CONFIG, verdicts=None) == _plain_config()
+
+# --- #408 -----------------------------------------------------------------------------
+
+
+def test_a_news_less_verdict_keeps_its_flag_and_an_old_one_reads_as_with_news(store):
+    from contrib.uniswap_v3.tests.fakes.verdicts import record as _record
+
+    store.insert_verdict(_record("WETH", 0, news_missing=True))
+    store.insert_verdict(_record("WBTC", 0))
+    assert store.verdict("test-judge", "WETH", _record().verdict.time).news_missing is True
+    assert store.verdict("test-judge", "WBTC", _record().verdict.time).news_missing is False
+
+
+def test_the_judges_declines_at_a_bar_are_kept_oldest_first_and_never_twice(store):
+    from contrib.uniswap_v3.domain.verdicts import JudgeDecline
+    from contrib.uniswap_v3.store.repository import StoreError
+    from contrib.uniswap_v3.tests.fakes.verdicts import record as _record
+
+    at = _record().verdict.time
+    first = JudgeDecline(source="test-judge", symbol="WETH", time=at, asked_at=at + 600, reason="later")
+    second = JudgeDecline(source="test-judge", symbol="WETH", time=at, asked_at=at + 4200, reason="later again")
+    store.insert_judge_decline(second)
+    store.insert_judge_decline(first)
+    assert [d.asked_at for d in store.judge_declines_at("test-judge", at)] == [at + 600, at + 4200]
+    with pytest.raises(StoreError, match="already stored"):
+        store.insert_judge_decline(first)
+    assert store.judge_declines_at("other-judge", at) == []

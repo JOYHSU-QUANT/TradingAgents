@@ -720,6 +720,24 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **`get_news` answers again: yfinance's floor is 1.8.0** (#405). Yahoo
+  retired the `/xhr/ncp` news endpoint around 2026-11-02 18:50Z, and every
+  yfinance below 1.8.0 reads the page it now gets as `YFDataException`
+  (`*** YAHOO! FINANCE IS CURRENTLY DOWN! ***`) — from a residential
+  address as much as from the paper host, so this was not a block on the
+  host's IP. The ticker-news input was gone for every caller: `paper-BTC-9`'s
+  last five cycles were `api_failed` (the shape #393 removed), every
+  `paper-BTC-10` cycle carried `unavailable_inputs = news_data` and the
+  uniswap_v3 judge, which does not record an answer given on a news-less
+  input, said "later" at every visit from 2026-11-03 and left `paper-ai-2`
+  three boundaries behind. yfinance 1.8.0 makes the GraphQL request the
+  quote page makes instead; the renderer reads its answer unchanged
+  (titles, source, link), so the fix is the pin alone: `yfinance>=1.8.0`
+  in `pyproject.toml`, which `requirements.txt`'s `.` carries to the host's
+  and the uniswap checkout's venvs on their next install — a floor of
+  1.4.1 would have left an installed 1.7.0 in place. Not a new input
+  variable (the source comes back), so no new run-id.
+
 - **A crypto asset's sentiment report no longer asks StockTwits, and Reddit
   searches the crypto rooms for it** (#395). StockTwits' public API answers
   the paper host's datacenter address with a Cloudflare 403 — 227 of 227

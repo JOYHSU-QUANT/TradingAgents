@@ -86,6 +86,7 @@ from .manifest import Manifest, Planted, World
 from .upstream import (
     DAILY_INTERVAL,
     FUNDING_INTERVAL_MS,
+    FUNDING_PAGE_DAYS,
     MAX_EPOCH_MS,
     MS_PER_DAY,
     Candle,
@@ -149,6 +150,21 @@ class WorldError(ValueError):
     """
 
 
+def _require_this_generator(world: World) -> None:
+    """Refuse a world of another generator version or on another path interval, by name."""
+    if world.generator_version != GENERATOR_VERSION:
+        raise WorldError(
+            f"{world.id}: this build generates version {GENERATOR_VERSION!r}, the manifest "
+            f"names {world.generator_version!r}; a world of another generator is another world"
+        )
+    if world.bars.interval != PATH_INTERVAL:
+        raise WorldError(
+            f"{world.id}: generator {GENERATOR_VERSION} lays the path on {PATH_INTERVAL} bars "
+            f"and aggregates the {DAILY_INTERVAL} backdrop from it; a {world.bars.interval} "
+            f"decision series is not a world it makes"
+        )
+
+
 # -- the history ----------------------------------------------------------------------
 
 
@@ -175,6 +191,10 @@ class WorldHistory:
 
     def __post_init__(self) -> None:
         world = self.world
+        # The checks below read the path as this generator lays it (its
+        # interval, its settlement grid), so a history of another generator
+        # or interval is refused here too, not only at ``generate``.
+        _require_this_generator(world)
         expected = world.bars.warmup_bars + world.bars.count
         if len(self.bars) != expected:
             raise WorldError(
@@ -375,9 +395,9 @@ def _path(world: World, draws: _Draws, sides: tuple[Side | None, ...]) -> tuple[
             # ``m`` above the start has ``P(M > m) = exp(-2m(m - move)/vol²)``
             # for ``m >= max(0, move)``, so ``m = (move + sqrt(move² -
             # 2·vol²·ln U))/2`` with ``U`` uniform on (0, 1]; the undershoot
-            # is the same law on the reflected path. ``m`` is at or above
-            # both ends by construction, so the OHLC order holds without a
-            # clamp.
+            # is the same law on the reflected path. In exact arithmetic
+            # ``m`` is at or above both ends by construction; the clamp
+            # below covers the float's round trip.
             above = (move + math.sqrt(move * move - 2.0 * vol * vol * math.log(up))) / 2.0
             below = (-move + math.sqrt(move * move - 2.0 * vol * vol * math.log(down))) / 2.0
             # Clamped to the body as well: in exact arithmetic the overshoot
@@ -507,6 +527,10 @@ def generate(manifest: Manifest) -> WorldHistory:
     run directory by it).
     """
     world = manifest.world
+    # The version and the path interval first — they say whether this is a
+    # world of this generator at all — and only then this generator's own
+    # rules, so a manifest of another version is told that, not a parameter.
+    _require_this_generator(world)
     if world.price.drift != 0:
         raise WorldError(
             f"{world.id}: generator {GENERATOR_VERSION} makes the martingale world and the "
@@ -516,25 +540,17 @@ def generate(manifest: Manifest) -> WorldHistory:
         )
     total = world.bars.warmup_bars + world.bars.count
     last_stamp = world.origin_ms + total * interval_to_ms(PATH_INTERVAL) + SETTLEMENT_LAG_MS
-    if last_stamp > MAX_EPOCH_MS:
-        # The manifest bounds the origin below; the venue's stamp type bounds
-        # every stamp above, and the last one this world writes is the
-        # settlement due at its final close. Refused here, by name, rather
-        # than by that type at the first bar past the edge.
+    # The venue's stamp type bounds every stamp above, and the last one this
+    # world writes is the settlement due at its final close — but the
+    # research package's funding walk asks its last page up to a page's
+    # width PAST the clock (it does not clamp, on purpose), and that window
+    # end is decoded too. Refused here, by name, rather than inside the
+    # walk at the first instant past the edge.
+    if last_stamp + FUNDING_PAGE_DAYS * MS_PER_DAY > MAX_EPOCH_MS:
         raise WorldError(
             f"{world.id}: {total} bars from {from_epoch_ms(world.origin_ms).isoformat()} end "
-            f"past the last instant a venue stamp can hold; fewer bars, or an earlier origin"
-        )
-    if world.generator_version != GENERATOR_VERSION:
-        raise WorldError(
-            f"{world.id}: this build generates version {GENERATOR_VERSION!r}, the manifest "
-            f"names {world.generator_version!r}; a world of another generator is another world"
-        )
-    if world.bars.interval != PATH_INTERVAL:
-        raise WorldError(
-            f"{world.id}: generator {GENERATOR_VERSION} lays the path on {PATH_INTERVAL} bars "
-            f"and aggregates the {DAILY_INTERVAL} backdrop from it; a {world.bars.interval} "
-            f"decision series is not a world it makes"
+            f"past the last instant a venue stamp can hold (less the funding walk's "
+            f"{FUNDING_PAGE_DAYS}-day page); fewer bars, or an earlier origin"
         )
     draws = _draw(world)
     quiet: tuple[Side | None, ...] = (None,) * len(draws.steps)

@@ -40,7 +40,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Final
 
 from .records import Reader, dumps
@@ -304,7 +304,12 @@ class Planted:
 
 @dataclass(frozen=True)
 class World:
-    """One generated history: what it is, which seed made it, and every generator parameter.
+    """One generated history: what it is, which seed made it, and its generator parameters.
+
+    Every parameter but one: ``indicator_lookback`` sits on the manifest,
+    and a conditional world reads it too (the planted rule is replayed under
+    it), which is why the generator takes the whole manifest and the run
+    directory is keyed by it, not by this record.
 
     ``origin_ms`` is the instant the first warm-up bar opens, and it sits
     on a UTC midnight: a day edge is on both the 4h grid and the 1d grid,
@@ -932,6 +937,16 @@ class Manifest:
 
     def dumps(self) -> str:
         return dumps(self.to_dict())
+
+    def identity(self) -> str:
+        """The canonical text with the one fill-in field set aside: what a landed run is keyed by.
+
+        ``search_space.pool_size`` is written back once the pool is
+        enumerated (plan PR 3), after the world has landed; everything else
+        is fixed before. A digest of this text names the run directory, so
+        the filled manifest names the directory it was filled in.
+        """
+        return replace(self, search_space=replace(self.search_space, pool_size=None)).dumps()
 
     @classmethod
     def loads(cls, text: str) -> Manifest:

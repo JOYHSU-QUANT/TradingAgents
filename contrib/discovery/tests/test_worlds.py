@@ -143,6 +143,14 @@ def test_the_wicks_are_the_bridge_s_overshoot_from_the_wicks_stream():
         assert float(bar.low) == pytest.approx(float(bar.open) * math.exp(-below), rel=1e-12)
 
 
+def test_a_vanishing_range_keeps_the_ohlc_order():
+    # Below an ulp the float round trip can put the close past the bridge's
+    # high; the clamp to the body is what keeps the bar a bar.
+    for vol in (1e-12, 1e-15):
+        for bar in generate(small_manifest(vol=vol, count=300)).bars:
+            assert bar.low <= min(bar.open, bar.close) <= max(bar.open, bar.close) <= bar.high
+
+
 def test_daily_bars_are_the_complete_days_of_the_same_path():
     made = null(count=10 * PER_DAY + 3)
     assert len(made.daily) == 10  # the trailing three bars are not a closed day
@@ -344,9 +352,10 @@ def test_the_port_serves_the_world_as_the_venue_reader_would():
     just_before = from_epoch_ms(made.bars[5].close_time - 1)
     assert market.get_candles(coin, "4h", 100, end=just_before) == list(made.bars[:5])
     assert market.get_candles(coin, "1d", 100, end=clock) == list(made.daily)
-    # Settlements inside the trailing window, both edges inclusive: a day
-    # ending exactly on a settlement holds that one and the one a day
-    # before it, twenty-five in all.
+    # Settlements inside the trailing window, both edges inclusive. The
+    # clock sits a millisecond past the last settlement, so a day back from
+    # it holds twenty-four; a day ending exactly ON a settlement holds that
+    # one and the one a day before it, twenty-five in all.
     day = market.get_funding_history(coin, 1, end=clock)
     assert day == [p for p in made.funding if made.clock_ms - MS_PER_DAY <= p.time <= made.clock_ms]
     assert len(day) == 24

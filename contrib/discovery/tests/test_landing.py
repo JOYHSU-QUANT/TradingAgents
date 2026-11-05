@@ -11,7 +11,9 @@ pays for it once.
 
 from __future__ import annotations
 
+import os
 import shutil
+import stat
 from dataclasses import replace
 from pathlib import Path
 
@@ -298,6 +300,64 @@ def test_a_landing_is_staged_and_only_a_verified_one_reaches_the_final_path(tmp_
     with pytest.raises(WorldError, match="already holds this manifest's world"):
         land_world(tmp_path, history)
     assert [p.name for p in tmp_path.iterdir()] == [target.name]
+
+
+def test_an_interrupt_or_a_store_left_with_a_journal_leaves_nothing_behind(tmp_path, monkeypatch):
+    history = generate(small_manifest(count=30))
+
+    def interrupt(store, m):
+        raise KeyboardInterrupt
+
+    # An operator's interrupt is not an ``Exception``; the staging goes anyway.
+    monkeypatch.setattr(landing, "verify", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        land_world(tmp_path / "bench", history)
+    assert list((tmp_path / "bench").iterdir()) == []
+
+    # A store whose close left a journal beside it is not an artifact an arm
+    # could copy as one file: refused, and nothing reaches the final path.
+    def journalled(history, store):
+        Path(str(store.path) + "-journal").write_bytes(b"")
+        return ()
+
+    monkeypatch.setattr(landing, "land", journalled)
+    monkeypatch.setattr(landing, "verify", lambda store, m: None)
+    with pytest.raises(WorldError, match="did not close cleanly"):
+        land_world(tmp_path / "bench", history)
+    assert list((tmp_path / "bench").iterdir()) == []
+
+
+def test_a_staging_that_cannot_be_removed_is_named_and_the_cause_still_propagates(
+    tmp_path, monkeypatch, caplog
+):
+    history = generate(small_manifest(count=30))
+
+    def refuse(store, m):
+        raise WorldError("the world is not fit to measure on")
+
+    def stuck(path):
+        raise OSError("in use")
+
+    monkeypatch.setattr(landing, "verify", refuse)
+    monkeypatch.setattr(landing.shutil, "rmtree", stuck)
+    with (
+        caplog.at_level("WARNING", logger="contrib.discovery.landing"),
+        pytest.raises(WorldError, match="not fit to measure on"),
+    ):
+        land_world(tmp_path / "bench", history)
+    assert "could not remove the staging directory" in caplog.text
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX modes only")
+def test_the_run_directory_takes_the_umask_s_mode_not_mkdtemp_s(tmp_path, monkeypatch):
+    history = generate(small_manifest(count=30))
+    monkeypatch.setattr(landing, "verify", lambda store, m: None)
+    previous = os.umask(0o027)
+    try:
+        target, _fetched, _landing = land_world(tmp_path / "bench", history)
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE(target.stat().st_mode) == 0o750
 
 
 def test_a_landing_that_is_refused_leaves_nothing_behind(tmp_path, monkeypatch):

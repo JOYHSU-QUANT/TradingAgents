@@ -26,7 +26,7 @@ def _manifest_file(tmp_path: Path, name: str = "world.json", **changes) -> Path:
 
 
 def test_generate_lands_the_world_and_its_null_twin_beside_it_and_refuses_a_repeat(
-    tmp_path, capsys
+    tmp_path, capsys, example_world
 ):
     manifest = example_manifest()
     root = tmp_path / "bench"
@@ -40,7 +40,10 @@ def test_generate_lands_the_world_and_its_null_twin_beside_it_and_refuses_a_repe
     assert "4h candles: 2 request(s)" in out
     assert "every feature has a value from bar" in out
     assert "split (4h): holdout:" in out
-    assert "planted rule: holds a position on 78 of 400 decision bars (19.5%)" in out
+    held = example_world.planted_exposure  # pinned once, in test_worlds
+    assert (
+        f"planted rule: holds a position on {held} of 400 decision bars ({held / 400:.1%})" in out
+    )
     assert f"manifest: {target / MANIFEST_FILENAME}" in out
 
     # The same manifest again is refused; the null twin lands beside it,
@@ -138,7 +141,12 @@ def test_a_root_that_cannot_be_written_is_a_named_refusal(tmp_path, capsys):
     assert blocker.read_text(encoding="utf-8") == "not a directory"
 
 
-def test_usage_errors_exit_2():
+def test_usage_errors_exit_2_and_help_survives_a_percent_in_the_default_root(monkeypatch):
     with pytest.raises(SystemExit) as usage:
         main([])
     assert usage.value.code == 2
+    # argparse %-formats help text; a repository under ``100%done`` must not break it.
+    monkeypatch.setattr(cli, "default_root", lambda: Path("C:/work/100%done/data/discovery"))
+    with pytest.raises(SystemExit) as shown:
+        main(["generate", "--help"])
+    assert shown.value.code == 0

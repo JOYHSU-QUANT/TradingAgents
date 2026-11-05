@@ -65,7 +65,8 @@ What is borrowed and why:
   a position on (``replay_sides``, over a ``SeriesBundle``), the research
   package's own walk into its own store (``backfill_candles``,
   ``backfill_funding`` and their ``SeriesFetch``/``StopReason``/
-  ``describe_stop``/``render_fetch``), the store itself (``ResearchStore``,
+  ``describe_stop``/``render_fetch``, and ``FUNDING_PAGE_DAYS``, how far
+  past a clock that walk's last window reaches), the store itself (``ResearchStore``,
   ``StoreError``, and ``default_db_path`` — the one statement of where
   ``data/`` is, which the bench root sits beside),
   the measured start of the span (``first_measurable_index``) and the
@@ -108,6 +109,7 @@ from contrib.autoresearch.features import (
     SeriesBundle,
 )
 from contrib.autoresearch.fetch import (
+    FUNDING_PAGE_DAYS,
     SeriesFetch,
     StopReason,
     backfill_candles,
@@ -149,6 +151,7 @@ __all__ = [
     "DEFAULT_TRAIN_SHARE",
     "DEFAULT_VALIDATION_SHARE",
     "FUNDING_INTERVAL_MS",
+    "FUNDING_PAGE_DAYS",
     "INTERRUPTED",
     "MAX_EPOCH_MS",
     "MAX_HOLD_BARS",
@@ -236,6 +239,7 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.features", "FeatureFrame"),
     ("contrib.autoresearch.features", "MIN_INDICATOR_LOOKBACK"),
     ("contrib.autoresearch.features", "SeriesBundle"),
+    ("contrib.autoresearch.fetch", "FUNDING_PAGE_DAYS"),
     ("contrib.autoresearch.fetch", "SeriesFetch"),
     ("contrib.autoresearch.fetch", "StopReason"),
     ("contrib.autoresearch.fetch", "backfill_candles"),

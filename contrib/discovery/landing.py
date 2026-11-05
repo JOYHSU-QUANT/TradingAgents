@@ -53,7 +53,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .manifest import Manifest, Shares, World
-from .records import dumps
 from .upstream import (
     DAILY_INTERVAL,
     Experiment,
@@ -114,19 +113,8 @@ def default_root() -> Path:
 
 
 def manifest_digest(manifest: Manifest) -> str:
-    """The first hex digits of the SHA-256 of the manifest's canonical text, ``pool_size`` set aside.
-
-    ``search_space.pool_size`` is the one field a later step fills in (the
-    pool is enumerated by plan PR 3 and the count written back), so it is
-    nulled before hashing: the run directory keeps its name when its
-    ``manifest.json`` gains the count, and the filled manifest names the
-    same directory it was filled in.
-    """
-    record = manifest.to_dict()
-    search_space = dict(record["search_space"])  # type: ignore[call-overload]
-    search_space["pool_size"] = None
-    record["search_space"] = search_space
-    return hashlib.sha256(dumps(record).encode("utf-8")).hexdigest()[:_DIGEST_DIGITS]
+    """The first hex digits of the SHA-256 of the manifest's identity text (``Manifest.identity``)."""
+    return hashlib.sha256(manifest.identity().encode("utf-8")).hexdigest()[:_DIGEST_DIGITS]
 
 
 def world_dir(root: Path, manifest: Manifest) -> Path:

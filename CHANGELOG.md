@@ -19,7 +19,8 @@ Breaking changes within the 0.x line are called out explicitly.
   martingale (`log P[t] = log P[t-1] + vol·Z − vol²/2`, the bar's high and
   low drawn exactly from the Brownian bridge between its ends, i.i.d.
   zero-mean funding from its own stream; a non-zero `price.drift` is refused
-  as another kind of world), Conditional-v1 the same draws
+  as another kind of world, and so is a world whose last settlement, plus
+  the funding walk's page, would pass the venue's time form), Conditional-v1 the same draws
   plus `beta` on every bar the planted rule holds a position on, which bars
   being the research package's own `replay_sides` over the pre-effect path
   (decide at close, fill next open, `max_bars`, reversal) — never the

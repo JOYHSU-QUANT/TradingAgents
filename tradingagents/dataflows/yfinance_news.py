@@ -281,12 +281,14 @@ def _get_news_read_on_the_wire(stock: yf.Ticker, count: int) -> list:
     try:
         news = stock.get_news(count=count)
     except (AttributeError, TypeError) as exc:
-        # The library reads ``body.get("data")`` before anything else, so a
-        # JSON body that is not an object (a list, a scalar) fails inside it
-        # with one of these — read as an outage here, not as the empty
-        # answer the boundary's broad handler would make of it.
-        if answers and not isinstance(_json_or_none(answers[-1]), dict):
-            raise YFDataException("news GraphQL answered without an object body") from exc
+        # The library parses the body with bare ``.get`` chains, so a JSON
+        # body of another shape — not an object, or an object whose list
+        # container is of the wrong type — fails inside it with one of
+        # these. An answer was received, so it is an outage here, not the
+        # empty answer the boundary's broad handler would make of it; with
+        # no answer recorded the error is the library's own and left alone.
+        if answers:
+            raise YFDataException("news GraphQL answered with a body of another shape") from exc
         raise
     finally:
         if had_own_post:

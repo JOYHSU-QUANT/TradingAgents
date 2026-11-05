@@ -779,8 +779,8 @@ Breaking changes within the 0.x line are called out explicitly.
   now reads the last wire answer back (the singleton `YfData.post` is
   shadowed for the one call) and believes an empty list only when the
   answer carried the list's container (`data.lightyearList.main`) and no
-  `errors`; otherwise — an error body, a nulled list, a body that is not an
-  object — it is the library's own
+  `errors`; otherwise — an error body, a nulled list, a body of another
+  shape that fails inside the library — it is the library's own
   `YFDataException`, mapped as before to the optional sentinel; the error
   detail is flattened and capped like every other vendor fragment the
   module quotes. That sentence — for every yfinance answer that is not

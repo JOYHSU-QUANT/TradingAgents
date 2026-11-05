@@ -138,10 +138,28 @@ def test_a_null_or_empty_errors_key_beside_the_list_is_not_an_outage(monkeypatch
 
 
 @pytest.mark.unit
-def test_a_json_body_that_is_not_an_object_is_an_outage(monkeypatch):
-    _wire(monkeypatch, [1, 2, 3])
-    with pytest.raises(VendorUnavailableError, match="answered without an object body"):
+@pytest.mark.parametrize(
+    "body",
+    [
+        [1, 2, 3],
+        None,
+        {"data": "oops"},
+        {"data": {"lightyearList": {"main": "x"}}},
+        {"data": {"lightyearList": {"main": {"edges": 5}}}},
+    ],
+)
+def test_a_body_of_another_shape_that_fails_inside_the_library_is_an_outage(monkeypatch, body):
+    _wire(monkeypatch, body)
+    with pytest.raises(VendorUnavailableError, match="answered with a body of another shape"):
         ynews.get_news_yfinance("NVDA", "2026-11-01", "2026-11-05")
+
+
+@pytest.mark.unit
+def test_a_present_but_empty_list_container_is_believed_as_no_news(monkeypatch):
+    # ``main`` present with no ``edges`` is what the library reads as no
+    # articles; the container was served, so it is a quiet week, not an outage.
+    _wire(monkeypatch, {"data": {"lightyearList": {"main": {}}}})
+    assert ynews.get_news_yfinance("NVDA", "2026-11-01", "2026-11-05").startswith("No news found")
 
 
 @pytest.mark.unit

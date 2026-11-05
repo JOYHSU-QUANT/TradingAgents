@@ -33,6 +33,7 @@ minutes a judge takes. The schedule runs one visit at a time.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
@@ -42,12 +43,14 @@ from ..config import ConfigError, UniswapConfig
 from ..domain.times import DATE_ONLY, utc_text
 from ..domain.verdicts import JudgeDecline, VerdictRecord
 from ..store.bar_source import StoredBar, load_bar
-from ..store.repository import Store
+from ..store.repository import Store, StoreError
 from .context import BARS_NEEDED, spot_context
 from .errors import AgentError, BarNotStored, JudgeUnavailable
 from .graph import FAKE_MODEL, Judge
 from .record import sidecar_path, sidecar_record, verdict_record, write_sidecar
 from .tickers import tickers_for
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["AskSummary", "Asked", "ask_verdicts", "trade_date_of", "verdict_source"]
 
@@ -241,12 +244,23 @@ def ask_verdicts(
         except AgentError as exc:
             if isinstance(exc, JudgeUnavailable):
                 # The "later" is kept, so the status document can count how
-                # many visits the judge declined a bar on (#408).
-                store.insert_judge_decline(
-                    JudgeDecline(
-                        source=source, symbol=symbol, time=time, asked_at=now, reason=str(exc)
+                # many visits the judge declined a bar on (#408). It is
+                # telemetry: a store that refuses the row (a second visit
+                # in the same second, a write error) does not change the
+                # visit's outcome.
+                try:
+                    store.insert_judge_decline(
+                        JudgeDecline(
+                            source=source, symbol=symbol, time=time, asked_at=now, reason=str(exc)
+                        )
                     )
-                )
+                except StoreError as store_exc:
+                    logger.warning(
+                        "the judge's decline on %s at %s was not recorded (%s)",
+                        symbol,
+                        trade_date,
+                        store_exc,
+                    )
             raise type(exc)(
                 f"{exc}; {len(done)} verdict(s) at {trade_date} stay recorded, and a later "
                 f"visit asks about the rest"

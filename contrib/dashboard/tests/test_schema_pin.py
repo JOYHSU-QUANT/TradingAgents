@@ -102,6 +102,7 @@ def test_the_uniswap_document_carries_the_fields_of_the_uniswap_status_model():
     assert _fields(module, "JudgeStatus") == [
         "source",
         "boundary",
+        "expected",
         "verdicts",
         "news_missing",
         "declined",

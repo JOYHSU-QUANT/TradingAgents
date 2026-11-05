@@ -194,12 +194,20 @@ class Answer:
     elapsed_seconds: float
     #: The graph answered on a news-less input and the answer was kept
     #: anyway (the judge's patience was over, #408); a strategy reads the
-    #: rating as any other, the sidecar and the store carry the flag.
+    #: rating as any other, the sidecar and the store carry the flag, and
+    #: the sidecar keeps the router's line that said so.
     news_missing: bool = False
+    news_missing_reason: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.news_missing, bool):
             raise ValueError(f"news_missing must be a bool, got {self.news_missing!r}")
+        if self.news_missing_reason is not None and not isinstance(self.news_missing_reason, str):
+            raise ValueError(
+                f"news_missing_reason must be a string or None, got {self.news_missing_reason!r}"
+            )
+        if self.news_missing_reason is not None and not self.news_missing:
+            raise ValueError("news_missing_reason is only given with news_missing")
         if not isinstance(self.decision, str):
             raise ValueError(f"decision must be a string, got {self.decision!r}")
         if not isinstance(self.rating, Rating):
@@ -315,12 +323,12 @@ class TradingAgentsJudge:
         self._home = home
         self._graph_class = None if graph_class is None else _spot_graph(graph_class)
         self._config: dict[str, Any] | None = None
-        # Whether ``ask`` probes the news vendor through the engine's router
+        # Whether ``ask`` probes the news tools through the engine's router
         # before building a graph (#408): the ``verdict`` command switches it
         # on; a question that would only be answered "later" then costs no
         # model call. Off by default so a judge built in tests, or by hand,
         # asks the way it always did.
-        self._probe_news = probe_news
+        self._probing = probe_news
 
     @property
     def model(self) -> str:
@@ -367,20 +375,28 @@ class TradingAgentsJudge:
                 ) from exc
         return self._config
 
-    def _news_reachable(self, ticker: str, trade_date: str) -> bool:
-        """Whether the engine's news input answers for ``ticker`` now (#408).
+    def _probe_news(self, ticker: str, trade_date: str) -> None:
+        """Ask the engine's two news tools for ``ticker`` now, without a model (#408).
 
-        One ``get_news`` call through the router, under the engine's config
-        and the same watch ``ask`` keeps on the router's logger: the
-        optional-lane line for ``news_data`` means the vendor is down, and
-        so does a probe that raises (the graph would meet the same wire).
-        No model is involved.
+        One ``get_news`` and one ``get_global_news`` call through the
+        router, under the engine's config and the same watch ``ask`` keeps
+        on the router's logger — the two tools the graph's news analyst
+        has, so the probe's verdict is the one the graph's watch would
+        give. The optional-lane line for ``news_data``, or a probe that
+        raises, is classed as the graph's answer is: a failure that may
+        pass is :class:`JudgeUnavailable` ("later", with the router's
+        words), one that will not is :class:`AgentError` ("for good").
+        Returns when both answered.
         """
-        from datetime import date, timedelta
+        try:
+            from datetime import date, timedelta
 
-        from tradingagents.dataflows.config import set_config
-        from tradingagents.dataflows.interface import route_to_vendor
-
+            from tradingagents.dataflows.config import set_config
+            from tradingagents.dataflows.interface import route_to_vendor
+        except Exception as exc:
+            raise AgentError(
+                f"the tradingagents engine cannot be set up ({type(exc).__name__}: {exc})"
+            ) from exc
         set_config(self._engine_config())
         start = (date.fromisoformat(trade_date) - timedelta(days=7)).isoformat()
         watch = _NewsWatch()
@@ -391,25 +407,42 @@ class TradingAgentsJudge:
         router_logger.addHandler(watch)
         try:
             route_to_vendor("get_news", ticker, start, trade_date)
+            if not watch.seen:
+                route_to_vendor("get_global_news", trade_date, None, None)
         except Exception as exc:
-            logger.warning("the news probe on %s raised (%s: %s)", ticker, type(exc).__name__, exc)
-            return False
+            said = f"the news probe raised {type(exc).__name__}: {exc}"
+            if _may_pass(exc):
+                raise JudgeUnavailable(
+                    f"the judge was not asked on {ticker} (news unavailable before asking: "
+                    f"{said}; no model call was made)"
+                ) from exc
+            raise AgentError(
+                f"the judge failed on {ticker} for good (news failed before asking: {said}); "
+                f"asking again unchanged will not help"
+            ) from exc
         finally:
             router_logger.removeHandler(watch)
             router_logger.setLevel(level_before)
-        return not watch.seen
+        if watch.seen:
+            message, error = watch.seen[0]
+            if error is not None and not _may_pass(error):
+                raise AgentError(
+                    f"the judge failed on {ticker} for good (news failed before asking: "
+                    f"{message}); asking again unchanged will not help"
+                )
+            raise JudgeUnavailable(
+                f"the judge was not asked on {ticker} (news unavailable before asking: "
+                f"{message}; no model call was made)"
+            )
 
     def ask(
         self, ticker: str, trade_date: str, context: str, *, accept_news_less: bool = False
     ) -> Answer:
         started = _time.monotonic()
-        if self._probe_news and not accept_news_less and not self._news_reachable(ticker, trade_date):
-            # Inside the caller's patience: say "later" before any model
-            # call, since the graph's answer would not be kept.
-            raise JudgeUnavailable(
-                f"the judge was not asked on {ticker} (news unavailable before asking; "
-                f"no model call was made)"
-            )
+        if self._probing and not accept_news_less:
+            # Inside the caller's patience: "later" (or "for good") before
+            # any model call, since a news-less answer would not be kept.
+            self._probe_news(ticker, trade_date)
         graph = self._graph(context)
         watch = _NewsWatch()
         router_logger = logging.getLogger(_ROUTER_LOGGER)
@@ -459,7 +492,7 @@ class TradingAgentsJudge:
                 ticker,
                 message,
             )
-            return replace(answer, news_missing=True)
+            return replace(answer, news_missing=True, news_missing_reason=message)
         return answer
 
 

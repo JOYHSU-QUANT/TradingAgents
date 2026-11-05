@@ -41,7 +41,8 @@ def test_the_defaults_are_the_judge_of_the_hyperliquid_paper_run():
     assert AgentSettings(ask_within_seconds=3600).ask_within_seconds == 3600
     # The patience for the news input: two hours, or half a shorter window (#408).
     assert settings.news_patience_seconds == 7200
-    assert AgentSettings(ask_within_seconds=3600).news_patience_seconds == 1800
+    assert AgentSettings(ask_within_seconds=7200).news_patience_seconds == 3600
+    assert AgentSettings(ask_within_seconds=3600).news_patience_seconds == 0
     assert AgentSettings(news_patience_seconds=0).patience_seconds == 0
 
 

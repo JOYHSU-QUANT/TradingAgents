@@ -63,6 +63,7 @@ def test_the_sidecar_record_keeps_what_was_asked_and_everything_that_came_back()
         "elapsed_seconds": 12.346,
         "rating": "Buy",
         "news_missing": False,
+        "news_missing_reason": None,
         "spot_context": "the spot context",
         "decision": _DECISION,
         "decision_digest": text_digest(_DECISION),

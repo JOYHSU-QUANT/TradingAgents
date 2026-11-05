@@ -302,6 +302,7 @@ def test_a_news_less_answer_is_recorded_with_its_flag_in_the_store_and_the_sidec
                 reports=answer.reports,
                 elapsed_seconds=answer.elapsed_seconds,
                 news_missing=ticker == "ETH-USD",
+                news_missing_reason="the router said so" if ticker == "ETH-USD" else None,
             )
 
     summary = _ask(store, _NewsLessJudge({"BTC-USD": Rating.BUY, "ETH-USD": Rating.HOLD}), tmp_path)
@@ -310,6 +311,7 @@ def test_a_news_less_answer_is_recorded_with_its_flag_in_the_store_and_the_sidec
     assert store.verdict(SOURCE, "WETH", _DAY2).news_missing is True
     sidecar = json.loads((tmp_path / by_symbol["WETH"].sidecar_path).read_text(encoding="utf-8"))
     assert sidecar["news_missing"] is True and sidecar["schema"] == 2
+    assert sidecar["news_missing_reason"] == "the router said so"
 
 
 def test_a_later_is_recorded_as_a_decline_and_the_next_visit_asks_again(store, tmp_path):
@@ -322,4 +324,9 @@ def test_a_later_is_recorded_as_a_decline_and_the_next_visit_asks_again(store, t
     # A failure of another kind is not a decline.
     with pytest.raises(RuntimeError):
         _ask(store, ScriptedJudge({"BTC-USD": RuntimeError("boom")}), tmp_path)
+    assert len(store.judge_declines_at(SOURCE, _DAY2)) == 1
+    # A second visit in the same second is refused by the store, and the
+    # "later" still comes out as a "later" (the row is telemetry).
+    with pytest.raises(JudgeUnavailable, match="not asked on BTC-USD"):
+        _ask(store, judge, tmp_path)
     assert len(store.judge_declines_at(SOURCE, _DAY2)) == 1

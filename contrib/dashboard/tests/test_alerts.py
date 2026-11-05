@@ -729,6 +729,7 @@ def test_the_judge_declining_a_days_visits_or_answering_without_news_are_conditi
     judge = {
         "source": "tradingagents-rating-v1",
         "boundary": boundary,
+        "expected": 2,
         "verdicts": 0,
         "news_missing": 0,
         "declined": 3,
@@ -746,10 +747,13 @@ def test_the_judge_declining_a_days_visits_or_answering_without_news_are_conditi
     evaluation = _tick(tmp_path, docs)
     assert uniswap_keys(evaluation) == ["uniswap-ai:judge_declined"]
     assert uniswap_text(evaluation) == [
-        "the judge declined 3 visit(s) at 2026-10-14 00:00Z and no verdict stands "
+        "the judge declined 3 visit(s) at 2026-10-14 00:00Z and 0 of 2 verdict(s) stand "
         "(the judge was not asked on ETH-USD (news unavailable before asking))"
     ]
-    # Two declines, or declines with a verdict standing, are the day's normal retries.
+    # One token rated and the other declined all day is still a token unrated.
+    docs[UNI_AI_KEY] = uniswap_document(uniswap_run(run_id="paper-ai-1", judge={**judge, "verdicts": 1}))
+    assert uniswap_keys(_tick(tmp_path, docs)) == ["uniswap-ai:judge_declined"]
+    # Two declines, or declines with every verdict standing, are the day's normal retries.
     for quiet in ({**judge, "declined": 2}, {**judge, "declined": 3, "verdicts": 2}):
         docs[UNI_AI_KEY] = uniswap_document(uniswap_run(run_id="paper-ai-1", judge=quiet))
         assert uniswap_keys(_tick(tmp_path, docs)) == []

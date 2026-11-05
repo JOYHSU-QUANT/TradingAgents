@@ -63,6 +63,7 @@ def sidecar_record(
         "elapsed_seconds": round(answer.elapsed_seconds, 3),
         "rating": answer.rating.value,
         "news_missing": answer.news_missing,
+        "news_missing_reason": answer.news_missing_reason,
         "spot_context": context,
         "decision": answer.decision,
         "decision_digest": text_digest(answer.decision),

@@ -349,14 +349,18 @@ class ValuationPoint:
 class JudgeStatus:
     """The judge at the latest boundary that has passed, for a paper run that reads verdicts (#408).
 
-    ``verdicts`` is how many tokens hold a verdict at that boundary,
-    ``news_missing`` how many of those were given without the news input,
-    ``declined`` how many visits the judge said "later" on (over every
-    token), ``last_decline`` the sentence of the newest one.
+    ``expected`` is how many traded tokens the run asks about,
+    ``verdicts`` how many hold a verdict at that boundary, ``news_missing``
+    how many of those were given without the news input, ``declined`` how
+    many visits the judge said "later" on (over every token),
+    ``last_decline`` the sentence of the newest one. Read before the run's
+    first decision too, since a judge that declines keeps the first bar
+    from ever being decided.
     """
 
     source: str
     boundary: str
+    expected: int
     verdicts: int
     news_missing: int
     declined: int
@@ -427,7 +431,7 @@ class RunStatus:
             self.value,
         )
         if self.decided == 0:
-            later = (self.clock, self.metrics, self.metrics_error, self.verdicts_seen, self.judge)
+            later = (self.clock, self.metrics, self.metrics_error, self.verdicts_seen)
             tails = (self.recent_decisions, self.recent_valuations)
             if any(field is not None for field in standing + later) or any(tails):
                 raise ValueError(
@@ -733,7 +737,7 @@ def _decision(store: Store, config: UniswapConfig, decision: Decision) -> Decisi
     )
 
 
-def _judge(store: Store, source: str, interval: int, now: int) -> JudgeStatus:
+def _judge(store: Store, source: str, expected: int, interval: int, now: int) -> JudgeStatus:
     """The judge of ``source`` at the latest boundary that has passed by ``now`` (#408)."""
     boundary = now - now % interval
     held = store.verdicts_at(source, boundary)
@@ -741,6 +745,7 @@ def _judge(store: Store, source: str, interval: int, now: int) -> JudgeStatus:
     return JudgeStatus(
         source=source,
         boundary=utc_text(boundary),
+        expected=expected,
         verdicts=len(held),
         news_missing=sum(1 for record in held if record.news_missing),
         declined=len(declines),
@@ -762,14 +767,24 @@ def _read_run(store: Store, run_id: str, latest: int, now: int) -> RunStatus:
     judge: JudgeStatus | None = None
     recent: tuple[DecisionStatus, ...] = ()
     values: tuple[ValuationPoint, ...] = ()
+    # The run's own config: the sources it reads, not the ones the caller's config names.
+    config = config_from_snapshot(run.config)
+    if config.verdicts is not None and run.mode is RunMode.PAPER:
+        # Read whether or not a bar is decided: a judge that declines keeps
+        # the first bar from ever being decided, which is when it matters.
+        judge = _judge(
+            store,
+            config.verdicts.source,
+            len(config.traded_symbols),
+            config.bars.interval_seconds,
+            now,
+        )
     if decisions:
         valuations = store.valuations(run_id)
         if not valuations or valuations[-1].time != decisions[-1].time:
             raise StoreError(
                 f"the decision of run {run_id!r} at {decisions[-1].time} has no valuation"
             )
-        # The run's own config: the sources it reads, not the ones the caller's config names.
-        config = config_from_snapshot(run.config)
         last = valuations[-1]
         if run.mode is RunMode.PAPER:
             clock = _clock(config, decisions[-1].time, now)
@@ -784,8 +799,6 @@ def _read_run(store: Store, run_id: str, latest: int, now: int) -> RunStatus:
             metrics = _metrics(measured_on, run_metrics_found, len(valuations) - len(measured_on))
         if config.verdicts is not None:
             seen = verdicts_seen(config.verdicts.source, len(config.traded_symbols), decisions)
-            if run.mode is RunMode.PAPER:
-                judge = _judge(store, config.verdicts.source, config.bars.interval_seconds, now)
         recent = tuple(_decision(store, config, decision) for decision in decisions[-latest:])
         values = tuple(
             ValuationPoint(utc_text(valuation.time), valuation.total_value)

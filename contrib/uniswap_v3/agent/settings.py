@@ -39,10 +39,14 @@ inside the patience, records nothing and spends nothing when the probe
 finds it down; past the patience, the graph is asked anyway and its
 answer is kept with ``news_missing`` set, so a bar whose news never came
 back still gets a verdict on the last visit instead of none. Left unset
-it is two hours, or half of ``ask_within_seconds`` when that is shorter,
-so the third scheduled visit (02:10 UTC) is the last chance; given, it
-must be less than ``ask_within_seconds``, and zero means a news-less
-answer is kept at once.
+it is two hours, or an hour less than ``ask_within_seconds`` when that is
+shorter, so the last hourly visit inside the window (02:10 UTC under the
+defaults) is the last chance; given, it must be less than
+``ask_within_seconds``, and zero means a news-less answer is kept at once.
+The probe asks both news tools the graph has (the ticker's news and the
+global news), so an outage of either is "later" before any model call; a
+news failure that will not pass (a key not set, a vendor not configured)
+is "for good" from the probe, as it was from the graph.
 
 None of this enters a run's config snapshot: the verdicts a run reads are
 data in the store, which record the model that gave each one, and which
@@ -106,9 +110,10 @@ class AgentSettings:
         require_count(self.ask_within_seconds, "ask_within_seconds", at_least=3600)
         patience = self.news_patience_seconds
         if patience is None:
-            # Two hours, or half the window when the window is shorter: the
-            # last scheduled visit stays the last chance either way.
-            patience = min(7_200, self.ask_within_seconds // 2)
+            # Two hours, or an hour less than the window when the window is
+            # shorter: the last hourly visit inside the window is lenient
+            # either way, so a bar always has its last chance.
+            patience = min(7_200, self.ask_within_seconds - 3_600)
             object.__setattr__(self, "news_patience_seconds", patience)
         require_count(patience, "news_patience_seconds", at_least=0)
         if patience >= self.ask_within_seconds:

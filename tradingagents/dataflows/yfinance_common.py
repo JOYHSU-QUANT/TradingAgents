@@ -225,14 +225,15 @@ def yf_fetch_unhidden(func, *, hidden_answer):
     scrapers catch their own failures and answer with something empty: the
     statement properties and ``Ticker.history`` an empty frame, ``info`` a
     stub dict, ``insider_transactions`` an empty frame, ``get_news`` an empty
-    list (verified on yfinance 1.4.1, the pinned floor). That swallow hid two
-    things this boundary exists to surface — a throttle (#67) and a transport
-    failure (#116), which read as "no data" or "no filings" and never reached
-    :func:`yf_retry`'s mapping or the router's fallback. The backup/restore
-    shape mirrors the library's own ``multi._download_one`` — but NOT its
-    flag: that code flips ``network.hide_exceptions``, which nothing in
-    yfinance 1.4.1 reads; ``debug.hide_exceptions`` is the one the scrapers
-    consult, so flipping the network one would silently reinstate the swallow.
+    list (verified on yfinance 1.4.1, re-read on 1.8.0, the floor since
+    #405). That swallow hid two things this boundary exists to surface — a
+    throttle (#67) and a transport failure (#116), which read as "no data" or
+    "no filings" and never reached :func:`yf_retry`'s mapping or the router's
+    fallback. The backup/restore shape mirrors the library's own
+    ``multi._download_one`` — but NOT its flag: that code flips
+    ``network.hide_exceptions``, which nothing in yfinance 1.4.1 (nor 1.8.0)
+    reads; ``debug.hide_exceptions`` is the one the scrapers consult, so
+    flipping the network one would silently reinstate the swallow.
 
     What comes out of the window, in order:
 
@@ -548,8 +549,8 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     if data is None:
         # Fetched through Ticker.history, NOT yf.download: download's
         # per-ticker worker swallows YFRateLimitError and answers with an
-        # empty frame (verified empirically on yfinance 1.4.1, the pinned
-        # floor), so a throttle would read as "no rows" and yf_retry's
+        # empty frame (verified empirically on yfinance 1.4.1; the swallow is
+        # still there in 1.8.0), so a throttle would read as "no rows" and yf_retry's
         # rate-limit mapping would never fire (#67). history re-raises the
         # throttle, and is the fetch get_YFin_data_online already uses. Its
         # own swallow of everything else is switched off for the call so a

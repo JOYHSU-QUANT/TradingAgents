@@ -4,8 +4,8 @@
 on the library's singleton with no TTL — keyed on request parameters that carry
 no date. ``get_global_news_yfinance`` therefore contacted Yahoo once per process
 and served the same headlines to every later cycle until a restart. It now
-forgets that memo before each call. Verified on yfinance 1.4.1, the pinned
-floor; these pins run the real ``Search`` below the library's own swallow, with
+forgets that memo before each call. Verified on yfinance 1.4.1 and again on
+1.8.0; these pins run the real ``Search`` below the library's own swallow, with
 only ``YfData.get`` (the wire) replaced.
 """
 

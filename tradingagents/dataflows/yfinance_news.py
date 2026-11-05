@@ -391,7 +391,7 @@ def get_global_news_yfinance(
     # the request parameters — and the parameters built below carry no date.
     # A long-lived daemon therefore contacted Yahoo for global news once per
     # process and served every later cycle its first cycle's headlines, until
-    # a restart (#198; verified on yfinance 1.4.1, the pinned floor). Forgotten
+    # a restart (#198; verified on yfinance 1.4.1, still so on 1.8.0). Forgotten
     # here, once per call, so each call is a fresh set of requests. The forget
     # is process-wide by construction: it also drops the day's memoized
     # fundamentals-timeseries pages (behind ``info`` and the statements —

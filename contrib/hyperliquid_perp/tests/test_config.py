@@ -475,7 +475,9 @@ def test_the_network_refusal_names_every_legal_network(tmp_path):
     assert f"must be one of {sorted(LEGAL_NETWORKS)}" in str(caught.value)
 
 
-@pytest.mark.parametrize("site", ["config", "live_config", "sdk_client", "signed_client", "secrets"])
+@pytest.mark.parametrize(
+    "site", ["config", "live_config", "sdk_client", "signed_client", "secrets"]
+)
 def test_every_network_refusal_speaks_one_sentence_over_one_vocabulary(site, tmp_path, monkeypatch):
     # Five entry points each spelled ``network must be one of …`` by hand,
     # enumerating THREE different tables between them (issue #226). All five
@@ -847,7 +849,22 @@ def test_load_config_rejects_non_list_container(tmp_path, text, key):
 # --------------------------------------------------------------------------
 
 
-def test_load_dotenv_files_reads_env_from_cwd(tmp_path, monkeypatch):
+@pytest.fixture
+def restored_environ():
+    """The process environment put back whole after the test (#411).
+
+    ``load_dotenv_files`` writes straight into ``os.environ``; ``monkeypatch``
+    only undoes what it set itself, and ``delenv`` of a name that was absent
+    records nothing — so a key the real loader set outlived its test and
+    reached a smoke test in the same session, which then made a real request.
+    """
+    from unittest import mock
+
+    with mock.patch.dict(os.environ):
+        yield
+
+
+def test_load_dotenv_files_reads_env_from_cwd(tmp_path, monkeypatch, restored_environ):
     # The engine package loads .env on import, but the CLIs check
     # OPENROUTER_API_KEY before that lazy import — so this helper must find the
     # same file (find_dotenv walks up from the CWD) on its own.
@@ -860,7 +877,7 @@ def test_load_dotenv_files_reads_env_from_cwd(tmp_path, monkeypatch):
     assert os.environ["OPENROUTER_API_KEY"] == "sk-or-from-dotenv"
 
 
-def test_load_dotenv_files_never_overrides_exported_vars(tmp_path, monkeypatch):
+def test_load_dotenv_files_never_overrides_exported_vars(tmp_path, monkeypatch, restored_environ):
     # Same contract as tradingagents/__init__: an exported variable always wins
     # over the file, so a shell override for one run cannot be clobbered.
     (tmp_path / ".env").write_text("OPENROUTER_API_KEY=sk-or-from-dotenv\n", encoding="utf-8")
@@ -872,7 +889,7 @@ def test_load_dotenv_files_never_overrides_exported_vars(tmp_path, monkeypatch):
     assert os.environ["OPENROUTER_API_KEY"] == "sk-or-exported"
 
 
-def test_load_dotenv_files_reads_env_enterprise(tmp_path, monkeypatch):
+def test_load_dotenv_files_reads_env_enterprise(tmp_path, monkeypatch, restored_environ):
     # Both upstream files are mirrored; .env.enterprise is the second load.
     (tmp_path / ".env").write_text("", encoding="utf-8")
     (tmp_path / ".env.enterprise").write_text("HL_ENTERPRISE_MARKER=yes\n", encoding="utf-8")
@@ -884,7 +901,9 @@ def test_load_dotenv_files_reads_env_enterprise(tmp_path, monkeypatch):
     assert os.environ["HL_ENTERPRISE_MARKER"] == "yes"
 
 
-def test_load_dotenv_files_warns_and_continues_on_undecodable_file(tmp_path, monkeypatch, capsys):
+def test_load_dotenv_files_warns_and_continues_on_undecodable_file(
+    tmp_path, monkeypatch, capsys, restored_environ
+):
     # PowerShell's bare `>>` redirection writes UTF-16: the loader must degrade
     # to env-vars-only with a stderr warning — it runs as the first statement of
     # both CLI entry points, before any exit-code mapping exists, so a raw
@@ -949,7 +968,7 @@ def test_dotenv_diagnosis_covers_env_enterprise(tmp_path, monkeypatch):
     assert "could not read" in diagnosis
 
 
-def test_dotenv_scan_failure_degrades_not_raises(monkeypatch, capsys):
+def test_dotenv_scan_failure_degrades_not_raises(monkeypatch, capsys, restored_environ):
     # find_dotenv(usecwd=True) calls os.getcwd(), which raises OSError when the
     # working directory was deleted under a long-lived daemon — both functions
     # must extend their degradation contract to the scan, not just the read.
@@ -967,7 +986,9 @@ def test_dotenv_scan_failure_degrades_not_raises(monkeypatch, capsys):
     assert "could not scan" in diagnosis
 
 
-def test_load_dotenv_files_corrupt_env_does_not_suppress_enterprise(tmp_path, monkeypatch, capsys):
+def test_load_dotenv_files_corrupt_env_does_not_suppress_enterprise(
+    tmp_path, monkeypatch, capsys, restored_environ
+):
     # The per-file try exists precisely so a corrupt .env degrades only itself:
     # the healthy .env.enterprise after it must still load. Guards against the
     # plausible refactor of hoisting the try/except out of the loop (or breaking
@@ -984,7 +1005,7 @@ def test_load_dotenv_files_corrupt_env_does_not_suppress_enterprise(tmp_path, mo
 
 
 def test_load_dotenv_files_scan_failure_on_one_file_does_not_suppress_other(
-    tmp_path, monkeypatch, capsys
+    tmp_path, monkeypatch, capsys, restored_environ
 ):
     # The read half of the degradation contract has the mixed-scenario test
     # above; this is the scan half's counterpart — a find_dotenv failure on
@@ -1009,7 +1030,9 @@ def test_load_dotenv_files_scan_failure_on_one_file_does_not_suppress_other(
     assert "could not read" in capsys.readouterr().err
 
 
-def test_dotenv_functions_degrade_without_python_dotenv(tmp_path, monkeypatch, capsys):
+def test_dotenv_functions_degrade_without_python_dotenv(
+    tmp_path, monkeypatch, capsys, restored_environ
+):
     # The optional-dependency branch: without python-dotenv the loader is a
     # silent no-op (env-vars-only operation, same as upstream) and the
     # diagnosis says so — neither may raise. Poisoning sys.modules makes the

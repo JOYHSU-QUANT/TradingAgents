@@ -2,7 +2,7 @@
 
 ::
 
-    python -m dotenv run -- pytest -m smoke contrib/uniswap_v3/tests/test_agent_smoke.py -s
+    UNISWAP_JUDGE_SMOKE=1 python -m dotenv run -- pytest -m smoke contrib/uniswap_v3/tests/test_agent_smoke.py -s
 
 It runs the whole graph once on ETH-USD as of today, some fifteen to
 twenty completions at the configured provider, and prints the rating and
@@ -33,6 +33,10 @@ pytestmark = pytest.mark.smoke
 
 def test_the_judge_answers_on_eth_usd_with_a_rating_and_its_reports(tmp_path):
     settings = AgentSettings()
+    # Opt-in on top of the key (#411): a key that reached the environment by
+    # accident (a dotenv test, a shell's export) must not buy a model call.
+    if os.environ.get("UNISWAP_JUDGE_SMOKE") != "1":
+        pytest.skip("UNISWAP_JUDGE_SMOKE=1 is not set; this test asks a real model")
     if not os.environ.get("OPENROUTER_API_KEY"):
         pytest.skip("OPENROUTER_API_KEY is not set")
     now = int(datetime.now(tz=timezone.utc).timestamp())

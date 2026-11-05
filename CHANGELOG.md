@@ -767,6 +767,35 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **A Yahoo news answer without the list is an outage, not "No news
+  found", and the outage sentence names the yfinance version** (#407).
+  Since 1.8.0 the ticker news is a GraphQL POST whose answer the library
+  reads for `data.lightyearList.main.edges` and nothing else, so the body
+  Yahoo sends for a refused query or a moved schema — HTTP 200, `errors`,
+  no `data` — came back as an empty list, the same answer as a quiet
+  week, and the renderer claimed it as coverage (the #136 shape: a future
+  endpoint change would read as weeks without news, and the
+  `input_unavailable:news_data` rule would never fire). `get_news_yfinance`
+  now reads the last wire answer back (the singleton `YfData.post` is
+  shadowed for the one call) and believes an empty list only when the
+  answer carried the list's container (`data.lightyearList.main`) and no
+  `errors`; otherwise — an error body, a nulled list, a body of another
+  shape that fails inside the library — it is a `YFDataException`, the
+  library's own class, raised from the wire read and mapped as before to
+  the optional sentinel; the error
+  detail is flattened and capped like every other vendor fragment the
+  module quotes. That sentence — for every yfinance answer that is not
+  data, the history, info and statements lanes included — now reads
+  `Yahoo Finance answered without data (yfinance x.y.z): …`, the version
+  ahead of the vendor's words because the router caps the sentinel's
+  clause from the end: "CURRENTLY DOWN" is yfinance's wording for any
+  unreadable answer, and a library too old for an endpoint Yahoo retired
+  reads exactly like an outage — #405 cost three days on that — so the
+  version is the first thing to check and RUNBOOK §7's news-vendor row
+  says so (and no longer calls cross-cycle counting a gap: #402 closed it).
+  The shadow is to be deleted once the yfinance floor includes a
+  `get_news` that raises on an `errors` body.
+
 - **`get_news` answers again: yfinance's floor is 1.8.0** (#405). Yahoo
   retired the `/xhr/ncp` news endpoint around 2026-11-02 18:50Z, and every
   yfinance below 1.8.0 reads the page it now gets as `YFDataException`

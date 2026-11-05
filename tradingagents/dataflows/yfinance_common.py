@@ -297,7 +297,15 @@ def yf_fetch_unhidden(func, *, hidden_answer):
             # here rather than let out: the getters re-raise VendorError
             # and nothing else non-OSError, so raw these reached their
             # broad handler and came back as prose (#136).
-            raise VendorUnavailableError(f"Yahoo Finance answered without data: {e}") from e
+            # The library's version rides along, ahead of the vendor's words:
+            # its "CURRENTLY DOWN" is yfinance's own text for any unreadable
+            # answer, and a library too old for an endpoint Yahoo retired
+            # reads exactly like an outage (#405 cost three days on that).
+            # The router caps the sentinel's clause from the end (#407), so
+            # the version comes first, where no long detail can cut it off.
+            raise VendorUnavailableError(
+                f"Yahoo Finance answered without data (yfinance {yf.__version__}): {e}"
+            ) from e
         except OSError as e:
             if http_status(e) == 404:
                 # 404 alone: a 401/403 is Yahoo refusing this client (a

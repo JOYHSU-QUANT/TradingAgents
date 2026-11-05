@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import yfinance as yf
 from dateutil.relativedelta import relativedelta
 from yfinance.data import YfData
+from yfinance.exceptions import YFDataException
 
 from .config import get_config
 
@@ -241,6 +242,93 @@ def _render_article(data: dict) -> str:
     return block + "\n"
 
 
+def _get_news_read_on_the_wire(stock: yf.Ticker, count: int) -> list:
+    """``Ticker.get_news`` with its last wire answer read back (#407).
+
+    Since yfinance 1.8.0 the news is a GraphQL POST; the library parses the
+    answer's ``data.lightyearList.main.edges`` and nothing else, so a body
+    Yahoo sends when the query is refused or the schema moved — HTTP 200
+    with ``errors`` and no ``data`` — comes back as an empty list, the same
+    answer as a quiet week, and the renderer would claim it as "No news
+    found" (the shape #136 exists to keep out). The singleton ``YfData``'s
+    ``post`` is shadowed for this one call so the answers are seen; an empty
+    list is then believed only when the last answer carried the list's
+    container (``data.lightyearList.main``) and no ``errors``, and is a
+    ``YFDataException`` otherwise — the same exception the library raises
+    for its "Will be right back" page, mapped by the caller to the
+    vendor-unavailable lane. A JSON body that is not an object fails inside
+    the library and is read as an outage too; a non-JSON body has already
+    left as the library's own raise (``hide_exceptions`` is off inside the
+    boundary). A fake ``Ticker`` with no wire (tests) is called as it was.
+    """
+    data = getattr(stock, "_data", None)
+    if data is None or not callable(getattr(data, "post", None)):
+        return stock.get_news(count=count)
+    answers: list = []
+    real_post = data.post
+
+    def recording_post(*args, **kwargs):
+        answer = real_post(*args, **kwargs)
+        answers.append(answer)
+        return answer
+
+    # The shadow is safe because yf_fetch_unhidden holds _UNHIDE_LOCK around
+    # this call, so no other yfinance call can post through the singleton
+    # meanwhile — answers[-1] is this call's. Delete the shadow once the
+    # yfinance floor includes a get_news that raises on an ``errors`` body.
+    had_own_post = "post" in vars(data)
+    data.post = recording_post
+    try:
+        news = stock.get_news(count=count)
+    except (AttributeError, TypeError) as exc:
+        # The library parses the body with bare ``.get`` chains, so a JSON
+        # body of another shape — not an object, or an object whose list
+        # container is of the wrong type — fails inside it with one of
+        # these. An answer was received, so it is an outage here, not the
+        # empty answer the boundary's broad handler would make of it; with
+        # no answer recorded the error is the library's own and left alone.
+        if answers:
+            # The class is named so an operator can tell a parse failure from
+            # a transport one once the router has made the sentinel of it.
+            raise YFDataException(
+                f"news GraphQL answered with a body of another shape ({type(exc).__name__})"
+            ) from exc
+        raise
+    finally:
+        if had_own_post:
+            data.post = real_post
+        else:
+            del data.post
+    if news or not answers:
+        return news
+    body = _json_or_none(answers[-1])
+    if body is None:
+        return news  # not JSON: the library's own raise would have left first
+    errors = body.get("errors") if isinstance(body, dict) else None
+    main = (
+        ((body.get("data") or {}).get("lightyearList") or {}).get("main")
+        if isinstance(body, dict)
+        else None
+    )
+    if errors or not isinstance(main, dict):
+        detail = ""
+        if isinstance(errors, list) and errors and isinstance(errors[0], dict):
+            # Vendor words quoted in a raised message: flattened and capped
+            # like every other vendor fragment this module quotes.
+            said = sanitize_untrusted(_vendor_text(errors[0].get("message")), limit=160)
+            detail = f": {said}" if said else ""
+        raise YFDataException(f"news GraphQL answered without the list{detail}")
+    return news
+
+
+def _json_or_none(answer: object) -> object:
+    """``answer.json()``, or ``None`` when the body is not JSON."""
+    try:
+        return answer.json()  # type: ignore[attr-defined]
+    except (ValueError, AttributeError):
+        return None
+
+
 def get_news_yfinance(
     ticker: str,
     start_date: str,
@@ -287,8 +375,12 @@ def get_news_yfinance(
     stock = yf.Ticker(canonical)
     # Through the shared un-hidden boundary like every other yfinance leaf
     # (#116); an outage body takes its vendor-unavailable lane rather than
-    # the empty list "No news found" below would claim as coverage (#136).
-    news = yf_fetch_unhidden(lambda: stock.get_news(count=article_limit), hidden_answer=list)
+    # the empty list "No news found" below would claim as coverage (#136) —
+    # the GraphQL error body included, which the library reads as no
+    # articles (#407).
+    news = yf_fetch_unhidden(
+        lambda: _get_news_read_on_the_wire(stock, article_limit), hidden_answer=list
+    )
 
     if not news:
         return f"No news found for {echoed}{resolved}"

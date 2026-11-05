@@ -273,6 +273,7 @@ def uniswap_run(**overrides: Any) -> dict[str, Any]:
         },
         "metrics_error": None,
         "verdicts_seen": None,
+        "judge": None,
         "recent_decisions": [decision(latest)],
         "recent_valuations": [{"time": uni_instant(latest), "total_value": "10012.34"}],
     }
@@ -316,7 +317,7 @@ def coverage() -> dict[str, Any]:
 def uniswap_document(run: Mapping[str, Any] | None = None, **overrides: Any) -> dict[str, Any]:
     """A ``uniswap_v3`` ``status --json`` document with one run (the default one unless given)."""
     document = {
-        "schema_version": 1,
+        "schema_version": 2,
         "source": "uniswap_v3",
         "generated_at": uni_instant(NOW),
         "store": {

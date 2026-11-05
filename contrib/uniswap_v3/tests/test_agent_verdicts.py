@@ -237,10 +237,10 @@ def test_a_verdict_another_visit_recorded_meanwhile_is_kept_and_this_ones_droppe
     store, tmp_path
 ):
     class Meanwhile(ScriptedJudge):
-        def ask(self, ticker, trade_date, context):
+        def ask(self, ticker, trade_date, context, **kwargs):
             # Another visit lands the same token's verdict while this judge thinks.
             store.insert_verdict(_record("WBTC" if ticker == "BTC-USD" else "WETH", 2))
-            return super().ask(ticker, trade_date, context)
+            return super().ask(ticker, trade_date, context, **kwargs)
 
     summary = _ask(store, Meanwhile(), tmp_path)
     assert summary.asked == () and [a.symbol for a in summary.already_stored] == ["WBTC", "WETH"]
@@ -272,3 +272,54 @@ def test_the_record_types_hold_their_invariants():
 def test_the_trade_date_is_the_boundarys_utc_date():
     assert trade_date_of(_DAY2) == "2024-01-03"
     assert trade_date_of(_DAY2 + 86_399) == "2024-01-03"
+
+# --- #408: the patience for the news input, and the declines ---------------------------
+
+
+def test_the_patience_over_is_told_to_the_judge_by_the_boundarys_age(store, tmp_path):
+    # 600 s after the boundary: inside the default patience (7200 s).
+    judge = ScriptedJudge({"BTC-USD": Rating.BUY, "ETH-USD": Rating.HOLD})
+    _ask(store, judge, tmp_path)
+    assert judge.lenient == [False, False]
+    # 7800 s after the boundary (the 02:10 visit): past it.
+    later = ScriptedJudge({"BTC-USD": Rating.BUY, "ETH-USD": Rating.HOLD})
+    with open_store(tmp_path / "later.db") as fresh:
+        for day in range(3):
+            put_day(fresh, day, eth_tick=DEFAULT_TICK + day * 100)
+        ask_verdicts(fresh, _CONFIG, later, time=_DAY2, home=tmp_path, now=_DAY2 + 7800)
+    assert later.lenient == [True, True]
+
+
+def test_a_news_less_answer_is_recorded_with_its_flag_in_the_store_and_the_sidecar(store, tmp_path):
+    from contrib.uniswap_v3.agent.graph import Answer
+
+    class _NewsLessJudge(ScriptedJudge):
+        def ask(self, ticker, trade_date, context, *, accept_news_less=False):
+            answer = super().ask(ticker, trade_date, context, accept_news_less=accept_news_less)
+            return Answer(
+                decision=answer.decision,
+                rating=answer.rating,
+                reports=answer.reports,
+                elapsed_seconds=answer.elapsed_seconds,
+                news_missing=ticker == "ETH-USD",
+            )
+
+    summary = _ask(store, _NewsLessJudge({"BTC-USD": Rating.BUY, "ETH-USD": Rating.HOLD}), tmp_path)
+    by_symbol = {asked.symbol: asked.record for asked in summary.asked}
+    assert by_symbol["WETH"].news_missing is True and by_symbol["WBTC"].news_missing is False
+    assert store.verdict(SOURCE, "WETH", _DAY2).news_missing is True
+    sidecar = json.loads((tmp_path / by_symbol["WETH"].sidecar_path).read_text(encoding="utf-8"))
+    assert sidecar["news_missing"] is True and sidecar["schema"] == 2
+
+
+def test_a_later_is_recorded_as_a_decline_and_the_next_visit_asks_again(store, tmp_path):
+    judge = ScriptedJudge({"BTC-USD": JudgeUnavailable("the judge was not asked on BTC-USD (news unavailable before asking)")})
+    with pytest.raises(JudgeUnavailable, match=r"0 verdict\(s\) at 2024-01-03 stay recorded"):
+        _ask(store, judge, tmp_path)
+    declines = store.judge_declines_at(SOURCE, _DAY2)
+    assert [(d.symbol, d.asked_at) for d in declines] == [("WBTC", _NOW)]
+    assert declines[0].reason.startswith("the judge was not asked on BTC-USD")
+    # A failure of another kind is not a decline.
+    with pytest.raises(RuntimeError):
+        _ask(store, ScriptedJudge({"BTC-USD": RuntimeError("boom")}), tmp_path)
+    assert len(store.judge_declines_at(SOURCE, _DAY2)) == 1

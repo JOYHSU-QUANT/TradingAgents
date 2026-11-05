@@ -92,6 +92,10 @@ class Thresholds:
     export_stale_hours: float = 5.0
     uniswap_behind_hours: float = 3.5
     uniswap_no_decision_hours: float = 48.0
+    # Visits on which the uniswap judge declined the latest boundary (said
+    # "later") while no verdict stands there: three is a scheduled day's
+    # visits (#408).
+    uniswap_judge_declines: int = 3
     # Decided cycles in a row whose verdict read the trend guardrail as
     # ``unknown`` (the perp validator's own threshold, 2026-10-16). The rule
     # reads the ``recent`` cycles the status document carries, so a
@@ -377,6 +381,7 @@ THRESHOLD_PARSERS: dict[str, Callable[[Mapping[str, Any], str, str, Any], Any]] 
     "export_stale_hours": _hours,
     "uniswap_behind_hours": _hours,
     "uniswap_no_decision_hours": _hours,
+    "uniswap_judge_declines": _int,
     "guardrail_unknown_cycles": _int,
     "input_unavailable_cycles": _int,
     "handoff_due_utc": _clock,

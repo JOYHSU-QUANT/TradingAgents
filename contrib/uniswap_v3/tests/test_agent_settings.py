@@ -39,6 +39,10 @@ def test_the_defaults_are_the_judge_of_the_hyperliquid_paper_run():
     assert settings.ask_within_seconds == 14_400
     # The least the first visit's verdict, 10 to 35 minutes after the boundary, clears.
     assert AgentSettings(ask_within_seconds=3600).ask_within_seconds == 3600
+    # The patience for the news input: two hours, or half a shorter window (#408).
+    assert settings.news_patience_seconds == 7200
+    assert AgentSettings(ask_within_seconds=3600).news_patience_seconds == 1800
+    assert AgentSettings(news_patience_seconds=0).patience_seconds == 0
 
 
 def test_a_list_of_analysts_is_kept_as_a_tuple():
@@ -66,6 +70,8 @@ def test_the_fundamentals_analyst_is_refused_as_stock_only():
         ({"max_tokens": True}, "max_tokens must be a positive integer"),
         ({"max_tokens": "8192"}, "max_tokens must be a positive integer"),
         ({"ask_within_seconds": 3599}, "ask_within_seconds must be an integer of at least 3600"),
+        ({"news_patience_seconds": -1}, "news_patience_seconds must be a non-negative integer"),
+        ({"news_patience_seconds": 14400}, "news_patience_seconds must be less than ask_within_seconds"),
     ],
 )
 def test_settings_that_cannot_be_used_are_refused(changes, match):

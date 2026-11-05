@@ -99,6 +99,14 @@ def test_the_uniswap_document_carries_the_fields_of_the_uniswap_status_model():
     assert sorted(doc["run"]["recent_decisions"][0]) == sorted(_fields(module, "DecisionStatus"))
     assert sorted(doc["run"]["recent_valuations"][0]) == sorted(_fields(module, "ValuationPoint"))
     assert _fields(module, "VerdictsSeen") == ["source", "every", "some", "none"]
+    assert _fields(module, "JudgeStatus") == [
+        "source",
+        "boundary",
+        "verdicts",
+        "news_missing",
+        "declined",
+        "last_decline",
+    ]
 
 
 def test_the_carry_document_carries_the_fields_of_the_carry_report_model():

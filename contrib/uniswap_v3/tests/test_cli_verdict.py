@@ -56,7 +56,7 @@ def _verdict(config: Path, db: Path, *extra: str, now: int = _NOW) -> tuple[int,
 def _judging(monkeypatch, judge, homes: list[Path] | None = None):
     """Have the command's judge be ``judge``, keeping where it was told to put the engine's files."""
 
-    def build(settings, home):
+    def build(settings, home, **kwargs):
         if homes is not None:
             homes.append(home)
         return judge
@@ -325,11 +325,11 @@ def test_a_sidecar_that_cannot_be_written_fails_without_a_traceback(
 
 def test_an_answer_another_visit_overtook_is_warned_of(config, db, monkeypatch, capsys):
     class Overtaken(ScriptedJudge):
-        def ask(self, ticker, trade_date, context):
+        def ask(self, ticker, trade_date, context, **kwargs):
             symbol = "WBTC" if ticker == "BTC-USD" else "WETH"
             with open_store(db, create=False) as store:
                 store.insert_verdict(_record(symbol, 2, source="judge-v1"))
-            return super().ask(ticker, trade_date, context)
+            return super().ask(ticker, trade_date, context, **kwargs)
 
     _judging(monkeypatch, Overtaken())
     code, lines = _verdict(config, db)

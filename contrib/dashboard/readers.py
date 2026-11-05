@@ -43,7 +43,7 @@ __all__ = [
 ]
 
 # The document version of each source this build reads; see the module docstring.
-KNOWN_SCHEMA_VERSIONS: Mapping[str, int] = {"hyperliquid_perp": 2, "uniswap_v3": 1, "carry": 1}
+KNOWN_SCHEMA_VERSIONS: Mapping[str, int] = {"hyperliquid_perp": 2, "uniswap_v3": 2, "carry": 1}
 STDERR_LIMIT = 200
 
 

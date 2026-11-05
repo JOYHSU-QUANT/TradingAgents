@@ -229,6 +229,11 @@ systemctl list-timers uniswap-v3-paper.timer         # 下一次 visit 的時間
   第一次 visit 一定來得及）`verdict` 就不問還沒問的代幣：stderr `warning: the boundary ... passed N s ago, more than agent.ask_within_seconds`、
   結束碼 0、不寫列，那些代幣那根照「沒判斷」走；早先已寫進 store 的判斷照用、照印。正常 visit（00:10–00:35）的 5–30 分鐘後見之明是已知取捨。
   `--fake-rating` 不受視窗限制。
+- **新聞缺席的耐心**（#408）：`verdict` 問 graph 之前先經 router 探一次 `get_news`（不問模型）；新聞來源掛了（router 的 optional sentinel）
+  就 `try again later`、不花錢、不記答案——但邊界過了 `agent.news_patience_seconds`（預設 7200＝2 小時，必須小於 `ask_within_seconds`）
+  之後，graph 照問、答案帶 `news_missing` 記下來（store 的 `verdicts.news_missing`、sidecar 的 `news_missing`、`verdict` 印 `without news`）：
+  一根 bar 的新聞整天沒回來，最後一次 visit（02:10）仍留下判斷，而不是永遠沒判斷。每次「later」記在 `judge_declines` 表，
+  `status --json` 的 `run.judge` 給最新邊界的 `verdicts`／`news_missing`／`declined`，dashboard 的 `<uni>:judge_declined`（3 次）與 `<uni>:news_missing` 讀它。
 - 上游用**本機日期**當 trade date：伺服器是 UTC 沒事；在台灣的本機於 UTC 16:00 之後手動跑，上游會把「今天」算成明天、
   把這次當回測、即時資料源留白。要在本機手動跑就在台北時間 08:10–23:59 之間跑。
 - 每個代幣約 15–20 次 completion；實測經 OpenRouter 一個代幣約 11 分鐘（2026-10-06，sonnet-4-6）到 15 分鐘（2026-10-07，sonnet-5.5 會思考），
@@ -389,6 +394,7 @@ cd ~/uniswap-paper
 | `==== RUN_TREND, RUN_AI and RUN_CARRY are all empty` 接 `==== exit 1` | `paper-visit.local.sh` 把三個 run id 都留空 | 填回去（§3.1） |
 | `verdict`：`try again later: the store has no bar at ...` 接 `exit 3` | 當天的 bar 還沒進 store（前一步的 `backfill` 沒讀到，多半是節點落後） | 當天後面的重試會補；順序見 §2.5 |
 | `verdict`：`try again later: the judge did not answer on ETH-USD (...)` 接 `exit 3` | 原因可能會過：閘道回 402（額度）、408、429、5xx，連線／逾時類錯誤，或分析師的資料源被限流／掛了（括號裡是 `VendorRateLimitError`／`VendorUnavailableError` 之類），或新聞 vendor 壞了（#393 起 router 不再為新聞 raise、graph 會用沒有新聞的輸入答完；judge 看到 router 的 `Optional news_data unavailable` 這行，就照那行背後的例外分類：會過的（outage／限流／連線）丟 `JudgeUnavailable`，括號裡是 `news unavailable: …`，那根 bar 不記、稍後重問；不會過的（vendor 的 library bug、金鑰沒設）丟 `AgentError`＝`failed: … (news failed: …)` 接 `exit 1`，要人處理。注意新聞壞掉時每次重問都是跑完整個 graph 再丟掉，一天最多三次）；已答的代幣已寫進 store | 當天後面的重試只問剩下的；**一整天都是 3** 就看括號裡的例外：閘道的就查 OpenRouter 額度與服務狀態，資料源的就查該資料源 |
+| `verdict`：`try again later: the judge was not asked on ETH-USD (news unavailable before asking; no model call was made)` 接 `exit 3` | 問模型前的新聞探針撞到 optional sentinel（新聞來源掛了），還在 `agent.news_patience_seconds` 內 | 當天後面的 visit 重試；過了耐心（預設 2 小時）會照問並記成 `without news`（#408） |
 | `verdict`：`failed: the judge cannot be built (ValueError: API key for provider 'openrouter' is not set. Please set ...)` | `.env` 沒有供應商的 key | 補 key（§1.4） |
 | `verdict`：`failed: the judge failed on ... for good (...)` | 供應商回其他 4xx（模型名打錯、key 無效、請求格式不對）或引擎自己出錯（KeyError 之類），重試也一樣、還會先花掉分析師的呼叫 | 對照 `agent` 區塊的模型名與 key；是引擎的錯就看括號裡的例外 |
 | `verdict`：`failed: the bar at ... is not the latest whose boundary has passed` | 想補問舊的 bar | 不補：舊 bar 的判斷會看到未來；那天照「沒判斷」走 |

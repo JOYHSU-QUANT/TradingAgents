@@ -97,9 +97,14 @@ class ScriptedJudge:
     def __init__(self, script: Mapping[str, Rating | Exception] | None = None) -> None:
         self.script = dict(script or {})
         self.asked: list[tuple[str, str, str]] = []
+        #: What ``accept_news_less`` each question carried (#408).
+        self.lenient: list[bool] = []
 
-    def ask(self, ticker: str, trade_date: str, context: str) -> Answer:
+    def ask(
+        self, ticker: str, trade_date: str, context: str, *, accept_news_less: bool = False
+    ) -> Answer:
         self.asked.append((ticker, trade_date, context))
+        self.lenient.append(accept_news_less)
         rating = self.script.get(ticker, Rating.HOLD)
         if isinstance(rating, Exception):
             raise rating

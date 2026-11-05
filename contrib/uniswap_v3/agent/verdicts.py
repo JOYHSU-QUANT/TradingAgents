@@ -40,11 +40,11 @@ from pathlib import Path
 
 from ..config import ConfigError, UniswapConfig
 from ..domain.times import DATE_ONLY, utc_text
-from ..domain.verdicts import VerdictRecord
+from ..domain.verdicts import JudgeDecline, VerdictRecord
 from ..store.bar_source import StoredBar, load_bar
 from ..store.repository import Store
 from .context import BARS_NEEDED, spot_context
-from .errors import AgentError, BarNotStored
+from .errors import AgentError, BarNotStored, JudgeUnavailable
 from .graph import FAKE_MODEL, Judge
 from .record import sidecar_path, sidecar_record, verdict_record, write_sidecar
 from .tickers import tickers_for
@@ -211,6 +211,9 @@ def ask_verdicts(
     # it would see hours past the fill the run trades at, so what it has not said
     # yet is left unsaid; what it said earlier stands.
     late = not judge.point_in_time and now - time > config.agent.ask_within_seconds
+    # Past the judge's patience for the news input, a news-less answer is
+    # kept with its flag rather than left for a later visit (#408).
+    lenient = not judge.point_in_time and now - time > config.agent.patience_seconds
     left: list[str] = []
     closes: Mapping[str, list[Decimal | None]] | None = None
     done: list[Asked] = []
@@ -234,8 +237,16 @@ def ask_verdicts(
             interval_seconds=config.bars.interval_seconds,
         )
         try:
-            answer = judge.ask(ticker, trade_date, context)
+            answer = judge.ask(ticker, trade_date, context, accept_news_less=lenient)
         except AgentError as exc:
+            if isinstance(exc, JudgeUnavailable):
+                # The "later" is kept, so the status document can count how
+                # many visits the judge declined a bar on (#408).
+                store.insert_judge_decline(
+                    JudgeDecline(
+                        source=source, symbol=symbol, time=time, asked_at=now, reason=str(exc)
+                    )
+                )
             raise type(exc)(
                 f"{exc}; {len(done)} verdict(s) at {trade_date} stay recorded, and a later "
                 f"visit asks about the rest"

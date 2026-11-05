@@ -210,6 +210,22 @@ _MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (
         )
         """,
     ),
+    # #408: a verdict given on a news-less input carries the flag, and the
+    # visits on which the judge declined a bar are kept, one row each.
+    (
+        "ALTER TABLE verdicts ADD COLUMN news_missing INTEGER NOT NULL DEFAULT 0 "
+        "CHECK (news_missing IN (0, 1))",
+        """
+        CREATE TABLE judge_declines (
+            source TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            time INTEGER NOT NULL,
+            asked_at INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            PRIMARY KEY (source, symbol, time, asked_at)
+        )
+        """,
+    ),
 )
 
 SCHEMA_VERSION: Final = len(_MIGRATIONS)

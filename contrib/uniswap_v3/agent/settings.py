@@ -9,6 +9,7 @@
       selected_analysts: [market, social, news]
       max_tokens: 16384
       ask_within_seconds: 14400
+      news_patience_seconds: 7200
 
 The defaults are the models the Hyperliquid paper run is judged by, so
 that the two scorecards compare. ``llm_provider`` is a provider the
@@ -31,7 +32,17 @@ verdicts already stored stand (the default, four hours, covers the
 scheduled visit and its two retries; the least is 3600 seconds, which the
 first visit's verdict, asked 10 to 35 minutes after the boundary, always
 clears, so a typo cannot leave every bar unrated); a fake rating is not
-bound by it.
+bound by it. ``news_patience_seconds`` is how long after the boundary the
+judge keeps saying "later" when the news input is unavailable (#408): the
+``verdict`` command probes the news vendor before asking the graph and,
+inside the patience, records nothing and spends nothing when the probe
+finds it down; past the patience, the graph is asked anyway and its
+answer is kept with ``news_missing`` set, so a bar whose news never came
+back still gets a verdict on the last visit instead of none. Left unset
+it is two hours, or half of ``ask_within_seconds`` when that is shorter,
+so the third scheduled visit (02:10 UTC) is the last chance; given, it
+must be less than ``ask_within_seconds``, and zero means a news-less
+answer is kept at once.
 
 None of this enters a run's config snapshot: the verdicts a run reads are
 data in the store, which record the model that gave each one, and which
@@ -63,6 +74,7 @@ class AgentSettings:
     selected_analysts: tuple[str, ...] = ("market", "social", "news")
     max_tokens: int = 16384
     ask_within_seconds: int = 14_400
+    news_patience_seconds: int | None = None
 
     def __post_init__(self) -> None:
         require_text(self.llm_provider, "llm_provider")
@@ -92,3 +104,21 @@ class AgentSettings:
         object.__setattr__(self, "selected_analysts", analysts)
         require_count(self.max_tokens, "max_tokens", at_least=1)
         require_count(self.ask_within_seconds, "ask_within_seconds", at_least=3600)
+        patience = self.news_patience_seconds
+        if patience is None:
+            # Two hours, or half the window when the window is shorter: the
+            # last scheduled visit stays the last chance either way.
+            patience = min(7_200, self.ask_within_seconds // 2)
+            object.__setattr__(self, "news_patience_seconds", patience)
+        require_count(patience, "news_patience_seconds", at_least=0)
+        if patience >= self.ask_within_seconds:
+            raise ValueError(
+                f"news_patience_seconds must be less than ask_within_seconds "
+                f"({self.ask_within_seconds}), got {patience}"
+            )
+
+    @property
+    def patience_seconds(self) -> int:
+        """``news_patience_seconds`` as resolved: an int once the settings are built."""
+        assert self.news_patience_seconds is not None
+        return self.news_patience_seconds

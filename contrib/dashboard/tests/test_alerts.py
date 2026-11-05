@@ -721,3 +721,42 @@ def test_an_optional_input_unavailable_on_six_decided_cycles_is_a_condition(tmp_
     doc["cycles"]["recent"] = [cycle(4 * i + 1, ["news_data"]) for i in range(8)]
     del doc["cycles"]["recent"][0]["verdict"]["unavailable_inputs"]
     assert line_keys(_tick(tmp_path, docs)) == ["hl-paper:rules_failed"]
+
+def test_the_judge_declining_a_days_visits_or_answering_without_news_are_conditions(tmp_path):
+    from .support import UNI_AI_KEY, uni_instant
+
+    boundary = uni_instant(datetime(2026, 10, 14, tzinfo=timezone.utc))
+    judge = {
+        "source": "tradingagents-rating-v1",
+        "boundary": boundary,
+        "verdicts": 0,
+        "news_missing": 0,
+        "declined": 3,
+        "last_decline": "the judge was not asked on ETH-USD (news unavailable before asking)",
+    }
+    docs = quiet_documents()
+    docs[UNI_AI_KEY] = uniswap_document(uniswap_run(run_id="paper-ai-1", judge=judge))
+    # The host's own conditions (a full disk on a developer machine) are not this rule's.
+    def uniswap_keys(evaluation):
+        return [key for key in _keys(evaluation) if key.startswith("uniswap-ai:")]
+
+    def uniswap_text(evaluation):
+        return [c.text for c in evaluation.conditions if c.key.startswith("uniswap-ai:")]
+
+    evaluation = _tick(tmp_path, docs)
+    assert uniswap_keys(evaluation) == ["uniswap-ai:judge_declined"]
+    assert uniswap_text(evaluation) == [
+        "the judge declined 3 visit(s) at 2026-10-14 00:00Z and no verdict stands "
+        "(the judge was not asked on ETH-USD (news unavailable before asking))"
+    ]
+    # Two declines, or declines with a verdict standing, are the day's normal retries.
+    for quiet in ({**judge, "declined": 2}, {**judge, "declined": 3, "verdicts": 2}):
+        docs[UNI_AI_KEY] = uniswap_document(uniswap_run(run_id="paper-ai-1", judge=quiet))
+        assert uniswap_keys(_tick(tmp_path, docs)) == []
+    kept = {**judge, "declined": 2, "verdicts": 2, "news_missing": 2}
+    docs[UNI_AI_KEY] = uniswap_document(uniswap_run(run_id="paper-ai-1", judge=kept))
+    evaluation = _tick(tmp_path, docs)
+    assert uniswap_keys(evaluation) == ["uniswap-ai:news_missing"]
+    assert uniswap_text(evaluation) == [
+        "2 verdict(s) at 2026-10-14 00:00Z were given without the news input"
+    ]

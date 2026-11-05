@@ -425,6 +425,24 @@ def _uniswap(line: UniswapLine, doc: Mapping[str, Any], now: datetime, th: Thres
             "clock_ahead",
             f"the clock is before the last decided bar ({show_text(clock['last_decided'])})",
         )
+    judge = run.get("judge")
+    if judge is not None:
+        # The judge at the latest boundary (#408): a day's visits all
+        # declined with no verdict standing, or a verdict given without
+        # the news input.
+        if judge["verdicts"] == 0 and judge["declined"] >= th.uniswap_judge_declines:
+            add(
+                "judge_declined",
+                f"the judge declined {judge['declined']} visit(s) at "
+                f"{show_text(judge['boundary'])} and no verdict stands "
+                f"({judge['last_decline']})",
+            )
+        if judge["news_missing"]:
+            add(
+                "news_missing",
+                f"{judge['news_missing']} verdict(s) at {show_text(judge['boundary'])} were given "
+                f"without the news input",
+            )
     return _Outcome(found)
 
 

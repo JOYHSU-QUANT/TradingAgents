@@ -10,6 +10,31 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **The uniswap_v3 judge probes the news input before asking, keeps a
+  news-less answer once its patience is over, and records every "later"**
+  (#408). Three days of the judge paying for a graph run and dropping
+  the answer at every visit (#405) came from a policy that had only
+  "later": an answer given without news was never recorded, and a bar
+  whose news never came back was never rated. Now `verdict` builds the
+  judge with `probe_news=True`: one `get_news` through the engine's
+  router, under the same watch `ask` keeps on the router's logger, says
+  whether the news input answers, and inside
+  `agent.news_patience_seconds` (default 7200, less than
+  `ask_within_seconds`; the third scheduled visit at 02:10 UTC is the last
+  chance) a down vendor is "later" before any model call. Past the
+  patience `ask_verdicts` asks with `accept_news_less=True` and a
+  news-less answer is kept with `news_missing` set — on the `Answer`, in
+  the sidecar (schema 2), in `verdicts.news_missing` (store schema +1) and
+  on the `verdict` line (`without news`); a strategy reads the rating as
+  any other. Every "later" is a row of the new `judge_declines` table, and
+  the status document (schema 2) carries `run.judge` for a paper run that
+  reads verdicts: the latest boundary's `verdicts`, `news_missing`,
+  `declined` and `last_decline`. The dashboard reads it as two conditions,
+  `<uni line>:judge_declined` (`uniswap_judge_declines`, default 3, visits
+  declined with no verdict standing) and `<uni line>:news_missing`. Not
+  changed: a news failure that will not pass is still "for good", and a
+  judge built by hand or in tests does not probe.
+
 - **The research-loop benchmark's world generator and `generate` command**
   (discovery plan 2026-10-21, PR 2). `contrib/discovery/worlds.py` turns a
   manifest's seed into the three series a research store holds — 4h bars

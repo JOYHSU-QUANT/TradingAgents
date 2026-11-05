@@ -74,7 +74,7 @@ def test_a_timeout_a_non_document_and_another_schema_are_named(tmp_path):
 
 
 def test_a_uniswap_line_is_keyed_by_its_run_id_too(tmp_path):
-    runner = FakeRunner({UNI_TREND_KEY: {"schema_version": 1, "source": "uniswap_v3", "run": None}})
+    runner = FakeRunner({UNI_TREND_KEY: {"schema_version": 2, "source": "uniswap_v3", "run": None}})
     read = read_line(build_config(tmp_path).lines[2], runner=runner, timeout=1)
     assert read.ok and read.kind == "uniswap"
 

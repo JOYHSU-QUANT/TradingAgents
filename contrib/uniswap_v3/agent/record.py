@@ -50,7 +50,7 @@ def sidecar_record(
 ) -> dict[str, Any]:
     """The sidecar's content: what was asked, of whom and how it was set up, and everything that came back."""
     return {
-        "schema": 1,
+        "schema": 2,
         "source": source,
         "symbol": symbol,
         "ticker": ticker,
@@ -62,6 +62,7 @@ def sidecar_record(
         "asked_at": asked_at,
         "elapsed_seconds": round(answer.elapsed_seconds, 3),
         "rating": answer.rating.value,
+        "news_missing": answer.news_missing,
         "spot_context": context,
         "decision": answer.decision,
         "decision_digest": text_digest(answer.decision),
@@ -120,4 +121,5 @@ def verdict_record(
         asked_at=asked_at,
         sidecar_path=sidecar_path,
         sidecar_digest=sidecar_digest,
+        news_missing=answer.news_missing,
     )

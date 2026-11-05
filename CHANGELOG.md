@@ -767,6 +767,26 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **A Yahoo news answer without the list is an outage, not "No news
+  found", and the outage sentence names the yfinance version** (#407).
+  Since 1.8.0 the ticker news is a GraphQL POST whose answer the library
+  reads for `data.lightyearList.main.edges` and nothing else, so the body
+  Yahoo sends for a refused query or a moved schema — HTTP 200, `errors`,
+  no `data` — came back as an empty list, the same answer as a quiet
+  week, and the renderer claimed it as coverage (the #136 shape: a future
+  endpoint change would read as weeks without news, and the
+  `input_unavailable:news_data` rule would never fire). `get_news_yfinance`
+  now reads the last wire answer back (the singleton `YfData.post` is
+  shadowed for the one call) and believes an empty list only when the
+  answer carried the list; otherwise it is the library's own
+  `YFDataException`, mapped as before to `Yahoo Finance answered without
+  data: …` and the optional sentinel. That sentence now ends with
+  `(yfinance x.y.z)`: "CURRENTLY DOWN" is yfinance's wording for any
+  unreadable answer, and a library too old for an endpoint Yahoo retired
+  reads exactly like an outage — #405 cost three days on that — so the
+  version is the first thing to check and RUNBOOK §7's news-vendor row
+  says so (and no longer calls cross-cycle counting a gap: #402 closed it).
+
 - **`get_news` answers again: yfinance's floor is 1.8.0** (#405). Yahoo
   retired the `/xhr/ncp` news endpoint around 2026-11-02 18:50Z, and every
   yfinance below 1.8.0 reads the page it now gets as `YFDataException`

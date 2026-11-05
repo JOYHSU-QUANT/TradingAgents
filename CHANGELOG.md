@@ -735,8 +735,14 @@ Breaking changes within the 0.x line are called out explicitly.
   (titles, source, link), so the fix is the pin alone: `yfinance>=1.8.0`
   in `pyproject.toml`, which `requirements.txt`'s `.` carries to the host's
   and the uniswap checkout's venvs on their next install — a floor of
-  1.4.1 would have left an installed 1.7.0 in place. Not a new input
-  variable (the source comes back), so no new run-id.
+  1.4.1 would have left an installed 1.7.0 in place. A source coming back
+  after being absent for every cycle of a run changes that run's whole
+  input regime at once, which RUNBOOK §4 gives to the run-id, not to
+  `PROMPT_VERSION`: the deploy opens `paper-BTC-11` (no migration), and
+  `ai_outputs.unavailable_inputs` turning from `news_data` to empty is the
+  split key for anyone reading across it. Follow-ups: #407 (a GraphQL
+  error body renders as "no news", and the outage text hides the library
+  version).
 
 - **A crypto asset's sentiment report no longer asks StockTwits, and Reddit
   searches the crypto rooms for it** (#395). StockTwits' public API answers

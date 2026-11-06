@@ -371,8 +371,9 @@ def _read_record(path: Path, loads: Callable[[str], _R]) -> _R:
     file; over a root of many run directories the file is what the
     operator needs.
     """
+    text = _record_text(path)
     try:
-        return loads(_record_text(path))
+        return loads(text)
     except RecordError as exc:
         raise BenchError(f"{path}: {exc}") from exc
 
@@ -694,8 +695,8 @@ def calibration_table(run_dirs: Iterable[Path]) -> list[CalibrationRow]:
     A directory holding none of what a search leaves (``arms/``,
     ``verdicts.json``, ``oracle.json``) is a world not yet searched and is
     skipped; one holding some of it but no ``verdicts.json`` is a search
-    that did not finish, refused by name rather than dropped from the
-    table without a word. A record that cannot be read, or whose verdicts
+    in progress or one that did not finish, refused by name rather than
+    dropped from the table without a word. A record that cannot be read, or whose verdicts
     are not its manifest's (another world, another pool), is refused by
     name. Rows come in the enums' own order: kind, then the null
     definition, then arm.
@@ -708,9 +709,13 @@ def calibration_table(run_dirs: Iterable[Path]) -> list[CalibrationRow]:
         if not left:
             continue
         if VERDICTS_FILENAME not in left:
+            # ``arms/`` alone is also what a search in progress leaves (the
+            # claim is made first, the records moved in last), so the
+            # sentence says so and prescribes nothing while one may be running.
             raise BenchError(
-                f"{run_dir} holds {left} but no {VERDICTS_FILENAME}: a search that did not "
-                f"finish; remove them by hand to search the world again"
+                f"{run_dir} holds {left} but no {VERDICTS_FILENAME}: a search of this world is "
+                f"running or did not finish; once no search is running, remove them by hand to "
+                f"search the world again"
             )
         manifest = own_manifest(run_dir)
         if manifest.arms.llm is not None:

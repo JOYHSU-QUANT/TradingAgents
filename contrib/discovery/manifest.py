@@ -791,11 +791,12 @@ class SearchSpace:
             # and a number on the regime as a comparison it refuses.
             categorical = spec_of(kind).unit is FeatureUnit.REGIME
             if any(isinstance(value, str) != categorical for value in grid[feature]):
-                raise ManifestError(
-                    f"{path}: {feature} is "
-                    + ("categorical, so its grid is labels" if categorical else "a number, so its grid is numbers")
-                    + f", got {list(grid[feature])!r}"
+                kind_of = (
+                    "categorical, so its grid is labels"
+                    if categorical
+                    else "a number, so its grid is numbers"
                 )
+                raise ManifestError(f"{path}: {feature} is {kind_of}, got {list(grid[feature])!r}")
         compared = {feature for template in templates for feature in template.features}
         if set(grid) != compared:
             raise ManifestError(

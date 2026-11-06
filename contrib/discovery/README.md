@@ -165,7 +165,8 @@ null 世界沒有東西可看。holdout 在任何 seed 上都不在這裡讀。
 擱置：被切短的搜尋不是預算買到的那次）。沒搜過的目錄跳過；`verdicts.json` 的 `world_id`／`pool_size`／臂集合／`manifest_digest`
 對不上旁邊 manifest（id、`len(candidates)`、`arms`、目錄的 digest）就拒絕；`oracle.json` 也一起讀：world_id／digest 要跟
 verdicts 一致、`planted` 有無要對得上世界的 kind、`pool.size` 要等於 `len(candidates)`；壞掉的紀錄拒絕句子帶檔案路徑；
-有 `arms/`／`oracle.json` 但沒 `verdicts.json` 的目錄（沒跑完的搜尋）拒絕而不是跳過；帶 `llm` 的 manifest 整個 calibrate
+有 `arms/`／`oracle.json` 但沒 `verdicts.json` 的目錄（搜尋進行中或沒跑完——`arms/` 是 search 一開始就建的 claim，紀錄最後才搬進來）
+拒絕而不是跳過，句子只說「等沒有搜尋在跑再手動移除」；帶 `llm` 的 manifest 整個 calibrate
 拒絕；不要求 `world.sqlite`（artifact 可裁掉省空間）。
 
 **兩份紀錄**：`verdicts.json`＝`{verdicts_version, world_id, pool_size, manifest_digest, results: [{arm, replicate, snapshot,

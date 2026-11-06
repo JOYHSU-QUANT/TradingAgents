@@ -461,7 +461,7 @@ def test_the_calibration_table_reads_a_world_whose_artifact_was_pruned(searched,
     run, *_ = searched
     pruned = tmp_path / run.name
     pruned.mkdir()
-    for name in (MANIFEST_FILENAME, VERDICTS_FILENAME):
+    for name in (MANIFEST_FILENAME, VERDICTS_FILENAME, ORACLE_FILENAME):
         (pruned / name).write_bytes((run / name).read_bytes())
     assert [r.searches for r in calibration_table([pruned])] == [1, 1]
     # The verbs that measure still want the artifact.
@@ -509,3 +509,76 @@ def test_the_holdout_figures_can_be_kept_off_the_console(searched):
     assert oracle.planted is not None and oracle.planted.holdout is not None
     assert any("holdout" in line for line in oracle.describe())
     assert not any("holdout" in line for line in oracle.describe(holdout=False))
+
+
+# -- the refusals the records make in the refusing direction ------------------------------------
+
+
+def test_a_staging_that_cannot_be_opened_gives_the_claim_back(fresh_run, monkeypatch):
+    def cannot(parent, prefix):
+        raise OSError("no room for a staging directory")
+
+    monkeypatch.setattr(bench, "open_staging", cannot)
+    with pytest.raises(OSError, match="no room"):
+        run_world(fresh_run)
+    # Nothing ran, so nothing claims the directory: the listing is the
+    # landing's, and a later search is not told the world was searched.
+    assert _listing(fresh_run) == LANDED
+
+
+def test_an_interrupted_ending_is_not_a_result(searched):
+    _run, verdicts, *_ = searched
+    result = verdicts.results[0]
+    document = result.to_dict()
+    document["snapshot"]["ended"] = "interrupted"
+    document["verdict"]["ended"] = "interrupted"
+    with pytest.raises(BenchError, match="an interrupted search is not a result"):
+        ArmResult.from_dict(document)
+
+
+def test_the_oracle_s_blockers_are_held_to_its_figures(searched):
+    _run, _verdicts, oracle, *_ = searched
+    assert oracle.planted is not None
+    document = oracle.to_dict()
+    # One sentence per failing predicate: fewer, more, or none at all when
+    # a predicate fails, is a record the gate did not write.
+    failing = len(oracle.planted.blockers)
+    for blockers in (["made up"] * (failing + 1), [] if failing else ["made up"]):
+        tampered = oracle.to_dict()
+        tampered["planted"]["blockers"] = blockers
+        tampered["planted"]["eligible"] = not blockers
+        tampered["planted"]["passed"] = (not blockers) and tampered["planted"]["margin"] >= 0.25
+        with pytest.raises(OracleError, match="planted.blockers: .* of the gate's predicates"):
+            Oracle.from_dict(tampered)
+    assert Oracle.from_dict(document) == oracle
+
+
+def test_the_calibration_holds_the_oracle_record_and_refuses_a_model_arm(searched, tmp_path):
+    run, verdicts, oracle, *_ = searched
+    manifest = read_manifest(run)
+    # The oracle record beside the verdicts says which manifest it was read
+    # under; one written under another (the null twin's, say) does not match.
+    twin_oracle = replace(oracle, manifest_digest="0badf00d")
+    stray = tmp_path / "stray" / run.name
+    stray.mkdir(parents=True)
+    for name in (MANIFEST_FILENAME, VERDICTS_FILENAME):
+        (stray / name).write_bytes((run / name).read_bytes())
+    (stray / ORACLE_FILENAME).write_bytes(twin_oracle.dumps().encode("utf-8"))
+    with pytest.raises(BenchError, match=f"{ORACLE_FILENAME} is for .* under manifest 0badf00d"):
+        calibration_table([stray])
+    (stray / ORACLE_FILENAME).unlink()
+    with pytest.raises(BenchError, match=f"cannot read .*{ORACLE_FILENAME}"):
+        calibration_table([stray])
+    # A manifest naming a model arm is not tallied, as it is not searched.
+    with_model = replace(manifest, arms=replace(manifest.arms, llm=example_manifest().arms.llm))
+    modelled = world_dir(tmp_path, with_model)
+    modelled.mkdir()
+    (modelled / MANIFEST_FILENAME).write_bytes(with_model.dumps().encode("utf-8"))
+    (modelled / VERDICTS_FILENAME).write_bytes((run / VERDICTS_FILENAME).read_bytes())
+    with pytest.raises(BenchError, match="names a model arm"):
+        calibration_table([modelled])
+    # And the records' digest is a digest.
+    with pytest.raises(BenchError, match="manifest_digest: a manifest digest is 8 lower-case"):
+        replace(verdicts, manifest_digest="DEADBEEF")
+    with pytest.raises(BenchError, match="no grid arm"):
+        replace(verdicts, results=verdicts.results[:1])

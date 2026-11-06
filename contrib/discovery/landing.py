@@ -53,6 +53,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .manifest import Manifest, Shares, World
+from .records import DIGEST_DIGITS
 from .upstream import (
     DAILY_INTERVAL,
     Experiment,
@@ -97,10 +98,10 @@ logger = logging.getLogger(__name__)
 ARTIFACT_FILENAME = "world.sqlite"
 MANIFEST_FILENAME = "manifest.json"
 
-# How many hex digits of the manifest's digest name the run directory. Eight
-# is the id's own width; the digest is a label for people and directories,
-# not a key anything is looked up by.
-_DIGEST_DIGITS = 8
+# How many hex digits of the manifest's digest name the run directory: the
+# records' own width (``records.DIGEST_DIGITS``), since the records written
+# beside the directory carry the same digest and are held to it.
+_DIGEST_DIGITS = DIGEST_DIGITS
 
 
 def default_root() -> Path:

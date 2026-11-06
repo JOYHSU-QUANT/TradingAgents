@@ -126,13 +126,10 @@ def classify_ending(report: SearchReport, *, exhausted: bool) -> Ended:
             )
         return Ended.BUDGET_SPENT
     if report.stopped == INTERRUPTED:
-        if exhausted:
-            # The pool raises inside ``propose`` and the loop records that
-            # sentence, not an interrupt: both at once is a contradiction.
-            raise VerdictError(
-                f"the hypothesist says its candidates ran out, but {report.experiment_id}'s "
-                f"search was interrupted; a pool that ran out stops a run with its own sentence"
-            )
+        # The flag is not consulted: a pool that ran out raises its own
+        # sentence inside ``propose``, so the one way both arrive together
+        # is an interrupt landing between the flag and the raise — and an
+        # interrupt is what it was.
         return Ended.INTERRUPTED
     return Ended.EXHAUSTED if exhausted else Ended.SEAM_FAILED
 
@@ -444,6 +441,10 @@ class ArmVerdict:
                 raise VerdictError(
                     f"verdict.first_eligible_round: round {self.first_eligible_round} of "
                     f"{self.answers} answer(s)"
+                )
+            if self.distinct_rules == 0:
+                raise VerdictError(
+                    "verdict.first_eligible_round: a round passed the gate, but no rule was tried"
                 )
         elif eligible:
             # The threshold only rises with the count (k ≥ 0) and the other

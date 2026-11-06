@@ -23,16 +23,24 @@ in ``__post_init__``.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import Any, Final, TypeVar
 
 from .upstream import SpecError, VocabEnum, require_amount, require_number
 
-__all__ = ["Reader", "RecordError", "dumps"]
+__all__ = ["DIGEST_DIGITS", "Reader", "RecordError", "dumps"]
 
 _E = TypeVar("_E", bound=VocabEnum)
 _T = TypeVar("_T")
+
+# How many hex digits of a manifest's SHA-256 name its run directory and
+# are written into the records read beside it. Eight is the opaque id's
+# own width; the digest is a label for people, directories and records,
+# not a key anything is looked up by.
+DIGEST_DIGITS: Final = 8
+_DIGEST: Final = re.compile(rf"[0-9a-f]{{{DIGEST_DIGITS}}}")
 
 
 class RecordError(RuntimeError):
@@ -137,6 +145,14 @@ class Reader:
     def flag(self, value: object, path: str) -> bool:
         if not isinstance(value, bool):
             raise self.error(f"{path}: expected true or false, got {value!r}")
+        return value
+
+    def digest(self, value: object, path: str) -> str:
+        """A manifest digest as ``landing.manifest_digest`` writes one: the fixed count of lower-case hex digits."""
+        if not isinstance(value, str) or not _DIGEST.fullmatch(value):
+            raise self.error(
+                f"{path}: a manifest digest is {DIGEST_DIGITS} lower-case hex digits, got {value!r}"
+            )
         return value
 
     def number(self, value: object, path: str) -> float:

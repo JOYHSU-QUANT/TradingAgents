@@ -126,6 +126,12 @@ def test_two_spellings_of_one_rule_are_one_candidate(pool):
         replace(first, template=-1)
     with pytest.raises(ManifestError, match="candidate.gate"):
         replace(first, gate=float("nan"))
+    # The thresholds are the spec's: a candidate claiming another number
+    # for its entry or its gate is refused.
+    with pytest.raises(ManifestError, match="candidate.entry: 0.5 is not the spec's threshold"):
+        replace(first, entry=0.5)
+    with pytest.raises(ManifestError, match="candidate.gate: 0.5 is not the spec's threshold"):
+        replace(first, gate=0.5)
 
 
 def test_a_candidate_answers_with_the_text_the_parser_reads_back_as_its_rule(pool):
@@ -145,14 +151,23 @@ def test_a_candidate_the_language_refuses_is_refused_by_the_template_that_wrote_
         enumerate_pool(_space(template, regime=("trending",), realized_vol_20=(0.002,)))
 
 
-def test_a_grid_mixing_numbers_and_labels_names_no_order():
+def test_a_label_is_a_regime_label_and_a_grid_of_labels_keeps_its_order():
+    # A string on a numeric feature is refused where the grid is read (the
+    # parser would read it as a feature's name); a regime grid of labels is
+    # walked in the order listed, and one mixing a number in names no order.
     template = Template(Side.LONG, Clause("funding_zscore_14", Op.LT), GATE, 12)
     with pytest.raises(
-        ManifestError, match=r"threshold_grid\['funding_zscore_14'\]: a grid is numbers or labels"
+        ManifestError,
+        match=r"threshold_grid\['funding_zscore_14'\]: a grid value is a number, or a regime",
     ):
-        enumerate_pool(
-            _space(template, funding_zscore_14=(-1.0, "trend_up"), realized_vol_20=(0.002,))
-        )
+        _space(template, funding_zscore_14=(-1.0, "trending"), realized_vol_20=(0.002,))
+    regime = Template(Side.LONG, Clause("regime", Op.EQ), GATE, 12)
+    pool = enumerate_pool(_space(regime, regime=("volatile", "trending"), realized_vol_20=(0.002,)))
+    assert [c.entry for c in pool.candidates] == ["volatile", "trending"]
+    with pytest.raises(
+        ManifestError, match=r"threshold_grid\['regime'\]: a grid is numbers or labels"
+    ):
+        enumerate_pool(_space(regime, regime=("trending", 1.0), realized_vol_20=(0.002,)))
 
 
 @pytest.mark.parametrize(

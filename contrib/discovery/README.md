@@ -162,7 +162,8 @@ null 世界沒有東西可看。holdout 在任何 seed 上都不在這裡讀。
 照計畫 §4.1：Null-v1 定義下的誤判率）；conditional 世界那行叫「non-empty verdicts」——找到的規則是不是埋的那條是 PR 4 評分器
 的事。`seam_failed` 的臂沒有搜尋過：不進分母，另計「n seam failure(s) not counted」印在同一行（它已 file 的判定也一併
 擱置：被切短的搜尋不是預算買到的那次）。沒搜過的目錄跳過；`verdicts.json` 的 `world_id`／`pool_size`／臂集合／`manifest_digest`
-對不上旁邊 manifest（id、`len(candidates)`、`arms`、目錄的 digest）就拒絕；不要求 `world.sqlite`（artifact 可裁掉省空間）。
+對不上旁邊 manifest（id、`len(candidates)`、`arms`、目錄的 digest）就拒絕；`oracle.json` 也一起讀、它的 world_id／digest
+要跟 verdicts 一致；帶 `llm` 的 manifest 不列入；不要求 `world.sqlite`（artifact 可裁掉省空間）。
 
 **兩份紀錄**：`verdicts.json`＝`{verdicts_version, world_id, pool_size, manifest_digest, results: [{arm, replicate, snapshot,
 verdict, holdout}]}`（`manifest_digest`＝跑的時候 run 目錄的 digest，把紀錄綁在它的條件上、不只綁 world id——同 seed 的 null

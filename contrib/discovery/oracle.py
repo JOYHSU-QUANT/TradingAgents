@@ -449,7 +449,7 @@ class Oracle:
 
     def __post_init__(self) -> None:
         _read.text(self.world_id, "world_id")
-        _read.text(self.manifest_digest, "manifest_digest")
+        _read.digest(self.manifest_digest, "manifest_digest")
         if self.planted is not None and not isinstance(self.planted, PlantedFigures):
             raise OracleError("planted: expected PlantedFigures or None")
         if not isinstance(self.pool, PoolReference):

@@ -259,7 +259,7 @@ def test_generate_refuses_a_manifest_whose_pool_cannot_be_written_before_landing
     path.write_text(text, encoding="utf-8")
     root = tmp_path / "bench"
     assert main(["generate", "--manifest", str(path), "--root", str(root)]) == 1
-    assert "a grid is numbers or labels, not both" in capsys.readouterr().err
+    assert "a grid value is a number, or a regime label for the regime" in capsys.readouterr().err
     assert not root.exists()
     # And a manifest naming a model arm: this build cannot search it, so
     # landing it would only defer the refusal past the backfill.

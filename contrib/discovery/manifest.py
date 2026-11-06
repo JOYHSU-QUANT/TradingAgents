@@ -777,12 +777,22 @@ class SearchSpace:
             feature, values = pair
             path = f"search_space.threshold_grid[{feature!r}]"
             try:
-                parse_feature_name(feature, path=path)
+                kind, _period = parse_feature_name(feature, path=path)
             except SpecError as exc:
                 raise ManifestError(str(exc)) from exc
             if feature in grid:
                 raise ManifestError(f"{path}: listed twice")
             grid[feature] = _read.distinct(values, path, _grid_value)
+            # A label is a regime label and nothing else: the parser would
+            # read a string on another feature as a feature's name, and a
+            # feature-to-feature comparison is not a threshold of the grid.
+            if kind is not FeatureKind.REGIME and any(
+                isinstance(value, str) for value in grid[feature]
+            ):
+                raise ManifestError(
+                    f"{path}: a grid value is a number, or a regime label for the regime; "
+                    f"{feature} is compared with numbers"
+                )
         compared = {feature for template in templates for feature in template.features}
         if set(grid) != compared:
             raise ManifestError(

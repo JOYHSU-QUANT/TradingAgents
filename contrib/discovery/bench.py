@@ -270,13 +270,17 @@ class Verdicts:
     def __post_init__(self) -> None:
         _read.text(self.world_id, "world_id")
         _read.whole(self.pool_size, "pool_size", minimum=1)
-        _read.text(self.manifest_digest, "manifest_digest")
+        _read.digest(self.manifest_digest, "manifest_digest")
         results = tuple(_read.sequence(self.results, "results"))
         if not results or any(not isinstance(result, ArmResult) for result in results):
             raise BenchError("results: at least one ArmResult")
         ids = [result.experiment_id for result in results]
         if len(set(ids)) != len(ids):
             raise BenchError(f"results: each arm and replicate once, got {ids}")
+        if experiment_id(Arm.GRID, 0) not in ids:
+            # Every run has the one deterministic arm (``_arms`` appends it
+            # unconditionally); the oracle is read on its store.
+            raise BenchError(f"results: no grid arm among {ids}; every search runs it")
         first = _conditions(results[0].snapshot.experiment)
         for result in results:
             experiment = result.snapshot.experiment
@@ -347,6 +351,14 @@ def read_manifest(run_dir: Path) -> Manifest:
     pruned; the verbs that measure ask for it (:func:`require_artifact`).
     """
     return Manifest.read(run_dir / MANIFEST_FILENAME)
+
+
+def _record_text(path: Path) -> str:
+    """A record file's text; one that cannot be read is refused by name."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise BenchError(f"cannot read {path}: {exc}") from exc
 
 
 def require_artifact(run_dir: Path) -> None:
@@ -492,7 +504,14 @@ def run_world(
             f"{claim} exists: another search of this world is running or ran; a search is "
             f"spent once"
         ) from exc
-    staging = open_staging(run_dir, ".search.partial-")
+    try:
+        staging = open_staging(run_dir, ".search.partial-")
+    except BaseException:
+        # No staging, nothing run: the claim goes back, or the next search
+        # would be told the world was searched.
+        with suppress(OSError):
+            claim.rmdir()
+        raise
     moved = False
     try:
         results: list[ArmResult] = []
@@ -655,11 +674,15 @@ def calibration_table(run_dirs: Iterable[Path]) -> list[CalibrationRow]:
         if not (run_dir / VERDICTS_FILENAME).is_file():
             continue
         manifest = own_manifest(run_dir)
-        try:
-            text = (run_dir / VERDICTS_FILENAME).read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            raise BenchError(f"cannot read {run_dir / VERDICTS_FILENAME}: {exc}") from exc
-        verdicts = Verdicts.loads(text)
+        if manifest.arms.llm is not None:
+            # The same refusal ``search`` makes: a tally under a manifest that
+            # names an arm this build never ran would be a calibration that
+            # silently lacks it.
+            raise BenchError(
+                f"{run_dir / MANIFEST_FILENAME} names a model arm (arms.llm), which this build "
+                f"does not run or tally"
+            )
+        verdicts = Verdicts.loads(_record_text(run_dir / VERDICTS_FILENAME))
         if verdicts.world_id != manifest.world.id:
             raise BenchError(
                 f"{run_dir / VERDICTS_FILENAME} is for {verdicts.world_id}, the manifest beside "
@@ -689,6 +712,19 @@ def calibration_table(run_dirs: Iterable[Path]) -> list[CalibrationRow]:
             raise BenchError(
                 f"{run_dir / VERDICTS_FILENAME} was written under manifest "
                 f"{verdicts.manifest_digest}, the manifest beside it is {manifest_digest(manifest)}"
+            )
+        # The oracle's record is written with the verdicts and read with
+        # them: a search leaves both or neither, and both say which world
+        # and which manifest they were read under.
+        oracle = Oracle.loads(_record_text(run_dir / ORACLE_FILENAME))
+        if (oracle.world_id, oracle.manifest_digest) != (
+            verdicts.world_id,
+            verdicts.manifest_digest,
+        ):
+            raise BenchError(
+                f"{run_dir / ORACLE_FILENAME} is for {oracle.world_id} under manifest "
+                f"{oracle.manifest_digest}; {VERDICTS_FILENAME} beside it is for "
+                f"{verdicts.world_id} under {verdicts.manifest_digest}"
             )
         for result in verdicts.results:
             counts = tally.setdefault(

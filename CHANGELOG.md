@@ -64,8 +64,9 @@ Breaking changes within the 0.x line are called out explicitly.
   treats a 4xx whose listed upstream errors are all a 408, 409, 429 or 5xx
   as worth another try, so `replay`, the direction probe and `backtest --ask`
   retry it after the usual pauses and stop by name (resumable, the message
-  naming the upstream codes) if it still fails; a 4xx with no upstream errors listed, or with one upstream that
-  refused the request itself, is still refused. On a graph walk this
+  naming the upstream codes) if it still fails; a 4xx with no upstream
+  errors listed, or with one upstream that refused the request itself, is
+  still refused. On a graph walk this
   matters more than a later `--retry-failed` could fix: the refused
   question's held book is already carried into every later question's book.
 - **A dotenv test no longer leaves its key in the process, and the uniswap

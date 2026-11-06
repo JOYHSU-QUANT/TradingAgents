@@ -120,6 +120,13 @@ def _cmd_generate(args: argparse.Namespace) -> int:
     # the landed manifest records it and is never rewritten after (the run
     # directory's name sets the field aside, so it names the same place).
     manifest = Manifest.read(Path(args.manifest))
+    if manifest.arms.llm is not None:
+        # Landing a world this build cannot search only defers the refusal
+        # to after minutes of backfill; the model arm is plan PR 5's.
+        raise ManifestError(
+            "arms.llm: this build runs the random and grid arms only (the model arm is plan "
+            "PR 5); set arms.llm to null"
+        )
     space = manifest.search_space
     manifest = replace(manifest, search_space=replace(space, pool_size=len(space.candidates)))
     root = Path(args.root) if args.root else default_root()

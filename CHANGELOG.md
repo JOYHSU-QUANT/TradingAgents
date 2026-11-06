@@ -43,7 +43,10 @@ Breaking changes within the 0.x line are called out explicitly.
   conditional worlds; an arm whose seam failed is counted beside the rate,
   not in it). `manifest_version` is 2: `search_space.candidate_order` is
   now the enum `templates_then_grid`, the one order the runner walks.
-  Follow-ups left to PR 4 are in `contrib/discovery/README.md`.
+  Both records carry the digest of the manifest they were written under
+  (the run directory's own name) and `calibrate` holds them to it, so the
+  null twin of a seed — same id, same pool — cannot be filed under the
+  other kind. The hand-over to PR 4 is in the local plan.
 
 ### Fixed
 

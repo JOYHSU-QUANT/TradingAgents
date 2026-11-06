@@ -1,4 +1,4 @@
-"""``generate``: a manifest in, a run directory out, the refusals named on stderr."""
+"""The four commands: ``generate`` lands a run directory, ``oracle``/``search``/``calibrate`` print what the bench returns; every refusal family exits with its code and sentence on stderr."""
 
 from __future__ import annotations
 
@@ -24,16 +24,21 @@ from contrib.discovery.worlds import WorldError
 from .conftest import example_manifest, small_manifest
 
 
+def _landable(manifest):
+    """The example manifest as this build lands it: no model arm (plan PR 5's)."""
+    return replace(manifest, arms=replace(manifest.arms, llm=None))
+
+
 def _manifest_file(tmp_path: Path, name: str = "world.json", **changes) -> Path:
     path = tmp_path / name
-    path.write_bytes(example_manifest(**changes).dumps().encode("utf-8"))
+    path.write_bytes(_landable(example_manifest(**changes)).dumps().encode("utf-8"))
     return path
 
 
 def test_generate_lands_the_world_and_its_null_twin_beside_it_and_refuses_a_repeat(
     tmp_path, capsys, example_world
 ):
-    manifest = example_manifest()
+    manifest = _landable(example_manifest())
     root = tmp_path / "bench"
     argv = ["generate", "--manifest", str(_manifest_file(tmp_path)), "--root", str(root)]
     assert main(argv) == 0
@@ -64,7 +69,7 @@ def test_generate_lands_the_world_and_its_null_twin_beside_it_and_refuses_a_repe
     assert main(["generate", "--manifest", str(twin), "--root", str(root)]) == 0
     assert "planted rule" not in capsys.readouterr().out
     assert sorted(p.name for p in root.iterdir()) == sorted(
-        [target.name, world_dir(root, example_manifest(kind=WorldKind.NULL_V1)).name]
+        [target.name, world_dir(root, _landable(example_manifest(kind=WorldKind.NULL_V1))).name]
     )
 
 
@@ -99,7 +104,7 @@ def test_a_landing_the_checks_refuse_exits_1_and_leaves_nothing_behind(
     monkeypatch.setattr(landing, "verify", refuse)
     root = tmp_path / "bench"
     path = tmp_path / "small.json"
-    path.write_bytes(small_manifest(count=30).dumps().encode("utf-8"))
+    path.write_bytes(_landable(small_manifest(count=30)).dumps().encode("utf-8"))
     assert main(["generate", "--manifest", str(path), "--root", str(root)]) == 1
     assert "not fit to measure on" in capsys.readouterr().err
     assert list(root.iterdir()) == []
@@ -145,7 +150,7 @@ def test_a_root_that_cannot_be_written_is_a_named_refusal(tmp_path, capsys):
     blocker = tmp_path / "bench"
     blocker.write_text("not a directory", encoding="utf-8")
     path = tmp_path / "small.json"
-    path.write_bytes(small_manifest(count=30).dumps().encode("utf-8"))
+    path.write_bytes(_landable(small_manifest(count=30)).dumps().encode("utf-8"))
     assert main(["generate", "--manifest", str(path), "--root", str(blocker)]) == 1
     assert "error:" in capsys.readouterr().err
     assert blocker.read_text(encoding="utf-8") == "not a directory"
@@ -255,6 +260,13 @@ def test_generate_refuses_a_manifest_whose_pool_cannot_be_written_before_landing
     root = tmp_path / "bench"
     assert main(["generate", "--manifest", str(path), "--root", str(root)]) == 1
     assert "a grid is numbers or labels, not both" in capsys.readouterr().err
+    assert not root.exists()
+    # And a manifest naming a model arm: this build cannot search it, so
+    # landing it would only defer the refusal past the backfill.
+    with_model = tmp_path / "model.json"
+    with_model.write_bytes(example_manifest().dumps().encode("utf-8"))
+    assert main(["generate", "--manifest", str(with_model), "--root", str(root)]) == 1
+    assert "arms.llm: this build runs the random and grid arms only" in capsys.readouterr().err
     assert not root.exists()
 
 

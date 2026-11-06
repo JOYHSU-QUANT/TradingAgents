@@ -58,7 +58,8 @@ replay 消融（PR 6）都還沒有。
   （`SearchSpace.candidates`，讀 manifest 時就枚舉、parser 拒絕就 manifest 拒絕）；定義見「三臂與判定」一節。
 - [`bench.py`](./bench.py)：`run_world(run_dir)` 把一個落地世界按計畫 §3 的順序跑到底；`preview_oracle(run_dir)`＝搜尋前的
   oracle 讀數（只准 dev seed）；`calibration_table(run_dirs)`＝誤判率表；`Verdicts`／`ArmResult`＝`verdicts.json` 的紀錄。
-- [`records.py`](./records.py)：兩份 JSON 紀錄共用的嚴格讀取器（`Reader`，各模組帶自己的 error class）；`from_dict` 管
+- [`records.py`](./records.py)：各份 JSON 紀錄（manifest、verdict 快照、`verdicts.json`、`oracle.json`）共用的嚴格讀取器
+  （`Reader`，各模組帶自己的 error class；三個紀錄錯誤共用 `RecordError` 基底、`Reader.version` 統一版本檢查）；`from_dict` 管
   鍵集合與只有原始文件才能做的檢查（版本、寫出的 id／hash 對衍生值、parser），每個欄位自己的值一律在 `__post_init__`
   驗（與 autoresearch 的 `Penalty.from_dict` 同款）；重複的 JSON key 拒絕。
 - [`worlds.py`](./worlds.py)：`generate(manifest)` 把一個 seed 變成一份 `WorldHistory`（4h bars、1d 聚合、hourly funding、
@@ -75,7 +76,8 @@ replay 消融（PR 6）都還沒有。
 
 一個世界由 manifest 決定（`world` 區塊，加上 conditional 世界才讀的 `indicator_lookback`）；`generator_version` 不是 `"1"`、
 `price.drift` 不是 0（有價格漂移的世界是另一種世界，不是這種世界的參數）、`bars.interval` 不是 4h、最後一筆 funding 戳記（加上
-autoresearch funding walk 多問的 20 天）超出 venue 時間戳上限的 manifest 直接拒絕；價格路徑衝出 float 範圍也拒絕。
+autoresearch funding walk 多問的 20 天）超出 venue 時間戳上限的 manifest 直接拒絕；價格路徑衝出 float 範圍也拒絕。帶 `arms.llm`
+的 manifest 也在 `generate` 就拒絕（這一版跑不了那個臂，落地只是把拒絕延到 `search`；LLM 臂是 PR 5）。
 
 - **亂數流**：三條（`price`／`wicks`／`funding`），都從不透明 id 派生（`random.Random(f"{id}/{name}")`），**kind 不進種子**，
   所以同 seed 的 Null 與 Conditional 共用同一組抽樣、只差埋入效果。每根 bar 的抽樣按 bar 順序消耗，短世界是長世界的
@@ -108,7 +110,8 @@ python -m contrib.discovery generate --manifest dev-seed-0.json --root data/disc
 bytes，`search_space.pool_size` 已回填；digest 把它置空算，所以目錄名與手寫的 manifest 一致）。落地先在同一個 root 下的 staging 目錄做（`.<name>.partial-*`），驗收通過、manifest 寫好才 rename 到定位；任何原因
 中途結束都把 staging 整個移除，最終路徑永遠不會出現半成品。同一份 manifest 已落地就拒絕（exit 1）。stdout 印三條 walk 的
 結果、量到的第一根可量測 bar、三段 split 與各自的 bar 數、conditional 世界還有埋的規則在決策 bar 上持倉的根數與比例
-（規則在決策 bar 上從不持倉的 conditional 世界在生成時就拒絕）；這些只給操作者看，不進任何 prompt。
+（規則在決策 bar 上從不持倉的 conditional 世界在生成時就拒絕）、池的大小（去重後／枚舉數）與 manifest 路徑；這些只給操作者看，
+不進任何 prompt。
 
 ## 三臂與判定（PR 3）
 
@@ -132,8 +135,9 @@ template 依 manifest 順序，template 內 entry 門檻升冪（外層）× gat
 **`search --run <dir>`**（`bench.run_world`，計畫 §3 步驟 2–5，順序就是重點）：
 1. 讀落地的 `manifest.json`（必須是這個目錄自己的：目錄名＝manifest 的 digest，落地後手改過 kind／penalty／budget 的
    manifest 會指到別的目錄名，拒絕）；`arms/`、`verdicts.json`、`oracle.json` 任一已存在＝這個世界搜過了，拒絕（一個世界
-   只搜一次，要重搜就手動移除）；`arms.llm` 有填＝這一版跑不了 manifest 指名的臂，拒絕（Null 校準的 manifest 把 `llm`
-   設 `null`；LLM 臂是 PR 5）。池與 `pool_size` 在讀 manifest 時就已核對（見「候選池」）。
+   只搜一次，要重搜就手動移除）；`arms.llm` 有填＝這一版跑不了 manifest 指名的臂，拒絕（`generate` 也拒絕，所以這種目錄只會
+   是別的版本落的；要重跑就從 `llm: null` 的 manifest 重新落地——就地改 manifest 會改掉 digest、對不上目錄名；LLM 臂是 PR 5）。
+   池與 `pool_size` 在讀 manifest 時就已核對（見「候選池」）。
 2. 每臂把 `world.sqlite` 複製到自己的 store（`arms/random/replicate-<search seed>.sqlite`、`arms/grid/replicate-0.sqlite`），
    第一顆先跑 `verify()`（落地時的驗收再跑一次：artifact 真的是 manifest 描述的世界）；每臂以 `experiment_for()`＋
    `ledger.create_experiment()` 開自己的 experiment（id＝`random-<seed>`／`grid-0`）——同 coin、同 split／costs／window／
@@ -156,17 +160,20 @@ null 世界沒有東西可看。holdout 在任何 seed 上都不在這裡讀。
 **`calibrate [--root <dir>]`**（`bench.calibration_table`）：走 root 下每個有 `verdicts.json` 的 run 目錄，按（world kind、
 `null_definition_version`、arm）列：搜尋次數、`final_eligible` 非空的次數、比例。null 世界那行叫「false calls」（報表措辭
 照計畫 §4.1：Null-v1 定義下的誤判率）；conditional 世界那行叫「non-empty verdicts」——找到的規則是不是埋的那條是 PR 4 評分器
-的事。`seam_failed` 的臂沒有搜尋過：不進分母，另計「n seam failure(s) not counted」印在同一行。沒搜過的目錄跳過；
-`verdicts.json` 的 `world_id`／`pool_size` 對不上旁邊 manifest（id、`len(candidates)`）就拒絕；不要求 `world.sqlite`（artifact
-可裁掉省空間）。
+的事。`seam_failed` 的臂沒有搜尋過：不進分母，另計「n seam failure(s) not counted」印在同一行（它已 file 的判定也一併
+擱置：被切短的搜尋不是預算買到的那次）。沒搜過的目錄跳過；`verdicts.json` 的 `world_id`／`pool_size`／臂集合／`manifest_digest`
+對不上旁邊 manifest（id、`len(candidates)`、`arms`、目錄的 digest）就拒絕；不要求 `world.sqlite`（artifact 可裁掉省空間）。
 
-**兩份紀錄**：`verdicts.json`＝`{verdicts_version, world_id, pool_size, results: [{arm, replicate, snapshot, verdict, holdout}]}`，
+**兩份紀錄**：`verdicts.json`＝`{verdicts_version, world_id, pool_size, manifest_digest, results: [{arm, replicate, snapshot,
+verdict, holdout}]}`（`manifest_digest`＝跑的時候 run 目錄的 digest，把紀錄綁在它的條件上、不只綁 world id——同 seed 的 null
+雙胞胎 id 相同、池相同，只差 digest），
 `verdict` 寫在 `snapshot` 旁邊給人讀，讀回時重算 `final_verdict(snapshot)` 不相等就拒絕（紀錄永遠可由快照重判，計畫 §4.5）；
 `holdout` 有值 ⇔ `selected` 非空；grid 只有 replicate 0；沒有一臂的 distinct rules 超過 `pool_size`。`oracle.json`＝
-`{oracle_version, world_id, planted: {train, validation, holdout, budget, threshold, oracle_margin, blockers[], eligible,
-margin, passed} | null, pool: {size, validation_sharpes[], best, threshold, clearing}}`：`blockers` 是 autoresearch 閘門在
-`threshold(max_trials)` 的句子（空＝過），`eligible`／`margin`／`passed`／`best`／`size` 是衍生值，讀回對不上就拒絕；三段數字
-各自要掛在自己的視窗名下；`clearing` 不能超過 validation sharpe ≥ threshold 的個數。
+`{oracle_version, world_id, manifest_digest, planted: {train, validation, holdout, budget, threshold, oracle_margin, blockers[],
+eligible, margin, passed} | null, pool: {size, validation_sharpes[], best, threshold, clearing}}`：`blockers` 是 autoresearch
+閘門在 `threshold(max_trials)` 的句子（空＝過），而且句數要等於旁邊 validation 數字失敗的判斷式數（ruined／零交易／淨報酬不正／
+sharpe 低於門檻），所以手改 blockers 寫不出「有餘裕」；`eligible`／`margin`／`passed`／`best`／`size` 是衍生值，讀回對不上就
+拒絕；三段數字各自要掛在自己的視窗名下；`clearing` 不能超過 validation sharpe ≥ threshold 的個數。
 
 **2026-11-06 範例世界（dev seed 0、400 根決策 bar）的煙霧讀數，給校準參考**：埋的規則 train net sharpe 5.31、validation −4.36
 → oracle 無餘裕；同 seed 的 Null 世界整池 16 個候選有 8 個過 `threshold(16)`＝1.69、最佳 validation sharpe 9.3，Random／Grid
@@ -220,7 +227,7 @@ python -m contrib.discovery calibrate --root data/discovery
     "threshold_grid": {"funding_zscore_14": [-2.0, -1.0], "realized_vol_20": [0.002, 0.004]},
     "candidate_order": "templates_then_grid", "pool_size": null
   },
-  "arms": {"random": {"search_seeds": [0, 1]}, "llm": {"provider": "", "model": "", "temperature": 0.0, "replicates": 1, "world_subset": ["SYN-EB3BC030"]}},
+  "arms": {"random": {"search_seeds": [0, 1]}, "llm": null},
   "scoring": {"version": "1", "recovery": {"theta_behavior": 0.8, "require_positive_holdout": true}},
   "null_definition_version": "v1"
 }
@@ -228,7 +235,8 @@ python -m contrib.discovery calibrate --root data/discovery
 
 與計畫 §5 的差異：`seed_set` 放在 `world` 裡（id 是 seed_set＋world_seed 的函數，`World.id` 是衍生屬性，讀檔時寫的 id
 跟算出來的不符就拒絕）；Grid 臂沒有自己的區塊（它只走 `search_space` 的 `candidate_order`）；`arms.llm` 可為 `null`
-（Null 校準先只跑 Random＋Grid）。`costs` 是 `CostModel.to_dict()`、`penalty` 是 `Penalty.to_dict()`，不另造型別。`planted` 在 null 世界
+（Null 校準先只跑 Random＋Grid；**這一版的 `search` 要 `llm: null`**，填了的形式 `{"provider", "model", "temperature",
+"replicates", "world_subset"}` 是 PR 5 的 LLM 臂讀的，現在填了會被 `search` 拒絕）。`costs` 是 `CostModel.to_dict()`、`penalty` 是 `Penalty.to_dict()`，不另造型別。`planted` 在 null 世界
 為 `null`；conditional 世界的 `planted.spec` 必須通過 autoresearch 的 parser，每個進場側都要有 exit（exit 規則或 `max_bars`），
 `beta` 嚴格為正、方向＝「有利於埋的那一側的部位」（short 側的埋法＝負的價格漂移）。`origin_ms` 必須 ≥ 1 且落在 UTC 午夜（同時在 4h 與
 1d 格線上）。`indicator_lookback` 的下限＝引擎的 `MIN_INDICATOR_LOOKBACK`。`pool_size` 手寫時留 `null`，`generate` 落地時
@@ -265,7 +273,8 @@ runner 遇到「有 llm 區塊但本世界不在子集」應拒絕。
 
 目錄用 **manifest 的 digest**（`search_space.pool_size` 置空後的 `sha256(manifest.dumps())` 前 8 碼——`generate` 回填池大小
 後目錄名與手寫的 manifest 一致；`search`／`oracle`／`calibrate` 都核對目錄名＝旁邊 manifest 的 digest，落地後手改過的
-manifest 會被拒）而不只用 world id 命名：id 只是 seed_set＋seed 的函數
+manifest 會被拒；`verdicts.json`／`oracle.json` 也寫入跑的時候的 digest，calibrate 一併核對，所以改 manifest 又把目錄改名
+也繞不過）而不只用 world id 命名：id 只是 seed_set＋seed 的函數
 （計畫 §1 #7），同 seed 的 null 雙胞胎、或校準時同 seed 三檔 β 的三份 manifest 共用一個 id，要能並存；目錄名不進任何
 prompt，store 裡的 coin 名仍是 id。與計畫 §2 寫的 `<world-id>/` 不同，記在計畫 §9。預設 `<bench-root>`＝
 `<repo>/data/discovery`（`.gitignore` 已排除）。

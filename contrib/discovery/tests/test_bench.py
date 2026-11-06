@@ -218,19 +218,18 @@ def test_the_verdicts_record_holds_every_arm_to_one_set_of_conditions(searched):
     experiment = second.snapshot.experiment
     other = replace(experiment, indicator_lookback=experiment.indicator_lookback + 1)
     with pytest.raises(BenchError, match="other conditions"):
-        Verdicts(
-            world_id=verdicts.world_id,
-            pool_size=verdicts.pool_size,
+        replace(
+            verdicts,
             results=(first, replace(second, snapshot=replace(second.snapshot, experiment=other))),
         )
     with pytest.raises(BenchError, match="each arm and replicate once"):
-        Verdicts(world_id=verdicts.world_id, pool_size=16, results=(first, first))
+        replace(verdicts, results=(first, first))
     with pytest.raises(BenchError, match="verdicts_version"):
         Verdicts.from_dict({**verdicts.to_dict(), "verdicts_version": 2})
     # No arm of a pool can have tried more rules than the pool holds, and
     # the grid arm is one deterministic search.
     with pytest.raises(BenchError, match="tried 2 distinct rule\\(s\\) from a pool of 1"):
-        Verdicts(world_id=verdicts.world_id, pool_size=1, results=(first, second))
+        replace(verdicts, pool_size=1)
     assert second.arm is Arm.GRID
     with pytest.raises(BenchError, match="grid-3: the grid arm is one deterministic search"):
         replace(second, replicate=3)
@@ -404,7 +403,7 @@ def test_a_holdout_figure_for_another_window_is_refused(searched):
 def test_the_calibration_table_refuses_verdicts_filed_under_another_world(
     searched, landed_world, tmp_path
 ):
-    run, *_ = searched
+    run, verdicts, *_ = searched
     artifact, _landing = landed_world
     other = land_run(tmp_path, artifact, bench_manifest(world_seed=1))
     (other / VERDICTS_FILENAME).write_bytes((run / VERDICTS_FILENAME).read_bytes())
@@ -441,6 +440,21 @@ def test_the_calibration_table_refuses_verdicts_filed_under_another_world(
     )
     with pytest.raises(BenchError, match="not the manifest this directory was landed for"):
         calibration_table([edited])
+    # The null twin: same id, same pool, another digest — the records carry
+    # the digest they were written under, so a copy lands in no row.
+    twin = land_run(tmp_path, artifact, bench_manifest(kind=WorldKind.NULL_V1))
+    (twin / VERDICTS_FILENAME).write_bytes((run / VERDICTS_FILENAME).read_bytes())
+    with pytest.raises(BenchError, match="was written under manifest"):
+        calibration_table([twin])
+    # And a record missing an arm the manifest names.
+    assert len(verdicts.results) == 2
+    trimmed = replace(verdicts, results=verdicts.results[1:])
+    short = land_run(tmp_path / "short", artifact, bench_manifest())
+    (short / VERDICTS_FILENAME).write_bytes(trimmed.dumps().encode("utf-8"))
+    with pytest.raises(
+        BenchError, match=r"holds the arms \['grid-0'\], the manifest beside it names"
+    ):
+        calibration_table([short])
 
 
 def test_the_calibration_table_reads_a_world_whose_artifact_was_pruned(searched, tmp_path):

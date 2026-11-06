@@ -7,8 +7,9 @@ did not find it" can be told apart from "it was not there to find" (plan
 that verb files what it scores as a trial, the next prompt would show the
 model the answer before it searched, and the coin's rule count — the ``n``
 of the promote threshold — would be one higher than the search earned
-(plan §1 #4). It goes through the pure function ``calibrate`` uses instead,
-:func:`~contrib.autoresearch.evaluator.evaluate_split`, which writes nothing
+(plan §1 #4). It goes through the pure function the research package's own
+``calibrate`` uses instead (not this package's ``calibrate`` command, which
+reads records), :func:`~contrib.autoresearch.evaluator.evaluate_split`, which writes nothing
 (plan §1 #5). ``tests/test_isolation.py`` holds that: the arm's store is
 byte-identical around a call here.
 
@@ -185,14 +186,29 @@ class PlantedFigures:
         _read.whole(self.budget, "planted.budget", minimum=1)
         _read.number(self.threshold, "planted.threshold")
         _read.amount(self.oracle_margin, "planted.oracle_margin")
-        object.__setattr__(
-            self,
-            "blockers",
-            tuple(
-                _read.text(sentence, f"planted.blockers[{index}]")
-                for index, sentence in enumerate(_read.sequence(self.blockers, "planted.blockers"))
-            ),
+        blockers = tuple(
+            _read.text(sentence, f"planted.blockers[{index}]")
+            for index, sentence in enumerate(_read.sequence(self.blockers, "planted.blockers"))
         )
+        # The gate's sentences are held to the figures beside them: every
+        # predicate the research package's gate reads (ruined, no trades, no
+        # gain, under the threshold; "already promoted" is structurally
+        # absent, the rule is rebuilt as measured) is on this record, and
+        # the gate writes one sentence per failing predicate. A record whose
+        # blockers say otherwise was not written by the gate.
+        validation = self.validation
+        failing = (
+            validation.ruined,
+            validation.trades == 0,
+            validation.net.total_return <= 0,
+            validation.net.sharpe < self.threshold,
+        )
+        if len(blockers) != sum(failing):
+            raise OracleError(
+                f"planted.blockers: {len(blockers)} blocker(s) written, but the validation "
+                f"figures fail {sum(failing)} of the gate's predicates"
+            )
+        object.__setattr__(self, "blockers", blockers)
 
     @property
     def eligible(self) -> bool:
@@ -419,14 +435,21 @@ def pool_reference(
 
 @dataclass(frozen=True)
 class Oracle:
-    """``oracle.json``: the planted rule's figures (``None`` on a null world) and the pool's."""
+    """``oracle.json``: the planted rule's figures (``None`` on a null world) and the pool's.
+
+    ``manifest_digest`` is the manifest the figures were read under (the
+    run directory's own name), so the record is bound to its conditions
+    and not only to a world id the null twin shares.
+    """
 
     world_id: str
+    manifest_digest: str
     planted: PlantedFigures | None
     pool: PoolReference
 
     def __post_init__(self) -> None:
         _read.text(self.world_id, "world_id")
+        _read.text(self.manifest_digest, "manifest_digest")
         if self.planted is not None and not isinstance(self.planted, PlantedFigures):
             raise OracleError("planted: expected PlantedFigures or None")
         if not isinstance(self.pool, PoolReference):
@@ -440,6 +463,7 @@ class Oracle:
         return {
             "oracle_version": ORACLE_VERSION,
             "world_id": self.world_id,
+            "manifest_digest": self.manifest_digest,
             "planted": None if self.planted is None else self.planted.to_dict(),
             "pool": self.pool.to_dict(),
         }
@@ -447,9 +471,12 @@ class Oracle:
     @classmethod
     def from_dict(cls, payload: object) -> Oracle:
         _read.version(payload, "oracle_version", ORACLE_VERSION)
-        body = _read.exact(payload, ("oracle_version", "world_id", "planted", "pool"), "oracle")
+        body = _read.exact(
+            payload, ("oracle_version", "world_id", "manifest_digest", "planted", "pool"), "oracle"
+        )
         return cls(
             world_id=body["world_id"],
+            manifest_digest=body["manifest_digest"],
             planted=None if body["planted"] is None else PlantedFigures.from_dict(body["planted"]),
             pool=PoolReference.from_dict(body["pool"]),
         )

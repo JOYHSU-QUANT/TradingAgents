@@ -124,6 +124,7 @@ def _edited(**changes):
         ({"search_space.threshold_grid.realized_vol_20": [0.002, ""]}, "realized_vol_20"),
         ({"arms.random.search_seeds": []}, "arms.random.search_seeds"),
         ({"arms.random.search_seeds": [0, 0]}, "arms.random.search_seeds"),
+        ({"arms.random.search_seeds": [2**63]}, "a search seed is at most"),
         ({"arms.llm.world_subset": ["BTC"]}, "arms.llm.world_subset"),
         ({"arms.llm.replicates": 0}, "arms.llm.replicates"),
         ({"search_space.candidate_order": ""}, "search_space.candidate_order"),

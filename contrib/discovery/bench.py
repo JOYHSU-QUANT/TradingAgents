@@ -27,11 +27,13 @@ is the point of this module:
    after every arm has searched and chosen, and written to ``oracle.json``.
 
 Everything is built in a staging directory inside the run directory and
-moved into place at the end (the two records, then ``arms/``), so a run
-that ends any other way leaves the directory as the landing left it. A
-run directory that already holds any of those is a world searched
-before: refused, since a search is spent once — remove them by hand to
-search the world again.
+moved into place at the end (the two records, then the arms' stores into
+``arms/``), so a run that ends any other way leaves the directory as the
+landing left it. ``arms/`` itself is made first, atomically, as the claim
+on the directory: two searches started on one world cannot both pass the
+guard. A run directory that already holds any of those is a world
+searched before: refused, since a search is spent once — remove them by
+hand to search the world again.
 
 The ``oracle`` command's preview (:func:`preview_oracle`) reads the planted
 rule's two measured windows on a throw-away copy BEFORE any arm has
@@ -52,6 +54,7 @@ import os
 import shutil
 import tempfile
 from collections.abc import Callable, Iterable
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from functools import cached_property
 from pathlib import Path
@@ -63,6 +66,7 @@ from .landing import (
     Landing,
     discard_staging,
     experiment_for,
+    manifest_digest,
     open_staging,
     verify,
     world_dir,
@@ -147,6 +151,13 @@ class ArmResult:
             )
         if not isinstance(self.snapshot, ArmSnapshot):
             raise BenchError("result.snapshot: expected an ArmSnapshot")
+        if self.snapshot.ended is Ended.INTERRUPTED:
+            # An interrupted arm ends the run and is never written (the
+            # module docstring); a record that says it was is not this run's.
+            raise BenchError(
+                f"{self.experiment_id}: an interrupted search is not a result; the run that was "
+                f"interrupted wrote nothing"
+            )
         if self.snapshot.experiment.experiment_id != self.experiment_id:
             raise BenchError(
                 f"{self.experiment_id}: the snapshot is of experiment "
@@ -245,16 +256,21 @@ class Verdicts:
     split, one cost model, one penalty; the budget is the manifest's and is
     not on the experiment), on the world's coin. ``pool_size`` is the pool
     the arms drew from — no arm of it can have filed more rules than that —
-    and the calibration holds it to the manifest's.
+    and ``manifest_digest`` is the manifest the arms ran under
+    (``landing.manifest_digest``: the run directory's own name), so the
+    record is bound to its conditions and not only to a world id the null
+    twin shares; the calibration holds both to the manifest beside it.
     """
 
     world_id: str
     pool_size: int
+    manifest_digest: str
     results: tuple[ArmResult, ...]
 
     def __post_init__(self) -> None:
         _read.text(self.world_id, "world_id")
         _read.whole(self.pool_size, "pool_size", minimum=1)
+        _read.text(self.manifest_digest, "manifest_digest")
         results = tuple(_read.sequence(self.results, "results"))
         if not results or any(not isinstance(result, ArmResult) for result in results):
             raise BenchError("results: at least one ArmResult")
@@ -281,14 +297,12 @@ class Verdicts:
                 )
         object.__setattr__(self, "results", results)
 
-    def describe(self) -> list[str]:
-        return [f"pool: {self.pool_size} candidate(s)", *(r.describe() for r in self.results)]
-
     def to_dict(self) -> dict[str, object]:
         return {
             "verdicts_version": VERDICTS_VERSION,
             "world_id": self.world_id,
             "pool_size": self.pool_size,
+            "manifest_digest": self.manifest_digest,
             "results": [result.to_dict() for result in self.results],
         }
 
@@ -296,11 +310,14 @@ class Verdicts:
     def from_dict(cls, payload: object) -> Verdicts:
         _read.version(payload, "verdicts_version", VERDICTS_VERSION)
         body = _read.exact(
-            payload, ("verdicts_version", "world_id", "pool_size", "results"), "verdicts"
+            payload,
+            ("verdicts_version", "world_id", "pool_size", "manifest_digest", "results"),
+            "verdicts",
         )
         return cls(
             world_id=body["world_id"],
             pool_size=body["pool_size"],
+            manifest_digest=body["manifest_digest"],
             results=tuple(
                 ArmResult.from_dict(item) for item in _read.sequence(body["results"], "results")
             ),
@@ -431,7 +448,11 @@ def run_world(
     ``oracle.json``.
     """
     say = on_line or (lambda line: None)
-    manifest = landed_manifest(run_dir)
+    # The directory's own manifest first, then "searched before", then the
+    # artifact: a searched world whose artifact was pruned is told it was
+    # searched, not sent back to `generate` (which would refuse the
+    # directory and send the operator to delete the records).
+    manifest = own_manifest(run_dir)
     for name in (ARMS_DIRNAME, VERDICTS_FILENAME, ORACLE_FILENAME):
         if (run_dir / name).exists():
             raise BenchError(
@@ -439,14 +460,19 @@ def run_world(
                 f"spent once — remove {ARMS_DIRNAME}/, {VERDICTS_FILENAME} and "
                 f"{ORACLE_FILENAME} by hand to search it again"
             )
+    require_artifact(run_dir)
     if manifest.arms.llm is not None:
         # The manifest is the run's specification, and a world is searched
         # once: a search that left out an arm the manifest names would be a
-        # calibration that silently lacks it. The model arm is plan PR 5's.
+        # calibration that silently lacks it. The model arm is plan PR 5's;
+        # `generate` refuses such a manifest too, so this is a directory
+        # landed by another build.
         raise BenchError(
             f"{run_dir / MANIFEST_FILENAME} names a model arm (arms.llm), which this build does "
-            f"not run; set arms.llm to null for the random and grid calibration"
+            f"not run; land the world again from a manifest with arms.llm null (editing this "
+            f"one in place would change its digest, which names this directory)"
         )
+    digest = manifest_digest(manifest)
     space = manifest.search_space
     pool_size = len(space.candidates)
     say(f"pool: {pool_size} candidate(s) ({space.enumerated} enumerated)")
@@ -454,7 +480,20 @@ def run_world(
     # console (plan §4.2: nothing is tuned on them).
     show_holdout = manifest.world.seed_set is SeedSet.DEV
     world_id = manifest.world.id
+    # The claim: ``arms/`` is made first, atomically, so two searches of
+    # one directory cannot both pass the guard above and leave one's
+    # records beside the other's stores. It is filled from staging at the
+    # end, and taken away again if the run ends before that.
+    claim = run_dir / ARMS_DIRNAME
+    try:
+        claim.mkdir()
+    except FileExistsError as exc:
+        raise BenchError(
+            f"{claim} exists: another search of this world is running or ran; a search is "
+            f"spent once"
+        ) from exc
     staging = open_staging(run_dir, ".search.partial-")
+    moved = False
     try:
         results: list[ArmResult] = []
         landing: Landing | None = None
@@ -493,7 +532,12 @@ def run_world(
                 result = ArmResult(arm=arm, replicate=replicate, snapshot=snapshot, holdout=holdout)
                 say(result.describe(holdout=show_holdout))
                 results.append(result)
-        verdicts = Verdicts(world_id=world_id, pool_size=pool_size, results=tuple(results))
+        verdicts = Verdicts(
+            world_id=world_id,
+            pool_size=pool_size,
+            manifest_digest=digest,
+            results=tuple(results),
+        )
         # The oracle last (plan §4.4): read on the Grid arm's store — the
         # last result's — after every arm has searched and chosen. The
         # oracle path files nothing, so the store is the arm's record still.
@@ -515,7 +559,7 @@ def run_world(
             reference = pool_reference(
                 ledger, grid, [candidate.spec for candidate in space.candidates], frame=frame
             )
-        oracle = Oracle(world_id=world_id, planted=planted, pool=reference)
+        oracle = Oracle(world_id=world_id, manifest_digest=digest, planted=planted, pool=reference)
         for line in oracle.describe(holdout=show_holdout):
             say(line)
         # Written whole in staging, then moved: the two records first, the
@@ -527,10 +571,18 @@ def run_world(
         (staging / ORACLE_FILENAME).write_bytes(oracle.dumps().encode("utf-8"))
         for name in (VERDICTS_FILENAME, ORACLE_FILENAME):
             os.replace(staging / name, run_dir / name)
-        (staging / ARMS_DIRNAME).rename(run_dir / ARMS_DIRNAME)
+        moved = True
+        for arm_dir in (staging / ARMS_DIRNAME).iterdir():
+            arm_dir.rename(claim / arm_dir.name)
     finally:
         # Emptied by the moves on success; the half-made run on any other end.
         discard_staging(staging)
+        if not moved:
+            # The claim is given back only while it is still empty: a run
+            # that failed moving its stores in has records beside them,
+            # which the guard refuses and the operator removes by hand.
+            with suppress(OSError):
+                claim.rmdir()
     return verdicts, oracle
 
 
@@ -618,6 +670,25 @@ def calibration_table(run_dirs: Iterable[Path]) -> list[CalibrationRow]:
             raise BenchError(
                 f"{run_dir / VERDICTS_FILENAME} drew from a pool of {verdicts.pool_size}, the "
                 f"manifest beside it writes one of {pool_size}"
+            )
+        # The arms the manifest names, no fewer and no others: a search
+        # that left one out is refused before it runs (``run_world``), so a
+        # record missing one was not written by this build's search.
+        expected = {(Arm.RANDOM, seed) for seed in manifest.arms.random.search_seeds}
+        expected.add((Arm.GRID, 0))
+        held = {(result.arm, result.replicate) for result in verdicts.results}
+        if held != expected:
+            raise BenchError(
+                f"{run_dir / VERDICTS_FILENAME} holds the arms "
+                f"{sorted(experiment_id(a, r) for a, r in held)}, the manifest beside it names "
+                f"{sorted(experiment_id(a, r) for a, r in expected)}"
+            )
+        # And the manifest itself: the null twin of a seed shares the id and
+        # the pool, and differs by the digest alone.
+        if verdicts.manifest_digest != manifest_digest(manifest):
+            raise BenchError(
+                f"{run_dir / VERDICTS_FILENAME} was written under manifest "
+                f"{verdicts.manifest_digest}, the manifest beside it is {manifest_digest(manifest)}"
             )
         for result in verdicts.results:
             counts = tally.setdefault(

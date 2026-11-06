@@ -345,8 +345,8 @@ class World:
     ``origin_ms`` is the instant the first warm-up bar opens, and it sits
     on a UTC midnight: a day edge is on both the 4h grid and the 1d grid,
     so the daily backdrop aggregated from the same path lines up with the
-    decision bars, and the split's first holdout cut (snapped to a
-    midnight) is on the grid too.
+    decision bars (the split is cut on the bar grid from the decision
+    span's start, ``landing.split_of``, not snapped to a midnight).
     """
 
     kind: WorldKind
@@ -656,6 +656,27 @@ class Candidate:
             object.__setattr__(self, name, _grid_value(getattr(self, name), f"candidate.{name}"))
         if not isinstance(self.spec, StrategySpec):
             raise ManifestError(f"candidate.spec: expected a StrategySpec, got {self.spec!r}")
+        # The thresholds are provenance of the spec, held to it: a pool
+        # candidate is one entry clause on one side and one gate under
+        # ``filters`` (``_candidate_document``), and the two numbers are
+        # those clauses' right-hand sides.
+        entries = self.spec.entry_long or self.spec.entry_short
+        if (
+            len(entries) != 1
+            or len(self.spec.filters) != 1
+            or (self.spec.entry_long and self.spec.entry_short)
+        ):
+            raise ManifestError(
+                "candidate.spec: a pool candidate is one entry clause on one side and one gate"
+            )
+        for name, clause in (("entry", entries[0]), ("gate", self.spec.filters[0])):
+            right = clause.right
+            written = right.value if isinstance(right, VocabEnum) else right
+            if getattr(self, name) != written:
+                raise ManifestError(
+                    f"candidate.{name}: {getattr(self, name)!r} is not the spec's threshold "
+                    f"{written!r}"
+                )
 
     @property
     def spec_hash(self) -> str:
@@ -863,6 +884,20 @@ class SearchSpace:
         )
 
 
+# A search seed names a replicate's experiment (``random-<seed>``) and the
+# ledger names an experiment in at most 64 characters: the bound keeps the
+# refusal here, with the manifest path, rather than at the ledger after the
+# world is landed. Sixty-three bits is far inside that and is a seed.
+_MAX_SEARCH_SEED: Final = 2**63 - 1
+
+
+def _search_seed(value: Any, path: str) -> int:
+    seed = _read.whole(value, path, minimum=0)
+    if seed > _MAX_SEARCH_SEED:
+        raise ManifestError(f"{path}: a search seed is at most {_MAX_SEARCH_SEED}, got {seed}")
+    return seed
+
+
 @dataclass(frozen=True)
 class RandomArm:
     """One search seed per replicate: the order the pool is drawn in, apart from the world seed."""
@@ -873,11 +908,7 @@ class RandomArm:
         object.__setattr__(
             self,
             "search_seeds",
-            _read.distinct(
-                self.search_seeds,
-                "arms.random.search_seeds",
-                lambda seed, path: _read.whole(seed, path, minimum=0),
-            ),
+            _read.distinct(self.search_seeds, "arms.random.search_seeds", _search_seed),
         )
 
     def to_dict(self) -> dict[str, object]:

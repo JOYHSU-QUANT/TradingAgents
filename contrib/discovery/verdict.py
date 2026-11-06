@@ -126,6 +126,13 @@ def classify_ending(report: SearchReport, *, exhausted: bool) -> Ended:
             )
         return Ended.BUDGET_SPENT
     if report.stopped == INTERRUPTED:
+        if exhausted:
+            # The pool raises inside ``propose`` and the loop records that
+            # sentence, not an interrupt: both at once is a contradiction.
+            raise VerdictError(
+                f"the hypothesist says its candidates ran out, but {report.experiment_id}'s "
+                f"search was interrupted; a pool that ran out stops a run with its own sentence"
+            )
         return Ended.INTERRUPTED
     return Ended.EXHAUSTED if exhausted else Ended.SEAM_FAILED
 
@@ -438,6 +445,16 @@ class ArmVerdict:
                     f"verdict.first_eligible_round: round {self.first_eligible_round} of "
                     f"{self.answers} answer(s)"
                 )
+        elif eligible:
+            # The threshold only rises with the count (k ≥ 0) and the other
+            # blockers are the trial's own, so a trial that passes at the
+            # final count passed at its own round: a non-empty final set
+            # with no passing round is a record that was not written by
+            # the search.
+            raise VerdictError(
+                f"verdict.first_eligible_round: {len(eligible)} trial(s) pass at the final "
+                f"count, so some round passed the gate"
+            )
 
     @property
     def selected(self) -> int | None:

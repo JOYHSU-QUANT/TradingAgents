@@ -43,7 +43,7 @@ What is borrowed and why:
   (plan §4.3: the research package is not taught about pools); the port an
   arm implements (``Hypothesist``) is structural and is not borrowed —
   ``search()`` takes anything that answers ``propose``;
-- the one promotion a run makes (``promote``): the trial the final verdict
+- the one promotion an arm makes (``promote``): the trial the final verdict
   selects is promoted through the research package's own verb, which is
   what reads the holdout for it, after the verdict is snapshotted;
 - the spec language (``StrategySpec``, ``Family``, ``Op``, ``Side``,
@@ -62,7 +62,8 @@ What is borrowed and why:
 - the evaluator's read path (``FeatureFrame``, ``evaluate_split`` and its
   ``SplitResult``, ``load_bundle``, ``require_clean_history``,
   ``require_measurable_tail``): the oracle scores the planted rule through
-  the pure function ``calibrate`` uses, so nothing it does is filed (plan
+  the pure function the research package's own ``calibrate`` uses, so
+  nothing it does is filed (plan
   §1 #5), and checks the holdout's tail as ``promote`` does;
 - the vocabulary the manifest validates its search space against
   (``parse_feature_name``), the declarations behind it (``FeatureKind``,

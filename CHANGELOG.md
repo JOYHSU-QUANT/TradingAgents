@@ -8,6 +8,22 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A dotenv test no longer leaves its key in the process, and the uniswap
+  judge's smoke test is opt-in** (#411). `load_dotenv_files` writes straight
+  into `os.environ`, and `monkeypatch.delenv` of a name that was absent
+  records nothing to undo, so among the tests under
+  `contrib/hyperliquid_perp/tests/` that run the real loader (eight in
+  `test_config.py`, two re-binding it in `cli/`) five left
+  `OPENROUTER_API_KEY` (a made-up value) or `HL_ENTERPRISE_MARKER` set for
+  the rest of the session; in a combined run the uniswap judge's
+  smoke test, which skipped only without a key, then made a real request
+  (401, no cost — but a real key in `.env` would have paid). The perp
+  tests' conftest now restores the environment whole after every test
+  (`mock.patch.dict(os.environ)`, autouse), and the smoke test also
+  requires `UNISWAP_JUDGE_SMOKE=1`.
+
 ### Added
 
 - **The uniswap_v3 judge probes the news input before asking, keeps a

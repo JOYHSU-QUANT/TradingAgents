@@ -41,6 +41,24 @@ def _no_real_dotenv(monkeypatch):
     monkeypatch.setattr(main, "load_dotenv_files", lambda: None)
 
 
+@pytest.fixture(autouse=True)
+def _environment_restored():
+    """The process environment put back whole after every test (#411).
+
+    The tests that run the real ``load_dotenv_files`` (``test_config.py``, and
+    the entry-point ordering tests that re-bind it) have it write straight
+    into ``os.environ``; ``monkeypatch`` undoes only what it set itself, and
+    ``delenv`` of a name that was absent records nothing — so a key the real
+    loader set outlived its test and reached a smoke test later in the same
+    session, which then made a real request. One snapshot per test, restored
+    whole, covers every such test now and later.
+    """
+    from unittest import mock
+
+    with mock.patch.dict(os.environ):
+        yield
+
+
 def _load(name: str):
     with (_FIXTURES / name).open(encoding="utf-8") as fh:
         return json.load(fh)

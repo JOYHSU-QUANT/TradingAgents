@@ -53,6 +53,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .manifest import Manifest, Shares, World
+from .records import DIGEST_DIGITS
 from .upstream import (
     DAILY_INTERVAL,
     Experiment,
@@ -79,10 +80,13 @@ __all__ = [
     "MANIFEST_FILENAME",
     "Landing",
     "default_root",
+    "discard_staging",
     "experiment_for",
     "land",
     "land_world",
+    "conditions_digest",
     "manifest_digest",
+    "open_staging",
     "split_of",
     "verify",
     "world_dir",
@@ -95,10 +99,10 @@ logger = logging.getLogger(__name__)
 ARTIFACT_FILENAME = "world.sqlite"
 MANIFEST_FILENAME = "manifest.json"
 
-# How many hex digits of the manifest's digest name the run directory. Eight
-# is the id's own width; the digest is a label for people and directories,
-# not a key anything is looked up by.
-_DIGEST_DIGITS = 8
+# How many hex digits of the manifest's digest name the run directory: the
+# records' own width (``records.DIGEST_DIGITS``), since the records written
+# beside the directory carry the same digest and are held to it.
+_DIGEST_DIGITS = DIGEST_DIGITS
 
 
 def default_root() -> Path:
@@ -115,6 +119,11 @@ def default_root() -> Path:
 def manifest_digest(manifest: Manifest) -> str:
     """The first hex digits of the SHA-256 of the manifest's identity text (``Manifest.identity``)."""
     return hashlib.sha256(manifest.identity().encode("utf-8")).hexdigest()[:_DIGEST_DIGITS]
+
+
+def conditions_digest(manifest: Manifest) -> str:
+    """The same digest of ``Manifest.conditions``: one per calibration, shared by its seeds' worlds."""
+    return hashlib.sha256(manifest.conditions().encode("utf-8")).hexdigest()[:_DIGEST_DIGITS]
 
 
 def world_dir(root: Path, manifest: Manifest) -> Path:
@@ -311,16 +320,8 @@ def land_world(root: Path, history: WorldHistory) -> tuple[Path, tuple[SeriesFet
             f"and copied — remove the directory by hand to generate it again"
         )
     root.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(dir=root, prefix=f".{target.name}.partial-"))
+    staging = open_staging(root, f".{target.name}.partial-")
     try:
-        if os.name != "nt":
-            # ``mkdtemp`` makes a private (0700) directory and the rename
-            # keeps the mode; a run directory is an ordinary one under the
-            # umask. Inside the ``try``: a mode that cannot be set is a run
-            # that did not happen, and its staging goes with it.
-            mask = os.umask(0)
-            os.umask(mask)
-            staging.chmod(0o777 & ~mask)
         with ResearchStore(staging / ARTIFACT_FILENAME) as store:
             fetched = land(history, store)
             landing = verify(store, manifest)
@@ -337,11 +338,38 @@ def land_world(root: Path, history: WorldHistory) -> tuple[Path, tuple[SeriesFet
         (staging / MANIFEST_FILENAME).write_bytes(manifest.dumps().encode("utf-8"))
         staging.rename(target)
     except BaseException:
-        try:
-            shutil.rmtree(staging)
-        except OSError:
-            # The failure propagating is the one to report; the orphan is
-            # named so it is not mistaken for a world next time.
-            logger.warning("could not remove the staging directory %s", staging, exc_info=True)
+        discard_staging(staging)
         raise
     return target, fetched, landing
+
+
+def open_staging(parent: Path, prefix: str) -> Path:
+    """A fresh staging directory under ``parent``, with the mode a run directory has.
+
+    ``mkdtemp`` makes a private (0700) directory and a rename keeps the
+    mode; a run directory is an ordinary one under the umask (POSIX only;
+    Windows has no mode to set). A mode that cannot be set is a run that
+    did not happen, and its staging goes with it.
+    """
+    staging = Path(tempfile.mkdtemp(dir=parent, prefix=prefix))
+    if os.name != "nt":
+        try:
+            mask = os.umask(0)
+            os.umask(mask)
+            staging.chmod(0o777 & ~mask)
+        except BaseException:
+            discard_staging(staging)
+            raise
+    return staging
+
+
+def discard_staging(staging: Path) -> None:
+    """Remove a staging directory a run did not finish; an orphan is named, not raised over.
+
+    The failure propagating is the one to report; the orphan is logged so
+    it is not mistaken for a run next time.
+    """
+    try:
+        shutil.rmtree(staging)
+    except OSError:
+        logger.warning("could not remove the staging directory %s", staging, exc_info=True)

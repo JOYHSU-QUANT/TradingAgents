@@ -1,13 +1,14 @@
-"""The strict readers the package's two JSON records share: one spelling, parameterised by the refusal.
+"""The strict readers the package's JSON records share: one spelling, parameterised by the refusal.
 
-The manifest (:mod:`.manifest`) and the verdict snapshot (:mod:`.verdict`)
-are both frozen values written as JSON and read back EXACTLY — every key
-present and no other, every value checked, a refusal naming the path
-inside the document. The research package's own records read theirs the
-same way, each with a private copy of these helpers; this package has two
-records and will have more (plan PR 2's world, PR 4's scores), so the
-helpers live here once, and each record module instantiates a
-:class:`Reader` with its own error class.
+The manifest (:mod:`.manifest`), the verdict snapshot (:mod:`.verdict`),
+``verdicts.json`` (:mod:`.bench`) and ``oracle.json`` (:mod:`.oracle`) are
+frozen values written as JSON and read back EXACTLY — every key present
+and no other, every value checked, a refusal naming the path inside the
+document. The research package's own records read theirs the same way,
+each with a private copy of these helpers; this package has four records
+and will have more (plan PR 4's scores), so the helpers live here once,
+and each record module instantiates a :class:`Reader` with its own error
+class — the three records' errors sharing :class:`RecordError`.
 
 The division of labour is the upstream pattern (``Penalty.from_dict``,
 ``CostModel.from_dict``): a record's ``from_dict`` reads the KEY SET and
@@ -22,16 +23,37 @@ in ``__post_init__``.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import Any, Final, TypeVar
 
 from .upstream import SpecError, VocabEnum, require_amount, require_number
 
-__all__ = ["Reader", "dumps"]
+__all__ = ["DIGEST_DIGITS", "Reader", "RecordError", "dumps"]
 
 _E = TypeVar("_E", bound=VocabEnum)
 _T = TypeVar("_T")
+
+# How many hex digits of a manifest's SHA-256 name its run directory and
+# are written into the records read beside it. Eight is the opaque id's
+# own width; the digest is a label for people, directories and records,
+# not a key anything is looked up by.
+DIGEST_DIGITS: Final = 8
+_DIGEST: Final = re.compile(rf"[0-9a-f]{{{DIGEST_DIGITS}}}")
+
+
+class RecordError(RuntimeError):
+    """A record this package writes (a verdict, an oracle, a run) cannot be read, built or continued.
+
+    The base of the record modules' refusals, so a caller — the CLI — has
+    one class to catch for "this is not a usable record" whichever file it
+    came from. A ``RuntimeError`` as the ledger's own refusals are, because
+    the refusals that matter most are about the STATE of a run rather than
+    a malformed argument. The manifest's refusal is not one of these: a
+    manifest is an operator's input, and its error is a ``ValueError`` on
+    the lane the research package's refusals use.
+    """
 
 
 def dumps(document: object) -> str:
@@ -45,6 +67,20 @@ class Reader:
 
     error: type[Exception]
     noun: str
+
+    def version(self, payload: object, key: str, expected: int) -> Mapping[str, Any]:
+        """``payload`` as a mapping whose ``key`` is exactly this build's version.
+
+        Read before the key set, so a later version's extra key is refused
+        with the sentence that names the real reason — another build wrote
+        this — rather than as an unknown key. ``type`` rather than ``==``:
+        ``True`` and ``1.0`` both equal 1.
+        """
+        body = self.mapping(payload, self.noun)
+        version = body.get(key)
+        if type(version) is not int or version != expected:
+            raise self.error(f"{key}: this build reads version {expected}, got {version!r}")
+        return body
 
     def loads(self, text: str) -> Any:
         """The text as JSON, a repeated key refused rather than resolved to the last one.
@@ -109,6 +145,14 @@ class Reader:
     def flag(self, value: object, path: str) -> bool:
         if not isinstance(value, bool):
             raise self.error(f"{path}: expected true or false, got {value!r}")
+        return value
+
+    def digest(self, value: object, path: str) -> str:
+        """A manifest digest as ``landing.manifest_digest`` writes one: the fixed count of lower-case hex digits."""
+        if not isinstance(value, str) or not _DIGEST.fullmatch(value):
+            raise self.error(
+                f"{path}: a manifest digest is {DIGEST_DIGITS} lower-case hex digits, got {value!r}"
+            )
         return value
 
     def number(self, value: object, path: str) -> float:

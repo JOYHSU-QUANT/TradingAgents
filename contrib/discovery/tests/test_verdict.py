@@ -348,6 +348,7 @@ def test_the_selection_ranks_by_validation_sharpe_then_by_trial_id():
         _record(experiment, 2, sharpe=3.0, threshold=25),
         _record(experiment, 3, sharpe=3.0, threshold=20),
         _record(experiment, 4, sharpe=1.0, threshold=35),  # below 1 + 0.25 ln 4
+        first_eligible_round=1,
     )
     verdict = final_verdict(snapshot)
     assert verdict.final_eligible == (2, 3, 1) and verdict.selected == 2
@@ -360,12 +361,36 @@ def test_the_count_the_gate_divides_by_is_the_snapshot_s_not_the_record_count():
     experiment = _experiment()
     tight = _snapshot(experiment, _record(experiment, 1, sharpe=1.2), distinct_rules=5)
     assert final_verdict(tight).final_eligible == ()  # 1.2 < 1 + 0.25 ln 5
-    loose = _snapshot(experiment, _record(experiment, 1, sharpe=1.2))
+    loose = _snapshot(experiment, _record(experiment, 1, sharpe=1.2), first_eligible_round=1)
     assert final_verdict(loose).final_eligible == (1,)  # 1.2 >= 1 + 0.25 ln 1
+    # A trial that passes at the final count passed at its own round (the
+    # threshold only rises with the count): a snapshot saying otherwise is
+    # refused when it is judged.
+    with pytest.raises(VerdictError, match="some round passed the gate"):
+        final_verdict(_snapshot(experiment, _record(experiment, 1, sharpe=1.2)))
+    # And the converse on the verdict alone: a passing round with no rule tried.
+    with pytest.raises(VerdictError, match="a round passed the gate, but no rule was tried"):
+        ArmVerdict(
+            ended=Ended.BUDGET_SPENT,
+            answers=1,
+            distinct_rules=0,
+            threshold=None,
+            final_eligible=(),
+            first_eligible_round=1,
+        )
     # Nothing filed here, but rules tried elsewhere on the coin: the
     # threshold they set is still a fact of the arm.
     empty = _snapshot(experiment, distinct_rules=3)
     assert final_verdict(empty).threshold == pytest.approx(experiment.penalty.threshold(3))
+
+
+def test_an_interrupt_wins_over_an_exhausted_flag():
+    # A pool that ran out raises inside ``propose``; the one way the flag
+    # and an interrupt arrive together is the interrupt landing between
+    # the two, and it was an interrupt.
+    report = SearchReport(experiment_id="arm", max_trials=3, rounds=(), stopped="interrupted")
+    assert classify_ending(report, exhausted=False) is Ended.INTERRUPTED
+    assert classify_ending(report, exhausted=True) is Ended.INTERRUPTED
 
 
 def test_a_snapshot_round_trips_through_its_record():

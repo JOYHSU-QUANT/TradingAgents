@@ -8,6 +8,50 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ## [Unreleased]
 
+### Added
+
+- **Discovery Lab PR 3: the Random and Grid arms, the final verdicts on
+  disk, the oracle's room over the gate, and three commands.** A landed
+  world (PR 2) can now be searched: `python -m contrib.discovery search
+  --run DIR` takes the manifest's candidate pool (written where the
+  manifest is read, `SearchSpace.candidates`: templates crossed with their
+  threshold grids, each candidate parsed by the research package's own
+  parser, repeats dropped by `spec_hash`, the gate under `filters`, one
+  fixed sizing — a manifest whose pool the language refuses lands
+  nothing), copies the artifact into one store per arm
+  (`arms/random/replicate-<seed>.sqlite`,
+  `arms/grid/replicate-0.sqlite`), runs each through autoresearch's own
+  `search()` with the manifest's budget — Random proposes a permutation
+  drawn from the world's id and the search seed, Grid the pool in its
+  numbered order, both without replacement and both raising a
+  `HypothesistError` with their own `exhausted` flag when the pool runs
+  out — snapshots and judges each arm before any promotion, promotes the
+  selected trial through autoresearch's own `promote` for its holdout
+  figure, and only then reads the oracle: the planted rule's holdout and
+  the whole pool's validation figures, on the grid arm's store, filed
+  nowhere (`bench.py`; `verdicts.json` and `oracle.json`, staged and
+  moved into place at the end; an interrupt before the records are in
+  discards the run, one after keeps the stores not yet moved; a world is
+  searched once; a manifest that names a model arm, or that is not the
+  one its directory was landed for, is refused; test-seed worlds keep
+  their holdout figures off the console). `generate` fills
+  `search_space.pool_size` into the landed manifest, which is not written
+  again. `oracle --run DIR` previews the planted rule's train and
+  validation figures against `threshold(max_trials)` on a throw-away copy
+  — development seeds only, as the protocol says — and `calibrate --root
+  DIR` tallies every searched world by kind, null definition, seed set,
+  set of conditions (a digest of the manifest with `world_seed` set aside,
+  printed on each row, so two calibrations under one root are two rows)
+  and arm (the null false-call
+  rate under the null definition named, the non-empty-verdict rate on
+  conditional worlds; an arm whose seam failed is counted beside the rate,
+  not in it). `manifest_version` is 2: `search_space.candidate_order` is
+  now the enum `templates_then_grid`, the one order the runner walks.
+  Both records carry the digest of the manifest they were written under
+  (the run directory's own name) and `calibrate` holds them to it, so the
+  null twin of a seed — same id, same pool — cannot be filed under the
+  other kind. The hand-over to PR 4 is in the local plan.
+
 ### Fixed
 
 - **A dotenv test no longer leaves its key in the process, and the uniswap

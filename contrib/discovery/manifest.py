@@ -38,9 +38,11 @@ not.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any, Final
 
 from .records import Reader, dumps
@@ -51,23 +53,32 @@ from .upstream import (
     MIN_INDICATOR_LOOKBACK,
     MS_PER_DAY,
     CostModel,
+    Family,
+    FeatureKind,
+    FeatureUnit,
     Op,
     Penalty,
+    SeriesSource,
     Side,
     SpecError,
     StrategySpec,
     VocabEnum,
     parse_feature_name,
     parse_spec,
+    spec_hash,
+    spec_of,
     spec_to_document,
     studied_interval,
 )
 
 __all__ = [
     "MANIFEST_VERSION",
+    "POOL_SIZING",
     "Arms",
     "Bars",
     "Budget",
+    "Candidate",
+    "CandidateOrder",
     "Clause",
     "Difficulty",
     "FundingModel",
@@ -85,12 +96,16 @@ __all__ = [
     "Template",
     "World",
     "WorldKind",
+    "family_for",
     "opaque_world_id",
 ]
 
 # Bumped when a key is added, removed or re-read: a manifest of another
-# version is refused by name, never read with a default filled in.
-MANIFEST_VERSION: Final = 1
+# version is refused by name, never read with a default filled in. Version 2
+# re-reads ``search_space.candidate_order`` as a :class:`CandidateOrder`
+# (plan PR 3); a version-1 manifest's free text there named no order a
+# runner could walk.
+MANIFEST_VERSION: Final = 2
 
 
 class ManifestError(ValueError):
@@ -124,6 +139,23 @@ class SeedSet(VocabEnum, noun="seed set"):
 
     DEV = "dev"
     TEST = "test"
+
+
+class CandidateOrder(VocabEnum, noun="candidate order"):
+    """The fixed order the Grid arm walks the pool in, and the order the pool is numbered in.
+
+    One order so far. ``templates_then_grid``: the templates in the order
+    the manifest lists them; inside a template, the entry threshold's grid
+    ascending as the outer loop and the gate threshold's ascending as the
+    inner one (a grid of labels keeps the order it is listed in). A
+    candidate the pool has already (same ``spec_hash``) is skipped, so the
+    pool's numbering is the order with the repeats removed
+    (:attr:`SearchSpace.candidates`). Recorded as a name rather than
+    described in prose so a manifest names an order the runner knows, or
+    is refused where it is written.
+    """
+
+    TEMPLATES_THEN_GRID = "templates_then_grid"
 
 
 # -- the opaque id ------------------------------------------------------------
@@ -314,8 +346,8 @@ class World:
     ``origin_ms`` is the instant the first warm-up bar opens, and it sits
     on a UTC midnight: a day edge is on both the 4h grid and the 1d grid,
     so the daily backdrop aggregated from the same path lines up with the
-    decision bars, and the split's first holdout cut (snapped to a
-    midnight) is on the grid too.
+    decision bars (the split is cut on the bar grid from the decision
+    span's start, ``landing.split_of``, not snapped to a midnight).
     """
 
     kind: WorldKind
@@ -576,28 +608,150 @@ def _grid_value(value: Any, path: str) -> float | str:
     return value if isinstance(value, str) and value else _read.number(value, path)
 
 
+# The sizing every candidate of the pool is written with (plan §4.3). A fixed
+# fraction, because the evaluator sizes a fixed-fraction rule as that share
+# of equity at every bar, so its net Sharpe is the rule's and not the
+# fraction's; half, so a candidate cannot be ruined by one bar of a
+# synthetic walk. A version of the pool: changing it changes every
+# candidate's ``spec_hash``, which is a new pool.
+POOL_SIZING: Final[dict[str, object]] = {"mode": "fixed_margin_fraction", "fraction": 0.5}
+
+
+def family_for(features: tuple[str, ...]) -> Family:
+    """The family label a candidate's features earn: the one structural claim the parser checks.
+
+    The parser holds ``funding_filter`` to reading a funding series and
+    ``regime_filter`` to reading the regime; ``breakout`` claims nothing it
+    checks. The label is not part of a rule's identity (``spec_hash`` is
+    blind to it), so this decides what a report calls the candidate and
+    nothing about what it trades. A hand-kept mirror of the parser's two
+    claims; a drift surfaces as the parser's refusal of every candidate,
+    never as a wrong label (an upstream ``family_of(spec)`` would retire it).
+    """
+    kinds = {parse_feature_name(name)[0] for name in features}
+    if any(spec_of(kind).source is SeriesSource.FUNDING for kind in kinds):
+        return Family.FUNDING_FILTER
+    if FeatureKind.REGIME in kinds:
+        return Family.REGIME_FILTER
+    return Family.BREAKOUT
+
+
+@dataclass(frozen=True)
+class Candidate:
+    """One rule of the pool: the template and thresholds it came from, and the spec.
+
+    Its number is its position in ``SearchSpace.candidates``; its
+    ``spec_hash`` is the spec's, derived (a pool deduplicates on it, so it
+    cannot be a field a hand-built candidate could set apart from its
+    spec).
+    """
+
+    template: int
+    entry: float | str
+    gate: float | str
+    spec: StrategySpec
+
+    def __post_init__(self) -> None:
+        _read.whole(self.template, "candidate.template", minimum=0)
+        for name in ("entry", "gate"):
+            object.__setattr__(self, name, _grid_value(getattr(self, name), f"candidate.{name}"))
+        if not isinstance(self.spec, StrategySpec):
+            raise ManifestError(f"candidate.spec: expected a StrategySpec, got {self.spec!r}")
+        # The thresholds are provenance of the spec, held to it: a pool
+        # candidate is one entry clause on one side and one gate under
+        # ``filters`` (``_candidate_document``), and the two numbers are
+        # those clauses' right-hand sides.
+        entries = self.spec.entry_long or self.spec.entry_short
+        if (
+            len(entries) != 1
+            or len(self.spec.filters) != 1
+            or (self.spec.entry_long and self.spec.entry_short)
+        ):
+            raise ManifestError(
+                "candidate.spec: a pool candidate is one entry clause on one side and one gate"
+            )
+        for name, clause in (("entry", entries[0]), ("gate", self.spec.filters[0])):
+            right = clause.right
+            written = right.value if isinstance(right, VocabEnum) else right
+            if getattr(self, name) != written:
+                raise ManifestError(
+                    f"candidate.{name}: {getattr(self, name)!r} is not the spec's threshold "
+                    f"{written!r}"
+                )
+
+    @property
+    def spec_hash(self) -> str:
+        return spec_hash(self.spec)
+
+    def answer(self) -> str:
+        """The candidate as a hypothesist answers it: the spec's document, as JSON text."""
+        return json.dumps(spec_to_document(self.spec))
+
+
+def _candidate_document(
+    template: Template, family: Family, entry: float | str, gate: float | str
+) -> dict[str, object]:
+    """A candidate as a spec document: the gate under ``filters``, ``max_bars`` the exit (plan §1 #10)."""
+    return {
+        "family": family.value,
+        "entry": {
+            template.side.value: [
+                {"left": template.entry.feature, "op": template.entry.op.value, "right": entry}
+            ]
+        },
+        "filters": [{"left": template.gate.feature, "op": template.gate.op.value, "right": gate}],
+        "exit": {"max_bars": template.max_bars},
+        "sizing": dict(POOL_SIZING),
+    }
+
+
+def _ascending(values: tuple[float | str, ...]) -> tuple[float | str, ...]:
+    """Numbers ascending; labels in the order listed (a grid is one or the other, held at the read)."""
+    if all(isinstance(value, str) for value in values):
+        return values
+    return tuple(sorted(value for value in values if not isinstance(value, str)))
+
+
 @dataclass(frozen=True)
 class SearchSpace:
     """The finite candidate pool Random and Grid draw from (plan §4.3): structures × thresholds.
 
     ``threshold_grid`` names a grid for every feature a template compares,
     and for no other — a grid nothing reads is a knob whose author believes
-    it is doing something. Which features take a label and which a number
-    is the parser's call, made when the pool is written out (plan PR 3).
-    ``pool_size`` is filled in then, after ``spec_hash`` deduplication, and
-    is ``None`` until it is — not 0, which would read as a pool enumerated
-    and found empty, a manifest that cannot be run and is refused.
+    it is doing something. Which grids take labels and which numbers is the
+    vocabulary's call — a categorical feature's grid is labels, every other
+    grid is numbers — and is held where the grid is read, before the pool
+    is written out (below). ``pool_size`` is what ``generate`` fills in from
+    that count (after
+    ``spec_hash`` deduplication) when it lands the world, and is ``None``
+    until it is — not 0, which would read as a pool enumerated and found
+    empty, a manifest that cannot be run and is refused; filled, it has
+    to be the count this build enumerates. ``candidate_order`` names the
+    order the pool is numbered in and the Grid arm walks it.
 
     The grid is held as a tuple of ``(feature, values)`` pairs, sorted by
     feature — immutable, as the rest of a frozen record is, and hashable —
     and accepted as a mapping at construction; :meth:`grid` reads it by
     name.
+
+    **The pool is written here**, as the planted rule is parsed here: every
+    template crossed with its two features' grids in ``candidate_order``,
+    each candidate written as a spec of the language (the gate under
+    ``filters``, ``max_bars`` the exit, :data:`POOL_SIZING`, the family its
+    features earn) and parsed by the research package's own parser, the
+    repeats (one ``spec_hash``) dropped. A candidate the language refuses
+    is refused with the template that wrote it, so a manifest that
+    describes a pool the benchmark cannot run is refused where it is
+    read — before a world is built — and ``pool_size``, once filled, has
+    to be the count this build enumerates. The candidates are held beside
+    the record (not a field: they are derived) as :attr:`candidates`.
     """
 
     templates: tuple[Template, ...]
     threshold_grid: tuple[tuple[str, tuple[float | str, ...]], ...]
-    candidate_order: str
+    candidate_order: CandidateOrder
     pool_size: int | None = None
+    _candidates: tuple[Candidate, ...] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         templates = tuple(_read.sequence(self.templates, "search_space.templates"))
@@ -624,12 +778,25 @@ class SearchSpace:
             feature, values = pair
             path = f"search_space.threshold_grid[{feature!r}]"
             try:
-                parse_feature_name(feature, path=path)
+                kind, _period = parse_feature_name(feature, path=path)
             except SpecError as exc:
                 raise ManifestError(str(exc)) from exc
             if feature in grid:
                 raise ManifestError(f"{path}: listed twice")
             grid[feature] = _read.distinct(values, path, _grid_value)
+            # A categorical feature's grid is labels and every other grid is
+            # numbers, decided by the vocabulary's own unit: the parser would
+            # read a string on a numeric feature as a feature's name (a
+            # feature-to-feature comparison is not a threshold of the grid),
+            # and a number on the regime as a comparison it refuses.
+            categorical = spec_of(kind).unit is FeatureUnit.REGIME
+            if any(isinstance(value, str) != categorical for value in grid[feature]):
+                kind_of = (
+                    "categorical, so its grid is labels"
+                    if categorical
+                    else "a number, so its grid is numbers"
+                )
+                raise ManifestError(f"{path}: {feature} is {kind_of}, got {list(grid[feature])!r}")
         compared = {feature for template in templates for feature in template.features}
         if set(grid) != compared:
             raise ManifestError(
@@ -638,9 +805,60 @@ class SearchSpace:
                 f"{sorted(grid)}"
             )
         object.__setattr__(self, "threshold_grid", tuple(sorted(grid.items())))
-        _read.text(self.candidate_order, "search_space.candidate_order")
+        object.__setattr__(
+            self,
+            "candidate_order",
+            _read.enum(CandidateOrder, self.candidate_order, "search_space.candidate_order"),
+        )
+        object.__setattr__(self, "_candidates", self._enumerate())
         if self.pool_size is not None:
             _read.whole(self.pool_size, "search_space.pool_size", minimum=1)
+            if self.pool_size != len(self._candidates):
+                raise ManifestError(
+                    f"search_space.pool_size: {self.pool_size} is filled in, and this build "
+                    f"enumerates {len(self._candidates)} candidate(s); the pool is not the one "
+                    f"the manifest was filled with"
+                )
+
+    def _enumerate(self) -> tuple[Candidate, ...]:
+        """The pool in ``candidate_order`` (the class docstring), each rule once."""
+        candidates: list[Candidate] = []
+        seen: set[str] = set()
+        for number, template in enumerate(self.templates):
+            path = f"search_space.templates[{number}]"
+            family = family_for(template.features)
+            entries = _ascending(self.grid(template.entry.feature))
+            gates = _ascending(self.grid(template.gate.feature))
+            for entry in entries:
+                for gate in gates:
+                    try:
+                        spec = parse_spec(_candidate_document(template, family, entry, gate))
+                    except SpecError as exc:
+                        raise ManifestError(
+                            f"{path} with {template.entry.feature} {template.entry.op.value} "
+                            f"{entry!r} and gate {template.gate.feature} "
+                            f"{template.gate.op.value} {gate!r} is not a rule of the language: "
+                            f"{exc}"
+                        ) from exc
+                    digest = spec_hash(spec)
+                    if digest in seen:
+                        continue
+                    seen.add(digest)
+                    candidates.append(Candidate(template=number, entry=entry, gate=gate, spec=spec))
+        return tuple(candidates)
+
+    @property
+    def candidates(self) -> tuple[Candidate, ...]:
+        """The pool: numbered by position, in ``candidate_order``, each rule once."""
+        return self._candidates
+
+    @property
+    def enumerated(self) -> int:
+        """How many the templates and grids spell before the repeats are dropped."""
+        return sum(
+            len(self.grid(t.entry.feature)) * len(self.grid(t.gate.feature))
+            for t in self.templates
+        )
 
     def grid(self, feature: str) -> tuple[float | str, ...]:
         """The thresholds for ``feature``; the templates name only features that have one."""
@@ -650,7 +868,7 @@ class SearchSpace:
         return {
             "templates": [template.to_dict() for template in self.templates],
             "threshold_grid": {feature: list(values) for feature, values in self.threshold_grid},
-            "candidate_order": self.candidate_order,
+            "candidate_order": self.candidate_order.value,
             "pool_size": self.pool_size,
         }
 
@@ -674,6 +892,20 @@ class SearchSpace:
         )
 
 
+# A search seed names a replicate's experiment (``random-<seed>``) and the
+# ledger names an experiment in at most 64 characters: the bound keeps the
+# refusal here, with the manifest path, rather than at the ledger after the
+# world is landed. Sixty-three bits is far inside that and is a seed.
+_MAX_SEARCH_SEED: Final = 2**63 - 1
+
+
+def _search_seed(value: Any, path: str) -> int:
+    seed = _read.whole(value, path, minimum=0)
+    if seed > _MAX_SEARCH_SEED:
+        raise ManifestError(f"{path}: a search seed is at most {_MAX_SEARCH_SEED}, got {seed}")
+    return seed
+
+
 @dataclass(frozen=True)
 class RandomArm:
     """One search seed per replicate: the order the pool is drawn in, apart from the world seed."""
@@ -684,11 +916,7 @@ class RandomArm:
         object.__setattr__(
             self,
             "search_seeds",
-            _read.distinct(
-                self.search_seeds,
-                "arms.random.search_seeds",
-                lambda seed, path: _read.whole(seed, path, minimum=0),
-            ),
+            _read.distinct(self.search_seeds, "arms.random.search_seeds", _search_seed),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -891,15 +1119,7 @@ class Manifest:
 
     @classmethod
     def from_dict(cls, payload: object) -> Manifest:
-        # The version first, before the key set: a later version's extra key
-        # would otherwise be refused as an unknown key, and the sentence that
-        # names the real reason — another build wrote this — never reached.
-        version = _read.mapping(payload, "manifest").get("manifest_version")
-        # ``type`` rather than ``==``: ``True`` and ``1.0`` both equal 1.
-        if type(version) is not int or version != MANIFEST_VERSION:
-            raise ManifestError(
-                f"manifest_version: this build reads version {MANIFEST_VERSION}, got {version!r}"
-            )
+        _read.version(payload, "manifest_version", MANIFEST_VERSION)
         body = _read.exact(
             payload,
             (
@@ -941,13 +1161,42 @@ class Manifest:
     def identity(self) -> str:
         """The canonical text with the one fill-in field set aside: what a landed run is keyed by.
 
-        ``search_space.pool_size`` is written back once the pool is
-        enumerated (plan PR 3), after the world has landed; everything else
-        is fixed before. A digest of this text names the run directory, so
-        the filled manifest names the directory it was filled in.
+        ``search_space.pool_size`` is filled in by ``generate`` before the
+        world lands, and is the one field a landed manifest carries that a
+        hand-written one may leave null; everything else is fixed before.
+        A digest of this text names the run directory, so the filled and
+        the unfilled manifest name the same place.
         """
         return replace(self, search_space=replace(self.search_space, pool_size=None)).dumps()
+
+    def conditions(self) -> str:
+        """The identity text with ``world_seed`` set aside too: what the worlds of one calibration share.
+
+        Two manifests that differ only in ``world_seed`` (and so in the id
+        derived from it) give the same text; any other difference — kind,
+        planted rule or β, seed set, bars, penalty, budget, costs, pool —
+        gives another. The calibration table keys its rows by a digest of
+        it, so one rate is never taken over two sets of conditions.
+        """
+        document = json.loads(self.identity())
+        document["world"]["world_seed"] = None
+        document["world"]["id"] = None
+        return dumps(document)
 
     @classmethod
     def loads(cls, text: str) -> Manifest:
         return cls.from_dict(_read.loads(text))
+
+    @classmethod
+    def read(cls, path: Path) -> Manifest:
+        """The manifest at ``path``; a file that cannot be read is a refusal naming it."""
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ManifestError(f"cannot read the manifest at {path}: {exc}") from exc
+        try:
+            return cls.loads(text)
+        except ManifestError as exc:
+            # The reader names the path inside the document; over a root of
+            # many run directories the file is what the operator needs.
+            raise ManifestError(f"{path}: {exc}") from exc

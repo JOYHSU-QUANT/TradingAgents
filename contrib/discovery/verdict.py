@@ -42,7 +42,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .records import Reader, dumps
+from .records import Reader, RecordError, dumps
 from .upstream import (
     INTERRUPTED,
     CostModel,
@@ -55,6 +55,7 @@ from .upstream import (
     StrategySpec,
     Trial,
     TrialStatus,
+    Verdict,
     VocabEnum,
     parse_spec,
     promotion_verdict,
@@ -70,19 +71,19 @@ __all__ = [
     "VerdictError",
     "classify_ending",
     "final_verdict",
+    "gate_at",
     "snapshot_arm",
 ]
 
 
-class VerdictError(RuntimeError):
+class VerdictError(RecordError):
     """The snapshot cannot be taken, read or built, and the sentence says why.
 
-    A ``RuntimeError`` as the ledger's own refusals are, because the
-    refusals that matter most are about the STATE of a run — a promotion
-    made before the snapshot, a report for another experiment, a record on
-    disk a later build cannot read. The records' own gates raise it too, so
-    a caller has one class to catch for "this is not a usable snapshot"
-    whether the record came from a file or was built in code.
+    The refusals that matter most are about the STATE of a run — a
+    promotion made before the snapshot, a report for another experiment, a
+    record on disk a later build cannot read. The records' own gates raise
+    it too, so a caller has one class to catch for "this is not a usable
+    snapshot" whether the record came from a file or was built in code.
     """
 
 
@@ -125,6 +126,10 @@ def classify_ending(report: SearchReport, *, exhausted: bool) -> Ended:
             )
         return Ended.BUDGET_SPENT
     if report.stopped == INTERRUPTED:
+        # The flag is not consulted: a pool that ran out raises its own
+        # sentence inside ``propose``, so the one way both arrive together
+        # is an interrupt landing between the flag and the raise — and an
+        # interrupt is what it was.
         return Ended.INTERRUPTED
     return Ended.EXHAUSTED if exhausted else Ended.SEAM_FAILED
 
@@ -437,6 +442,20 @@ class ArmVerdict:
                     f"verdict.first_eligible_round: round {self.first_eligible_round} of "
                     f"{self.answers} answer(s)"
                 )
+            if self.distinct_rules == 0:
+                raise VerdictError(
+                    "verdict.first_eligible_round: a round passed the gate, but no rule was tried"
+                )
+        elif eligible:
+            # The threshold only rises with the count (k ≥ 0) and the other
+            # blockers are the trial's own, so a trial that passes at the
+            # final count passed at its own round: a non-empty final set
+            # with no passing round is a record that was not written by
+            # the search.
+            raise VerdictError(
+                f"verdict.first_eligible_round: {len(eligible)} trial(s) pass at the final "
+                f"count, so some round passed the gate"
+            )
 
     @property
     def selected(self) -> int | None:
@@ -459,6 +478,58 @@ class ArmVerdict:
             "first_eligible_round": self.first_eligible_round,
         }
 
+    @classmethod
+    def from_dict(cls, payload: object) -> ArmVerdict:
+        body = _read.exact(
+            payload,
+            (
+                "ended",
+                "answers",
+                "distinct_rules",
+                "threshold",
+                "final_eligible",
+                "selected",
+                "first_eligible_round",
+            ),
+            "verdict",
+        )
+        verdict = cls(
+            ended=body["ended"],
+            answers=body["answers"],
+            distinct_rules=body["distinct_rules"],
+            threshold=body["threshold"],
+            final_eligible=body["final_eligible"],
+            first_eligible_round=body["first_eligible_round"],
+        )
+        # Written for the reader of the file; checked against the list it is
+        # the head of, so a record cannot name a selection its order did not make.
+        if body["selected"] != verdict.selected:
+            raise VerdictError(
+                f"verdict.selected: {body['selected']!r} is not the first of final_eligible "
+                f"{list(verdict.final_eligible)!r}"
+            )
+        return verdict
+
+
+def gate_at(
+    experiment: Experiment,
+    spec: StrategySpec,
+    train: SegmentMetrics,
+    validation: SegmentMetrics,
+    count: int,
+    *,
+    trial_id: int = 0,
+) -> Verdict:
+    """The research package's gate applied to a rule rebuilt as a measured trial, at ``count`` rules tried.
+
+    The one way this package re-applies the gate — the final verdict and
+    the oracle's two readings (plan §4.4) all come through here, so what
+    "eligible at n" means cannot drift between them. ``trial_id`` is for
+    the blockers' sentences only.
+    """
+    record = TrialRecord(trial_id=trial_id, spec=spec, train=train, validation=validation)
+    return promotion_verdict(experiment, record.as_measured(experiment.experiment_id), count)
+
 
 def final_verdict(snapshot: ArmSnapshot) -> ArmVerdict:
     """The research package's gate, re-applied to every trial at the FINAL rule count.
@@ -473,8 +544,13 @@ def final_verdict(snapshot: ArmSnapshot) -> ArmVerdict:
     passing = [
         record
         for record in snapshot.trials
-        if promotion_verdict(
-            experiment, record.as_measured(experiment.experiment_id), count
+        if gate_at(
+            experiment,
+            record.spec,
+            record.train,
+            record.validation,
+            count,
+            trial_id=record.trial_id,
         ).eligible
     ]
     ranked = sorted(passing, key=lambda record: (-record.validation.net.sharpe, record.trial_id))

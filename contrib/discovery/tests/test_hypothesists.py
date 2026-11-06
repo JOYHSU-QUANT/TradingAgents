@@ -152,22 +152,23 @@ def test_a_candidate_the_language_refuses_is_refused_by_the_template_that_wrote_
 
 
 def test_a_label_is_a_regime_label_and_a_grid_of_labels_keeps_its_order():
-    # A string on a numeric feature is refused where the grid is read (the
-    # parser would read it as a feature's name); a regime grid of labels is
-    # walked in the order listed, and one mixing a number in names no order.
+    # Which grids take labels is the vocabulary's call, held where the grid
+    # is read: a string on a numeric feature (the parser would read it as a
+    # feature's name) and a number on the categorical regime are both
+    # refused there; a regime grid of labels is walked in the order listed.
     template = Template(Side.LONG, Clause("funding_zscore_14", Op.LT), GATE, 12)
     with pytest.raises(
         ManifestError,
-        match=r"threshold_grid\['funding_zscore_14'\]: a grid value is a number, or a regime",
+        match=r"threshold_grid\['funding_zscore_14'\]: funding_zscore_14 is a number, so its grid",
     ):
         _space(template, funding_zscore_14=(-1.0, "trending"), realized_vol_20=(0.002,))
     regime = Template(Side.LONG, Clause("regime", Op.EQ), GATE, 12)
     pool = enumerate_pool(_space(regime, regime=("volatile", "trending"), realized_vol_20=(0.002,)))
     assert [c.entry for c in pool.candidates] == ["volatile", "trending"]
     with pytest.raises(
-        ManifestError, match=r"threshold_grid\['regime'\]: a grid is numbers or labels"
+        ManifestError, match=r"threshold_grid\['regime'\]: regime is categorical, so its grid"
     ):
-        enumerate_pool(_space(regime, regime=("trending", 1.0), realized_vol_20=(0.002,)))
+        _space(regime, regime=("trending", 1.0), realized_vol_20=(0.002,))
 
 
 @pytest.mark.parametrize(

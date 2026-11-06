@@ -55,6 +55,7 @@ from .upstream import (
     CostModel,
     Family,
     FeatureKind,
+    FeatureUnit,
     Op,
     Penalty,
     SeriesSource,
@@ -704,13 +705,11 @@ def _candidate_document(
     }
 
 
-def _ascending(values: tuple[float | str, ...], path: str) -> tuple[float | str, ...]:
-    """Numbers ascending; labels in the order listed. A grid mixing the two names no order."""
+def _ascending(values: tuple[float | str, ...]) -> tuple[float | str, ...]:
+    """Numbers ascending; labels in the order listed (a grid is one or the other, held at the read)."""
     if all(isinstance(value, str) for value in values):
         return values
-    if all(not isinstance(value, str) for value in values):
-        return tuple(sorted(values))
-    raise ManifestError(f"{path}: a grid is numbers or labels, not both, got {list(values)!r}")
+    return tuple(sorted(value for value in values if not isinstance(value, str)))
 
 
 @dataclass(frozen=True)
@@ -719,9 +718,11 @@ class SearchSpace:
 
     ``threshold_grid`` names a grid for every feature a template compares,
     and for no other — a grid nothing reads is a knob whose author believes
-    it is doing something. Which features take a label and which a number
-    is the parser's call, made when the pool is written out (below).
-    ``pool_size`` is what ``generate`` fills in from that count (after
+    it is doing something. Which grids take labels and which numbers is the
+    vocabulary's call — a categorical feature's grid is labels, every other
+    grid is numbers — and is held where the grid is read, before the pool
+    is written out (below). ``pool_size`` is what ``generate`` fills in from
+    that count (after
     ``spec_hash`` deduplication) when it lands the world, and is ``None``
     until it is — not 0, which would read as a pool enumerated and found
     empty, a manifest that cannot be run and is refused; filled, it has
@@ -783,15 +784,17 @@ class SearchSpace:
             if feature in grid:
                 raise ManifestError(f"{path}: listed twice")
             grid[feature] = _read.distinct(values, path, _grid_value)
-            # A label is a regime label and nothing else: the parser would
-            # read a string on another feature as a feature's name, and a
-            # feature-to-feature comparison is not a threshold of the grid.
-            if kind is not FeatureKind.REGIME and any(
-                isinstance(value, str) for value in grid[feature]
-            ):
+            # A categorical feature's grid is labels and every other grid is
+            # numbers, decided by the vocabulary's own unit: the parser would
+            # read a string on a numeric feature as a feature's name (a
+            # feature-to-feature comparison is not a threshold of the grid),
+            # and a number on the regime as a comparison it refuses.
+            categorical = spec_of(kind).unit is FeatureUnit.REGIME
+            if any(isinstance(value, str) != categorical for value in grid[feature]):
                 raise ManifestError(
-                    f"{path}: a grid value is a number, or a regime label for the regime; "
-                    f"{feature} is compared with numbers"
+                    f"{path}: {feature} is "
+                    + ("categorical, so its grid is labels" if categorical else "a number, so its grid is numbers")
+                    + f", got {list(grid[feature])!r}"
                 )
         compared = {feature for template in templates for feature in template.features}
         if set(grid) != compared:
@@ -823,14 +826,8 @@ class SearchSpace:
         for number, template in enumerate(self.templates):
             path = f"search_space.templates[{number}]"
             family = family_for(template.features)
-            entries = _ascending(
-                self.grid(template.entry.feature),
-                f"search_space.threshold_grid[{template.entry.feature!r}]",
-            )
-            gates = _ascending(
-                self.grid(template.gate.feature),
-                f"search_space.threshold_grid[{template.gate.feature!r}]",
-            )
+            entries = _ascending(self.grid(template.entry.feature))
+            gates = _ascending(self.grid(template.gate.feature))
             for entry in entries:
                 for gate in gates:
                     try:

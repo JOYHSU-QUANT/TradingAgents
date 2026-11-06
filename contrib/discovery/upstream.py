@@ -67,8 +67,10 @@ What is borrowed and why:
   §1 #5), and checks the holdout's tail as ``promote`` does;
 - the vocabulary the manifest validates its search space against
   (``parse_feature_name``), the declarations behind it (``FeatureKind``,
-  ``SeriesSource``, ``spec_of``: which series a candidate's features read
-  decides the family label it is written under) and its numeric guards
+  ``FeatureUnit``, ``SeriesSource``, ``spec_of``: which series a
+  candidate's features read decides the family label it is written under,
+  and which features are categorical decides which grids take labels) and
+  its numeric guards
   (``require_number``, ``require_amount``, ``SpecError``), the studied
   intervals (``studied_interval``) and the day the world grid is laid on
   (``MS_PER_DAY``);
@@ -163,6 +165,7 @@ from contrib.autoresearch.store import ResearchStore, StoreError, default_db_pat
 from contrib.autoresearch.upstream import Candle, FundingPoint, interval_to_ms
 from contrib.autoresearch.vocabulary import (
     FeatureKind,
+    FeatureUnit,
     SeriesSource,
     SpecError,
     parse_feature_name,
@@ -193,6 +196,7 @@ __all__ = [
     "FeatureError",
     "FeatureFrame",
     "FeatureKind",
+    "FeatureUnit",
     "FundingPoint",
     "HypothesistError",
     "Ledger",
@@ -315,6 +319,7 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.upstream", "FundingPoint"),
     ("contrib.autoresearch.upstream", "interval_to_ms"),
     ("contrib.autoresearch.vocabulary", "FeatureKind"),
+    ("contrib.autoresearch.vocabulary", "FeatureUnit"),
     ("contrib.autoresearch.vocabulary", "SeriesSource"),
     ("contrib.autoresearch.vocabulary", "SpecError"),
     ("contrib.autoresearch.vocabulary", "parse_feature_name"),

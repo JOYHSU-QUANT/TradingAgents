@@ -123,8 +123,9 @@ template 的 hold、sizing 固定（`POOL_SIZING`＝`fixed_margin_fraction 0.5`�
 候選都過 autoresearch 自己的 parser，被拒就是 manifest 被拒（句子點名 template 與 parser 的理由；`generate` 在建世界前就先枚舉
 一次，所以池寫不出來的 manifest 什麼都不會落地）。`spec_hash` 相同的候選只留
 第一個，去重後按 `candidate_order` 從 0 編號，`pool_size`＝去重後的數。`candidate_order` 只有一種：`templates_then_grid`＝
-template 依 manifest 順序，template 內 entry 門檻升冪（外層）× gate 門檻升冪（內層）；標籤格線照列出的順序；數字與標籤混在
-一條格線上拒絕。v1 池的兩個限制：exit 只有 `max_bars`、每個候選都有 gate。
+template 依 manifest 順序，template 內 entry 門檻升冪（外層）× gate 門檻升冪（內層）；標籤格線照列出的順序。哪條格線用標籤由
+詞彙表的 unit 決定：categorical 的特徵（目前只有 `regime`）格線是標籤、其餘是數字，讀 manifest 時就擋（數值特徵給字串會被
+parser 讀成 feature 名、regime 給數字會被 parser 拒絕，兩種都在格線這層先說清楚）。v1 池的兩個限制：exit 只有 `max_bars`、每個候選都有 gate。
 
 **兩臂**：都實作 autoresearch 的 `Hypothesist` port、都**不讀 prompt**（餵給它們的已試規則與失敗回饋被忽略——Random 是零資訊
 基準、Grid 是固定順序基準，LLM 臂贏過它們的部分才是「讀回饋」買到的）。`RandomHypothesist(pool, world_id=…, search_seed=…)`
@@ -162,8 +163,10 @@ null 世界沒有東西可看。holdout 在任何 seed 上都不在這裡讀。
 照計畫 §4.1：Null-v1 定義下的誤判率）；conditional 世界那行叫「non-empty verdicts」——找到的規則是不是埋的那條是 PR 4 評分器
 的事。`seam_failed` 的臂沒有搜尋過：不進分母，另計「n seam failure(s) not counted」印在同一行（它已 file 的判定也一併
 擱置：被切短的搜尋不是預算買到的那次）。沒搜過的目錄跳過；`verdicts.json` 的 `world_id`／`pool_size`／臂集合／`manifest_digest`
-對不上旁邊 manifest（id、`len(candidates)`、`arms`、目錄的 digest）就拒絕；`oracle.json` 也一起讀、它的 world_id／digest
-要跟 verdicts 一致；帶 `llm` 的 manifest 不列入；不要求 `world.sqlite`（artifact 可裁掉省空間）。
+對不上旁邊 manifest（id、`len(candidates)`、`arms`、目錄的 digest）就拒絕；`oracle.json` 也一起讀：world_id／digest 要跟
+verdicts 一致、`planted` 有無要對得上世界的 kind、`pool.size` 要等於 `len(candidates)`；壞掉的紀錄拒絕句子帶檔案路徑；
+有 `arms/`／`oracle.json` 但沒 `verdicts.json` 的目錄（沒跑完的搜尋）拒絕而不是跳過；帶 `llm` 的 manifest 整個 calibrate
+拒絕；不要求 `world.sqlite`（artifact 可裁掉省空間）。
 
 **兩份紀錄**：`verdicts.json`＝`{verdicts_version, world_id, pool_size, manifest_digest, results: [{arm, replicate, snapshot,
 verdict, holdout}]}`（`manifest_digest`＝跑的時候 run 目錄的 digest，把紀錄綁在它的條件上、不只綁 world id——同 seed 的 null

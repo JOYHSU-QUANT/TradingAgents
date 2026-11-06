@@ -547,7 +547,9 @@ def test_the_oracle_s_blockers_are_held_to_its_figures(searched):
         tampered = oracle.to_dict()
         tampered["planted"]["blockers"] = blockers
         tampered["planted"]["eligible"] = not blockers
-        tampered["planted"]["passed"] = (not blockers) and tampered["planted"]["margin"] >= 0.25
+        tampered["planted"]["passed"] = (not blockers) and tampered["planted"][
+            "margin"
+        ] >= tampered["planted"]["oracle_margin"]
         with pytest.raises(OracleError, match="planted.blockers: .* of the gate's predicates"):
             Oracle.from_dict(tampered)
     assert Oracle.from_dict(document) == oracle
@@ -582,3 +584,31 @@ def test_the_calibration_holds_the_oracle_record_and_refuses_a_model_arm(searche
         replace(verdicts, manifest_digest="DEADBEEF")
     with pytest.raises(BenchError, match="no grid arm"):
         replace(verdicts, results=verdicts.results[:1])
+    # The oracle record describes this world: a planted figure exactly
+    # when the world plants something, and the manifest's pool.
+    for change, fragment in (
+        ({"planted": None}, "has no planted figure for a conditional-v1 world"),
+        (
+            {
+                "pool": replace(
+                    oracle.pool, validation_sharpes=oracle.pool.validation_sharpes[:15], clearing=0
+                )
+            },
+            "scores a pool of 15",
+        ),
+    ):
+        described = replace(oracle, **change)
+        (stray / ORACLE_FILENAME).write_bytes(described.dumps().encode("utf-8"))
+        with pytest.raises(BenchError, match=fragment):
+            calibration_table([stray])
+    # A malformed record names its file, not only its path inside the document.
+    (stray / ORACLE_FILENAME).write_bytes(b"{}")
+    with pytest.raises(BenchError, match=rf"{ORACLE_FILENAME}: oracle_version"):
+        calibration_table([stray])
+    # And a search that did not finish is refused, not dropped from the table.
+    unfinished = tmp_path / "unfinished" / run.name
+    unfinished.mkdir(parents=True)
+    (unfinished / MANIFEST_FILENAME).write_bytes((run / MANIFEST_FILENAME).read_bytes())
+    (unfinished / ARMS_DIRNAME).mkdir()
+    with pytest.raises(BenchError, match=rf"holds \['{ARMS_DIRNAME}'\] but no {VERDICTS_FILENAME}"):
+        calibration_table([unfinished])

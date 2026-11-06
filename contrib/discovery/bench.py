@@ -50,14 +50,15 @@ selected rule IS the planted one is the scorer's question, plan PR 4).
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import tempfile
 from collections.abc import Callable, Iterable
-from contextlib import suppress
 from dataclasses import dataclass, replace
 from functools import cached_property
 from pathlib import Path
+from typing import TypeVar
 
 from .hypothesists import GridHypothesist, PoolHypothesist, RandomHypothesist, enumerate_pool
 from .landing import (
@@ -111,6 +112,8 @@ class BenchError(RecordError):
 
 
 _read = Reader(BenchError, "verdicts")
+_R = TypeVar("_R")
+logger = logging.getLogger(__name__)
 
 
 class Arm(VocabEnum, noun="arm"):
@@ -361,6 +364,32 @@ def _record_text(path: Path) -> str:
         raise BenchError(f"cannot read {path}: {exc}") from exc
 
 
+def _read_record(path: Path, loads: Callable[[str], _R]) -> _R:
+    """A record read from its file, every refusal — unreadable or malformed — naming the file.
+
+    The records' own readers name the path inside the document, not the
+    file; over a root of many run directories the file is what the
+    operator needs.
+    """
+    try:
+        return loads(_record_text(path))
+    except RecordError as exc:
+        raise BenchError(f"{path}: {exc}") from exc
+
+
+def _give_back(claim: Path) -> None:
+    """Remove the empty ``arms/`` claim of a run that did not finish; a leftover is named, not raised over."""
+    try:
+        claim.rmdir()
+    except OSError:
+        logger.warning(
+            "could not remove the claim %s; the next search of this world will be refused until "
+            "it is removed by hand",
+            claim,
+            exc_info=True,
+        )
+
+
 def require_artifact(run_dir: Path) -> None:
     """Refuse a run directory an arm could not copy its world from."""
     if not (run_dir / ARTIFACT_FILENAME).is_file():
@@ -509,8 +538,7 @@ def run_world(
     except BaseException:
         # No staging, nothing run: the claim goes back, or the next search
         # would be told the world was searched.
-        with suppress(OSError):
-            claim.rmdir()
+        _give_back(claim)
         raise
     moved = False
     try:
@@ -600,8 +628,7 @@ def run_world(
             # The claim is given back only while it is still empty: a run
             # that failed moving its stores in has records beside them,
             # which the guard refuses and the operator removes by hand.
-            with suppress(OSError):
-                claim.rmdir()
+            _give_back(claim)
     return verdicts, oracle
 
 
@@ -664,15 +691,27 @@ class CalibrationRow:
 def calibration_table(run_dirs: Iterable[Path]) -> list[CalibrationRow]:
     """Every searched run directory's verdicts, tallied by world kind and arm (the module docstring).
 
-    A directory without ``verdicts.json`` is a world not yet searched and is
-    skipped; one whose records cannot be read, or whose verdicts are not
-    its manifest's (another world, another pool), is refused by name. Rows
-    come in the enums' own order: kind, then the null definition, then arm.
+    A directory holding none of what a search leaves (``arms/``,
+    ``verdicts.json``, ``oracle.json``) is a world not yet searched and is
+    skipped; one holding some of it but no ``verdicts.json`` is a search
+    that did not finish, refused by name rather than dropped from the
+    table without a word. A record that cannot be read, or whose verdicts
+    are not its manifest's (another world, another pool), is refused by
+    name. Rows come in the enums' own order: kind, then the null
+    definition, then arm.
     """
     tally: dict[tuple[WorldKind, str, Arm], list[int]] = {}
     for run_dir in run_dirs:
-        if not (run_dir / VERDICTS_FILENAME).is_file():
+        left = [
+            n for n in (ARMS_DIRNAME, VERDICTS_FILENAME, ORACLE_FILENAME) if (run_dir / n).exists()
+        ]
+        if not left:
             continue
+        if VERDICTS_FILENAME not in left:
+            raise BenchError(
+                f"{run_dir} holds {left} but no {VERDICTS_FILENAME}: a search that did not "
+                f"finish; remove them by hand to search the world again"
+            )
         manifest = own_manifest(run_dir)
         if manifest.arms.llm is not None:
             # The same refusal ``search`` makes: a tally under a manifest that
@@ -682,7 +721,7 @@ def calibration_table(run_dirs: Iterable[Path]) -> list[CalibrationRow]:
                 f"{run_dir / MANIFEST_FILENAME} names a model arm (arms.llm), which this build "
                 f"does not run or tally"
             )
-        verdicts = Verdicts.loads(_record_text(run_dir / VERDICTS_FILENAME))
+        verdicts = _read_record(run_dir / VERDICTS_FILENAME, Verdicts.loads)
         if verdicts.world_id != manifest.world.id:
             raise BenchError(
                 f"{run_dir / VERDICTS_FILENAME} is for {verdicts.world_id}, the manifest beside "
@@ -716,7 +755,7 @@ def calibration_table(run_dirs: Iterable[Path]) -> list[CalibrationRow]:
         # The oracle's record is written with the verdicts and read with
         # them: a search leaves both or neither, and both say which world
         # and which manifest they were read under.
-        oracle = Oracle.loads(_record_text(run_dir / ORACLE_FILENAME))
+        oracle = _read_record(run_dir / ORACLE_FILENAME, Oracle.loads)
         if (oracle.world_id, oracle.manifest_digest) != (
             verdicts.world_id,
             verdicts.manifest_digest,
@@ -725,6 +764,19 @@ def calibration_table(run_dirs: Iterable[Path]) -> list[CalibrationRow]:
                 f"{run_dir / ORACLE_FILENAME} is for {oracle.world_id} under manifest "
                 f"{oracle.manifest_digest}; {VERDICTS_FILENAME} beside it is for "
                 f"{verdicts.world_id} under {verdicts.manifest_digest}"
+            )
+        # And it describes this world: a planted figure exactly when the
+        # world plants something, and the pool the manifest writes.
+        if (oracle.planted is None) != (manifest.world.planted is None):
+            raise BenchError(
+                f"{run_dir / ORACLE_FILENAME} "
+                + ("has no planted figure" if oracle.planted is None else "has a planted figure")
+                + f" for a {manifest.world.kind.value} world"
+            )
+        if oracle.pool.size != pool_size:
+            raise BenchError(
+                f"{run_dir / ORACLE_FILENAME} scores a pool of {oracle.pool.size}, the manifest "
+                f"beside it writes one of {pool_size}"
             )
         for result in verdicts.results:
             counts = tally.setdefault(

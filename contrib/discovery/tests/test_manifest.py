@@ -119,7 +119,7 @@ def _edited(**changes):
         ({"search_space.pool_size": 5}, "5 is filled in, and this build enumerates 16"),
         (
             {"search_space.threshold_grid.realized_vol_20": [0.002, "high"]},
-            "a regime label for the regime",
+            "realized_vol_20 is a number, so its grid is numbers",
         ),
         ({"manifest_version": True}, "manifest_version"),
         ({"manifest_version": 1.0}, "manifest_version"),

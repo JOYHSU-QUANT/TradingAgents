@@ -87,7 +87,7 @@ def _edited(**changes):
 @pytest.mark.parametrize(
     ("changes", "fragment"),
     [
-        ({"manifest_version": 2}, "manifest_version"),
+        ({"manifest_version": 1}, "manifest_version"),
         ({"world.kind": "null-v1"}, "null-v1 world plants nothing"),
         ({"world.planted": None}, "conditional-v1 world carries a planted rule"),
         ({"world.id": "SYN-NULL0001"}, "world.id"),
@@ -116,9 +116,11 @@ def _edited(**changes):
         ({"costs.taker_fee_rate": -1}, "CostModel.taker_fee_rate"),
         ({"penalty.k": -1}, "Penalty.k"),
         ({"search_space.pool_size": 0}, "search_space.pool_size"),
+        ({"search_space.pool_size": 5}, "5 is filled in, and this build enumerates 16"),
+        ({"search_space.threshold_grid.realized_vol_20": [0.002, "high"]}, "numbers or labels"),
         ({"manifest_version": True}, "manifest_version"),
         ({"manifest_version": 1.0}, "manifest_version"),
-        ({"manifest_version": 2, "later": 1}, "this build reads version 1, got 2"),
+        ({"manifest_version": 3, "later": 1}, "this build reads version 2, got 3"),
         ({"search_space.threshold_grid.realized_vol_20": [0.002, ""]}, "realized_vol_20"),
         ({"arms.random.search_seeds": []}, "arms.random.search_seeds"),
         ({"arms.random.search_seeds": [0, 0]}, "arms.random.search_seeds"),
@@ -211,9 +213,9 @@ def test_the_grid_is_immutable_and_read_by_feature():
         replace(space, threshold_grid=doubled)
     with pytest.raises(ManifestError, match=r"a \(feature, values\) pair"):
         replace(space, threshold_grid=(("realized_vol_20",),))
-    # Enumerated and filled in: the size is a count of at least one.
-    filled = Manifest.from_dict(_edited(**{"search_space.pool_size": 7}))
-    assert filled.search_space.pool_size == 7
+    # Enumerated and filled in: the size is the count this build enumerates.
+    filled = Manifest.from_dict(_edited(**{"search_space.pool_size": 16}))
+    assert filled.search_space.pool_size == 16 == len(filled.search_space.candidates)
 
 
 # -- the opaque id -----------------------------------------------------------------

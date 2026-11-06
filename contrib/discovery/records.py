@@ -28,10 +28,23 @@ from typing import Any, TypeVar
 
 from .upstream import SpecError, VocabEnum, require_amount, require_number
 
-__all__ = ["Reader", "dumps"]
+__all__ = ["Reader", "RecordError", "dumps"]
 
 _E = TypeVar("_E", bound=VocabEnum)
 _T = TypeVar("_T")
+
+
+class RecordError(RuntimeError):
+    """A record this package writes (a verdict, an oracle, a run) cannot be read, built or continued.
+
+    The base of the record modules' refusals, so a caller — the CLI — has
+    one class to catch for "this is not a usable record" whichever file it
+    came from. A ``RuntimeError`` as the ledger's own refusals are, because
+    the refusals that matter most are about the STATE of a run rather than
+    a malformed argument. The manifest's refusal is not one of these: a
+    manifest is an operator's input, and its error is a ``ValueError`` on
+    the lane the research package's refusals use.
+    """
 
 
 def dumps(document: object) -> str:
@@ -45,6 +58,20 @@ class Reader:
 
     error: type[Exception]
     noun: str
+
+    def version(self, payload: object, key: str, expected: int) -> Mapping[str, Any]:
+        """``payload`` as a mapping whose ``key`` is exactly this build's version.
+
+        Read before the key set, so a later version's extra key is refused
+        with the sentence that names the real reason — another build wrote
+        this — rather than as an unknown key. ``type`` rather than ``==``:
+        ``True`` and ``1.0`` both equal 1.
+        """
+        body = self.mapping(payload, self.noun)
+        version = body.get(key)
+        if type(version) is not int or version != expected:
+            raise self.error(f"{key}: this build reads version {expected}, got {version!r}")
+        return body
 
     def loads(self, text: str) -> Any:
         """The text as JSON, a repeated key refused rather than resolved to the last one.

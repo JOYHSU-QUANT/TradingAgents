@@ -1,0 +1,565 @@
+"""One world run to its verdicts (plan §3 steps 2–5, PR 3): the arms, the final verdicts, the oracle, on disk.
+
+A landed run directory (``manifest.json`` and ``world.sqlite``, plan PR 2)
+is taken through the protocol in the order the plan fixes, and the order
+is the point of this module:
+
+1. **The pool** is the manifest's (``SearchSpace.candidates``, written and
+   checked where the manifest is read), and its size is what ``pool_size``
+   is filled in with — the one field a landed manifest is written back
+   with (the run directory's name set it aside).
+2. **Every arm copies the artifact** into its own store and opens its own
+   experiment from the manifest's conditions (:func:`~contrib.discovery.landing.experiment_for`):
+   one coin, one sqlite per arm, the same split, costs, window and
+   penalty for all (plan §1 #6; held by :class:`Verdicts`). The first copy
+   is verified as the landing was: the artifact an arm measures on is the
+   world the manifest describes.
+3. **Each arm searches** through the research package's own ``search()``
+   with its hypothesist and the manifest's budget, and is judged at once:
+   the snapshot before any promotion, the pure verdict, and — when the
+   verdict selected a trial — that one promotion, through the research
+   package's own ``promote``, which is what reads the holdout for it
+   (:class:`ArmResult`). An interrupted arm ends the run: a replicate is
+   one search, not resumed (plan §9 (14)), and nothing is written.
+4. **The oracle last** (plan §4.4): the planted rule's holdout figure and
+   the whole pool's validation figures are read off the Grid arm's store
+   after every arm has searched and chosen, and written to ``oracle.json``.
+
+Everything is built in a staging directory inside the run directory and
+moved into place at the end (the two records and the filled manifest,
+then ``arms/``), so a run that ends any other way leaves the directory
+as the landing left it. A run directory that already holds any of those
+is a world searched before: refused, since a search is spent once —
+remove them by hand to search the world again.
+
+The ``oracle`` command's preview (:func:`preview_oracle`) reads the planted
+rule's two measured windows on a throw-away copy BEFORE any arm has
+searched, which the protocol allows on development seeds only (plan §4.2,
+§4.4): on a test seed the world is run, and the oracle's figures come out
+of ``search`` with everyone else's.
+
+:func:`calibration_table` is the null calibration's reading (plan §4.3,
+PR 3's acceptance): over a root of run directories, how often each arm's
+final verdict was non-empty, by the kind of world — a false call on a
+null world, a candidate recovery on a conditional one (whether the
+selected rule IS the planted one is the scorer's question, plan PR 4).
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import tempfile
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, replace
+from functools import cached_property
+from pathlib import Path
+
+from .hypothesists import GridHypothesist, PoolHypothesist, RandomHypothesist, enumerate_pool
+from .landing import (
+    ARTIFACT_FILENAME,
+    MANIFEST_FILENAME,
+    Landing,
+    discard_staging,
+    experiment_for,
+    open_staging,
+    verify,
+)
+from .manifest import Manifest, SeedSet, WorldKind
+from .oracle import Oracle, PlantedFigures, frame_for, planted_figures, pool_reference
+from .records import Reader, RecordError, dumps
+from .upstream import Experiment, Ledger, ResearchStore, SegmentMetrics, VocabEnum, promote, search
+from .verdict import ArmSnapshot, ArmVerdict, Ended, final_verdict, snapshot_arm
+
+__all__ = [
+    "ARMS_DIRNAME",
+    "ORACLE_FILENAME",
+    "VERDICTS_FILENAME",
+    "VERDICTS_VERSION",
+    "Arm",
+    "ArmResult",
+    "BenchError",
+    "CalibrationRow",
+    "Verdicts",
+    "calibration_table",
+    "experiment_id",
+    "preview_oracle",
+    "read_manifest",
+    "require_artifact",
+    "run_world",
+    "store_path",
+]
+
+# What a searched run directory holds beside the landing (plan §2's layout).
+ARMS_DIRNAME = "arms"
+VERDICTS_FILENAME = "verdicts.json"
+ORACLE_FILENAME = "oracle.json"
+
+# Bumped when a key of ``verdicts.json`` is added, removed or re-read.
+VERDICTS_VERSION = 1
+
+
+class BenchError(RecordError):
+    """The run cannot be made, read or continued as asked, and the sentence says why."""
+
+
+_read = Reader(BenchError, "verdicts")
+
+
+class Arm(VocabEnum, noun="arm"):
+    """The arms this runner runs. The model arm is plan PR 5's."""
+
+    RANDOM = "random"
+    GRID = "grid"
+
+
+# -- the records ------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ArmResult:
+    """One arm's one search: its snapshot, the selected trial's holdout, and the verdict read off it.
+
+    ``replicate`` numbers the search: the search seed for the Random arm,
+    0 for the Grid arm (deterministic, one search). ``holdout`` is the
+    selected trial's figure from its promotion, present exactly when a
+    trial was selected. The verdict is DERIVED — :func:`final_verdict` of
+    the snapshot, as the package's other records derive what a reader
+    could recompute — written beside the snapshot for the reader of the
+    file and checked against it on the read, so the file can always be
+    re-judged from the snapshot alone (plan §4.5).
+    """
+
+    arm: Arm
+    replicate: int
+    snapshot: ArmSnapshot
+    holdout: SegmentMetrics | None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "arm", _read.enum(Arm, self.arm, "result.arm"))
+        _read.whole(self.replicate, "result.replicate", minimum=0)
+        if not isinstance(self.snapshot, ArmSnapshot):
+            raise BenchError("result.snapshot: expected an ArmSnapshot")
+        if self.snapshot.experiment.experiment_id != self.experiment_id:
+            raise BenchError(
+                f"{self.experiment_id}: the snapshot is of experiment "
+                f"{self.snapshot.experiment.experiment_id}"
+            )
+        if (self.holdout is None) == (self.verdict.selected is not None):
+            raise BenchError(
+                f"{self.experiment_id}: a result carries a holdout figure if and only if a "
+                f"trial was selected"
+            )
+        if self.holdout is not None:
+            if not isinstance(self.holdout, SegmentMetrics):
+                raise BenchError(f"{self.experiment_id}: holdout is not a SegmentMetrics")
+            if self.holdout.segment != self.snapshot.experiment.split.holdout:
+                raise BenchError(
+                    f"{self.experiment_id}: the holdout figure is for {self.holdout.segment}, "
+                    f"not the experiment's {self.snapshot.experiment.split.holdout}"
+                )
+
+    @cached_property
+    def verdict(self) -> ArmVerdict:
+        """The research package's gate at the final count: a pure function of the snapshot."""
+        return final_verdict(self.snapshot)
+
+    @property
+    def experiment_id(self) -> str:
+        return experiment_id(self.arm, self.replicate)
+
+    def describe(self) -> str:
+        verdict = self.verdict
+        line = (
+            f"{self.experiment_id}: ended {verdict.ended.value}, {verdict.answers} answer(s), "
+            f"{verdict.distinct_rules} distinct rule(s)"
+        )
+        if verdict.threshold is not None:
+            line += f", threshold {verdict.threshold:.4f}"
+        if verdict.selected is None:
+            return line + "; final eligible: none"
+        assert self.holdout is not None  # the constructor's rule
+        return (
+            line + f"; final eligible: {list(verdict.final_eligible)}, selected trial "
+            f"#{verdict.selected} (holdout net sharpe {self.holdout.net.sharpe:.4f})"
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "arm": self.arm.value,
+            "replicate": self.replicate,
+            "snapshot": self.snapshot.to_dict(),
+            "verdict": self.verdict.to_dict(),
+            "holdout": None if self.holdout is None else self.holdout.to_dict(),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> ArmResult:
+        body = _read.exact(
+            payload, ("arm", "replicate", "snapshot", "verdict", "holdout"), "result"
+        )
+        try:
+            holdout = None if body["holdout"] is None else SegmentMetrics.from_dict(body["holdout"])
+        except ValueError as exc:
+            raise BenchError(f"result.holdout: {exc}") from exc
+        result = cls(
+            arm=body["arm"],
+            replicate=body["replicate"],
+            snapshot=ArmSnapshot.from_dict(body["snapshot"]),
+            holdout=holdout,
+        )
+        # Written for the reader of the file; checked against the snapshot
+        # it is derived from, so a record cannot say what its snapshot does not.
+        if ArmVerdict.from_dict(body["verdict"]) != result.verdict:
+            raise BenchError(
+                f"{result.experiment_id}: the record's verdict is not the verdict of its snapshot"
+            )
+        return result
+
+
+def experiment_id(arm: Arm, replicate: int) -> str:
+    return f"{arm.value}-{replicate}"
+
+
+def store_path(run_dir: Path, arm: Arm, replicate: int) -> Path:
+    """``<run>/arms/<arm>/replicate-<k>.sqlite`` (plan §2's layout)."""
+    return run_dir / ARMS_DIRNAME / arm.value / f"replicate-{replicate}.sqlite"
+
+
+@dataclass(frozen=True)
+class Verdicts:
+    """``verdicts.json``: every arm's result on one world, under the one set of conditions.
+
+    The conditions are held here: every result's experiment is the same
+    experiment but for its name and stamp (plan §4.3: three arms, one
+    split, one cost model, one penalty, one budget), on the world's coin.
+    ``pool_size`` is the pool the arms drew from, as the filled manifest
+    records it; the calibration holds the two equal.
+    """
+
+    world_id: str
+    pool_size: int
+    results: tuple[ArmResult, ...]
+
+    def __post_init__(self) -> None:
+        _read.text(self.world_id, "world_id")
+        _read.whole(self.pool_size, "pool_size", minimum=1)
+        results = tuple(_read.sequence(self.results, "results"))
+        if not results or any(not isinstance(result, ArmResult) for result in results):
+            raise BenchError("results: at least one ArmResult")
+        ids = [result.experiment_id for result in results]
+        if len(set(ids)) != len(ids):
+            raise BenchError(f"results: each arm and replicate once, got {ids}")
+        first = _conditions(results[0].snapshot.experiment)
+        for result in results:
+            experiment = result.snapshot.experiment
+            if experiment.coin != self.world_id:
+                raise BenchError(
+                    f"{result.experiment_id} ran on coin {experiment.coin}, not {self.world_id}"
+                )
+            if _conditions(experiment) != first:
+                raise BenchError(
+                    f"{result.experiment_id} ran under other conditions than "
+                    f"{results[0].experiment_id}; every arm of a world shares one split, cost "
+                    f"model, window and penalty"
+                )
+        object.__setattr__(self, "results", results)
+
+    def describe(self) -> list[str]:
+        return [f"pool: {self.pool_size} candidate(s)", *(r.describe() for r in self.results)]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "verdicts_version": VERDICTS_VERSION,
+            "world_id": self.world_id,
+            "pool_size": self.pool_size,
+            "results": [result.to_dict() for result in self.results],
+        }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> Verdicts:
+        _read.version(payload, "verdicts_version", VERDICTS_VERSION)
+        body = _read.exact(
+            payload, ("verdicts_version", "world_id", "pool_size", "results"), "verdicts"
+        )
+        return cls(
+            world_id=body["world_id"],
+            pool_size=body["pool_size"],
+            results=tuple(
+                ArmResult.from_dict(item) for item in _read.sequence(body["results"], "results")
+            ),
+        )
+
+    def dumps(self) -> str:
+        return dumps(self.to_dict())
+
+    @classmethod
+    def loads(cls, text: str) -> Verdicts:
+        return cls.from_dict(_read.loads(text))
+
+
+def _conditions(experiment: Experiment) -> Experiment:
+    """The experiment with its name and stamp set aside: what every arm of a world shares."""
+    return replace(experiment, experiment_id="arm", created_at="")
+
+
+# -- the run directory ------------------------------------------------------------------------
+
+
+def read_manifest(run_dir: Path) -> Manifest:
+    """The landed manifest of ``run_dir``; a directory without one is not a run.
+
+    The artifact is not demanded here: the calibration table reads the
+    manifest and the verdicts of worlds whose artifacts may have been
+    pruned; the verbs that measure ask for it (:func:`require_artifact`).
+    """
+    return Manifest.read(run_dir / MANIFEST_FILENAME)
+
+
+def require_artifact(run_dir: Path) -> None:
+    """Refuse a run directory an arm could not copy its world from."""
+    if not (run_dir / ARTIFACT_FILENAME).is_file():
+        raise BenchError(f"{run_dir} holds no {ARTIFACT_FILENAME}; generate the world first")
+
+
+def _copy_artifact(run_dir: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(run_dir / ARTIFACT_FILENAME, target)
+
+
+# -- the oracle's preview --------------------------------------------------------------------------
+
+
+def preview_oracle(run_dir: Path) -> PlantedFigures:
+    """The planted rule's train and validation figures before any search, on a throw-away copy.
+
+    Development seeds only: this is the reading that sizes ``beta`` (plan
+    §4.1), and the protocol keeps it off test seeds, where nothing is
+    tuned and the oracle's figures are written by ``search`` after the arms
+    (plan §4.2, §4.4). The holdout is not read here on any seed.
+    """
+    manifest = read_manifest(run_dir)
+    require_artifact(run_dir)
+    world = manifest.world
+    if world.planted is None:
+        raise BenchError(
+            f"{world.id} is a {world.kind.value} world: nothing is planted, so there is no "
+            f"oracle to preview; run `search` for the pool's reference figures"
+        )
+    if world.seed_set is not SeedSet.DEV:
+        raise BenchError(
+            f"{world.id} is a {world.seed_set.value} seed: the oracle's figures are read before "
+            f"a search on development seeds only, to size beta; on a test seed run `search`, "
+            f"which writes them to {ORACLE_FILENAME} after the arms"
+        )
+    with tempfile.TemporaryDirectory(dir=run_dir, prefix=".oracle.partial-") as scratch:
+        path = Path(scratch) / "oracle.sqlite"
+        _copy_artifact(run_dir, path)
+        with ResearchStore(path) as store:
+            ledger = Ledger(store)
+            experiment = ledger.create_experiment(experiment_for(manifest, "oracle"))
+            return planted_figures(
+                ledger, experiment, world.planted, manifest.budget, holdout=False
+            )
+
+
+# -- the run -----------------------------------------------------------------------------------
+
+
+def _arms(manifest: Manifest) -> list[tuple[Arm, int, PoolHypothesist]]:
+    """The arms to run, in order: the Random replicates as the manifest lists their seeds, then Grid."""
+    pool = enumerate_pool(manifest.search_space)
+    world_id = manifest.world.id
+    arms: list[tuple[Arm, int, PoolHypothesist]] = [
+        (Arm.RANDOM, seed, RandomHypothesist(pool, world_id=world_id, search_seed=seed))
+        for seed in manifest.arms.random.search_seeds
+    ]
+    arms.append((Arm.GRID, 0, GridHypothesist(pool)))
+    return arms
+
+
+def run_world(
+    run_dir: Path, *, on_line: Callable[[str], None] | None = None
+) -> tuple[Verdicts, Oracle]:
+    """Take a landed run directory through the arms, the verdicts and the oracle (the module docstring).
+
+    ``on_line`` is told each arm's report as it completes, so a long run
+    reports as it goes. Returns what was written to ``verdicts.json`` and
+    ``oracle.json``.
+    """
+    say = on_line or (lambda line: None)
+    manifest = read_manifest(run_dir)
+    require_artifact(run_dir)
+    for name in (ARMS_DIRNAME, VERDICTS_FILENAME, ORACLE_FILENAME):
+        if (run_dir / name).exists():
+            raise BenchError(
+                f"{run_dir / name} exists: this world was searched before, and a search is "
+                f"spent once — remove {ARMS_DIRNAME}/, {VERDICTS_FILENAME} and "
+                f"{ORACLE_FILENAME} by hand to search it again"
+            )
+    space = manifest.search_space
+    pool_size = len(space.candidates)
+    say(f"pool: {pool_size} candidate(s) ({space.enumerated} enumerated)")
+    if manifest.arms.llm is not None:
+        say("the model arm is not run by this build (plan PR 5); random and grid only")
+    world_id = manifest.world.id
+    staging = open_staging(run_dir, ".search.partial-")
+    try:
+        results: list[ArmResult] = []
+        landing: Landing | None = None
+        for arm, replicate, hypothesist in _arms(manifest):
+            path = store_path(staging, arm, replicate)
+            _copy_artifact(run_dir, path)
+            with ResearchStore(path) as store:
+                ledger = Ledger(store)
+                if landing is None:
+                    # Once, on the first copy, before any experiment: the
+                    # artifact an arm will measure on is the world the
+                    # manifest describes.
+                    landing = verify(store, manifest)
+                experiment = ledger.create_experiment(
+                    experiment_for(manifest, experiment_id(arm, replicate))
+                )
+                report = search(
+                    ledger,
+                    experiment,
+                    hypothesist,
+                    model=arm.value,
+                    max_trials=manifest.budget.max_trials,
+                )
+                for line in report.describe():
+                    say(line)
+                snapshot = snapshot_arm(ledger, experiment, report, exhausted=hypothesist.exhausted)
+                if snapshot.ended is Ended.INTERRUPTED:
+                    # A replicate is one search and is not resumed (plan §9
+                    # (14)): the run ends here, its staging goes with it, and
+                    # the caller keeps the interrupt's own exit code.
+                    raise KeyboardInterrupt
+                selected = final_verdict(snapshot).selected
+                holdout = (
+                    None if selected is None else promote(ledger, experiment, selected).holdout
+                )
+                result = ArmResult(arm=arm, replicate=replicate, snapshot=snapshot, holdout=holdout)
+                say(result.describe())
+                results.append(result)
+        verdicts = Verdicts(world_id=world_id, pool_size=pool_size, results=tuple(results))
+        # The oracle last (plan §4.4): read on the Grid arm's store — the
+        # last result's — after every arm has searched and chosen. The
+        # oracle path files nothing, so the store is the arm's record still.
+        grid = results[-1].snapshot.experiment
+        with ResearchStore(store_path(staging, Arm.GRID, 0)) as store:
+            ledger = Ledger(store)
+            # One frame for both readers: a bar's features never read past
+            # it, so the holdout-bound frame measures the two earlier
+            # windows exactly as a narrower one would (``promote`` re-measures
+            # train and validation on it for that reason).
+            frame = frame_for(ledger, grid, holdout=True)
+            planted = (
+                None
+                if manifest.world.planted is None
+                else planted_figures(
+                    ledger, grid, manifest.world.planted, manifest.budget, holdout=True, frame=frame
+                )
+            )
+            reference = pool_reference(
+                ledger, grid, [candidate.spec for candidate in space.candidates], frame=frame
+            )
+        oracle = Oracle(world_id=world_id, planted=planted, pool=reference)
+        for line in oracle.describe():
+            say(line)
+        # Written whole in staging, then moved: the two records and the
+        # filled manifest first (bytes, as the landing wrote it), the arms'
+        # directory last. A move that fails part-way leaves records without
+        # arms, never arms without records: the guard above refuses either,
+        # and the records are what the calibration reads.
+        (staging / VERDICTS_FILENAME).write_bytes(verdicts.dumps().encode("utf-8"))
+        (staging / ORACLE_FILENAME).write_bytes(oracle.dumps().encode("utf-8"))
+        filled = replace(manifest, search_space=replace(space, pool_size=pool_size))
+        (staging / MANIFEST_FILENAME).write_bytes(filled.dumps().encode("utf-8"))
+        for name in (VERDICTS_FILENAME, ORACLE_FILENAME, MANIFEST_FILENAME):
+            os.replace(staging / name, run_dir / name)
+        (staging / ARMS_DIRNAME).rename(run_dir / ARMS_DIRNAME)
+    finally:
+        # Emptied by the moves on success; the half-made run on any other end.
+        discard_staging(staging)
+    return verdicts, oracle
+
+
+# -- the calibration table -----------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CalibrationRow:
+    """One arm on one kind of world across a root: how many searches, how many found something.
+
+    On a null world a non-empty final verdict is a false call under that
+    null definition (plan §4.1's wording); on a conditional world it is a
+    candidate recovery, not yet a recovery (plan PR 4 scores that).
+    """
+
+    kind: WorldKind
+    null_definition_version: str
+    arm: Arm
+    searches: int
+    found: int
+
+    @property
+    def rate(self) -> float:
+        return self.found / self.searches
+
+    def describe(self) -> str:
+        what = "false calls" if self.kind is WorldKind.NULL_V1 else "non-empty verdicts"
+        return (
+            f"{self.kind.value} ({self.null_definition_version}) {self.arm.value}: "
+            f"{self.found} {what} in {self.searches} search(es) = {self.rate:.1%}"
+        )
+
+
+def calibration_table(run_dirs: Iterable[Path]) -> list[CalibrationRow]:
+    """Every searched run directory's verdicts, tallied by world kind and arm (the module docstring).
+
+    A directory without ``verdicts.json`` is a world not yet searched and is
+    skipped; one whose records cannot be read, or whose verdicts are not
+    its manifest's, is refused by name. Rows come in the enums' own order:
+    kind, then the null definition, then arm.
+    """
+    tally: dict[tuple[WorldKind, str, Arm], list[int]] = {}
+    for run_dir in run_dirs:
+        if not (run_dir / VERDICTS_FILENAME).is_file():
+            continue
+        manifest = read_manifest(run_dir)
+        try:
+            text = (run_dir / VERDICTS_FILENAME).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise BenchError(f"cannot read {run_dir / VERDICTS_FILENAME}: {exc}") from exc
+        verdicts = Verdicts.loads(text)
+        if verdicts.world_id != manifest.world.id:
+            raise BenchError(
+                f"{run_dir / VERDICTS_FILENAME} is for {verdicts.world_id}, the manifest beside "
+                f"it for {manifest.world.id}"
+            )
+        if verdicts.pool_size != manifest.search_space.pool_size:
+            raise BenchError(
+                f"{run_dir / VERDICTS_FILENAME} drew from a pool of {verdicts.pool_size}, the "
+                f"manifest beside it records {manifest.search_space.pool_size!r}"
+            )
+        for result in verdicts.results:
+            counts = tally.setdefault(
+                (manifest.world.kind, manifest.null_definition_version, result.arm), [0, 0]
+            )
+            counts[0] += 1
+            counts[1] += result.verdict.found
+    versions = sorted({version for _, version, _ in tally})
+    return [
+        CalibrationRow(
+            kind=kind,
+            null_definition_version=version,
+            arm=arm,
+            searches=tally[kind, version, arm][0],
+            found=tally[kind, version, arm][1],
+        )
+        for kind in WorldKind
+        for version in versions
+        for arm in Arm
+        if (kind, version, arm) in tally
+    ]

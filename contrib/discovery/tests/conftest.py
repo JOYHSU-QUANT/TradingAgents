@@ -25,6 +25,7 @@ isolation tests can hold the one thing the manifest and the prompts share
 
 from __future__ import annotations
 
+import hashlib
 import random
 import shutil
 from dataclasses import dataclass, field, replace
@@ -41,11 +42,20 @@ from contrib.autoresearch.ports import HypothesistError
 from contrib.autoresearch.research import open_experiment
 from contrib.autoresearch.store import ResearchStore
 from contrib.autoresearch.upstream import Candle, FundingPoint, interval_to_ms
-from contrib.discovery.landing import Landing, land, verify
+from contrib.discovery.bench import run_world
+from contrib.discovery.landing import (
+    ARTIFACT_FILENAME,
+    MANIFEST_FILENAME,
+    Landing,
+    land,
+    verify,
+    world_dir,
+)
 from contrib.discovery.manifest import (
     Arms,
     Bars,
     Budget,
+    CandidateOrder,
     Clause,
     Difficulty,
     FundingModel,
@@ -256,6 +266,44 @@ def landed_world(example_world, tmp_path_factory) -> tuple[Path, Landing]:
     return path, landing
 
 
+# -- the searched world (plan PR 3) ------------------------------------------------------------
+
+
+def bench_manifest(**changes) -> Manifest:
+    """The example manifest under a two-answer budget, one Random seed, no model arm.
+
+    The world block is the example's, so the landed store is this
+    manifest's world too; only the run's parameters are smaller, since
+    every answer an arm spends is an indicator walk over the whole store.
+    """
+    base = example_manifest(**changes)
+    return replace(
+        base,
+        budget=Budget(max_trials=2, oracle_margin=0.25),
+        arms=replace(base.arms, random=RandomArm(search_seeds=(0,)), llm=None),
+    )
+
+
+def land_run(root: Path, artifact: Path, manifest: Manifest) -> Path:
+    """A run directory as ``generate`` leaves it: the artifact copied in, the manifest beside it."""
+    run = world_dir(root, manifest)
+    run.mkdir(parents=True)
+    shutil.copyfile(artifact, run / ARTIFACT_FILENAME)
+    (run / MANIFEST_FILENAME).write_bytes(manifest.dumps().encode("utf-8"))
+    return run
+
+
+@pytest.fixture(scope="session")
+def searched(landed_world, tmp_path_factory):
+    """The example world searched once: the run directory, what came back, what was printed, the artifact's digest before."""
+    artifact, _landing = landed_world
+    run = land_run(tmp_path_factory.mktemp("bench"), artifact, bench_manifest())
+    before = hashlib.sha256((run / ARTIFACT_FILENAME).read_bytes()).hexdigest()
+    lines: list[str] = []
+    verdicts, oracle = run_world(run, on_line=lines.append)
+    return run, verdicts, oracle, lines, before
+
+
 # -- the hypothesist ----------------------------------------------------------------------
 
 
@@ -331,7 +379,7 @@ def example_manifest(
             "funding_zscore_14": (-2.0, -1.0, 1.0, 2.0),
             "realized_vol_20": (0.002, 0.004),
         },
-        candidate_order="templates in order, then grid values ascending",
+        candidate_order=CandidateOrder.TEMPLATES_THEN_GRID,
     )
     return Manifest(
         world=world,

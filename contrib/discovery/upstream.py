@@ -32,15 +32,25 @@ pattern is one function away.
 What is borrowed and why:
 
 - the ledger's types and its gate (``Experiment``, ``Ledger``, ``Penalty``,
-  ``Trial``, ``TrialStatus``, ``promotion_verdict``): the final verdict
+  ``Trial``, ``TrialStatus``, ``promotion_verdict`` and its ``Verdict``): the final verdict
   (plan §4.5) is the research package's own gate re-applied at the rule
   count the search ended with — never a second gate;
-- the search's report and its interrupt sentence (``SearchReport``,
-  ``INTERRUPTED``), so how an arm ended is read off the loop that ended it;
-- the spec language (``StrategySpec``, ``Op``, ``Side``, ``MAX_HOLD_BARS``,
-  ``parse_spec``, ``spec_hash``, ``spec_to_document``): a planted rule is a
-  spec of that language — "expressible in the existing DSL" is the
-  benchmark's scope (plan §0.3), and the parser is what decides it;
+- the search loop itself (``search``), its report and its interrupt
+  sentence (``SearchReport``, ``INTERRUPTED``), so every arm is one run of
+  the research package's own loop (plan §1 #2) and how it ended is read
+  off the loop that ended it; the port an arm implements (``Hypothesist``)
+  and the one error the loop stops on (``HypothesistError``), which a
+  candidate pool walked to its end raises (plan §4.3: the research
+  package is not taught about pools);
+- the one promotion a run makes (``promote``): the trial the final verdict
+  selects is promoted through the research package's own verb, which is
+  what reads the holdout for it, after the verdict is snapshotted;
+- the spec language (``StrategySpec``, ``Family``, ``Op``, ``Side``,
+  ``MAX_HOLD_BARS``, ``parse_spec``, ``spec_hash``, ``spec_to_document``): a
+  planted rule is a spec of that language — "expressible in the existing
+  DSL" is the benchmark's scope (plan §0.3), and the parser is what
+  decides it — and a candidate of the pool is written as one, labelled
+  with the family its features earn;
 - the conditions a trial is measured under (``CostModel``, ``Split`` and
   its default shares, ``SegmentMetrics``), serialised through their own
   ``to_dict``/``from_dict`` so the manifest and the verdict snapshot write
@@ -53,9 +63,11 @@ What is borrowed and why:
   the pure function ``calibrate`` uses, so nothing it does is filed (plan
   §1 #5), and checks the holdout's tail as ``promote`` does;
 - the vocabulary the manifest validates its search space against
-  (``parse_feature_name``) and its numeric guards (``require_number``,
-  ``require_amount``, ``SpecError``), the studied intervals
-  (``studied_interval``) and the day the world grid is laid on
+  (``parse_feature_name``), the declarations behind it (``FeatureKind``,
+  ``SeriesSource``, ``spec_of``: which series a candidate's features read
+  decides the family label it is written under) and its numeric guards
+  (``require_number``, ``require_amount``, ``SpecError``), the studied
+  intervals (``studied_interval``) and the day the world grid is laid on
   (``MS_PER_DAY``);
 - what a world is made of and lands through (plan PR 2): the port's own
   value types (``Candle``, ``FundingPoint``, reached as the research package
@@ -88,6 +100,7 @@ from contrib.autoresearch.constants import (
 from contrib.autoresearch.costs import CostModel, require_amount
 from contrib.autoresearch.dsl import (
     MAX_HOLD_BARS,
+    Family,
     Op,
     Side,
     StrategySpec,
@@ -117,18 +130,21 @@ from contrib.autoresearch.fetch import (
     describe_stop,
     render_fetch,
 )
-from contrib.autoresearch.hypothesis import INTERRUPTED, SearchReport
+from contrib.autoresearch.hypothesis import INTERRUPTED, SearchReport, search
 from contrib.autoresearch.ledger import (
     Experiment,
     Ledger,
     Penalty,
     Trial,
     TrialStatus,
+    Verdict,
     promotion_verdict,
 )
 from contrib.autoresearch.metrics import SegmentMetrics
+from contrib.autoresearch.ports import Hypothesist, HypothesistError
 from contrib.autoresearch.research import (
     first_measurable_index,
+    promote,
     require_clean_history,
     require_measurable_tail,
 )
@@ -141,7 +157,14 @@ from contrib.autoresearch.split import (
 )
 from contrib.autoresearch.store import ResearchStore, StoreError, default_db_path
 from contrib.autoresearch.upstream import Candle, FundingPoint, interval_to_ms
-from contrib.autoresearch.vocabulary import SpecError, parse_feature_name, require_number
+from contrib.autoresearch.vocabulary import (
+    FeatureKind,
+    SeriesSource,
+    SpecError,
+    parse_feature_name,
+    require_number,
+    spec_of,
+)
 from contrib.core.enum_guard import VocabEnum
 from contrib.core.instants import MAX_EPOCH_MS, epoch_ms, from_epoch_ms
 
@@ -162,9 +185,13 @@ __all__ = [
     "CostModel",
     "EvaluationError",
     "Experiment",
+    "Family",
     "FeatureError",
     "FeatureFrame",
+    "FeatureKind",
     "FundingPoint",
+    "Hypothesist",
+    "HypothesistError",
     "Ledger",
     "Op",
     "Penalty",
@@ -173,6 +200,7 @@ __all__ = [
     "SegmentMetrics",
     "SeriesBundle",
     "SeriesFetch",
+    "SeriesSource",
     "Side",
     "SpecError",
     "Split",
@@ -183,6 +211,7 @@ __all__ = [
     "StrategySpec",
     "Trial",
     "TrialStatus",
+    "Verdict",
     "VocabEnum",
     "backfill_candles",
     "backfill_funding",
@@ -197,6 +226,7 @@ __all__ = [
     "load_bundle",
     "parse_feature_name",
     "parse_spec",
+    "promote",
     "promotion_verdict",
     "render_fetch",
     "replay_sides",
@@ -204,7 +234,9 @@ __all__ = [
     "require_clean_history",
     "require_measurable_tail",
     "require_number",
+    "search",
     "spec_hash",
+    "spec_of",
     "spec_to_document",
     "studied_interval",
 ]
@@ -224,6 +256,7 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.costs", "CostModel"),
     ("contrib.autoresearch.costs", "require_amount"),
     ("contrib.autoresearch.dsl", "MAX_HOLD_BARS"),
+    ("contrib.autoresearch.dsl", "Family"),
     ("contrib.autoresearch.dsl", "Op"),
     ("contrib.autoresearch.dsl", "Side"),
     ("contrib.autoresearch.dsl", "StrategySpec"),
@@ -248,14 +281,19 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.fetch", "render_fetch"),
     ("contrib.autoresearch.hypothesis", "INTERRUPTED"),
     ("contrib.autoresearch.hypothesis", "SearchReport"),
+    ("contrib.autoresearch.hypothesis", "search"),
     ("contrib.autoresearch.ledger", "Experiment"),
     ("contrib.autoresearch.ledger", "Ledger"),
     ("contrib.autoresearch.ledger", "Penalty"),
     ("contrib.autoresearch.ledger", "Trial"),
     ("contrib.autoresearch.ledger", "TrialStatus"),
+    ("contrib.autoresearch.ledger", "Verdict"),
     ("contrib.autoresearch.ledger", "promotion_verdict"),
     ("contrib.autoresearch.metrics", "SegmentMetrics"),
+    ("contrib.autoresearch.ports", "Hypothesist"),
+    ("contrib.autoresearch.ports", "HypothesistError"),
     ("contrib.autoresearch.research", "first_measurable_index"),
+    ("contrib.autoresearch.research", "promote"),
     ("contrib.autoresearch.research", "require_clean_history"),
     ("contrib.autoresearch.research", "require_measurable_tail"),
     ("contrib.autoresearch.split", "DEFAULT_TRAIN_SHARE"),
@@ -272,9 +310,12 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.upstream", "Candle"),
     ("contrib.autoresearch.upstream", "FundingPoint"),
     ("contrib.autoresearch.upstream", "interval_to_ms"),
+    ("contrib.autoresearch.vocabulary", "FeatureKind"),
+    ("contrib.autoresearch.vocabulary", "SeriesSource"),
     ("contrib.autoresearch.vocabulary", "SpecError"),
     ("contrib.autoresearch.vocabulary", "parse_feature_name"),
     ("contrib.autoresearch.vocabulary", "require_number"),
+    ("contrib.autoresearch.vocabulary", "spec_of"),
     ("contrib.core.enum_guard", "VocabEnum"),
     ("contrib.core.instants", "MAX_EPOCH_MS"),
     ("contrib.core.instants", "epoch_ms"),

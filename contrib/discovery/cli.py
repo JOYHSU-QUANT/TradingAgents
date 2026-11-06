@@ -1,6 +1,6 @@
 """``python -m contrib.discovery`` — the benchmark's commands.
 
-One so far:
+Four so far, in the order a world goes through them (plan §3):
 
 - ``generate --manifest world.json [--root DIR]`` — read a manifest, build
   its world from the seed, land it in ``<root>/<world id>-<manifest
@@ -11,16 +11,31 @@ One so far:
   is read-only from then on: an arm copies it (plan §2), and a second
   ``generate`` of a manifest already landed is refused rather than
   overwritten.
+- ``oracle --run DIR`` — the planted rule's train and validation figures
+  against the gate at the end of the budget, on a throw-away copy, before
+  any arm has searched: the reading that sizes ``beta`` on development
+  seeds, and refused on a test seed (plan §4.2, §4.4). Writes nothing.
+- ``search --run DIR`` — the Random replicates and the Grid arm, each in
+  its own copy of the artifact under ``arms/``, each judged at the end of
+  its budget (``verdicts.json``), then the oracle's figures and the whole
+  pool's reference (``oracle.json``) and the manifest's ``pool_size``
+  filled in (:mod:`.bench` keeps the order). A world is searched once.
+- ``calibrate --root DIR`` — every searched run directory under the root
+  tallied by world kind and arm: on null worlds the false-call rate under
+  the null definition named, on conditional worlds the rate of non-empty
+  verdicts (plan §4.3's null calibration, without a model).
 
-What ``generate`` prints is for the operator: the world's kind and rule
-are in the manifest, which a model never sees (plan §1 #7). Nothing this
-command prints reaches a prompt.
+What the commands print is for the operator: the world's kind and rule
+are in the manifest, which a model never sees (plan §1 #7). Nothing
+printed here reaches a prompt.
 
 Exit codes, as the research package's CLI has them: ``0`` done; ``1`` a
 named refusal — a manifest this build cannot read or run, a world the
 generator does not make, a landed history an arm could not measure on, a
-store that cannot be opened, a path that cannot be read or written — with
-the sentence on stderr; ``2`` argparse's usage errors; ``130`` interrupted.
+run directory searched before or not landed, a record a later build
+cannot read, a store that cannot be opened, a path that cannot be read or
+written — with the sentence on stderr; ``2`` argparse's usage errors;
+``130`` interrupted, with a search's staging removed.
 """
 
 from __future__ import annotations
@@ -30,8 +45,17 @@ import logging
 import sys
 from pathlib import Path
 
+from .bench import (
+    ORACLE_FILENAME,
+    VERDICTS_FILENAME,
+    BenchError,
+    calibration_table,
+    preview_oracle,
+    run_world,
+)
 from .landing import ARTIFACT_FILENAME, MANIFEST_FILENAME, default_root, land_world
 from .manifest import Manifest, ManifestError
+from .records import RecordError
 from .upstream import EvaluationError, FeatureError, SplitError, StoreError, render_fetch
 from .worlds import WorldError, generate
 
@@ -44,36 +68,53 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Discovery Lab: synthetic worlds the research loop is examined on.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+    # argparse %-formats help text, so a '%' in the repository's path is doubled.
+    shown_root = str(default_root()).replace("%", "%%")
+
     generate_cmd = subparsers.add_parser(
         "generate",
         help="build a world from its manifest, land it in its own store, and check it",
     )
     generate_cmd.add_argument(
-        "--manifest", required=True, help="path to the world's manifest (JSON, version 1)"
+        "--manifest", required=True, help="path to the world's manifest (JSON, version 2)"
     )
-    # argparse %-formats help text, so a '%' in the repository's path is doubled.
-    shown_root = str(default_root()).replace("%", "%%")
     generate_cmd.add_argument(
         "--root",
         default=None,
         help=f"the bench root; the run lands in <root>/<world id>-<digest>/ (default: {shown_root})",
     )
+
+    oracle_cmd = subparsers.add_parser(
+        "oracle",
+        help="the planted rule's figures against the gate, before any search (development seeds)",
+    )
+    oracle_cmd.add_argument(
+        "--run", required=True, help="a landed run directory (manifest.json and world.sqlite)"
+    )
+
+    search_cmd = subparsers.add_parser(
+        "search",
+        help="run the random and grid arms on a landed world, judge them, then read the oracle",
+    )
+    search_cmd.add_argument(
+        "--run", required=True, help="a landed run directory (manifest.json and world.sqlite)"
+    )
+
+    calibrate_cmd = subparsers.add_parser(
+        "calibrate", help="tally every searched world under a root by kind and arm"
+    )
+    calibrate_cmd.add_argument(
+        "--root", default=None, help=f"the bench root to walk (default: {shown_root})"
+    )
     return parser
 
 
-def _read_manifest(path: Path) -> Manifest:
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise ManifestError(f"cannot read the manifest at {path}: {exc}") from exc
-    return Manifest.loads(text)
-
-
 def _cmd_generate(args: argparse.Namespace) -> int:
-    manifest = _read_manifest(Path(args.manifest))
+    # The manifest's read writes the pool and the world is built before
+    # anything is written, so a manifest the language or the generator
+    # refuses leaves nothing behind.
+    manifest = Manifest.read(Path(args.manifest))
     root = Path(args.root) if args.root else default_root()
-    # The world is built before anything is written, so a manifest the
-    # generator refuses leaves nothing behind.
     history = generate(manifest)
     target, fetched, landing = land_world(root, history)
     print(f"store: {target / ARTIFACT_FILENAME}")
@@ -87,11 +128,47 @@ def _cmd_generate(args: argparse.Namespace) -> int:
             f"planted rule: holds a position on {history.planted_exposure} of {count} decision "
             f"bars ({history.planted_exposure / count:.1%})"
         )
+    space = manifest.search_space
+    print(f"pool: {len(space.candidates)} candidate(s) ({space.enumerated} enumerated)")
     print(f"manifest: {target / MANIFEST_FILENAME}")
     return 0
 
 
-_COMMANDS = {"generate": _cmd_generate}
+def _cmd_oracle(args: argparse.Namespace) -> int:
+    for line in preview_oracle(Path(args.run)).describe():
+        print(line)
+    return 0
+
+
+def _cmd_search(args: argparse.Namespace) -> int:
+    run_dir = Path(args.run)
+    # Reported as it goes: a search is minutes of indicator walks, and the
+    # arm that finished is worth seeing before the next one starts.
+    run_world(run_dir, on_line=print)
+    print(f"verdicts: {run_dir / VERDICTS_FILENAME}")
+    print(f"oracle: {run_dir / ORACLE_FILENAME}")
+    return 0
+
+
+def _cmd_calibrate(args: argparse.Namespace) -> int:
+    root = Path(args.root) if args.root else default_root()
+    if not root.is_dir():
+        raise BenchError(f"{root} is not a directory")
+    rows = calibration_table(sorted(p for p in root.iterdir() if p.is_dir()))
+    if not rows:
+        print(f"no searched world under {root}")
+        return 0
+    for row in rows:
+        print(row.describe())
+    return 0
+
+
+_COMMANDS = {
+    "generate": _cmd_generate,
+    "oracle": _cmd_oracle,
+    "search": _cmd_search,
+    "calibrate": _cmd_calibrate,
+}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -111,17 +188,19 @@ def main(argv: list[str] | None = None) -> int:
         StoreError,
         EvaluationError,
         FeatureError,
+        RecordError,
         OSError,
     ) as exc:
         # The families a well-formed invocation can still meet, each
         # carrying a sentence written for an operator: the manifest's, the
         # generator's and the split's refusals (listed by class, not as
         # ``ValueError`` — a bare one is a defect and propagates), the
-        # store that cannot be opened and the research package's two named
-        # measurement refusals (likewise listed, so any other
-        # ``RuntimeError`` propagates as the defect it is). ``OSError`` is
-        # on the list, unlike in the research package's CLI, because nothing
-        # here speaks to a network: an ``OSError`` can only be the manifest
-        # or the run directory.
+        # store that cannot be opened, the research package's two named
+        # measurement refusals, and this package's own records' refusals
+        # (one base, ``RecordError``, so any other ``RuntimeError`` — the
+        # ledger's, say — propagates as the defect it is). ``OSError`` is
+        # on the list, unlike in the research package's CLI, because
+        # nothing here speaks to a network: an ``OSError`` can only be the
+        # manifest or the run directory.
         print(f"error: {exc}", file=sys.stderr)
         return 1

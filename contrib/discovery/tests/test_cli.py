@@ -8,12 +8,16 @@ import pytest
 
 from contrib.autoresearch.evaluator import EvaluationError
 from contrib.autoresearch.features import FeatureError
+from contrib.autoresearch.ledger import LedgerError
 from contrib.autoresearch.split import SplitError
 from contrib.autoresearch.store import StoreError
 from contrib.discovery import cli, landing
+from contrib.discovery.bench import ORACLE_FILENAME, VERDICTS_FILENAME, BenchError
 from contrib.discovery.cli import main
 from contrib.discovery.landing import ARTIFACT_FILENAME, MANIFEST_FILENAME, world_dir
-from contrib.discovery.manifest import WorldKind
+from contrib.discovery.manifest import ManifestError, WorldKind
+from contrib.discovery.oracle import OracleError
+from contrib.discovery.verdict import VerdictError
 from contrib.discovery.worlds import WorldError
 
 from .conftest import example_manifest, small_manifest
@@ -72,7 +76,7 @@ def test_a_manifest_that_cannot_be_read_is_a_named_refusal(tmp_path, capsys):
     assert "cannot read the manifest" in capsys.readouterr().err
     other = tmp_path / "other.json"
     other.write_text(
-        example_manifest().dumps().replace('"manifest_version": 1', '"manifest_version": 2'),
+        example_manifest().dumps().replace('"manifest_version": 2', '"manifest_version": 3'),
         encoding="utf-8",
     )
     assert main(["generate", "--manifest", str(other), "--root", root]) == 1
@@ -150,3 +154,110 @@ def test_usage_errors_exit_2_and_help_survives_a_percent_in_the_default_root(mon
     with pytest.raises(SystemExit) as shown:
         main(["generate", "--help"])
     assert shown.value.code == 0
+    with pytest.raises(SystemExit) as shown:
+        main(["calibrate", "--help"])
+    assert shown.value.code == 0
+
+
+# -- oracle / search / calibrate (PR 3) ------------------------------------------------------
+
+
+def test_search_runs_the_world_reporting_as_it_goes_and_names_the_records(
+    tmp_path, capsys, monkeypatch
+):
+    seen = {}
+
+    def fake_run(run_dir, *, on_line):
+        seen["run"] = run_dir
+        on_line("pool: 16 candidate(s) (16 enumerated)")
+        on_line("grid-0: ended budget_spent")
+        return None, None
+
+    monkeypatch.setattr(cli, "run_world", fake_run)
+    assert main(["search", "--run", str(tmp_path / "run")]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert seen["run"] == tmp_path / "run"
+    assert out == [
+        "pool: 16 candidate(s) (16 enumerated)",
+        "grid-0: ended budget_spent",
+        f"verdicts: {tmp_path / 'run' / VERDICTS_FILENAME}",
+        f"oracle: {tmp_path / 'run' / ORACLE_FILENAME}",
+    ]
+
+
+def test_oracle_prints_the_preview_s_lines(tmp_path, capsys, monkeypatch):
+    class Figures:
+        def describe(self):
+            return ["planted rule: train net sharpe 1.0000, validation 2.0000"]
+
+    monkeypatch.setattr(cli, "preview_oracle", lambda run_dir: Figures())
+    assert main(["oracle", "--run", str(tmp_path)]) == 0
+    assert capsys.readouterr().out == "planted rule: train net sharpe 1.0000, validation 2.0000\n"
+
+
+def test_calibrate_tallies_the_root_and_says_when_nothing_is_searched(searched, tmp_path, capsys):
+    run, *_ = searched
+    assert main(["calibrate", "--root", str(run.parent)]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert [line.split(":")[0] for line in out] == [
+        "conditional-v1 (v1) random",
+        "conditional-v1 (v1) grid",
+    ]
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert main(["calibrate", "--root", str(empty)]) == 0
+    assert capsys.readouterr().out == f"no searched world under {empty}\n"
+    assert main(["calibrate", "--root", str(tmp_path / "missing")]) == 1
+    assert "is not a directory" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("raised", "code"),
+    [
+        (KeyboardInterrupt(), 130),
+        (BenchError("this world was searched before"), 1),
+        (VerdictError("the record cannot be read"), 1),
+        (OracleError("the record cannot be read"), 1),
+        (ManifestError("cannot read the landed manifest"), 1),
+    ],
+    ids=["interrupt", "bench", "verdict", "oracle", "manifest"],
+)
+def test_search_s_named_families_exit_with_their_code_and_sentence(
+    tmp_path, capsys, monkeypatch, raised, code
+):
+    def fail(run_dir, *, on_line):
+        raise raised
+
+    monkeypatch.setattr(cli, "run_world", fail)
+    assert main(["search", "--run", str(tmp_path)]) == code
+    err = capsys.readouterr().err
+    assert ("interrupted" if code == 130 else f"error: {raised}") in err
+
+
+def test_generate_refuses_a_manifest_whose_pool_cannot_be_written_before_landing_anything(
+    tmp_path, capsys, monkeypatch
+):
+    # A grid mixing a number and a label names no order: refused where the
+    # manifest is read for the run, before the minutes of backfill.
+    def never(manifest):
+        raise AssertionError("the world must not be built")
+
+    monkeypatch.setattr(cli, "generate", never)
+    text = example_manifest().dumps().replace("0.004", '"high"', 1)
+    path = tmp_path / "mixed.json"
+    path.write_text(text, encoding="utf-8")
+    root = tmp_path / "bench"
+    assert main(["generate", "--manifest", str(path), "--root", str(root)]) == 1
+    assert "a grid is numbers or labels, not both" in capsys.readouterr().err
+    assert not root.exists()
+
+
+def test_a_ledger_refusal_inside_a_search_is_not_dressed_as_one(tmp_path, monkeypatch):
+    # The ledger's own refusals are ``RuntimeError``s this CLI does not
+    # list: inside a search they are a defect of this package's sequencing.
+    def defect(run_dir, *, on_line):
+        raise LedgerError("trial #1 cannot be promoted")
+
+    monkeypatch.setattr(cli, "run_world", defect)
+    with pytest.raises(LedgerError):
+        main(["search", "--run", str(tmp_path)])

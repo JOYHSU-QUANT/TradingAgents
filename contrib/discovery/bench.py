@@ -29,9 +29,11 @@ is the point of this module:
 Everything is built in a staging directory inside the run directory and
 moved into place at the end (the two records, then the arms' stores into
 ``arms/``), so a run that ends before the records are in leaves the
-directory as the landing left it; one that fails while the stores move in
-leaves the records and keeps the staging that holds the rest, named in
-the refusal. ``arms/`` itself is made first, atomically, as the claim on
+directory as the landing left it but for at most ``verdicts.json`` (if it
+ends between the two moves), which the guard and calibrate refuse by
+name; one that ends while the stores move in — a failed rename or an
+interrupt — leaves the records and keeps the staging that holds the rest,
+named in the refusal. ``arms/`` itself is made first, atomically, as the claim on
 the directory: two searches started on one world cannot both pass the
 guard. A run directory holding the claim alone is a search running or
 one that did not finish (nothing is prescribed while one may run); one
@@ -309,6 +311,19 @@ class Verdicts:
                     f"tried and holds {len(result.snapshot.trials)} trial(s); each arm searches "
                     f"in its own store"
                 )
+            # Every arm here is a pool arm, proposing each candidate at most
+            # once and running out exactly when it has proposed them all.
+            answers = result.snapshot.answers
+            if answers > self.pool_size:
+                raise BenchError(
+                    f"{result.experiment_id} answered {answers} time(s) from a pool of "
+                    f"{self.pool_size}"
+                )
+            if result.snapshot.ended is Ended.EXHAUSTED and answers != self.pool_size:
+                raise BenchError(
+                    f"{result.experiment_id} walked its pool to the end in {answers} answer(s); "
+                    f"the pool holds {self.pool_size}"
+                )
             if _conditions(experiment) != first:
                 raise BenchError(
                     f"{result.experiment_id} ran under other conditions than "
@@ -528,10 +543,14 @@ def run_world(
         # may be running, as calibrate says of the same directory.
         raise BenchError(_unfinished(run_dir, left))
     if left:
+        # A staging kept by a failed store move holds the stores the claim did
+        # not receive; it is named so it is not left behind by a re-search.
+        kept = sorted(p.name for p in run_dir.glob(".search.partial-*"))
         raise BenchError(
-            f"{run_dir} holds {left}: this world was searched before, and a search is spent "
-            f"once — remove {ARMS_DIRNAME}/, {VERDICTS_FILENAME} and {ORACLE_FILENAME} by hand "
-            f"to search it again"
+            f"{run_dir} holds {left + kept}: this world was searched before, and a search is "
+            f"spent once — remove {ARMS_DIRNAME}/, {VERDICTS_FILENAME}, {ORACLE_FILENAME}"
+            + (" and the kept staging" if kept else "")
+            + " by hand to search it again"
         )
     require_artifact(run_dir)
     if manifest.arms.llm is not None:
@@ -655,17 +674,20 @@ def run_world(
             os.replace(staging / name, run_dir / name)
         moved = True
         done: list[str] = []
+        # From here the staging holds stores the claim has not received, so
+        # any end — a failed rename or an interrupt between two — keeps it.
+        keep_staging = True
         try:
             for arm_dir in sorted((staging / ARMS_DIRNAME).iterdir()):
                 arm_dir.rename(claim / arm_dir.name)
                 done.append(arm_dir.name)
         except OSError as exc:
-            keep_staging = True
             raise BenchError(
                 f"{run_dir}: the records are written, but moving the arms' stores into {claim} "
                 f"failed after {done}; the rest are in {staging / ARMS_DIRNAME} — move them in by "
                 f"hand, then remove {staging}"
             ) from exc
+        keep_staging = False
     finally:
         # Emptied by the moves on success; the half-made run on any other
         # end, except the stores the claim did not receive.
@@ -880,8 +902,9 @@ def _hold_to_manifest(path: Path, verdicts: Verdicts, manifest: Manifest) -> Non
     The arms share one set of conditions (``Verdicts`` holds that); here the
     set is held to the manifest's — a record whose experiments carry
     another penalty, split or cost model would be judged by them, since the
-    verdict is re-derived from the snapshot. Each pool arm's answers are
-    bounded by its budget and its pool, its ending agrees with them, and
+    verdict is re-derived from the snapshot. Each arm's answers are bounded
+    by the manifest's budget and a spent budget is exactly it (the pool's
+    half of those bounds is the record's own, held in ``Verdicts``), and
     every rule it filed is a rule of the pool.
     """
     first = verdicts.results[0].snapshot.experiment
@@ -899,15 +922,10 @@ def _hold_to_manifest(path: Path, verdicts: Verdicts, manifest: Manifest) -> Non
                 f"{path}: {result.experiment_id} spent its budget in {snapshot.answers} answer(s); "
                 f"the manifest's budget is {budget}"
             )
-        if snapshot.ended is Ended.EXHAUSTED and snapshot.answers != len(pool):
-            raise BenchError(
-                f"{path}: {result.experiment_id} walked its pool to the end in {snapshot.answers} "
-                f"answer(s); the pool holds {len(pool)}"
-            )
-        if snapshot.answers > min(budget, len(pool)):
+        if snapshot.answers > budget:
             raise BenchError(
                 f"{path}: {result.experiment_id} answered {snapshot.answers} time(s), over its "
-                f"budget of {budget} or its pool of {len(pool)}"
+                f"budget of {budget}"
             )
         outside = [trial.trial_id for trial in snapshot.trials if trial.spec_hash not in pool]
         if outside:
@@ -934,6 +952,14 @@ def _hold_oracle_to_manifest(path: Path, oracle: Oracle, manifest: Manifest) -> 
     planted = oracle.planted
     if planted is None:
         return
+    # And measured on the manifest's windows, as every arm's trials are.
+    split = experiment_for(manifest, "arm").split
+    assert planted.holdout is not None  # the record's own rule
+    windows = (planted.train.segment, planted.validation.segment, planted.holdout.segment)
+    if windows != split.ordered:
+        raise BenchError(
+            f"{path}: the planted rule was measured on other windows than the manifest's split"
+        )
     expected = (budget.max_trials, budget.oracle_margin, penalty.threshold(budget.max_trials))
     if (planted.budget, planted.oracle_margin, planted.threshold) != expected:
         raise BenchError(

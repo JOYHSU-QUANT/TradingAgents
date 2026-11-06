@@ -724,6 +724,27 @@ def test_the_calibration_holds_the_records_to_the_manifest_s_conditions(searched
     pool = replace(oracle, pool=replace(oracle.pool, threshold=-100.0))
     with pytest.raises(BenchError, match="the pool is gated at -100.0"):
         calibration_table([_stray(tmp_path, run, verdicts, pool)])
+    # The planted rule measured on other windows than the manifest's split
+    # (the holdout filed as the train's bounds, still named holdout).
+    assert oracle.planted.holdout is not None
+    moved = replace(
+        oracle,
+        planted=replace(
+            oracle.planted,
+            holdout=replace(
+                oracle.planted.holdout,
+                segment=replace(
+                    oracle.planted.train.segment, name=oracle.planted.holdout.segment.name
+                ),
+            ),
+        ),
+    )
+    with pytest.raises(BenchError, match="measured on other windows than the manifest's split"):
+        calibration_table([_stray(tmp_path, run, verdicts, moved)])
+    # A dead arm that answered more than the manifest's budget.
+    dead = replace(first, snapshot=replace(first.snapshot, ended=Ended.SEAM_FAILED, answers=3))
+    with pytest.raises(BenchError, match="random-0 answered 3 time\\(s\\), over its budget of 2"):
+        calibration_table([_stray(tmp_path, run, replace(verdicts, results=(dead, grid)), oracle)])
 
 
 def test_the_records_hold_a_searched_world_s_shape(searched):
@@ -739,6 +760,14 @@ def test_the_records_hold_a_searched_world_s_shape(searched):
     holdout = None if selected is None else (grid.holdout or oracle.planted.holdout)
     with pytest.raises(BenchError, match="grid-0 counts 3 rule\\(s\\) tried and holds 2"):
         replace(verdicts, results=(first, replace(grid, snapshot=padded, holdout=holdout)))
+    # A pool arm runs out exactly when it has proposed the whole pool, and
+    # never answers more often than the pool holds.
+    short = replace(grid, snapshot=replace(grid.snapshot, ended=Ended.EXHAUSTED))
+    with pytest.raises(BenchError, match="grid-0 walked its pool to the end in 2 answer"):
+        replace(verdicts, results=(first, short))
+    chatty = replace(grid, snapshot=replace(grid.snapshot, answers=17))
+    with pytest.raises(BenchError, match="grid-0 answered 17 time\\(s\\) from a pool of 16"):
+        replace(verdicts, results=(first, chatty))
 
 
 def test_a_search_in_progress_is_not_told_the_world_was_searched(fresh_run):
@@ -759,21 +788,25 @@ def test_a_failure_moving_the_stores_in_keeps_them_and_names_where(
     real = Path.rename
 
     def locked(self, target):
-        if Path(target).parent.name == ARMS_DIRNAME:
+        # The second store's move fails: one arm is in, one is left behind.
+        if Path(target).parent.name == ARMS_DIRNAME and Path(target).name == "random":
             raise PermissionError("locked by another process")
         return real(self, target)
 
     monkeypatch.setattr(Path, "rename", locked)
-    with pytest.raises(BenchError, match="the records are written, but moving the arms' stores"):
+    with pytest.raises(BenchError, match=r"moving the arms' stores .* failed after \['grid'\]"):
         run_world(fresh_run)
     monkeypatch.setattr(Path, "rename", real)
-    # The records are in, the claim is empty, and the stores are kept in
-    # the staging the sentence names — nothing was thrown away.
+    # The records are in, the claim holds the moved arm, and the rest is
+    # kept in the staging the sentence names — nothing was thrown away.
     assert (fresh_run / VERDICTS_FILENAME).is_file() and (fresh_run / ORACLE_FILENAME).is_file()
-    assert _listing(fresh_run / ARMS_DIRNAME) == []
+    assert _listing(fresh_run / ARMS_DIRNAME) == ["grid"]
     kept = [p for p in fresh_run.iterdir() if p.name.startswith(".search.partial-")]
     assert len(kept) == 1
-    assert _listing(kept[0] / ARMS_DIRNAME) == ["grid", "random"]
+    assert _listing(kept[0] / ARMS_DIRNAME) == ["random"]
+    # And a later search names the kept staging beside the records.
+    with pytest.raises(BenchError, match=r"searched before.* and the kept staging by hand"):
+        run_world(fresh_run)
 
 
 def test_a_broken_landed_manifest_is_refused_with_its_file(tmp_path):

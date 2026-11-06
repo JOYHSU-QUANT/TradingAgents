@@ -151,8 +151,9 @@ parser 讀成 feature 名、regime 給數字會被 parser 拒絕，兩種都在�
    full-pool reference（整池 validation net sharpe、最佳者、過 `threshold(pool_size)` 的個數），不落 ledger。
 5. 全部先寫進 run 目錄下的 staging（`.search.partial-*`），最後先搬 `verdicts.json`／`oracle.json`，再把各臂 store 逐一搬進
    開頭就建好的 `arms/`（claim）；`manifest.json` 不動（`pool_size` 由 `generate` 回填）。紀錄搬好之前任何原因中途結束都把
-   staging 與 claim 移除、目錄回到落地狀態；紀錄搬好之後搬 store 失敗（例如 Windows 防毒鎖檔），**staging 保留**、拒絕句子
-   點名哪些臂已進 `arms/`、其餘 store 在哪個 staging 路徑，手動搬完再刪 staging——不丟資料。test seed 的世界不把 holdout 數字印到 console（`verdicts.json`／`oracle.json` 照寫；計畫 §4.2
+   staging 與 claim 移除，目錄回到落地狀態——只有停在兩次搬檔之間會多留一個 `verdicts.json`，guard 與 calibrate 都會點名拒絕；
+   紀錄搬好之後搬 store 中途結束（例如 Windows 防毒鎖檔、或剛好 Ctrl-C），**staging 保留**、拒絕句子點名哪些臂已進 `arms/`、
+   其餘 store 在哪個 staging 路徑，手動搬完再刪 staging——不丟資料；之後再 `search` 時 guard 也會把保留的 staging 列出來。test seed 的世界不把 holdout 數字印到 console（`verdicts.json`／`oracle.json` 照寫；計畫 §4.2
    測試世界的 holdout 不得拿來調任何東西）。
 
 **`oracle --run <dir>`**（`bench.preview_oracle`）：搜尋前先看埋的規則的 train／validation 對 `threshold(max_trials)` 的餘裕，

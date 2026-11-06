@@ -15,7 +15,8 @@ Eleven tables, and nothing here ever writes the paper store:
   integral) and confidence as ``Decimal`` text.
 - ``failures``: one row per question, variant and repeat the provider
   refused for the question's own sake (a 4xx other than 401/403/404, the
-  key or the model, and other than 408/409/429, which are retried; for
+  key or the model, and other than 408/409/429 or a router's 4xx over
+  such upstream failures, which are retried; for
   instance the context too long, or a content filter). A question
   recorded here is not asked again unless the replay is told to, and the
   scorecard counts it as unanswered, as the daemon counts an ``api_failed``

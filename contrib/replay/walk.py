@@ -29,7 +29,8 @@ tick rounds to nothing) is paid for, not stored, and the walk stops there
 by name.
 
 The call discipline is the replay's (:func:`~.replay.attempt`): a 401, 403
-or 404 stops the walk by name; another client error (bar 408, 409 and 429)
+or 404 stops the walk by name; another client error (bar 408, 409 and 429,
+and a router's 4xx over upstream failures of those kinds or 5xx, #415)
 records the question as refused, the account holds its book through it,
 and the walk goes on; anything else is retried after each pause, then
 stops by name. A question's cost is every graph run it took, the failed

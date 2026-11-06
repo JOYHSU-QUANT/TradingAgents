@@ -753,6 +753,31 @@ class _RefusingGraph(EchoGraph):
         return super().ask(**kwargs)
 
 
+class _Routed(Exception):
+    """OpenRouter's 400 when no upstream served the call: every upstream said 429 (#415)."""
+
+    status_code = 400
+    body = {
+        "message": "Provider returned error",
+        "code": 400,
+        "metadata": {"previous_errors": [{"code": 429}, {"code": 429}, {"code": 429}]},
+    }
+
+
+class _RoutedGraph(EchoGraph):
+    """An echo graph whose router fails question 0 ``times`` times before it is served."""
+
+    def __init__(self, variant, *, times) -> None:
+        super().__init__(variant)
+        self.left = times
+
+    def ask(self, **kwargs):
+        if self.left and question_line(0) in kwargs["context_text"]:
+            self.left -= 1
+            raise _Routed("Provider returned error")
+        return super().ask(**kwargs)
+
+
 class _Stopping(Exception):
     status_code = 401
 
@@ -790,6 +815,23 @@ def test_a_question_the_provider_refuses_holds_the_book_and_is_recorded(
     # Resumed, the refusal stays a hold: nothing is asked again.
     assert cli.main(_ask_argv(graph_store, gate_research, variant_file, "--repeats", "1")) == 0
     assert "asked: 0 new answer(s); already stored, skipped: 8" in capsys.readouterr().out
+
+
+def test_a_routing_400_over_rate_limited_upstreams_is_tried_again_not_refused(
+    graph_store, gate_research, tmp_path, monkeypatch, capsys
+):
+    """#415 on the walk: a refusal would hold the book into every later question."""
+    variant_file = write_graph_variant(tmp_path, "g")
+    pauses: list[float] = []
+    monkeypatch.setattr(cli, "_sleep", pauses.append)
+    monkeypatch.setattr(cli, "_build_graph", lambda variant: _RoutedGraph(variant, times=2))
+    assert cli.main(_ask_argv(graph_store, gate_research, variant_file, "--repeats", "1")) == 0
+    assert pauses == [5.0, 20.0]
+    assert "asked: 8 new answer(s)" in capsys.readouterr().out
+    with ReplayStore(_replay_db(graph_store)) as replay:
+        sha = replay.variant("g").sha
+        assert not replay.failed(sha, GATE_RUN_ID)
+        assert len(replay.answers(sha, GATE_RUN_ID)[0]) == 8
 
 
 def test_a_failed_graph_call_is_tried_again_after_the_pause_and_its_cost_is_counted(

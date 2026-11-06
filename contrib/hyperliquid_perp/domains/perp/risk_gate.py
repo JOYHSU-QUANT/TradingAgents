@@ -995,6 +995,7 @@ def _evaluate_plain(
         side is current.side
         and current.margin_pct is not None
         and (current.leverage is None or current.leverage == risk.leverage)
+        and abs(Decimal(approved) - current.margin_pct) < decision_cfg.rebalance_deadband_pct
     ):
         # Deadband applies only to same-side rebalances (spec §2.4); flips and
         # flat closes execute no matter how small the difference is. It compares
@@ -1006,9 +1007,8 @@ def _evaluate_plain(
         # ``delta_notional`` converges the true exposure to the target. An
         # unknown leverage (``None``) keeps the deadband: it is a churn
         # optimisation, and Phase-2-opened positions always match.
-        if abs(Decimal(approved) - current.margin_pct) < decision_cfg.rebalance_deadband_pct:
-            order_created = False
-            no_order_reason = NO_ORDER_WITHIN_DEADBAND
+        order_created = False
+        no_order_reason = NO_ORDER_WITHIN_DEADBAND
     if order_created and delta_notional == 0:
         # Nothing to trade even outside the deadband (e.g. exact same target on
         # an unknown-margin position) — creating a zero-quantity order would be

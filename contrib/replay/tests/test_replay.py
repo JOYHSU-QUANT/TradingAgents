@@ -738,6 +738,11 @@ def test_a_routing_400_that_keeps_failing_stops_by_name_and_records_no_refusal(
     assert cli.main(_replay(store, variant_file, "--repeats", "1")) == 1
     err = capsys.readouterr().err
     assert "the model call failed 3 time(s)" in err
+    assert (
+        "the router said every upstream it tried failed for the moment (429, 429, 429), so a stop "
+        "that comes back on this same question on every resume likely means its last provider "
+        "refuses it"
+    ) in err
     assert "the same command resumes from here" in err
     assert slept == list(BACKOFF_SECONDS)
     conn = sqlite3.connect(store.parent / "replay.sqlite")
@@ -787,6 +792,8 @@ def test_upstream_failures_are_read_off_the_sdk_body_or_a_wrapped_one():
         ([{"code": "4x9"}], False),
         ([{"code": None}], False),
         ([{"code": 4.29}], False),
+        ([{"code": "\u00b2"}], False),  # a digit to isdigit(), not to int()
+        ([{"code": "4290"}], False),  # no status has four digits
         (["429"], False),  # an entry that is no mapping
     ],
 )
@@ -795,6 +802,19 @@ def test_an_upstream_code_counts_only_as_a_status(entries, retryable):
 
     body = {"message": "Provider returned error", "metadata": {"previous_errors": entries}}
     assert _upstream_retryable(_ProviderError(400, "routed", body)) is retryable
+
+
+def test_the_openai_sdk_hands_over_the_routers_error_object_as_the_body():
+    """#415 rests on the SDK keeping the response's ``error`` object as ``exc.body``."""
+    openai = pytest.importorskip("openai")
+    httpx = pytest.importorskip("httpx")
+    from contrib.replay.replay import _status, _upstream_retryable
+
+    request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+    response = httpx.Response(400, json={"error": _routed(429, 429, 429)}, request=request)
+    exc = openai.OpenAI(api_key="test-only")._make_status_error_from_response(response)
+    assert isinstance(exc, openai.BadRequestError)
+    assert (_status(exc), _upstream_retryable(exc)) == (400, True)
 
 
 def test_a_replay_refused_at_its_checks_pins_nothing(store, variant_file, echo, capsys):

@@ -568,40 +568,50 @@ def _code(value: object) -> int | None:
         return None
     if isinstance(value, int):
         return value
-    if isinstance(value, str) and value.isdigit():
+    if isinstance(value, str) and value.isascii() and value.isdigit() and len(value) <= 3:
         return int(value)
     return None
 
 
-def _upstream_retryable(exc: BaseException) -> bool:
-    """Whether a router's error says its upstream providers failed for their own sake.
+def _upstream_codes(exc: BaseException) -> list[int | None]:
+    """The statuses a router lists for the upstream providers it tried; ``[]`` when none.
 
     OpenRouter answers a call that none of its upstream providers served with
     the last one's status (a 400 "Provider returned error", say) and lists the
-    earlier ones under ``metadata.previous_errors``. When every one of those
-    is a timeout, a conflict, a rate limit or a 5xx, the call failed because
-    of the providers at that moment, not because of the question, and is
-    worth another try (#415). One upstream that refused the request itself
-    (a 400, a 413) keeps the question the caller's to record as refused. The
-    SDK keeps the response's ``error`` object as the exception's ``body``; a
-    body that still wraps it is read through, and ``metadata`` is looked for
-    on the error object first, then beside it.
+    earlier ones under ``metadata.previous_errors``. The SDK keeps the
+    response's ``error`` object as the exception's ``body``; a body that still
+    wraps it is read through, and ``metadata`` is looked for on the error
+    object first, then beside it. An entry with no readable status is ``None``.
     """
     body = getattr(exc, "body", None)
     if not isinstance(body, dict):
-        return False
+        return []
     inner = body.get("error")
-    holders = (inner, body) if isinstance(inner, dict) else (body,)
-    previous = None
-    for holder in holders:
+    for holder in (inner, body) if isinstance(inner, dict) else (body,):
         metadata = holder.get("metadata")
         if isinstance(metadata, dict) and isinstance(metadata.get("previous_errors"), list):
-            previous = metadata["previous_errors"]
-            break
-    if not previous:
-        return False
-    codes = [_code(error.get("code")) if isinstance(error, dict) else None for error in previous]
-    return all(code is not None and _retryable_status(code) for code in codes)
+            return [
+                _code(error.get("code")) if isinstance(error, dict) else None
+                for error in metadata["previous_errors"]
+            ]
+    return []
+
+
+def _upstream_retryable(exc: BaseException) -> bool:
+    """Whether every upstream provider a router tried failed for the moment (#415).
+
+    When each listed upstream status is a timeout, a conflict, a rate limit or
+    a 5xx, the call failed because of the providers at that moment, not
+    because of the question, and is worth another try. One upstream that
+    refused the request itself (a 400, a 413), or no upstream listed at all,
+    keeps the question the caller's to record as refused. The last provider's
+    own answer is the router's status, which is not read: in #415 it was a
+    400 for a reason of that provider's own ("model deprecated"), so a
+    question its last provider truly refuses stops the command on each resume
+    instead (the stop says so).
+    """
+    codes = _upstream_codes(exc)
+    return bool(codes) and all(code is not None and _retryable_status(code) for code in codes)
 
 
 def attempt(
@@ -645,10 +655,18 @@ def attempt(
             ):
                 raise QuestionRefused(f"{status} {type(exc).__name__}: {exc}") from exc
             if pause is None:
+                routed = (
+                    "; the router said every upstream it tried failed for the moment ("
+                    + ", ".join(str(code) for code in _upstream_codes(exc))
+                    + "), so a stop that comes back on this same question on every resume "
+                    "likely means its last provider refuses it"
+                    if _upstream_retryable(exc)
+                    else ""
+                )
                 raise ReplayError(
                     f"{input_id} repeat {repeat}: the model call failed {tried + 1} time(s), "
-                    f"last with {type(exc).__name__}: {exc}; {asked} new answer(s) were stored "
-                    "before it, and the same command resumes from here"
+                    f"last with {type(exc).__name__}: {exc}{routed}; {asked} new answer(s) were "
+                    "stored before it, and the same command resumes from here"
                 ) from exc
             sleep(pause)
     raise AssertionError("unreachable: the last pause is None, and a failure there raises")

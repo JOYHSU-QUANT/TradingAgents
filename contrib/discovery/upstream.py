@@ -25,9 +25,10 @@ pandas in — half a second on import — and it is borrowed at module level
 here. The research package keeps its ``report`` command off that cost and
 tests it; nothing in THIS package runs without the evaluator — a world is
 validated by measuring it, an arm is a search, and a verdict is read off a
-search's report — so a split would buy nothing today. If a command that
-only reads JSON (plan PR 4's ``report``) turns out to need one, the replay
-pattern is one function away.
+search's report — so a split would buy nothing today. ``calibrate`` is
+the one command that only reads JSON (the manifest and the two records)
+and still pays the import; if it, or plan PR 4's ``report``, turns out to
+need the split, the replay pattern is one function away.
 
 What is borrowed and why:
 

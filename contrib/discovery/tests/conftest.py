@@ -16,7 +16,8 @@ several seconds a round for a world they never read.
 The generated world is the example manifest's, built once per session
 (``example_world``) and landed once (``landed_world``) for the suites
 that are about the world itself: the generator, the landing and the
-command.
+command — and for the bench, whose ``searched`` fixture lands it under
+``bench_manifest`` (``land_run``) and searches it once per session.
 
 The example manifest is a conditional world over the same coin, so the
 isolation tests can hold the one thing the manifest and the prompts share

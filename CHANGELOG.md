@@ -30,7 +30,8 @@ Breaking changes within the 0.x line are called out explicitly.
   figure, and only then reads the oracle: the planted rule's holdout and
   the whole pool's validation figures, on the grid arm's store, filed
   nowhere (`bench.py`; `verdicts.json` and `oracle.json`, staged and
-  moved into place at the end; an interrupt discards the run; a world is
+  moved into place at the end; an interrupt before the records are in
+  discards the run, one after keeps the stores not yet moved; a world is
   searched once; a manifest that names a model arm, or that is not the
   one its directory was landed for, is refused; test-seed worlds keep
   their holdout figures off the console). `generate` fills
@@ -38,7 +39,10 @@ Breaking changes within the 0.x line are called out explicitly.
   again. `oracle --run DIR` previews the planted rule's train and
   validation figures against `threshold(max_trials)` on a throw-away copy
   — development seeds only, as the protocol says — and `calibrate --root
-  DIR` tallies every searched world by kind and arm (the null false-call
+  DIR` tallies every searched world by kind, null definition, seed set,
+  set of conditions (a digest of the manifest with `world_seed` set aside,
+  printed on each row, so two calibrations under one root are two rows)
+  and arm (the null false-call
   rate under the null definition named, the non-empty-verdict rate on
   conditional worlds; an arm whose seam failed is counted beside the rate,
   not in it). `manifest_version` is 2: `search_space.candidate_order` is

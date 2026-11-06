@@ -186,6 +186,9 @@ def test_the_calibration_table_tallies_the_searched_worlds_by_kind_and_arm(searc
         )
         assert "seam failure" not in row.describe()
     assert calibration_table([unsearched]) == []
+    # One world once, however many times the walk meets it (a link in the
+    # root to a run directory, say).
+    assert calibration_table([run, run.parent / ".." / run.parent.name / run.name]) == rows
     # The row's own gates: a tally of nothing, or more found than searched.
     row = partial(CalibrationRow, WorldKind.NULL_V1, "v1", SeedSet.DEV, "0badf00d", Arm.GRID)
     with pytest.raises(BenchError, match="at least one result"):
@@ -774,17 +777,29 @@ def test_a_search_in_progress_is_not_told_the_world_was_searched(fresh_run):
     (fresh_run / ARMS_DIRNAME).mkdir()
     with pytest.raises(BenchError, match="a search of this world is running or did not finish"):
         run_world(fresh_run)
+    # A run killed outright leaves its staging too, named with the claim so
+    # removing ``arms/`` alone does not leave whole store copies behind.
+    (fresh_run / ".search.partial-killed").mkdir()
+    with pytest.raises(BenchError, match=r"holds \['arms', '\.search\.partial-killed'\]"):
+        run_world(fresh_run)
+    with pytest.raises(BenchError, match=r"\.search\.partial-killed"):
+        calibration_table([fresh_run])
 
 
-def test_a_failure_moving_the_stores_in_keeps_them_and_names_where(
-    fresh_run, monkeypatch, landed_world, searched
-):
+def _quick_oracle(monkeypatch, landed_world, searched) -> None:
+    """The landing check and the oracle's readings stubbed: the run's end is under test, not them."""
     _artifact, landing = landed_world
     _run, _verdicts, oracle, *_ = searched
     monkeypatch.setattr(bench, "verify", lambda store, manifest: landing)
     monkeypatch.setattr(bench, "frame_for", lambda ledger, experiment, *, holdout: None)
     monkeypatch.setattr(bench, "planted_figures", lambda *args, **kwargs: oracle.planted)
     monkeypatch.setattr(bench, "pool_reference", lambda *args, **kwargs: oracle.pool)
+
+
+def test_a_failure_moving_the_stores_in_keeps_them_and_names_where(
+    fresh_run, monkeypatch, landed_world, searched
+):
+    _quick_oracle(monkeypatch, landed_world, searched)
     real = Path.rename
 
     def locked(self, target):
@@ -807,6 +822,34 @@ def test_a_failure_moving_the_stores_in_keeps_them_and_names_where(
     # And a later search names the kept staging beside the records.
     with pytest.raises(BenchError, match=r"searched before.* and the kept staging by hand"):
         run_world(fresh_run)
+
+
+@pytest.mark.parametrize("arm", ["grid", "random"])
+def test_an_interrupt_once_the_records_are_in_keeps_the_stores(
+    fresh_run, monkeypatch, landed_world, searched, arm
+):
+    _quick_oracle(monkeypatch, landed_world, searched)
+    real = Path.rename
+
+    def interrupted(self, target):
+        # Ctrl-C as one store moves in: before any arm ("grid" sorts first)
+        # or after one.
+        if Path(target).parent.name == ARMS_DIRNAME and Path(target).name == arm:
+            raise KeyboardInterrupt
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "rename", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        run_world(fresh_run)
+    monkeypatch.setattr(Path, "rename", real)
+    # The records are in, so the claim stays and the staging holding the
+    # stores it did not receive is kept: the stores are not thrown away.
+    assert (fresh_run / VERDICTS_FILENAME).is_file() and (fresh_run / ORACLE_FILENAME).is_file()
+    moved = [] if arm == "grid" else ["grid"]
+    assert _listing(fresh_run / ARMS_DIRNAME) == moved
+    kept = [p for p in fresh_run.iterdir() if p.name.startswith(".search.partial-")]
+    assert len(kept) == 1
+    assert _listing(kept[0] / ARMS_DIRNAME) == sorted({"grid", "random"} - set(moved))
 
 
 def test_a_broken_landed_manifest_is_refused_with_its_file(tmp_path):

@@ -40,7 +40,9 @@ generator does not make, a landed history an arm could not measure on, a
 run directory searched before or not landed, a record a later build
 cannot read, a store that cannot be opened, a path that cannot be read or
 written — with the sentence on stderr; ``2`` argparse's usage errors;
-``130`` interrupted, with a search's staging removed.
+``130`` interrupted, with a search's staging removed — unless its records
+were already in, when the staging holding the stores ``arms/`` did not
+receive is kept and the next ``search`` names it.
 """
 
 from __future__ import annotations
@@ -107,7 +109,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     calibrate_cmd = subparsers.add_parser(
-        "calibrate", help="tally every searched world under a root by kind and arm"
+        "calibrate",
+        help=(
+            "tally every searched world under a root by kind, null definition, seed set, "
+            "conditions (a digest printed on each row) and arm"
+        ),
     )
     calibrate_cmd.add_argument(
         "--root", default=None, help=f"the bench root to walk (default: {shown_root})"

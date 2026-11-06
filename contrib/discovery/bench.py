@@ -33,7 +33,8 @@ directory as the landing left it but for at most ``verdicts.json`` (if it
 ends between the two moves), which the guard and calibrate refuse by
 name; one that ends while the stores move in — a failed rename or an
 interrupt — leaves the records and keeps the staging that holds the rest,
-named in the refusal. ``arms/`` itself is made first, atomically, as the claim on
+named in a failed rename's refusal and, after an interrupt, by the next
+``search``. ``arms/`` itself is made first, atomically, as the claim on
 the directory: two searches started on one world cannot both pass the
 guard. A run directory holding the claim alone is a search running or
 one that did not finish (nothing is prescribed while one may run); one
@@ -48,9 +49,11 @@ of ``search`` with everyone else's.
 
 :func:`calibration_table` is the null calibration's reading (plan §4.3,
 PR 3's acceptance): over a root of run directories, how often each arm's
-final verdict was non-empty, by the kind of world — a false call on a
-null world, a candidate recovery on a conditional one (whether the
-selected rule IS the planted one is the scorer's question, plan PR 4).
+final verdict was non-empty, by the kind of world, its null definition,
+its seed set and its conditions (:func:`landing.conditions_digest`) — a
+false call on a null world, a candidate recovery on a conditional one
+(whether the selected rule IS the planted one is the scorer's question,
+plan PR 4).
 """
 
 from __future__ import annotations
@@ -424,11 +427,34 @@ def _search_left(run_dir: Path) -> list[str]:
     return [n for n in (ARMS_DIRNAME, VERDICTS_FILENAME, ORACLE_FILENAME) if (run_dir / n).exists()]
 
 
+_STAGING_PREFIX = ".search.partial-"
+
+
+def _kept_staging(run_dir: Path) -> list[str]:
+    """The search stagings in ``run_dir``: a running search's, one a failed store move kept, or a kill's."""
+    return sorted(p.name for p in run_dir.glob(f"{_STAGING_PREFIX}*"))
+
+
+def _holds_stores(staging: Path) -> bool:
+    """Whether a search's staging still holds an arm's store; one that cannot be listed is kept."""
+    try:
+        return any((staging / ARMS_DIRNAME).iterdir())
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
 def _unfinished(run_dir: Path, left: list[str]) -> str:
-    """The sentence for a search that is running or did not finish: nothing prescribed while one may run."""
+    """The sentence for a search that is running or did not finish: nothing prescribed while one may run.
+
+    The staging is named with the claim: a run killed outright leaves one
+    holding whole store copies, which removing ``arms/`` alone would leave
+    behind.
+    """
     return (
-        f"{run_dir} holds {left}: a search of this world is running or did not finish; once no "
-        f"search is running, remove them by hand to search the world again"
+        f"{run_dir} holds {left + _kept_staging(run_dir)}: a search of this world is running or "
+        f"did not finish; once no search is running, remove them by hand to search the world again"
     )
 
 
@@ -545,7 +571,7 @@ def run_world(
     if left:
         # A staging kept by a failed store move holds the stores the claim did
         # not receive; it is named so it is not left behind by a re-search.
-        kept = sorted(p.name for p in run_dir.glob(".search.partial-*"))
+        kept = _kept_staging(run_dir)
         raise BenchError(
             f"{run_dir} holds {left + kept}: this world was searched before, and a search is "
             f"spent once — remove {ARMS_DIRNAME}/, {VERDICTS_FILENAME}, {ORACLE_FILENAME}"
@@ -585,14 +611,12 @@ def run_world(
             f"spent once"
         ) from exc
     try:
-        staging = open_staging(run_dir, ".search.partial-")
+        staging = open_staging(run_dir, _STAGING_PREFIX)
     except BaseException:
         # No staging, nothing run: the claim goes back, or the next search
         # would be told the world was searched.
         _give_back(claim)
         raise
-    moved = False
-    keep_staging = False
     try:
         results: list[ArmResult] = []
         landing: Landing | None = None
@@ -672,11 +696,7 @@ def run_world(
         (staging / ORACLE_FILENAME).write_bytes(oracle.dumps().encode("utf-8"))
         for name in (VERDICTS_FILENAME, ORACLE_FILENAME):
             os.replace(staging / name, run_dir / name)
-        moved = True
         done: list[str] = []
-        # From here the staging holds stores the claim has not received, so
-        # any end — a failed rename or an interrupt between two — keeps it.
-        keep_staging = True
         try:
             for arm_dir in sorted((staging / ARMS_DIRNAME).iterdir()):
                 arm_dir.rename(claim / arm_dir.name)
@@ -687,16 +707,20 @@ def run_world(
                 f"failed after {done}; the rest are in {staging / ARMS_DIRNAME} — move them in by "
                 f"hand, then remove {staging}"
             ) from exc
-        keep_staging = False
     finally:
-        # Emptied by the moves on success; the half-made run on any other
-        # end, except the stores the claim did not receive.
-        if not keep_staging:
+        # Decided from the directory, not from how far the code got: an
+        # interrupt can land between a rename and the line after it. The
+        # guard refused any record and the claim keeps other searches out,
+        # so an ``oracle.json`` here is this run's. Once it is in, the claim
+        # stays (the records sit beside it, refused by the guard until the
+        # operator removes them) and a staging still holding stores the
+        # claim did not receive is kept — a failed rename and an interrupt
+        # alike; emptied by the moves, it goes. Before it is in, the
+        # half-made run goes and the claim is given back.
+        records_in = (run_dir / ORACLE_FILENAME).exists()
+        if not (records_in and _holds_stores(staging)):
             discard_staging(staging)
-        if not moved:
-            # The claim is given back only while it is still empty: a run
-            # that failed moving its stores in has records beside them,
-            # which the guard refuses and the operator removes by hand.
+        if not records_in:
             _give_back(claim)
     return verdicts, oracle
 
@@ -713,9 +737,9 @@ class CalibrationRow:
     candidate recovery, not yet a recovery (plan PR 4 scores that).
 
     A row is one set of conditions: ``conditions`` is the digest of the
-    manifest with the seed set aside (``landing.conditions_digest``), so the
-    worlds of one β tier, one penalty, one budget, one bar count and one
-    seed set are tallied together and two calibrations under one root are
+    manifest with ``world_seed`` (and the id derived from it) set aside
+    (``landing.conditions_digest``), so the worlds of one β tier, one
+    penalty, one budget, one bar count and one seed set are tallied together and two calibrations under one root are
     two rows, each printed with its digest — never one rate over both.
 
     A search is a run that answered — spent its budget or walked its pool
@@ -769,7 +793,7 @@ class CalibrationRow:
 
 
 def calibration_table(run_dirs: Iterable[Path]) -> list[CalibrationRow]:
-    """Every searched run directory's verdicts, tallied by world kind and arm (the module docstring).
+    """Every searched run directory's verdicts, tallied per row key (the module docstring).
 
     A directory holding none of what a search leaves (``arms/``,
     ``verdicts.json``, ``oracle.json``) is a world not yet searched and is
@@ -778,11 +802,21 @@ def calibration_table(run_dirs: Iterable[Path]) -> list[CalibrationRow]:
     dropped from the table without a word. A record that cannot be read,
     or that is not its manifest's — another world, pool, arm set, digest,
     set of conditions, budget, or rule outside the pool — is refused by
-    name. Rows come in the enums' own order: kind, then the null
-    definition, the seed set, the conditions, then arm.
+    name. A directory the walk meets twice (a link to it in the root) is
+    counted once. Rows are keyed by kind, null definition, seed set,
+    conditions and arm, and come in that order: the kind, seed set and arm
+    in their enums' order, the null definition and the conditions digest in
+    text order.
     """
     tally: dict[tuple[WorldKind, str, SeedSet, str, Arm], list[int]] = {}
+    seen: set[Path] = set()
     for run_dir in run_dirs:
+        # One world once: a link in the root to a run directory (a backup
+        # alias, say) would otherwise be tallied a second time.
+        real = run_dir.resolve()
+        if real in seen:
+            continue
+        seen.add(real)
         left = _search_left(run_dir)
         if not left:
             continue

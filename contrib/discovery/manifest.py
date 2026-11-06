@@ -1170,7 +1170,7 @@ class Manifest:
         return replace(self, search_space=replace(self.search_space, pool_size=None)).dumps()
 
     def conditions(self) -> str:
-        """The identity text with the seed set aside too: what the worlds of one calibration share.
+        """The identity text with ``world_seed`` set aside too: what the worlds of one calibration share.
 
         Two manifests that differ only in ``world_seed`` (and so in the id
         derived from it) give the same text; any other difference — kind,

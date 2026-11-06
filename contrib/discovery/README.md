@@ -142,8 +142,9 @@ parser 讀成 feature 名、regime 給數字會被 parser 拒絕，兩種都在�
 2. 每臂把 `world.sqlite` 複製到自己的 store（`arms/random/replicate-<search seed>.sqlite`、`arms/grid/replicate-0.sqlite`），
    第一顆先跑 `verify()`（落地時的驗收再跑一次：artifact 真的是 manifest 描述的世界）；每臂以 `experiment_for()`＋
    `ledger.create_experiment()` 開自己的 experiment（id＝`random-<seed>`／`grid-0`）——同 coin、同 split／costs／window／
-   penalty，`Verdicts` 的建構子守住這件事（也守住沒有一臂的 distinct rules 超過 `pool_size`）；grid 只有 replicate 0 由
-   `ArmResult` 守。
+   penalty，`Verdicts` 的建構子守住這件事（也守住：必有 `grid-0`、各臂 distinct rules＝自己的 trials 數且不超過
+   `pool_size`、答案數不超過 `pool_size`、`exhausted` 的答案數＝`pool_size`）；grid 只有 replicate 0、`interrupted` 的快照不收，
+   由 `ArmResult` 守。
 3. 每臂跑 autoresearch 的 `search(ledger, experiment, hypothesist, max_trials=budget)`；跑完立刻 `snapshot_arm`（晉升前）→
    `final_verdict`；`selected` 非空就用 autoresearch 的 `promote()` 晉升那一筆（holdout 數字由它讀）。中斷＝整個 run 丟掉
    （replicate 不 resume，計畫 §9 (14)）、staging 移除、exit 130；seam 失敗記成 `seam_failed`、下一臂照跑。
@@ -152,8 +153,11 @@ parser 讀成 feature 名、regime 給數字會被 parser 拒絕，兩種都在�
 5. 全部先寫進 run 目錄下的 staging（`.search.partial-*`），最後先搬 `verdicts.json`／`oracle.json`，再把各臂 store 逐一搬進
    開頭就建好的 `arms/`（claim）；`manifest.json` 不動（`pool_size` 由 `generate` 回填）。紀錄搬好之前任何原因中途結束都把
    staging 與 claim 移除，目錄回到落地狀態——只有停在兩次搬檔之間會多留一個 `verdicts.json`，guard 與 calibrate 都會點名拒絕；
-   紀錄搬好之後搬 store 中途結束（例如 Windows 防毒鎖檔、或剛好 Ctrl-C），**staging 保留**、拒絕句子點名哪些臂已進 `arms/`、
-   其餘 store 在哪個 staging 路徑，手動搬完再刪 staging——不丟資料；之後再 `search` 時 guard 也會把保留的 staging 列出來。test seed 的世界不把 holdout 數字印到 console（`verdicts.json`／`oracle.json` 照寫；計畫 §4.2
+   紀錄搬好之後搬 store 中途結束，**staging 保留**、不丟資料：搬檔失敗（例如 Windows 防毒鎖檔）時拒絕句子點名哪些臂已進
+   `arms/`、其餘 store 在哪個 staging 路徑，手動搬完再刪 staging；剛好 Ctrl-C 時只印「interrupted」、staging 一樣保留。
+   收尾看的是目錄本身（`oracle.json` 在不在、staging 裡還有沒有 store），不是程式跑到哪一行，所以中斷落在兩行之間也一樣。
+   之後再 `search` 時 guard 會把保留的 staging 列出來；只有 `arms/` 的目錄（搜尋進行中、或被直接殺掉）拒絕句子也會列出
+   staging，免得只刪 `arms/` 留下整份 store 副本。test seed 的世界不把 holdout 數字印到 console（`verdicts.json`／`oracle.json` 照寫；計畫 §4.2
    測試世界的 holdout 不得拿來調任何東西）。
 
 **`oracle --run <dir>`**（`bench.preview_oracle`）：搜尋前先看埋的規則的 train／validation 對 `threshold(max_trials)` 的餘裕，
@@ -170,8 +174,9 @@ null 世界沒有東西可看。holdout 在任何 seed 上都不在這裡讀。
 對不上旁邊 manifest（id、`len(candidates)`、`arms`、目錄的 digest）就拒絕；`oracle.json` 也一起讀：world_id／digest 要跟
 verdicts 一致、`planted` 有無要對得上世界的 kind、`pool.size` 要等於 `len(candidates)`、門檻（`budget`／`oracle_margin`／
 `threshold`、池的 `threshold`）要等於 manifest 的 budget 與 penalty 算出的值；`verdicts.json` 裡各臂 experiment 的條件
-（split／costs／window／penalty）要等於 `experiment_for(manifest)`、`budget_spent` 的答案數＝預算、`exhausted` 的答案數＝池大小、
-每筆 trial 都是池裡的規則；壞掉的紀錄（含 manifest）拒絕句子帶檔案路徑；兩份紀錄沒有都在的目錄（只有 `arms/`＝搜尋進行中或沒跑完、
+（split／costs／window／penalty）要等於 `experiment_for(manifest)`、`budget_spent` 的答案數＝預算、任何臂（含 `seam_failed`）
+的答案數不超過預算、每筆 trial 都是池裡的規則；`oracle.json` 埋的規則三段數字的視窗要等於 manifest 的 split
+（`exhausted` 的答案數＝池大小是紀錄本身的閘門、每次讀都檢查）；同一個目錄被走到兩次（root 裡有連到它的連結）只算一次；壞掉的紀錄（含 manifest）拒絕句子帶檔案路徑；兩份紀錄沒有都在的目錄（只有 `arms/`＝搜尋進行中或沒跑完、
 只有 `verdicts.json`＝停在兩次搬檔之間）拒絕而不是跳過，句子只說「等沒有搜尋在跑再手動移除」；帶 `llm` 的 manifest 整個 calibrate
 拒絕；不要求 `world.sqlite`（artifact 可裁掉省空間）。
 
@@ -179,12 +184,14 @@ verdicts 一致、`planted` 有無要對得上世界的 kind、`pool.size` 要�
 verdict, holdout}]}`（`manifest_digest`＝跑的時候 run 目錄的 digest，把紀錄綁在它的條件上、不只綁 world id——同 seed 的 null
 雙胞胎 id 相同、池相同，只差 digest），
 `verdict` 寫在 `snapshot` 旁邊給人讀，讀回時重算 `final_verdict(snapshot)` 不相等就拒絕（紀錄永遠可由快照重判，計畫 §4.5）；
-`holdout` 有值 ⇔ `selected` 非空；grid 只有 replicate 0；沒有一臂的 distinct rules 超過 `pool_size`。`oracle.json`＝
+`holdout` 有值 ⇔ `selected` 非空；grid 只有 replicate 0、必有 `grid-0`；`interrupted` 的快照不收；各臂 distinct rules＝trials 數且
+不超過 `pool_size`、答案數不超過 `pool_size`、`exhausted` 的答案數＝`pool_size`。`oracle.json`＝
 `{oracle_version, world_id, manifest_digest, planted: {train, validation, holdout, budget, threshold, oracle_margin, blockers[],
 eligible, margin, passed} | null, pool: {size, validation_sharpes[], best, threshold, clearing}}`：`blockers` 是 autoresearch
 閘門在 `threshold(max_trials)` 的句子（空＝過），而且句數要等於旁邊 validation 數字失敗的判斷式數（ruined／零交易／淨報酬不正／
 sharpe 低於門檻），所以手改 blockers 寫不出「有餘裕」；`eligible`／`margin`／`passed`／`best`／`size` 是衍生值，讀回對不上就
-拒絕；三段數字各自要掛在自己的視窗名下；`clearing` 不能超過 validation sharpe ≥ threshold 的個數。
+拒絕；三段數字各自要掛在自己的視窗名下；`planted` 有值時一定帶 holdout（紀錄是搜尋之後寫的）；`clearing` 不能超過
+validation sharpe ≥ threshold 的個數。
 
 **2026-11-06 範例世界（dev seed 0、400 根決策 bar）的煙霧讀數，給校準參考**：埋的規則 train net sharpe 5.31、validation −4.36
 → oracle 無餘裕；同 seed 的 Null 世界整池 16 個候選有 8 個過 `threshold(16)`＝1.69、最佳 validation sharpe 9.3，Random／Grid
@@ -210,7 +217,9 @@ python -m contrib.discovery calibrate --root data/discovery
 | store 的三條序列逐筆等於生成結果；`first_measurable_index ≤ warmup`；tail 通過；三段長度＝manifest；walk 沒走到頭拒絕 | `tests/test_landing.py` |
 | `generate` 寫出 canonical manifest、第二次拒絕、失敗不留半成品；`search`／`oracle`／`calibrate` 的輸出與各錯誤家族的 exit code | `tests/test_cli.py` |
 | 池＝templates × grids 按 `candidate_order`、去重後編號、每個候選寫法正規（gate 在 `filters`、`max_bars`、`POOL_SIZING`、family）、parser 拒絕就 manifest 拒絕；Random 是 seed＋world 決定的排列、不放回；Grid 按編號；池走完 raise `CandidatesExhausted`＋旗標；經真的 `search()` 每個候選只 file 一次、以 `exhausted` 結束 | `tests/test_hypothesists.py` |
-| 一次真的 `search`：`arms/` 兩顆 store、`verdicts.json`／`oracle.json` 讀回相等、`manifest.json` 不動且目錄名不變、artifact 位元組不變；各臂同條件、各自 store 裡只晉升 selected；oracle 在各臂之後印、holdout 有值、整池 16 個；再搜拒絕；帶 `llm` 的 manifest 拒絕；落地後改過的 manifest（digest 對不上目錄名）拒絕；calibrate 表（seam 失敗不進分母、artifact 裁掉仍可算、world_id／pool_size 不符拒絕）；紀錄閘門（verdict 對不上快照、selected 非首位、holdout 段位、`eligible`／`margin`／`passed`／段名／`clearing`、`best`／`size`、版本、grid replicate、trials ≤ pool_size、row 的計數）；holdout 旗標可關；dev-only／null 的 oracle 預覽拒絕；中斷＝目錄回到落地狀態；seam 失敗記錄後下一臂照跑 | `tests/test_bench.py` |
+| 一次真的 `search`：`arms/` 兩顆 store、`verdicts.json`／`oracle.json` 讀回相等、`manifest.json` 不動且目錄名不變、artifact 位元組不變；各臂同條件、各自 store 裡只晉升 selected；oracle 在各臂之後印、holdout 有值、整池 16 個；再搜拒絕；帶 `llm` 的 manifest 拒絕；落地後改過的 manifest（digest 對不上目錄名）拒絕；calibrate 表（一列＝一組條件〔條件 digest〕、seam 失敗不進分母、artifact 裁掉仍可算、同一目錄只算一次、world_id／pool_size／臂集合不符與
+null 雙胞胎 digest 拒絕、紀錄對 manifest 的條件／預算／池／oracle 門檻與視窗、帶 `llm` 拒絕）；搜尋進行中（只有 `arms/`）拒絕且點名 staging；
+staging 開不起來時 claim 歸還；搬 store 失敗或中斷時保留 staging 並點名；紀錄閘門（verdict 對不上快照、selected 非首位、holdout 段位、`eligible`／`margin`／`passed`／段名／`clearing`、`best`／`size`、版本、grid replicate、trials ≤ pool_size、row 的計數）；holdout 旗標可關；dev-only／null 的 oracle 預覽拒絕；中斷＝目錄回到落地狀態；seam 失敗記錄後下一臂照跑 | `tests/test_bench.py` |
 
 ## Manifest 格式（v2）
 

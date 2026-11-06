@@ -54,6 +54,20 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **The replay retries an OpenRouter routing error instead of recording the
+  question as refused** (#415). When none of a model's upstream providers
+  serves a call, OpenRouter answers with the last provider's status (a 400
+  "Provider returned error") and lists the others under
+  `metadata.previous_errors`; the replay read only the 400 and recorded the
+  question as refused for its own sake. In the plan PR 3c walk that was one
+  question of 552, whose three upstreams had all answered 429. `attempt` now
+  treats a 4xx whose listed upstream errors are all a 408, 409, 429 or 5xx
+  as worth another try, so `replay`, the direction probe and `backtest --ask`
+  retry it after the usual pauses and stop by name (resumable) if it still
+  fails; a 4xx with no upstream errors listed, or with one upstream that
+  refused the request itself, is still refused. On a graph walk this
+  matters more than a later `--retry-failed` could fix: the refused
+  question's held book is already carried into every later question's book.
 - **A dotenv test no longer leaves its key in the process, and the uniswap
   judge's smoke test is opt-in** (#411). `load_dotenv_files` writes straight
   into `os.environ`, and `monkeypatch.delenv` of a name that was absent

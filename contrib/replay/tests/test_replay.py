@@ -595,26 +595,30 @@ def test_gate_config_refuses_a_run_without_a_genesis(tmp_path):
 
 
 class _ProviderError(Exception):
-    def __init__(self, status: int, message: str) -> None:
+    def __init__(self, status: int, message: str, body: object = None) -> None:
         super().__init__(message)
         self.status_code = status
+        self.body = body
 
 
 class _Fails(Echo):
     """An echo whose provider answers ``status`` for the slots in ``slots``, ``times`` times each."""
 
-    def __init__(self, status: int, slots: set[int], *, times: int = 99) -> None:
+    def __init__(
+        self, status: int, slots: set[int], *, times: int = 99, body: object = None
+    ) -> None:
         super().__init__()
         self.status = status
         self.slots = slots
         self.left = dict.fromkeys(slots, times)
+        self.body = body
 
     def __call__(self, system: str, human: str) -> Completion:
         for slot in self.slots:
             if f"question {slot:02d}:" in human and self.left[slot] > 0:
                 self.left[slot] -= 1
                 self.calls.append((system, human))
-                raise _ProviderError(self.status, f"provider says {self.status}")
+                raise _ProviderError(self.status, f"provider says {self.status}", self.body)
         return super().__call__(system, human)
 
 
@@ -699,6 +703,98 @@ def test_a_status_is_read_off_the_exception_or_its_response():
     boolean.status = True  # type: ignore[attr-defined]
     assert (_status(on_itself), _status(on_response), _status(boolean)) == (400, 429, None)
     assert _status(ConnectionError("no status at all")) is None
+
+
+def _routed(*codes: int) -> dict[str, object]:
+    """OpenRouter's ``error`` object when no upstream served the call (the SDK's ``body``)."""
+    return {
+        "message": "Provider returned error",
+        "code": 400,
+        "metadata": {
+            "raw": "the last provider's own answer",
+            "provider_name": "Last",
+            "previous_errors": [
+                {"code": code, "message": "Provider returned error", "provider_name": f"P{i}"}
+                for i, code in enumerate(codes)
+            ],
+        },
+    }
+
+
+def test_a_routing_400_over_retryable_upstream_failures_is_tried_again(
+    store, variant_file, monkeypatch
+):
+    """#415: a 400 whose upstreams failed retryably is the providers' moment, not the question's."""
+    slept = _use(monkeypatch, _Fails(400, {TRAIN[1]}, times=2, body=_routed(429, 429, 429)))
+    assert cli.main(_replay(store, variant_file, "--repeats", "1")) == 0
+    assert slept == list(BACKOFF_SECONDS)
+    assert len(_answers(store.parent / "replay.sqlite")) == len(TRAIN)
+
+
+def test_a_routing_400_that_keeps_failing_stops_by_name_and_records_no_refusal(
+    store, variant_file, monkeypatch, capsys
+):
+    slept = _use(monkeypatch, _Fails(400, {TRAIN[1]}, body=_routed(429, 429, 429)))
+    assert cli.main(_replay(store, variant_file, "--repeats", "1")) == 1
+    err = capsys.readouterr().err
+    assert "the model call failed 3 time(s)" in err
+    assert "the same command resumes from here" in err
+    assert slept == list(BACKOFF_SECONDS)
+    conn = sqlite3.connect(store.parent / "replay.sqlite")
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM failures").fetchone() == (0,)
+    finally:
+        conn.close()
+
+
+def test_a_400_whose_upstreams_refused_the_request_itself_is_still_refused(
+    store, variant_file, monkeypatch, capsys
+):
+    """One upstream that refused the request itself keeps the question the caller's own."""
+    slept = _use(monkeypatch, _Fails(400, {TRAIN[1]}, body=_routed(429, 400)))
+    assert cli.main(_replay(store, variant_file, "--repeats", "1")) == 0
+    assert slept == []
+    assert f"{papers.input_id(TRAIN[1])} repeat 0: refused (400 _ProviderError" in (
+        capsys.readouterr().err
+    )
+    assert len(_answers(store.parent / "replay.sqlite")) == len(TRAIN) - 1
+
+
+def test_upstream_failures_are_read_off_the_sdk_body_or_a_wrapped_one():
+    from contrib.replay.replay import _upstream_retryable
+
+    def error(body: object) -> _ProviderError:
+        return _ProviderError(400, "routed", body)
+
+    assert _upstream_retryable(error(_routed(429)))
+    assert _upstream_retryable(error(_routed(429, 503, 408)))
+    assert _upstream_retryable(error({"error": _routed(502)}))  # the response, unwrapped
+    beside = {"error": {"message": "Provider returned error"}, "metadata": _routed(429)["metadata"]}
+    assert _upstream_retryable(error(beside))  # metadata beside the error object
+    assert not _upstream_retryable(error(_routed(429, 422)))  # one refused the request itself
+    assert not _upstream_retryable(error(_routed(400, 413)))
+    assert not _upstream_retryable(error(_routed()))  # no upstream errors listed
+    assert not _upstream_retryable(error({"message": "Provider returned error", "code": 400}))
+    assert not _upstream_retryable(error("not a mapping"))
+    assert not _upstream_retryable(ConnectionError("no body at all"))
+
+
+@pytest.mark.parametrize(
+    ("entries", "retryable"),
+    [
+        ([{"code": "429"}], True),  # the digits of a status
+        ([{"code": True}], False),
+        ([{"code": "4x9"}], False),
+        ([{"code": None}], False),
+        ([{"code": 4.29}], False),
+        (["429"], False),  # an entry that is no mapping
+    ],
+)
+def test_an_upstream_code_counts_only_as_a_status(entries, retryable):
+    from contrib.replay.replay import _upstream_retryable
+
+    body = {"message": "Provider returned error", "metadata": {"previous_errors": entries}}
+    assert _upstream_retryable(_ProviderError(400, "routed", body)) is retryable
 
 
 def test_a_replay_refused_at_its_checks_pins_nothing(store, variant_file, echo, capsys):

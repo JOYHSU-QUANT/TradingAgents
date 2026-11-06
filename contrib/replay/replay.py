@@ -106,7 +106,9 @@ BACKOFF_SECONDS: Final = (5.0, 20.0)
 _STOP_STATUSES: Final = frozenset({401, 403, 404})
 # Client errors that are still worth another try: a timeout, a conflict, a
 # rate limit. Every other 4xx is the question's own (its context too long, a
-# content filter) and is recorded as unanswered instead (decided 2026-09-24).
+# content filter) and is recorded as unanswered instead (decided 2026-09-24),
+# unless a router says all its upstreams failed in one of these ways or with
+# a 5xx (see :func:`_upstream_retryable`, #415).
 _RETRY_CLIENT_STATUSES: Final = frozenset({408, 409, 429})
 
 
@@ -454,7 +456,8 @@ def ask_all(
       too long, a content filter): the question is recorded as a failure,
       not asked again unless the caller clears the failures, and the replay
       goes on. The scorecard counts it as unanswered.
-    - anything else (no status, a timeout, a rate limit, a 5xx): tried again
+    - anything else (no status, a timeout, a rate limit, a 5xx, or a
+      router's 4xx over upstream failures of those kinds, #415): tried again
       after each of :data:`BACKOFF_SECONDS`; after the last try the replay
       stops by name, and the same command resumes from there.
 
@@ -554,6 +557,53 @@ def _status(exc: BaseException) -> int | None:
     return None
 
 
+def _retryable_status(status: int) -> bool:
+    """A timeout, a conflict, a rate limit or a server error: worth another try."""
+    return status in _RETRY_CLIENT_STATUSES or 500 <= status < 600
+
+
+def _code(value: object) -> int | None:
+    """An upstream error's status, as an int or as the digits of one."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+def _upstream_retryable(exc: BaseException) -> bool:
+    """Whether a router's error says its upstream providers failed for their own sake.
+
+    OpenRouter answers a call that none of its upstream providers served with
+    the last one's status (a 400 "Provider returned error", say) and lists the
+    earlier ones under ``metadata.previous_errors``. When every one of those
+    is a timeout, a conflict, a rate limit or a 5xx, the call failed because
+    of the providers at that moment, not because of the question, and is
+    worth another try (#415). One upstream that refused the request itself
+    (a 400, a 413) keeps the question the caller's to record as refused. The
+    SDK keeps the response's ``error`` object as the exception's ``body``; a
+    body that still wraps it is read through, and ``metadata`` is looked for
+    on the error object first, then beside it.
+    """
+    body = getattr(exc, "body", None)
+    if not isinstance(body, dict):
+        return False
+    inner = body.get("error")
+    holders = (inner, body) if isinstance(inner, dict) else (body,)
+    previous = None
+    for holder in holders:
+        metadata = holder.get("metadata")
+        if isinstance(metadata, dict) and isinstance(metadata.get("previous_errors"), list):
+            previous = metadata["previous_errors"]
+            break
+    if not previous:
+        return False
+    codes = [_code(error.get("code")) if isinstance(error, dict) else None for error in previous]
+    return all(code is not None and _retryable_status(code) for code in codes)
+
+
 def attempt(
     call: Callable[[], _T],
     *,
@@ -587,7 +637,12 @@ def attempt(
                     f"the question, so the replay stops here; {asked} new answer(s) were stored "
                     "before it"
                 ) from exc
-            if status is not None and 400 <= status < 500 and status not in _RETRY_CLIENT_STATUSES:
+            if (
+                status is not None
+                and 400 <= status < 500
+                and not _retryable_status(status)
+                and not _upstream_retryable(exc)
+            ):
                 raise QuestionRefused(f"{status} {type(exc).__name__}: {exc}") from exc
             if pause is None:
                 raise ReplayError(
@@ -681,7 +736,8 @@ def ask_probes(
     """Ask the probe of every prepared question ``repeats`` times, as :func:`ask_all` asks decisions.
 
     The same call discipline (:func:`call_model`: stop on 401/403/404,
-    record any other 4xx but 408/409/429 as refused, retry the rest), the
+    record any other 4xx but 408/409/429 as refused, unless a router's
+    upstreams failed retryably, retry the rest), the
     same resumption (a stored answer, valid or ``invalid_probe``, is never
     asked again; a refusal is, once the caller clears it) and the same
     ``limit`` count. No gate: a probe answer is a forecast, not a decision.

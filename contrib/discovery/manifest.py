@@ -700,11 +700,12 @@ class SearchSpace:
     and for no other — a grid nothing reads is a knob whose author believes
     it is doing something. Which features take a label and which a number
     is the parser's call, made when the pool is written out (below).
-    ``pool_size``
-    is filled in then, after ``spec_hash`` deduplication, and is ``None``
+    ``pool_size`` is what ``generate`` fills in from that count (after
+    ``spec_hash`` deduplication) when it lands the world, and is ``None``
     until it is — not 0, which would read as a pool enumerated and found
-    empty, a manifest that cannot be run and is refused. ``candidate_order``
-    names the order the pool is numbered in and the Grid arm walks it.
+    empty, a manifest that cannot be run and is refused; filled, it has
+    to be the count this build enumerates. ``candidate_order`` names the
+    order the pool is numbered in and the Grid arm walks it.
 
     The grid is held as a tuple of ``(feature, values)`` pairs, sorted by
     feature — immutable, as the rest of a frozen record is, and hashable —
@@ -1121,10 +1122,11 @@ class Manifest:
     def identity(self) -> str:
         """The canonical text with the one fill-in field set aside: what a landed run is keyed by.
 
-        ``search_space.pool_size`` is written back once the pool is
-        enumerated (plan PR 3), after the world has landed; everything else
-        is fixed before. A digest of this text names the run directory, so
-        the filled manifest names the directory it was filled in.
+        ``search_space.pool_size`` is filled in by ``generate`` before the
+        world lands, and is the one field a landed manifest carries that a
+        hand-written one may leave null; everything else is fixed before.
+        A digest of this text names the run directory, so the filled and
+        the unfilled manifest name the same place.
         """
         return replace(self, search_space=replace(self.search_space, pool_size=None)).dumps()
 

@@ -7,9 +7,11 @@ Four so far, in the order a world goes through them (plan §3):
   digest>/world.sqlite`` through the research package's own backfill,
   check the landed history the way an experiment would (plan PR 2's
   acceptance list), and write the canonical ``manifest.json`` beside it
-  (:mod:`.landing` owns the layout and the staged landing). The artifact
-  is read-only from then on: an arm copies it (plan §2), and a second
-  ``generate`` of a manifest already landed is refused rather than
+  with ``search_space.pool_size`` filled in — the one field the run
+  directory's digest sets aside (:mod:`.landing` owns the layout and the
+  staged landing). The directory is read-only from then on: an arm copies
+  the artifact (plan §2), the manifest is never written again, and a
+  second ``generate`` of a manifest already landed is refused rather than
   overwritten.
 - ``oracle --run DIR`` — the planted rule's train and validation figures
   against the gate at the end of the budget, on a throw-away copy, before
@@ -18,8 +20,9 @@ Four so far, in the order a world goes through them (plan §3):
 - ``search --run DIR`` — the Random replicates and the Grid arm, each in
   its own copy of the artifact under ``arms/``, each judged at the end of
   its budget (``verdicts.json``), then the oracle's figures and the whole
-  pool's reference (``oracle.json``) and the manifest's ``pool_size``
-  filled in (:mod:`.bench` keeps the order). A world is searched once.
+  pool's reference (``oracle.json``), in that order (:mod:`.bench` keeps
+  it). A world is searched once; a manifest that is not the directory's
+  own, or that names a model arm, is refused.
 - ``calibrate --root DIR`` — every searched run directory under the root
   tallied by world kind and arm: on null worlds the false-call rate under
   the null definition named, on conditional worlds the rate of non-empty

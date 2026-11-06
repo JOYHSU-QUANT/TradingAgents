@@ -137,7 +137,8 @@ template 依 manifest 順序，template 內 entry 門檻升冪（外層）× gat
 2. 每臂把 `world.sqlite` 複製到自己的 store（`arms/random/replicate-<search seed>.sqlite`、`arms/grid/replicate-0.sqlite`），
    第一顆先跑 `verify()`（落地時的驗收再跑一次：artifact 真的是 manifest 描述的世界）；每臂以 `experiment_for()`＋
    `ledger.create_experiment()` 開自己的 experiment（id＝`random-<seed>`／`grid-0`）——同 coin、同 split／costs／window／
-   penalty，`Verdicts` 的建構子守住這件事（也守住沒有一臂的 distinct rules 超過 `pool_size`、grid 只有 replicate 0）。
+   penalty，`Verdicts` 的建構子守住這件事（也守住沒有一臂的 distinct rules 超過 `pool_size`）；grid 只有 replicate 0 由
+   `ArmResult` 守。
 3. 每臂跑 autoresearch 的 `search(ledger, experiment, hypothesist, max_trials=budget)`；跑完立刻 `snapshot_arm`（晉升前）→
    `final_verdict`；`selected` 非空就用 autoresearch 的 `promote()` 晉升那一筆（holdout 數字由它讀）。中斷＝整個 run 丟掉
    （replicate 不 resume，計畫 §9 (14)）、staging 移除、exit 130；seam 失敗記成 `seam_failed`、下一臂照跑。
@@ -262,8 +263,9 @@ runner 遇到「有 llm 區塊但本世界不在子集」應拒絕。
   scores.json                （PR 4）
 ```
 
-目錄用 **manifest 的 digest**（`search_space.pool_size` 置空後的 `sha256(manifest.dumps())` 前 8 碼——PR 3 回填池大小時
-目錄名不變）而不只用 world id 命名：id 只是 seed_set＋seed 的函數
+目錄用 **manifest 的 digest**（`search_space.pool_size` 置空後的 `sha256(manifest.dumps())` 前 8 碼——`generate` 回填池大小
+後目錄名與手寫的 manifest 一致；`search`／`oracle`／`calibrate` 都核對目錄名＝旁邊 manifest 的 digest，落地後手改過的
+manifest 會被拒）而不只用 world id 命名：id 只是 seed_set＋seed 的函數
 （計畫 §1 #7），同 seed 的 null 雙胞胎、或校準時同 seed 三檔 β 的三份 manifest 共用一個 id，要能並存；目錄名不進任何
 prompt，store 裡的 coin 名仍是 id。與計畫 §2 寫的 `<world-id>/` 不同，記在計畫 §9。預設 `<bench-root>`＝
 `<repo>/data/discovery`（`.gitignore` 已排除）。

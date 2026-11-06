@@ -3,8 +3,8 @@
 One real run, once per session: the example world (landed once by the
 suite's ``landed_world`` fixture) under a two-answer budget with one
 Random replicate and the Grid arm, so the arms' reports, the two records,
-the filled manifest and the arms' own stores can all be read off one
-search. The protocol's refusals and the interrupt are cheap and run on
+the untouched landed manifest and the arms' own stores can all be read
+off one search. The protocol's refusals and the interrupt are cheap and run on
 fresh copies with the slow parts patched out where the test is not about
 them.
 """
@@ -66,7 +66,7 @@ def fresh_run(landed_world, tmp_path):
 # -- the run ----------------------------------------------------------------------------------
 
 
-def test_a_searched_run_directory_holds_the_arms_the_records_and_the_filled_manifest(searched):
+def test_a_searched_run_directory_holds_the_arms_the_records_and_leaves_the_manifest(searched):
     run, verdicts, oracle, lines, before = searched
     assert _listing(run) == sorted([*LANDED, ARMS_DIRNAME, ORACLE_FILENAME, VERDICTS_FILENAME])
     for arm, replicate in ((Arm.RANDOM, 0), (Arm.GRID, 0)):
@@ -268,17 +268,24 @@ def test_the_oracle_preview_is_for_planted_development_worlds_only(
 
 
 def test_a_run_directory_without_the_manifest_or_the_artifact_is_not_a_run(tmp_path):
-    run = tmp_path / "run"
+    manifest = bench_manifest()
+    run = world_dir(tmp_path, manifest)
     run.mkdir()
     with pytest.raises(ManifestError, match="cannot read the manifest at"):
         read_manifest(run)
-    (run / MANIFEST_FILENAME).write_bytes(bench_manifest().dumps().encode("utf-8"))
-    assert read_manifest(run) == bench_manifest()
+    (run / MANIFEST_FILENAME).write_bytes(manifest.dumps().encode("utf-8"))
+    assert read_manifest(run) == manifest
     with pytest.raises(BenchError, match=f"holds no {ARTIFACT_FILENAME}"):
         require_artifact(run)
     with pytest.raises(BenchError, match=f"holds no {ARTIFACT_FILENAME}"):
         run_world(run)
     assert _listing(run) == [MANIFEST_FILENAME]
+    # A directory not named by its manifest is refused before the artifact is asked for.
+    stray = tmp_path / "run"
+    stray.mkdir()
+    (stray / MANIFEST_FILENAME).write_bytes(manifest.dumps().encode("utf-8"))
+    with pytest.raises(BenchError, match="not the manifest this directory was landed for"):
+        run_world(stray)
 
 
 def test_a_filled_pool_size_that_is_not_this_build_s_is_refused_where_the_manifest_is_read():
@@ -414,16 +421,26 @@ def test_the_calibration_table_refuses_verdicts_filed_under_another_world(
         },
         pool_size=None,
     )
-    other_pool = tmp_path / "other-pool"
+    with_wider = replace(manifest, search_space=wider)
+    other_pool = world_dir(tmp_path, with_wider)
     other_pool.mkdir()
-    (other_pool / MANIFEST_FILENAME).write_bytes(
-        replace(manifest, search_space=wider).dumps().encode("utf-8")
-    )
+    (other_pool / MANIFEST_FILENAME).write_bytes(with_wider.dumps().encode("utf-8"))
     (other_pool / VERDICTS_FILENAME).write_bytes((run / VERDICTS_FILENAME).read_bytes())
     with pytest.raises(
         BenchError, match="drew from a pool of 16, the manifest beside it writes one of 24"
     ):
         calibration_table([other_pool])
+    # And a manifest that is not the directory's own: the calibration's rows
+    # are keyed by the kind and the null definition, which an edit after the
+    # landing can change without changing the world's id.
+    edited = tmp_path / run.name
+    edited.mkdir()
+    (edited / VERDICTS_FILENAME).write_bytes((run / VERDICTS_FILENAME).read_bytes())
+    (edited / MANIFEST_FILENAME).write_bytes(
+        replace(manifest, null_definition_version="v2").dumps().encode("utf-8")
+    )
+    with pytest.raises(BenchError, match="not the manifest this directory was landed for"):
+        calibration_table([edited])
 
 
 def test_the_calibration_table_reads_a_world_whose_artifact_was_pruned(searched, tmp_path):

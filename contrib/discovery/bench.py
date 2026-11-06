@@ -28,9 +28,10 @@ is the point of this module:
 
 Everything is built in a staging directory inside the run directory and
 moved into place at the end (the two records, then ``arms/``), so a run
-that ends any other way leaves the directory as the landing left it. A run directory that already holds any of those
-is a world searched before: refused, since a search is spent once —
-remove them by hand to search the world again.
+that ends any other way leaves the directory as the landing left it. A
+run directory that already holds any of those is a world searched
+before: refused, since a search is spent once — remove them by hand to
+search the world again.
 
 The ``oracle`` command's preview (:func:`preview_oracle`) reads the planted
 rule's two measured windows on a throw-away copy BEFORE any arm has
@@ -84,6 +85,7 @@ __all__ = [
     "Verdicts",
     "calibration_table",
     "experiment_id",
+    "own_manifest",
     "preview_oracle",
     "read_manifest",
     "require_artifact",
@@ -336,22 +338,31 @@ def require_artifact(run_dir: Path) -> None:
         raise BenchError(f"{run_dir} holds no {ARTIFACT_FILENAME}; generate the world first")
 
 
-def landed_manifest(run_dir: Path) -> Manifest:
-    """The manifest a measuring verb runs under: read, with its artifact beside it, and the directory's own.
+def own_manifest(run_dir: Path) -> Manifest:
+    """The directory's own manifest: read, and named by the directory it sits in.
 
     The directory is named by the manifest's digest (``landing.world_dir``),
     so a ``manifest.json`` edited after the landing — a kind flipped, a
     penalty or budget changed — names another directory, and is refused
-    rather than searched under conditions the directory does not describe.
+    rather than read as the conditions the directory describes. Every
+    reader of a run directory comes through here, the calibration included:
+    its rows are keyed by the kind and the null definition, two fields the
+    world's id does not carry.
     """
     manifest = read_manifest(run_dir)
-    require_artifact(run_dir)
     expected = world_dir(run_dir.parent, manifest).name
     if run_dir.resolve().name != expected:
         raise BenchError(
             f"{run_dir / MANIFEST_FILENAME} is not the manifest this directory was landed for: "
             f"it names {expected}, the directory is {run_dir.resolve().name}"
         )
+    return manifest
+
+
+def landed_manifest(run_dir: Path) -> Manifest:
+    """The manifest a measuring verb runs under: the directory's own, with its artifact beside it."""
+    manifest = own_manifest(run_dir)
+    require_artifact(run_dir)
     return manifest
 
 
@@ -537,7 +548,10 @@ class CalibrationRow:
     A search is a run that answered — spent its budget or walked its pool
     to the end; an arm whose seam failed never searched, is counted in
     ``failed`` and is not in the rate's denominator, so a dead arm cannot
-    read as a clean search.
+    read as a clean search. Whatever a dead arm's verdict holds (a seam
+    can fail after some trials were filed) is set aside with it, on
+    purpose: a search cut short is not the search the budget bought, and
+    its verdict is not comparable with the finished ones in the row.
     """
 
     kind: WorldKind
@@ -588,7 +602,7 @@ def calibration_table(run_dirs: Iterable[Path]) -> list[CalibrationRow]:
     for run_dir in run_dirs:
         if not (run_dir / VERDICTS_FILENAME).is_file():
             continue
-        manifest = read_manifest(run_dir)
+        manifest = own_manifest(run_dir)
         try:
             text = (run_dir / VERDICTS_FILENAME).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:

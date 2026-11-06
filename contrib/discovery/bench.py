@@ -28,12 +28,15 @@ is the point of this module:
 
 Everything is built in a staging directory inside the run directory and
 moved into place at the end (the two records, then the arms' stores into
-``arms/``), so a run that ends any other way leaves the directory as the
-landing left it. ``arms/`` itself is made first, atomically, as the claim
-on the directory: two searches started on one world cannot both pass the
-guard. A run directory that already holds any of those is a world
-searched before: refused, since a search is spent once — remove them by
-hand to search the world again.
+``arms/``), so a run that ends before the records are in leaves the
+directory as the landing left it; one that fails while the stores move in
+leaves the records and keeps the staging that holds the rest, named in
+the refusal. ``arms/`` itself is made first, atomically, as the claim on
+the directory: two searches started on one world cannot both pass the
+guard. A run directory holding the claim alone is a search running or
+one that did not finish (nothing is prescribed while one may run); one
+holding the records is a world searched before: refused, since a search
+is spent once — remove them by hand to search the world again.
 
 The ``oracle`` command's preview (:func:`preview_oracle`) reads the planted
 rule's two measured windows on a throw-away copy BEFORE any arm has
@@ -65,6 +68,7 @@ from .landing import (
     ARTIFACT_FILENAME,
     MANIFEST_FILENAME,
     Landing,
+    conditions_digest,
     discard_staging,
     experiment_for,
     manifest_digest,
@@ -296,6 +300,15 @@ class Verdicts:
                     f"{result.experiment_id} tried {result.snapshot.distinct_rules} distinct "
                     f"rule(s) from a pool of {self.pool_size}"
                 )
+            # Every arm searches in its own store, the first experiment on
+            # its coin, so the coin's rule count is the arm's own trials —
+            # a larger count would raise the gate over trials it never filed.
+            if result.snapshot.distinct_rules != len(result.snapshot.trials):
+                raise BenchError(
+                    f"{result.experiment_id} counts {result.snapshot.distinct_rules} rule(s) "
+                    f"tried and holds {len(result.snapshot.trials)} trial(s); each arm searches "
+                    f"in its own store"
+                )
             if _conditions(experiment) != first:
                 raise BenchError(
                     f"{result.experiment_id} ran under other conditions than "
@@ -389,6 +402,19 @@ def _give_back(claim: Path) -> None:
             claim,
             exc_info=True,
         )
+
+
+def _search_left(run_dir: Path) -> list[str]:
+    """What a search has left in ``run_dir``: the claim and the two records, in that order."""
+    return [n for n in (ARMS_DIRNAME, VERDICTS_FILENAME, ORACLE_FILENAME) if (run_dir / n).exists()]
+
+
+def _unfinished(run_dir: Path, left: list[str]) -> str:
+    """The sentence for a search that is running or did not finish: nothing prescribed while one may run."""
+    return (
+        f"{run_dir} holds {left}: a search of this world is running or did not finish; once no "
+        f"search is running, remove them by hand to search the world again"
+    )
 
 
 def require_artifact(run_dir: Path) -> None:
@@ -495,13 +521,18 @@ def run_world(
     # searched, not sent back to `generate` (which would refuse the
     # directory and send the operator to delete the records).
     manifest = own_manifest(run_dir)
-    for name in (ARMS_DIRNAME, VERDICTS_FILENAME, ORACLE_FILENAME):
-        if (run_dir / name).exists():
-            raise BenchError(
-                f"{run_dir / name} exists: this world was searched before, and a search is "
-                f"spent once — remove {ARMS_DIRNAME}/, {VERDICTS_FILENAME} and "
-                f"{ORACLE_FILENAME} by hand to search it again"
-            )
+    left = _search_left(run_dir)
+    if left == [ARMS_DIRNAME]:
+        # The claim alone is what a search in progress leaves (it is made
+        # first, the records moved in last): nothing is prescribed while one
+        # may be running, as calibrate says of the same directory.
+        raise BenchError(_unfinished(run_dir, left))
+    if left:
+        raise BenchError(
+            f"{run_dir} holds {left}: this world was searched before, and a search is spent "
+            f"once — remove {ARMS_DIRNAME}/, {VERDICTS_FILENAME} and {ORACLE_FILENAME} by hand "
+            f"to search it again"
+        )
     require_artifact(run_dir)
     if manifest.arms.llm is not None:
         # The manifest is the run's specification, and a world is searched
@@ -542,6 +573,7 @@ def run_world(
         _give_back(claim)
         raise
     moved = False
+    keep_staging = False
     try:
         results: list[ArmResult] = []
         landing: Landing | None = None
@@ -610,21 +642,35 @@ def run_world(
         oracle = Oracle(world_id=world_id, manifest_digest=digest, planted=planted, pool=reference)
         for line in oracle.describe(holdout=show_holdout):
             say(line)
-        # Written whole in staging, then moved: the two records first, the
-        # arms' directory last. A move that fails part-way leaves records
-        # without arms, never arms without records: the guard above refuses
-        # either, and the records are what the calibration reads. The
-        # landed manifest is not touched.
+        # Written whole in staging, then moved: the two records first, then
+        # each arm's store into the claim. A failure before the records are
+        # both in leaves the directory as the landing left it (at most one
+        # record, which calibrate and the guard refuse by name); a failure
+        # while the stores move in leaves the records and the staging that
+        # still holds the unmoved stores, named in the refusal so nothing
+        # is lost. The landed manifest is not touched.
         (staging / VERDICTS_FILENAME).write_bytes(verdicts.dumps().encode("utf-8"))
         (staging / ORACLE_FILENAME).write_bytes(oracle.dumps().encode("utf-8"))
         for name in (VERDICTS_FILENAME, ORACLE_FILENAME):
             os.replace(staging / name, run_dir / name)
         moved = True
-        for arm_dir in (staging / ARMS_DIRNAME).iterdir():
-            arm_dir.rename(claim / arm_dir.name)
+        done: list[str] = []
+        try:
+            for arm_dir in sorted((staging / ARMS_DIRNAME).iterdir()):
+                arm_dir.rename(claim / arm_dir.name)
+                done.append(arm_dir.name)
+        except OSError as exc:
+            keep_staging = True
+            raise BenchError(
+                f"{run_dir}: the records are written, but moving the arms' stores into {claim} "
+                f"failed after {done}; the rest are in {staging / ARMS_DIRNAME} — move them in by "
+                f"hand, then remove {staging}"
+            ) from exc
     finally:
-        # Emptied by the moves on success; the half-made run on any other end.
-        discard_staging(staging)
+        # Emptied by the moves on success; the half-made run on any other
+        # end, except the stores the claim did not receive.
+        if not keep_staging:
+            discard_staging(staging)
         if not moved:
             # The claim is given back only while it is still empty: a run
             # that failed moving its stores in has records beside them,
@@ -644,6 +690,12 @@ class CalibrationRow:
     null definition (plan §4.1's wording); on a conditional world it is a
     candidate recovery, not yet a recovery (plan PR 4 scores that).
 
+    A row is one set of conditions: ``conditions`` is the digest of the
+    manifest with the seed set aside (``landing.conditions_digest``), so the
+    worlds of one β tier, one penalty, one budget, one bar count and one
+    seed set are tallied together and two calibrations under one root are
+    two rows, each printed with its digest — never one rate over both.
+
     A search is a run that answered — spent its budget or walked its pool
     to the end; an arm whose seam failed never searched, is counted in
     ``failed`` and is not in the rate's denominator, so a dead arm cannot
@@ -655,6 +707,8 @@ class CalibrationRow:
 
     kind: WorldKind
     null_definition_version: str
+    seed_set: SeedSet
+    conditions: str
     arm: Arm
     searches: int
     found: int
@@ -663,6 +717,8 @@ class CalibrationRow:
     def __post_init__(self) -> None:
         object.__setattr__(self, "kind", _read.enum(WorldKind, self.kind, "row.kind"))
         _read.text(self.null_definition_version, "row.null_definition_version")
+        object.__setattr__(self, "seed_set", _read.enum(SeedSet, self.seed_set, "row.seed_set"))
+        _read.digest(self.conditions, "row.conditions")
         object.__setattr__(self, "arm", _read.enum(Arm, self.arm, "row.arm"))
         _read.whole(self.searches, "row.searches", minimum=0)
         _read.whole(self.found, "row.found", minimum=0)
@@ -681,7 +737,8 @@ class CalibrationRow:
         what = "false calls" if self.kind is WorldKind.NULL_V1 else "non-empty verdicts"
         rate = "n/a" if self.rate is None else f"{self.rate:.1%}"
         line = (
-            f"{self.kind.value} ({self.null_definition_version}) {self.arm.value}: "
+            f"{self.kind.value} ({self.null_definition_version}) {self.seed_set.value} "
+            f"[{self.conditions}] {self.arm.value}: "
             f"{self.found} {what} in {self.searches} search(es) = {rate}"
         )
         if self.failed:
@@ -694,29 +751,24 @@ def calibration_table(run_dirs: Iterable[Path]) -> list[CalibrationRow]:
 
     A directory holding none of what a search leaves (``arms/``,
     ``verdicts.json``, ``oracle.json``) is a world not yet searched and is
-    skipped; one holding some of it but no ``verdicts.json`` is a search
-    in progress or one that did not finish, refused by name rather than
-    dropped from the table without a word. A record that cannot be read, or whose verdicts
-    are not its manifest's (another world, another pool), is refused by
+    skipped; one holding some of it but not both records is a search in
+    progress or one that did not finish, refused by name rather than
+    dropped from the table without a word. A record that cannot be read,
+    or that is not its manifest's — another world, pool, arm set, digest,
+    set of conditions, budget, or rule outside the pool — is refused by
     name. Rows come in the enums' own order: kind, then the null
-    definition, then arm.
+    definition, the seed set, the conditions, then arm.
     """
-    tally: dict[tuple[WorldKind, str, Arm], list[int]] = {}
+    tally: dict[tuple[WorldKind, str, SeedSet, str, Arm], list[int]] = {}
     for run_dir in run_dirs:
-        left = [
-            n for n in (ARMS_DIRNAME, VERDICTS_FILENAME, ORACLE_FILENAME) if (run_dir / n).exists()
-        ]
+        left = _search_left(run_dir)
         if not left:
             continue
-        if VERDICTS_FILENAME not in left:
+        if VERDICTS_FILENAME not in left or ORACLE_FILENAME not in left:
             # ``arms/`` alone is also what a search in progress leaves (the
             # claim is made first, the records moved in last), so the
             # sentence says so and prescribes nothing while one may be running.
-            raise BenchError(
-                f"{run_dir} holds {left} but no {VERDICTS_FILENAME}: a search of this world is "
-                f"running or did not finish; once no search is running, remove them by hand to "
-                f"search the world again"
-            )
+            raise BenchError(_unfinished(run_dir, left))
         manifest = own_manifest(run_dir)
         if manifest.arms.llm is not None:
             # The same refusal ``search`` makes: a tally under a manifest that
@@ -757,9 +809,10 @@ def calibration_table(run_dirs: Iterable[Path]) -> list[CalibrationRow]:
                 f"{run_dir / VERDICTS_FILENAME} was written under manifest "
                 f"{verdicts.manifest_digest}, the manifest beside it is {manifest_digest(manifest)}"
             )
+        _hold_to_manifest(run_dir / VERDICTS_FILENAME, verdicts, manifest)
         # The oracle's record is written with the verdicts and read with
-        # them: a search leaves both or neither, and both say which world
-        # and which manifest they were read under.
+        # them, and both say which world and which manifest they were read
+        # under.
         oracle = _read_record(run_dir / ORACLE_FILENAME, Oracle.loads)
         if (oracle.world_id, oracle.manifest_digest) != (
             verdicts.world_id,
@@ -783,27 +836,108 @@ def calibration_table(run_dirs: Iterable[Path]) -> list[CalibrationRow]:
                 f"{run_dir / ORACLE_FILENAME} scores a pool of {oracle.pool.size}, the manifest "
                 f"beside it writes one of {pool_size}"
             )
+        _hold_oracle_to_manifest(run_dir / ORACLE_FILENAME, oracle, manifest)
+        conditions = conditions_digest(manifest)
         for result in verdicts.results:
-            counts = tally.setdefault(
-                (manifest.world.kind, manifest.null_definition_version, result.arm), [0, 0, 0]
+            key = (
+                manifest.world.kind,
+                manifest.null_definition_version,
+                manifest.world.seed_set,
+                conditions,
+                result.arm,
             )
+            counts = tally.setdefault(key, [0, 0, 0])
             if result.snapshot.ended is Ended.SEAM_FAILED:
                 counts[2] += 1
             else:
                 counts[0] += 1
                 counts[1] += result.verdict.found
-    versions = sorted({version for _, version, _ in tally})
+    kinds = {kind: index for index, kind in enumerate(WorldKind)}
+    seed_sets = {seed_set: index for index, seed_set in enumerate(SeedSet)}
+    arms = {arm: index for index, arm in enumerate(Arm)}
+    ordered = sorted(
+        tally,
+        key=lambda key: (kinds[key[0]], key[1], seed_sets[key[2]], key[3], arms[key[4]]),
+    )
     return [
         CalibrationRow(
             kind=kind,
             null_definition_version=version,
+            seed_set=seed_set,
+            conditions=conditions,
             arm=arm,
-            searches=tally[kind, version, arm][0],
-            found=tally[kind, version, arm][1],
-            failed=tally[kind, version, arm][2],
+            searches=tally[kind, version, seed_set, conditions, arm][0],
+            found=tally[kind, version, seed_set, conditions, arm][1],
+            failed=tally[kind, version, seed_set, conditions, arm][2],
         )
-        for kind in WorldKind
-        for version in versions
-        for arm in Arm
-        if (kind, version, arm) in tally
+        for kind, version, seed_set, conditions, arm in ordered
     ]
+
+
+def _hold_to_manifest(path: Path, verdicts: Verdicts, manifest: Manifest) -> None:
+    """Refuse a verdicts record that was not searched under ``manifest``'s conditions.
+
+    The arms share one set of conditions (``Verdicts`` holds that); here the
+    set is held to the manifest's — a record whose experiments carry
+    another penalty, split or cost model would be judged by them, since the
+    verdict is re-derived from the snapshot. Each pool arm's answers are
+    bounded by its budget and its pool, its ending agrees with them, and
+    every rule it filed is a rule of the pool.
+    """
+    first = verdicts.results[0].snapshot.experiment
+    if _conditions(first) != _conditions(experiment_for(manifest, "arm")):
+        raise BenchError(
+            f"{path}: the arms ran under other conditions (split, costs, window or penalty) than "
+            f"the manifest beside it sets"
+        )
+    budget = manifest.budget.max_trials
+    pool = {candidate.spec_hash for candidate in manifest.search_space.candidates}
+    for result in verdicts.results:
+        snapshot = result.snapshot
+        if snapshot.ended is Ended.BUDGET_SPENT and snapshot.answers != budget:
+            raise BenchError(
+                f"{path}: {result.experiment_id} spent its budget in {snapshot.answers} answer(s); "
+                f"the manifest's budget is {budget}"
+            )
+        if snapshot.ended is Ended.EXHAUSTED and snapshot.answers != len(pool):
+            raise BenchError(
+                f"{path}: {result.experiment_id} walked its pool to the end in {snapshot.answers} "
+                f"answer(s); the pool holds {len(pool)}"
+            )
+        if snapshot.answers > min(budget, len(pool)):
+            raise BenchError(
+                f"{path}: {result.experiment_id} answered {snapshot.answers} time(s), over its "
+                f"budget of {budget} or its pool of {len(pool)}"
+            )
+        outside = [trial.trial_id for trial in snapshot.trials if trial.spec_hash not in pool]
+        if outside:
+            raise BenchError(
+                f"{path}: {result.experiment_id} filed trial(s) {outside} that are not rules of "
+                f"the pool"
+            )
+
+
+def _hold_oracle_to_manifest(path: Path, oracle: Oracle, manifest: Manifest) -> None:
+    """Refuse an oracle record whose gate is not the one the manifest sets.
+
+    ``passed``, ``margin`` and ``clearing`` are read off the record's own
+    budget, threshold and margin; those are held here to the manifest's
+    budget and penalty, so the oracle pass rate is the manifest's question.
+    """
+    penalty = manifest.penalty
+    budget = manifest.budget
+    if oracle.pool.threshold != penalty.threshold(oracle.pool.size):
+        raise BenchError(
+            f"{path}: the pool is gated at {oracle.pool.threshold}, the manifest's penalty gives "
+            f"threshold({oracle.pool.size}) = {penalty.threshold(oracle.pool.size)}"
+        )
+    planted = oracle.planted
+    if planted is None:
+        return
+    expected = (budget.max_trials, budget.oracle_margin, penalty.threshold(budget.max_trials))
+    if (planted.budget, planted.oracle_margin, planted.threshold) != expected:
+        raise BenchError(
+            f"{path}: the planted rule is gated at budget {planted.budget}, oracle_margin "
+            f"{planted.oracle_margin}, threshold {planted.threshold}; the manifest sets "
+            f"{expected[0]}, {expected[1]}, {expected[2]}"
+        )

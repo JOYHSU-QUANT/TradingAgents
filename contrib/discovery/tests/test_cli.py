@@ -13,9 +13,14 @@ from contrib.autoresearch.ledger import LedgerError
 from contrib.autoresearch.split import SplitError
 from contrib.autoresearch.store import StoreError
 from contrib.discovery import cli, landing
-from contrib.discovery.bench import ORACLE_FILENAME, VERDICTS_FILENAME, BenchError
+from contrib.discovery.bench import ORACLE_FILENAME, VERDICTS_FILENAME, BenchError, read_manifest
 from contrib.discovery.cli import main
-from contrib.discovery.landing import ARTIFACT_FILENAME, MANIFEST_FILENAME, world_dir
+from contrib.discovery.landing import (
+    ARTIFACT_FILENAME,
+    MANIFEST_FILENAME,
+    conditions_digest,
+    world_dir,
+)
 from contrib.discovery.manifest import ManifestError, WorldKind
 from contrib.discovery.oracle import OracleError
 from contrib.discovery.verdict import VerdictError
@@ -210,9 +215,10 @@ def test_calibrate_tallies_the_root_and_says_when_nothing_is_searched(searched, 
     run, *_ = searched
     assert main(["calibrate", "--root", str(run.parent)]) == 0
     out = capsys.readouterr().out.splitlines()
+    conditions = conditions_digest(read_manifest(run))
     assert [line.split(":")[0] for line in out] == [
-        "conditional-v1 (v1) random",
-        "conditional-v1 (v1) grid",
+        f"conditional-v1 (v1) dev [{conditions}] random",
+        f"conditional-v1 (v1) dev [{conditions}] grid",
     ]
     empty = tmp_path / "empty"
     empty.mkdir()
@@ -248,7 +254,8 @@ def test_search_s_named_families_exit_with_their_code_and_sentence(
 def test_generate_refuses_a_manifest_whose_pool_cannot_be_written_before_landing_anything(
     tmp_path, capsys, monkeypatch
 ):
-    # A grid mixing a number and a label names no order: refused where the
+    # A label on a numeric feature's grid (only a categorical feature's grid
+    # takes labels): refused where the
     # manifest is read for the run, before the minutes of backfill.
     def never(manifest):
         raise AssertionError("the world must not be built")

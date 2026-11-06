@@ -84,6 +84,7 @@ __all__ = [
     "experiment_for",
     "land",
     "land_world",
+    "conditions_digest",
     "manifest_digest",
     "open_staging",
     "split_of",
@@ -118,6 +119,11 @@ def default_root() -> Path:
 def manifest_digest(manifest: Manifest) -> str:
     """The first hex digits of the SHA-256 of the manifest's identity text (``Manifest.identity``)."""
     return hashlib.sha256(manifest.identity().encode("utf-8")).hexdigest()[:_DIGEST_DIGITS]
+
+
+def conditions_digest(manifest: Manifest) -> str:
+    """The same digest of ``Manifest.conditions``: one per calibration, shared by its seeds' worlds."""
+    return hashlib.sha256(manifest.conditions().encode("utf-8")).hexdigest()[:_DIGEST_DIGITS]
 
 
 def world_dir(root: Path, manifest: Manifest) -> Path:

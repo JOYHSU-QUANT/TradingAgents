@@ -1169,6 +1169,20 @@ class Manifest:
         """
         return replace(self, search_space=replace(self.search_space, pool_size=None)).dumps()
 
+    def conditions(self) -> str:
+        """The identity text with the seed set aside too: what the worlds of one calibration share.
+
+        Two manifests that differ only in ``world_seed`` (and so in the id
+        derived from it) give the same text; any other difference — kind,
+        planted rule or β, seed set, bars, penalty, budget, costs, pool —
+        gives another. The calibration table keys its rows by a digest of
+        it, so one rate is never taken over two sets of conditions.
+        """
+        document = json.loads(self.identity())
+        document["world"]["world_seed"] = None
+        document["world"]["id"] = None
+        return dumps(document)
+
     @classmethod
     def loads(cls, text: str) -> Manifest:
         return cls.from_dict(_read.loads(text))
@@ -1180,4 +1194,9 @@ class Manifest:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
             raise ManifestError(f"cannot read the manifest at {path}: {exc}") from exc
-        return cls.loads(text)
+        try:
+            return cls.loads(text)
+        except ManifestError as exc:
+            # The reader names the path inside the document; over a root of
+            # many run directories the file is what the operator needs.
+            raise ManifestError(f"{path}: {exc}") from exc

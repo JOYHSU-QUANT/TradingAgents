@@ -135,8 +135,8 @@ parser 讀成 feature 名、regime 給數字會被 parser 拒絕，兩種都在�
 
 **`search --run <dir>`**（`bench.run_world`，計畫 §3 步驟 2–5，順序就是重點）：
 1. 讀落地的 `manifest.json`（必須是這個目錄自己的：目錄名＝manifest 的 digest，落地後手改過 kind／penalty／budget 的
-   manifest 會指到別的目錄名，拒絕）；`arms/`、`verdicts.json`、`oracle.json` 任一已存在＝這個世界搜過了，拒絕（一個世界
-   只搜一次，要重搜就手動移除）；`arms.llm` 有填＝這一版跑不了 manifest 指名的臂，拒絕（`generate` 也拒絕，所以這種目錄只會
+   manifest 會指到別的目錄名，拒絕）；只有 `arms/`＝另一個搜尋正在跑或沒跑完，拒絕（句子只說「等沒有搜尋在跑再手動移除」，
+   不叫人刪活的 claim）；有紀錄＝這個世界搜過了，拒絕（一個世界只搜一次，要重搜就手動移除）；`arms.llm` 有填＝這一版跑不了 manifest 指名的臂，拒絕（`generate` 也拒絕，所以這種目錄只會
    是別的版本落的；要重跑就從 `llm: null` 的 manifest 重新落地——就地改 manifest 會改掉 digest、對不上目錄名；LLM 臂是 PR 5）。
    池與 `pool_size` 在讀 manifest 時就已核對（見「候選池」）。
 2. 每臂把 `world.sqlite` 複製到自己的 store（`arms/random/replicate-<search seed>.sqlite`、`arms/grid/replicate-0.sqlite`），
@@ -149,24 +149,29 @@ parser 讀成 feature 名、regime 給數字會被 parser 拒絕，兩種都在�
    （replicate 不 resume，計畫 §9 (14)）、staging 移除、exit 130；seam 失敗記成 `seam_failed`、下一臂照跑。
 4. 所有臂跑完才讀 oracle（計畫 §4.4）：在 grid 臂的 store 上算埋的規則的 train／validation／holdout（null 世界為 null）與
    full-pool reference（整池 validation net sharpe、最佳者、過 `threshold(pool_size)` 的個數），不落 ledger。
-5. 全部先寫進 run 目錄下的 staging（`.search.partial-*`），最後先搬 `verdicts.json`／`oracle.json`、再 rename `arms/`
-   （半途失敗只會「有紀錄沒 arms」，guard 兩種都拒）；`manifest.json` 不動（`pool_size` 由 `generate` 回填）。任何原因中途
-   結束都把 staging 移除。test seed 的世界不把 holdout 數字印到 console（`verdicts.json`／`oracle.json` 照寫；計畫 §4.2
+5. 全部先寫進 run 目錄下的 staging（`.search.partial-*`），最後先搬 `verdicts.json`／`oracle.json`，再把各臂 store 逐一搬進
+   開頭就建好的 `arms/`（claim）；`manifest.json` 不動（`pool_size` 由 `generate` 回填）。紀錄搬好之前任何原因中途結束都把
+   staging 與 claim 移除、目錄回到落地狀態；紀錄搬好之後搬 store 失敗（例如 Windows 防毒鎖檔），**staging 保留**、拒絕句子
+   點名哪些臂已進 `arms/`、其餘 store 在哪個 staging 路徑，手動搬完再刪 staging——不丟資料。test seed 的世界不把 holdout 數字印到 console（`verdicts.json`／`oracle.json` 照寫；計畫 §4.2
    測試世界的 holdout 不得拿來調任何東西）。
 
 **`oracle --run <dir>`**（`bench.preview_oracle`）：搜尋前先看埋的規則的 train／validation 對 `threshold(max_trials)` 的餘裕，
 在拋棄式副本上算、不留檔。**只准 dev seed**：test seed 的 oracle 數字由 `search` 在各臂之後寫進 `oracle.json`（計畫 §4.2／§4.4）；
 null 世界沒有東西可看。holdout 在任何 seed 上都不在這裡讀。
 
-**`calibrate [--root <dir>]`**（`bench.calibration_table`）：走 root 下每個有 `verdicts.json` 的 run 目錄，按（world kind、
-`null_definition_version`、arm）列：搜尋次數、`final_eligible` 非空的次數、比例。null 世界那行叫「false calls」（報表措辭
+**`calibrate [--root <dir>]`**（`bench.calibration_table`）：走 root 下每個搜過的 run 目錄，按（world kind、
+`null_definition_version`、seed set、**條件 digest**、arm）列：搜尋次數、`final_eligible` 非空的次數、比例。條件 digest＝把
+`world_seed`（與由它衍生的 id）置空後的 manifest digest（`landing.conditions_digest`），印在每一列的方括號裡：同一組條件的
+多個 seed 合成一列，β 檔、penalty、預算、bars、seed set 任何一個不同就是另一列——同一個 root 放幾組校準都不會被合成一個比率。null 世界那行叫「false calls」（報表措辭
 照計畫 §4.1：Null-v1 定義下的誤判率）；conditional 世界那行叫「non-empty verdicts」——找到的規則是不是埋的那條是 PR 4 評分器
 的事。`seam_failed` 的臂沒有搜尋過：不進分母，另計「n seam failure(s) not counted」印在同一行（它已 file 的判定也一併
 擱置：被切短的搜尋不是預算買到的那次）。沒搜過的目錄跳過；`verdicts.json` 的 `world_id`／`pool_size`／臂集合／`manifest_digest`
 對不上旁邊 manifest（id、`len(candidates)`、`arms`、目錄的 digest）就拒絕；`oracle.json` 也一起讀：world_id／digest 要跟
-verdicts 一致、`planted` 有無要對得上世界的 kind、`pool.size` 要等於 `len(candidates)`；壞掉的紀錄拒絕句子帶檔案路徑；
-有 `arms/`／`oracle.json` 但沒 `verdicts.json` 的目錄（搜尋進行中或沒跑完——`arms/` 是 search 一開始就建的 claim，紀錄最後才搬進來）
-拒絕而不是跳過，句子只說「等沒有搜尋在跑再手動移除」；帶 `llm` 的 manifest 整個 calibrate
+verdicts 一致、`planted` 有無要對得上世界的 kind、`pool.size` 要等於 `len(candidates)`、門檻（`budget`／`oracle_margin`／
+`threshold`、池的 `threshold`）要等於 manifest 的 budget 與 penalty 算出的值；`verdicts.json` 裡各臂 experiment 的條件
+（split／costs／window／penalty）要等於 `experiment_for(manifest)`、`budget_spent` 的答案數＝預算、`exhausted` 的答案數＝池大小、
+每筆 trial 都是池裡的規則；壞掉的紀錄（含 manifest）拒絕句子帶檔案路徑；兩份紀錄沒有都在的目錄（只有 `arms/`＝搜尋進行中或沒跑完、
+只有 `verdicts.json`＝停在兩次搬檔之間）拒絕而不是跳過，句子只說「等沒有搜尋在跑再手動移除」；帶 `llm` 的 manifest 整個 calibrate
 拒絕；不要求 `world.sqlite`（artifact 可裁掉省空間）。
 
 **兩份紀錄**：`verdicts.json`＝`{verdicts_version, world_id, pool_size, manifest_digest, results: [{arm, replicate, snapshot,

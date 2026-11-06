@@ -9,10 +9,10 @@ Four so far, in the order a world goes through them (plan §3):
   acceptance list), and write the canonical ``manifest.json`` beside it
   with ``search_space.pool_size`` filled in — the one field the run
   directory's digest sets aside (:mod:`.landing` owns the layout and the
-  staged landing). The directory is read-only from then on: an arm copies
-  the artifact (plan §2), the manifest is never written again, and a
-  second ``generate`` of a manifest already landed is refused rather than
-  overwritten.
+  staged landing). The artifact and the manifest are read-only from then
+  on: an arm copies the artifact (plan §2), the manifest is never written
+  again, and a second ``generate`` of a manifest already landed is
+  refused rather than overwritten.
 - ``oracle --run DIR`` — the planted rule's train and validation figures
   against the gate at the end of the budget, on a throw-away copy, before
   any arm has searched: the reading that sizes ``beta`` on development
@@ -24,9 +24,11 @@ Four so far, in the order a world goes through them (plan §3):
   it). A world is searched once; a manifest that is not the directory's
   own, or that names a model arm, is refused.
 - ``calibrate --root DIR`` — every searched run directory under the root
-  tallied by world kind and arm: on null worlds the false-call rate under
-  the null definition named, on conditional worlds the rate of non-empty
-  verdicts (plan §4.3's null calibration, without a model).
+  tallied by world kind, seed set, set of conditions (a digest printed on
+  each row, so two calibrations under one root are two rows) and arm: on
+  null worlds the false-call rate under the null definition named, on
+  conditional worlds the rate of non-empty verdicts (plan §4.3's null
+  calibration, without a model).
 
 What the commands print is for the operator: the world's kind and rule
 are in the manifest, which a model never sees (plan §1 #7). Nothing

@@ -452,6 +452,10 @@ class Oracle:
         _read.digest(self.manifest_digest, "manifest_digest")
         if self.planted is not None and not isinstance(self.planted, PlantedFigures):
             raise OracleError("planted: expected PlantedFigures or None")
+        if self.planted is not None and self.planted.holdout is None:
+            # The record is written after the arms have searched, when the
+            # holdout may be read; a figure without it is the preview's.
+            raise OracleError("planted.holdout: the oracle's record carries the holdout figure")
         if not isinstance(self.pool, PoolReference):
             raise OracleError("pool: expected a PoolReference")
 

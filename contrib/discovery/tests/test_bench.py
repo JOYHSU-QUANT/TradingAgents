@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 
 import pytest
 
+from contrib.autoresearch.dsl import parse_spec
 from contrib.autoresearch.ledger import Ledger, TrialStatus
 from contrib.autoresearch.ports import HypothesistError
 from contrib.autoresearch.store import ResearchStore
@@ -38,12 +40,18 @@ from contrib.discovery.bench import (
     run_world,
     store_path,
 )
-from contrib.discovery.landing import ARTIFACT_FILENAME, MANIFEST_FILENAME, split_of, world_dir
+from contrib.discovery.landing import (
+    ARTIFACT_FILENAME,
+    MANIFEST_FILENAME,
+    conditions_digest,
+    split_of,
+    world_dir,
+)
 from contrib.discovery.manifest import ManifestError, SeedSet, WorldKind
 from contrib.discovery.oracle import Oracle, OracleError
 from contrib.discovery.verdict import Ended, VerdictError, final_verdict
 
-from .conftest import COIN, bench_manifest, example_manifest, land_run
+from .conftest import COIN, FLAT, bench_manifest, example_manifest, land_run
 
 LANDED = sorted([MANIFEST_FILENAME, ARTIFACT_FILENAME])
 
@@ -54,6 +62,12 @@ def _digest(path: Path) -> str:
 
 def _listing(run: Path) -> list[str]:
     return sorted(p.name for p in run.iterdir())
+
+
+def _copy_records(run: Path, target: Path) -> None:
+    """The two records a finished search leaves, copied beside ``target``'s manifest."""
+    for name in (VERDICTS_FILENAME, ORACLE_FILENAME):
+        (target / name).write_bytes((run / name).read_bytes())
 
 
 @pytest.fixture
@@ -157,28 +171,58 @@ def test_the_calibration_table_tallies_the_searched_worlds_by_kind_and_arm(searc
     unsearched = tmp_path / "not-a-run"
     unsearched.mkdir()
     rows = calibration_table([unsearched, run])
-    assert [(r.kind, r.null_definition_version, r.arm, r.searches) for r in rows] == [
-        (WorldKind.CONDITIONAL_V1, "v1", Arm.RANDOM, 1),
-        (WorldKind.CONDITIONAL_V1, "v1", Arm.GRID, 1),
+    conditions = conditions_digest(read_manifest(run))
+    assert [
+        (r.kind, r.null_definition_version, r.seed_set, r.conditions, r.arm, r.searches)
+        for r in rows
+    ] == [
+        (WorldKind.CONDITIONAL_V1, "v1", SeedSet.DEV, conditions, Arm.RANDOM, 1),
+        (WorldKind.CONDITIONAL_V1, "v1", SeedSet.DEV, conditions, Arm.GRID, 1),
     ]
     for row in rows:
         assert row.found in (0, 1) and row.rate == row.found and row.failed == 0
         assert row.describe().startswith(
-            f"conditional-v1 (v1) {row.arm.value}: {row.found} non-empty"
+            f"conditional-v1 (v1) dev [{conditions}] {row.arm.value}: {row.found} non-empty"
         )
         assert "seam failure" not in row.describe()
     assert calibration_table([unsearched]) == []
     # The row's own gates: a tally of nothing, or more found than searched.
+    row = partial(CalibrationRow, WorldKind.NULL_V1, "v1", SeedSet.DEV, "0badf00d", Arm.GRID)
     with pytest.raises(BenchError, match="at least one result"):
-        CalibrationRow(WorldKind.NULL_V1, "v1", Arm.GRID, searches=0, found=0, failed=0)
+        row(searches=0, found=0, failed=0)
     with pytest.raises(BenchError, match="2 found in 1 search"):
-        CalibrationRow(WorldKind.NULL_V1, "v1", Arm.GRID, searches=1, found=2, failed=0)
-    dead = CalibrationRow(WorldKind.NULL_V1, "v1", Arm.GRID, searches=0, found=0, failed=1)
+        row(searches=1, found=2, failed=0)
+    with pytest.raises(BenchError, match="row.conditions: a manifest digest"):
+        CalibrationRow(WorldKind.NULL_V1, "v1", SeedSet.DEV, "x", Arm.GRID, 1, 0, 0)
+    dead = row(searches=0, found=0, failed=1)
     assert dead.rate is None
-    assert (
-        dead.describe()
-        == "null-v1 (v1) grid: 0 false calls in 0 search(es) = n/a; 1 seam failure(s) not counted"
+    assert dead.describe() == (
+        "null-v1 (v1) dev [0badf00d] grid: 0 false calls in 0 search(es) = n/a; "
+        "1 seam failure(s) not counted"
     )
+
+
+def test_one_row_is_one_set_of_conditions():
+    # The seed is set aside, so the worlds of one calibration share a row;
+    # any other difference — penalty, β, budget, bars, the seed set — is
+    # another set of conditions, and another row.
+    base = bench_manifest()
+    assert conditions_digest(base) == conditions_digest(bench_manifest(world_seed=1))
+    assert conditions_digest(base) != conditions_digest(bench_manifest(seed_set=SeedSet.TEST))
+    assert conditions_digest(base) != conditions_digest(bench_manifest(kind=WorldKind.NULL_V1))
+    for changed in (
+        replace(base, penalty=replace(base.penalty, k=0.5)),
+        replace(base, budget=replace(base.budget, max_trials=3)),
+        replace(base, world=replace(base.world, bars=replace(base.world.bars, count=401))),
+        replace(
+            base,
+            world=replace(
+                base.world,
+                planted=replace(base.world.planted, beta=0.002),  # type: ignore[arg-type]
+            ),
+        ),
+    ):
+        assert conditions_digest(changed) != conditions_digest(base)
 
 
 # -- the records --------------------------------------------------------------------------------
@@ -406,7 +450,7 @@ def test_the_calibration_table_refuses_verdicts_filed_under_another_world(
     run, verdicts, *_ = searched
     artifact, _landing = landed_world
     other = land_run(tmp_path, artifact, bench_manifest(world_seed=1))
-    (other / VERDICTS_FILENAME).write_bytes((run / VERDICTS_FILENAME).read_bytes())
+    _copy_records(run, other)
     with pytest.raises(BenchError, match="the manifest beside it for"):
         calibration_table([other])
     # And another pool: the manifest beside the verdicts writes the pool the
@@ -424,7 +468,7 @@ def test_the_calibration_table_refuses_verdicts_filed_under_another_world(
     other_pool = world_dir(tmp_path, with_wider)
     other_pool.mkdir()
     (other_pool / MANIFEST_FILENAME).write_bytes(with_wider.dumps().encode("utf-8"))
-    (other_pool / VERDICTS_FILENAME).write_bytes((run / VERDICTS_FILENAME).read_bytes())
+    _copy_records(run, other_pool)
     with pytest.raises(
         BenchError, match="drew from a pool of 16, the manifest beside it writes one of 24"
     ):
@@ -434,7 +478,7 @@ def test_the_calibration_table_refuses_verdicts_filed_under_another_world(
     # landing can change without changing the world's id.
     edited = tmp_path / run.name
     edited.mkdir()
-    (edited / VERDICTS_FILENAME).write_bytes((run / VERDICTS_FILENAME).read_bytes())
+    _copy_records(run, edited)
     (edited / MANIFEST_FILENAME).write_bytes(
         replace(manifest, null_definition_version="v2").dumps().encode("utf-8")
     )
@@ -443,13 +487,14 @@ def test_the_calibration_table_refuses_verdicts_filed_under_another_world(
     # The null twin: same id, same pool, another digest — the records carry
     # the digest they were written under, so a copy lands in no row.
     twin = land_run(tmp_path, artifact, bench_manifest(kind=WorldKind.NULL_V1))
-    (twin / VERDICTS_FILENAME).write_bytes((run / VERDICTS_FILENAME).read_bytes())
+    _copy_records(run, twin)
     with pytest.raises(BenchError, match="was written under manifest"):
         calibration_table([twin])
     # And a record missing an arm the manifest names.
     assert len(verdicts.results) == 2
     trimmed = replace(verdicts, results=verdicts.results[1:])
     short = land_run(tmp_path / "short", artifact, bench_manifest())
+    _copy_records(run, short)
     (short / VERDICTS_FILENAME).write_bytes(trimmed.dumps().encode("utf-8"))
     with pytest.raises(
         BenchError, match=r"holds the arms \['grid-0'\], the manifest beside it names"
@@ -568,15 +613,18 @@ def test_the_calibration_holds_the_oracle_record_and_refuses_a_model_arm(searche
     (stray / ORACLE_FILENAME).write_bytes(twin_oracle.dumps().encode("utf-8"))
     with pytest.raises(BenchError, match=f"{ORACLE_FILENAME} is for .* under manifest 0badf00d"):
         calibration_table([stray])
+    # Verdicts without the oracle's record is a search that stopped between
+    # the two moves: refused as unfinished, with the sentence that says so.
     (stray / ORACLE_FILENAME).unlink()
-    with pytest.raises(BenchError, match=f"cannot read .*{ORACLE_FILENAME}"):
+    with pytest.raises(BenchError, match="a search of this world is running or did not finish"):
         calibration_table([stray])
     # A manifest naming a model arm is not tallied, as it is not searched.
     with_model = replace(manifest, arms=replace(manifest.arms, llm=example_manifest().arms.llm))
     modelled = world_dir(tmp_path, with_model)
     modelled.mkdir()
     (modelled / MANIFEST_FILENAME).write_bytes(with_model.dumps().encode("utf-8"))
-    (modelled / VERDICTS_FILENAME).write_bytes((run / VERDICTS_FILENAME).read_bytes())
+    for name in (VERDICTS_FILENAME, ORACLE_FILENAME):
+        (modelled / name).write_bytes((run / name).read_bytes())
     with pytest.raises(BenchError, match="names a model arm"):
         calibration_table([modelled])
     # And the records' digest is a digest.
@@ -610,5 +658,127 @@ def test_the_calibration_holds_the_oracle_record_and_refuses_a_model_arm(searche
     unfinished.mkdir(parents=True)
     (unfinished / MANIFEST_FILENAME).write_bytes((run / MANIFEST_FILENAME).read_bytes())
     (unfinished / ARMS_DIRNAME).mkdir()
-    with pytest.raises(BenchError, match=rf"holds \['{ARMS_DIRNAME}'\] but no {VERDICTS_FILENAME}"):
+    with pytest.raises(
+        BenchError, match=rf"holds \['{ARMS_DIRNAME}'\]: a search of this world is running"
+    ):
         calibration_table([unfinished])
+
+
+def _stray(tmp_path: Path, run: Path, verdicts: Verdicts, oracle: Oracle) -> Path:
+    """A copy of the searched run directory holding the given records, named as the run is."""
+    stray = tmp_path / "stray" / run.name
+    stray.mkdir(parents=True, exist_ok=True)
+    (stray / MANIFEST_FILENAME).write_bytes((run / MANIFEST_FILENAME).read_bytes())
+    (stray / VERDICTS_FILENAME).write_bytes(verdicts.dumps().encode("utf-8"))
+    (stray / ORACLE_FILENAME).write_bytes(oracle.dumps().encode("utf-8"))
+    return stray
+
+
+def test_the_calibration_holds_the_records_to_the_manifest_s_conditions(searched, tmp_path):
+    run, verdicts, oracle, *_ = searched
+    assert calibration_table([_stray(tmp_path, run, verdicts, oracle)])  # the untouched copy reads
+    # Every arm's experiment under other conditions than the manifest's: the
+    # verdict is re-derived from the snapshot, so the record would be
+    # judged by them.
+    shifted = replace(
+        verdicts,
+        results=tuple(
+            replace(
+                r,
+                snapshot=replace(
+                    r.snapshot,
+                    experiment=replace(
+                        r.snapshot.experiment,
+                        indicator_lookback=r.snapshot.experiment.indicator_lookback + 1,
+                    ),
+                ),
+            )
+            for r in verdicts.results
+        ),
+    )
+    with pytest.raises(BenchError, match="the arms ran under other conditions"):
+        calibration_table([_stray(tmp_path, run, shifted, oracle)])
+    # A budget spent in more answers than the manifest's budget.
+    first, grid = verdicts.results
+    over = replace(grid, snapshot=replace(grid.snapshot, answers=3))
+    with pytest.raises(BenchError, match="grid-0 spent its budget in 3 answer"):
+        calibration_table([_stray(tmp_path, run, replace(verdicts, results=(first, over)), oracle)])
+    # A trial that is not a rule of the pool (the figures unchanged, so the
+    # verdict is the same; only the rule is foreign).
+    trial = grid.snapshot.trials[0]
+    foreign = replace(trial, spec=parse_spec(FLAT))
+    outside = replace(
+        grid, snapshot=replace(grid.snapshot, trials=(foreign, *grid.snapshot.trials[1:]))
+    )
+    with pytest.raises(BenchError, match="filed trial\\(s\\) .* that are not rules of the pool"):
+        calibration_table(
+            [_stray(tmp_path, run, replace(verdicts, results=(first, outside)), oracle)]
+        )
+    # The oracle gated at another margin than the manifest sets.
+    assert oracle.planted is not None
+    loose = replace(oracle, planted=replace(oracle.planted, oracle_margin=0.5))
+    with pytest.raises(
+        BenchError, match="the planted rule is gated at budget 2, oracle_margin 0.5"
+    ):
+        calibration_table([_stray(tmp_path, run, verdicts, loose)])
+    pool = replace(oracle, pool=replace(oracle.pool, threshold=-100.0))
+    with pytest.raises(BenchError, match="the pool is gated at -100.0"):
+        calibration_table([_stray(tmp_path, run, verdicts, pool)])
+
+
+def test_the_records_hold_a_searched_world_s_shape(searched):
+    _run, verdicts, oracle, *_ = searched
+    # The oracle's record is written after the search: it has the holdout.
+    assert oracle.planted is not None
+    with pytest.raises(OracleError, match="planted.holdout: the oracle's record carries"):
+        replace(oracle, planted=replace(oracle.planted, holdout=None))
+    # Each arm searched in its own store, so its rule count is its trials.
+    first, grid = verdicts.results
+    padded = replace(grid.snapshot, distinct_rules=len(grid.snapshot.trials) + 1)
+    selected = final_verdict(padded).selected
+    holdout = None if selected is None else (grid.holdout or oracle.planted.holdout)
+    with pytest.raises(BenchError, match="grid-0 counts 3 rule\\(s\\) tried and holds 2"):
+        replace(verdicts, results=(first, replace(grid, snapshot=padded, holdout=holdout)))
+
+
+def test_a_search_in_progress_is_not_told_the_world_was_searched(fresh_run):
+    (fresh_run / ARMS_DIRNAME).mkdir()
+    with pytest.raises(BenchError, match="a search of this world is running or did not finish"):
+        run_world(fresh_run)
+
+
+def test_a_failure_moving_the_stores_in_keeps_them_and_names_where(
+    fresh_run, monkeypatch, landed_world, searched
+):
+    _artifact, landing = landed_world
+    _run, _verdicts, oracle, *_ = searched
+    monkeypatch.setattr(bench, "verify", lambda store, manifest: landing)
+    monkeypatch.setattr(bench, "frame_for", lambda ledger, experiment, *, holdout: None)
+    monkeypatch.setattr(bench, "planted_figures", lambda *args, **kwargs: oracle.planted)
+    monkeypatch.setattr(bench, "pool_reference", lambda *args, **kwargs: oracle.pool)
+    real = Path.rename
+
+    def locked(self, target):
+        if Path(target).parent.name == ARMS_DIRNAME:
+            raise PermissionError("locked by another process")
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "rename", locked)
+    with pytest.raises(BenchError, match="the records are written, but moving the arms' stores"):
+        run_world(fresh_run)
+    monkeypatch.setattr(Path, "rename", real)
+    # The records are in, the claim is empty, and the stores are kept in
+    # the staging the sentence names — nothing was thrown away.
+    assert (fresh_run / VERDICTS_FILENAME).is_file() and (fresh_run / ORACLE_FILENAME).is_file()
+    assert _listing(fresh_run / ARMS_DIRNAME) == []
+    kept = [p for p in fresh_run.iterdir() if p.name.startswith(".search.partial-")]
+    assert len(kept) == 1
+    assert _listing(kept[0] / ARMS_DIRNAME) == ["grid", "random"]
+
+
+def test_a_broken_landed_manifest_is_refused_with_its_file(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / MANIFEST_FILENAME).write_bytes(b"{}")
+    with pytest.raises(ManifestError, match=rf"{MANIFEST_FILENAME}: manifest_version"):
+        read_manifest(run)

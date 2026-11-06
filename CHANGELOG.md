@@ -13,11 +13,11 @@ Breaking changes within the 0.x line are called out explicitly.
 - **A dotenv test no longer leaves its key in the process, and the uniswap
   judge's smoke test is opt-in** (#411). `load_dotenv_files` writes straight
   into `os.environ`, and `monkeypatch.delenv` of a name that was absent
-  records nothing to undo, so the nine tests under
+  records nothing to undo, so among the tests under
   `contrib/hyperliquid_perp/tests/` that run the real loader (eight in
-  `test_config.py`, one entry-point ordering test in `cli/test_main.py`)
-  left `OPENROUTER_API_KEY` (a made-up value) and `HL_ENTERPRISE_MARKER`
-  set for the rest of the session; in a combined run the uniswap judge's
+  `test_config.py`, two re-binding it in `cli/`) five left
+  `OPENROUTER_API_KEY` (a made-up value) or `HL_ENTERPRISE_MARKER` set for
+  the rest of the session; in a combined run the uniswap judge's
   smoke test, which skipped only without a key, then made a real request
   (401, no cost — but a real key in `.env` would have paid). The perp
   tests' conftest now restores the environment whole after every test

@@ -105,7 +105,7 @@ python -m contrib.discovery generate --manifest dev-seed-0.json --root data/disc
 ```
 
 成功時 `<root>/<world id>-<manifest digest>/` 有 `world.sqlite`（唯讀 artifact，各臂複製它）與 `manifest.json`（canonical
-bytes）。落地先在同一個 root 下的 staging 目錄做（`.<name>.partial-*`），驗收通過、manifest 寫好才 rename 到定位；任何原因
+bytes，`search_space.pool_size` 已回填；digest 把它置空算，所以目錄名與手寫的 manifest 一致）。落地先在同一個 root 下的 staging 目錄做（`.<name>.partial-*`），驗收通過、manifest 寫好才 rename 到定位；任何原因
 中途結束都把 staging 整個移除，最終路徑永遠不會出現半成品。同一份 manifest 已落地就拒絕（exit 1）。stdout 印三條 walk 的
 結果、量到的第一根可量測 bar、三段 split 與各自的 bar 數、conditional 世界還有埋的規則在決策 bar 上持倉的根數與比例
 （規則在決策 bar 上從不持倉的 conditional 世界在生成時就拒絕）；這些只給操作者看，不進任何 prompt。
@@ -124,26 +124,29 @@ template 依 manifest 順序，template 內 entry 門檻升冪（外層）× gat
 一條格線上拒絕。v1 池的兩個限制：exit 只有 `max_bars`、每個候選都有 gate。
 
 **兩臂**：都實作 autoresearch 的 `Hypothesist` port、都**不讀 prompt**（餵給它們的已試規則與失敗回饋被忽略——Random 是零資訊
-基準、Grid 是固定順序基準，LLM 臂贏過它們的部分才是「讀回饋」買到的）。`RandomHypothesist(pool, world_id, search_seed)`
+基準、Grid 是固定順序基準，LLM 臂贏過它們的部分才是「讀回饋」買到的）。`RandomHypothesist(pool, world_id=…, search_seed=…)`
 的排列由 `random.Random(f"{world_id}/random/{seed}")` 抽（同一個 search seed 在不同世界不是同一個排列；kind 不進 id），
 不放回；`GridHypothesist(pool)` 按編號走。池走完就 raise `CandidatesExhausted`（`HypothesistError` 的子類：`search()` 不扣預算、
 停下、回報告）並把自己的 `exhausted` 旗標設 True，`verdict.classify_ending` 靠它把 `exhausted` 與 `seam_failed` 分開。
 
 **`search --run <dir>`**（`bench.run_world`，計畫 §3 步驟 2–5，順序就是重點）：
-1. 讀落地的 `manifest.json`；`arms/`、`verdicts.json`、`oracle.json` 任一已存在＝這個世界搜過了，拒絕（一個世界只搜一次，
-   要重搜就手動移除）。枚舉池；manifest 的 `pool_size` 若已回填且不等於這一版算出的數，拒絕。
+1. 讀落地的 `manifest.json`（必須是這個目錄自己的：目錄名＝manifest 的 digest，落地後手改過 kind／penalty／budget 的
+   manifest 會指到別的目錄名，拒絕）；`arms/`、`verdicts.json`、`oracle.json` 任一已存在＝這個世界搜過了，拒絕（一個世界
+   只搜一次，要重搜就手動移除）；`arms.llm` 有填＝這一版跑不了 manifest 指名的臂，拒絕（Null 校準的 manifest 把 `llm`
+   設 `null`；LLM 臂是 PR 5）。池與 `pool_size` 在讀 manifest 時就已核對（見「候選池」）。
 2. 每臂把 `world.sqlite` 複製到自己的 store（`arms/random/replicate-<search seed>.sqlite`、`arms/grid/replicate-0.sqlite`），
-   第一顆先跑 `verify()`（落地時的驗收再跑一次）並斷言量到的 split＝experiment 的 split；每臂以 `experiment_for()`＋
+   第一顆先跑 `verify()`（落地時的驗收再跑一次：artifact 真的是 manifest 描述的世界）；每臂以 `experiment_for()`＋
    `ledger.create_experiment()` 開自己的 experiment（id＝`random-<seed>`／`grid-0`）——同 coin、同 split／costs／window／
-   penalty，`Verdicts` 的建構子守住這件事。
+   penalty，`Verdicts` 的建構子守住這件事（也守住沒有一臂的 distinct rules 超過 `pool_size`、grid 只有 replicate 0）。
 3. 每臂跑 autoresearch 的 `search(ledger, experiment, hypothesist, max_trials=budget)`；跑完立刻 `snapshot_arm`（晉升前）→
    `final_verdict`；`selected` 非空就用 autoresearch 的 `promote()` 晉升那一筆（holdout 數字由它讀）。中斷＝整個 run 丟掉
    （replicate 不 resume，計畫 §9 (14)）、staging 移除、exit 130；seam 失敗記成 `seam_failed`、下一臂照跑。
 4. 所有臂跑完才讀 oracle（計畫 §4.4）：在 grid 臂的 store 上算埋的規則的 train／validation／holdout（null 世界為 null）與
    full-pool reference（整池 validation net sharpe、最佳者、過 `threshold(pool_size)` 的個數），不落 ledger。
-5. 全部先寫進 run 目錄下的 staging（`.search.partial-*`），最後才 rename `arms/`、搬 `verdicts.json`／`oracle.json`、
-   回填 `pool_size` 後的 `manifest.json`（目錄名不變：digest 把 `pool_size` 置空算）。任何原因中途結束都把 staging 移除。
-   `arms.llm` 有填時印一行「model arm 這一版不跑」（PR 5）。
+5. 全部先寫進 run 目錄下的 staging（`.search.partial-*`），最後先搬 `verdicts.json`／`oracle.json`、再 rename `arms/`
+   （半途失敗只會「有紀錄沒 arms」，guard 兩種都拒）；`manifest.json` 不動（`pool_size` 由 `generate` 回填）。任何原因中途
+   結束都把 staging 移除。test seed 的世界不把 holdout 數字印到 console（`verdicts.json`／`oracle.json` 照寫；計畫 §4.2
+   測試世界的 holdout 不得拿來調任何東西）。
 
 **`oracle --run <dir>`**（`bench.preview_oracle`）：搜尋前先看埋的規則的 train／validation 對 `threshold(max_trials)` 的餘裕，
 在拋棄式副本上算、不留檔。**只准 dev seed**：test seed 的 oracle 數字由 `search` 在各臂之後寫進 `oracle.json`（計畫 §4.2／§4.4）；
@@ -152,13 +155,17 @@ null 世界沒有東西可看。holdout 在任何 seed 上都不在這裡讀。
 **`calibrate [--root <dir>]`**（`bench.calibration_table`）：走 root 下每個有 `verdicts.json` 的 run 目錄，按（world kind、
 `null_definition_version`、arm）列：搜尋次數、`final_eligible` 非空的次數、比例。null 世界那行叫「false calls」（報表措辭
 照計畫 §4.1：Null-v1 定義下的誤判率）；conditional 世界那行叫「non-empty verdicts」——找到的規則是不是埋的那條是 PR 4 評分器
-的事。沒搜過的目錄跳過。
+的事。`seam_failed` 的臂沒有搜尋過：不進分母，另計「n seam failure(s) not counted」印在同一行。沒搜過的目錄跳過；
+`verdicts.json` 的 `world_id`／`pool_size` 對不上旁邊 manifest（id、`len(candidates)`）就拒絕；不要求 `world.sqlite`（artifact
+可裁掉省空間）。
 
 **兩份紀錄**：`verdicts.json`＝`{verdicts_version, world_id, pool_size, results: [{arm, replicate, snapshot, verdict, holdout}]}`，
 `verdict` 寫在 `snapshot` 旁邊給人讀，讀回時重算 `final_verdict(snapshot)` 不相等就拒絕（紀錄永遠可由快照重判，計畫 §4.5）；
-`holdout` 有值 ⇔ `selected` 非空。`oracle.json`＝`{oracle_version, world_id, planted: {train, validation, holdout, budget,
-threshold, oracle_margin, eligible, margin, passed} | null, pool: {size, validation_sharpes[], best, threshold, clearing}}`，
-`margin`／`passed`／`best`／`size` 是衍生值，讀回對不上就拒絕。
+`holdout` 有值 ⇔ `selected` 非空；grid 只有 replicate 0；沒有一臂的 distinct rules 超過 `pool_size`。`oracle.json`＝
+`{oracle_version, world_id, planted: {train, validation, holdout, budget, threshold, oracle_margin, blockers[], eligible,
+margin, passed} | null, pool: {size, validation_sharpes[], best, threshold, clearing}}`：`blockers` 是 autoresearch 閘門在
+`threshold(max_trials)` 的句子（空＝過），`eligible`／`margin`／`passed`／`best`／`size` 是衍生值，讀回對不上就拒絕；三段數字
+各自要掛在自己的視窗名下；`clearing` 不能超過 validation sharpe ≥ threshold 的個數。
 
 **2026-11-06 範例世界（dev seed 0、400 根決策 bar）的煙霧讀數，給校準參考**：埋的規則 train net sharpe 5.31、validation −4.36
 → oracle 無餘裕；同 seed 的 Null 世界整池 16 個候選有 8 個過 `threshold(16)`＝1.69、最佳 validation sharpe 9.3，Random／Grid
@@ -184,7 +191,7 @@ python -m contrib.discovery calibrate --root data/discovery
 | store 的三條序列逐筆等於生成結果；`first_measurable_index ≤ warmup`；tail 通過；三段長度＝manifest；walk 沒走到頭拒絕 | `tests/test_landing.py` |
 | `generate` 寫出 canonical manifest、第二次拒絕、失敗不留半成品；`search`／`oracle`／`calibrate` 的輸出與各錯誤家族的 exit code | `tests/test_cli.py` |
 | 池＝templates × grids 按 `candidate_order`、去重後編號、每個候選寫法正規（gate 在 `filters`、`max_bars`、`POOL_SIZING`、family）、parser 拒絕就 manifest 拒絕；Random 是 seed＋world 決定的排列、不放回；Grid 按編號；池走完 raise `CandidatesExhausted`＋旗標；經真的 `search()` 每個候選只 file 一次、以 `exhausted` 結束 | `tests/test_hypothesists.py` |
-| 一次真的 `search`：`arms/` 兩顆 store、`verdicts.json`／`oracle.json` 讀回相等、`pool_size` 回填且目錄名不變、artifact 位元組不變；各臂同條件、各自 store 裡只晉升 selected；oracle 在各臂之後印、holdout 有值、整池 16 個；再搜拒絕；calibrate 表；紀錄的 verdict 對不上快照拒絕；dev-only／null 的 oracle 預覽拒絕；中斷＝目錄回到落地狀態；seam 失敗記錄後下一臂照跑 | `tests/test_bench.py` |
+| 一次真的 `search`：`arms/` 兩顆 store、`verdicts.json`／`oracle.json` 讀回相等、`manifest.json` 不動且目錄名不變、artifact 位元組不變；各臂同條件、各自 store 裡只晉升 selected；oracle 在各臂之後印、holdout 有值、整池 16 個；再搜拒絕；帶 `llm` 的 manifest 拒絕；落地後改過的 manifest（digest 對不上目錄名）拒絕；calibrate 表（seam 失敗不進分母、artifact 裁掉仍可算、world_id／pool_size 不符拒絕）；紀錄閘門（verdict 對不上快照、selected 非首位、holdout 段位、`eligible`／`margin`／`passed`／段名／`clearing`、`best`／`size`、版本、grid replicate、trials ≤ pool_size、row 的計數）；holdout 旗標可關；dev-only／null 的 oracle 預覽拒絕；中斷＝目錄回到落地狀態；seam 失敗記錄後下一臂照跑 | `tests/test_bench.py` |
 
 ## Manifest 格式（v2）
 
@@ -223,8 +230,8 @@ python -m contrib.discovery calibrate --root data/discovery
 （Null 校準先只跑 Random＋Grid）。`costs` 是 `CostModel.to_dict()`、`penalty` 是 `Penalty.to_dict()`，不另造型別。`planted` 在 null 世界
 為 `null`；conditional 世界的 `planted.spec` 必須通過 autoresearch 的 parser，每個進場側都要有 exit（exit 規則或 `max_bars`），
 `beta` 嚴格為正、方向＝「有利於埋的那一側的部位」（short 側的埋法＝負的價格漂移）。`origin_ms` 必須 ≥ 1 且落在 UTC 午夜（同時在 4h 與
-1d 格線上）。`indicator_lookback` 的下限＝引擎的 `MIN_INDICATOR_LOOKBACK`。`pool_size` 在枚舉前是 `null`，枚舉後 ≥ 1
-（`search` 回填）。`candidate_order` 是 enum（v2 起；v1 的自由文字沒有指名 runner 走得出來的順序，所以版本號 bump、v1 檔拒絕），
+1d 格線上）。`indicator_lookback` 的下限＝引擎的 `MIN_INDICATOR_LOOKBACK`。`pool_size` 手寫時留 `null`，`generate` 落地時
+回填成這一版枚舉出的數；已填的值不等於枚舉數就拒絕。`candidate_order` 是 enum（v2 起；v1 的自由文字沒有指名 runner 走得出來的順序，所以版本號 bump、v1 檔拒絕），
 目前只有 `templates_then_grid`（定義見「三臂與判定」）。
 
 v1 候選池的兩個限制（寫在這裡，因為它們定義了 full-pool reference 的假說類）：每個 template 的 exit 只有 `max_bars`（LLM 臂可提
@@ -245,7 +252,7 @@ runner 遇到「有 llm 區塊但本世界不在子集」應拒絕。
 
 ```
 <bench-root>/<world-id>-<manifest-digest>/
-  manifest.json              世界與 benchmark 參數（generate 寫，canonical；search 只回填 search_space.pool_size）
+  manifest.json              世界與 benchmark 參數（generate 寫，canonical，search_space.pool_size 已回填；之後不再改寫）
   world.sqlite               生成器落地的 candles／funding（generate 寫；唯讀 artifact，各臂複製它）
   arms/random/replicate-<search seed>.sqlite   每個 Random replicate 自己的 store（search 寫；k＝search seed）
   arms/grid/replicate-0.sqlite                 Grid 臂的 store（確定性，只有一個 replicate）

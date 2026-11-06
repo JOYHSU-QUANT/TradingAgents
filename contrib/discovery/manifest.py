@@ -149,9 +149,9 @@ class CandidateOrder(VocabEnum, noun="candidate order"):
     inner one (a grid of labels keeps the order it is listed in). A
     candidate the pool has already (same ``spec_hash``) is skipped, so the
     pool's numbering is the order with the repeats removed
-    (:func:`~contrib.discovery.hypothesists.enumerate_pool`). Recorded as a
-    name rather than described in prose so a manifest names an order the
-    runner knows, or is refused where it is written.
+    (:attr:`SearchSpace.candidates`). Recorded as a name rather than
+    described in prose so a manifest names an order the runner knows, or
+    is refused where it is written.
     """
 
     TEMPLATES_THEN_GRID = "templates_then_grid"
@@ -637,17 +637,29 @@ def family_for(features: tuple[str, ...]) -> Family:
 
 @dataclass(frozen=True)
 class Candidate:
-    """One rule of the pool: the template and thresholds it came from, the spec and its hash.
+    """One rule of the pool: the template and thresholds it came from, and the spec.
 
-    Its number is its position in ``SearchSpace.candidates``. ``spec_hash``
-    is the spec's, computed once when the pool is written.
+    Its number is its position in ``SearchSpace.candidates``; its
+    ``spec_hash`` is the spec's, derived (a pool deduplicates on it, so it
+    cannot be a field a hand-built candidate could set apart from its
+    spec).
     """
 
     template: int
     entry: float | str
     gate: float | str
     spec: StrategySpec
-    spec_hash: str
+
+    def __post_init__(self) -> None:
+        _read.whole(self.template, "candidate.template", minimum=0)
+        for name in ("entry", "gate"):
+            object.__setattr__(self, name, _grid_value(getattr(self, name), f"candidate.{name}"))
+        if not isinstance(self.spec, StrategySpec):
+            raise ManifestError(f"candidate.spec: expected a StrategySpec, got {self.spec!r}")
+
+    @property
+    def spec_hash(self) -> str:
+        return spec_hash(self.spec)
 
     def answer(self) -> str:
         """The candidate as a hypothesist answers it: the spec's document, as JSON text."""
@@ -687,8 +699,8 @@ class SearchSpace:
     ``threshold_grid`` names a grid for every feature a template compares,
     and for no other — a grid nothing reads is a knob whose author believes
     it is doing something. Which features take a label and which a number
-    is the parser's call, made when the pool is written out
-    (:func:`~contrib.discovery.hypothesists.enumerate_pool`). ``pool_size``
+    is the parser's call, made when the pool is written out (below).
+    ``pool_size``
     is filled in then, after ``spec_hash`` deduplication, and is ``None``
     until it is — not 0, which would read as a pool enumerated and found
     empty, a manifest that cannot be run and is refused. ``candidate_order``
@@ -802,11 +814,7 @@ class SearchSpace:
                     if digest in seen:
                         continue
                     seen.add(digest)
-                    candidates.append(
-                        Candidate(
-                            template=number, entry=entry, gate=gate, spec=spec, spec_hash=digest
-                        )
-                    )
+                    candidates.append(Candidate(template=number, entry=entry, gate=gate, spec=spec))
         return tuple(candidates)
 
     @property

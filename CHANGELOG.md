@@ -29,16 +29,20 @@ Breaking changes within the 0.x line are called out explicitly.
   selected trial through autoresearch's own `promote` for its holdout
   figure, and only then reads the oracle: the planted rule's holdout and
   the whole pool's validation figures, on the grid arm's store, filed
-  nowhere (`bench.py`; `verdicts.json`, `oracle.json`, `pool_size` filled
-  into the landed `manifest.json`; everything staged and moved into place
-  at the end, an interrupt discards the run, a world is searched once).
-  `oracle --run DIR` previews the planted rule's train and validation
-  figures against `threshold(max_trials)` on a throw-away copy —
-  development seeds only, as the protocol says — and `calibrate --root
+  nowhere (`bench.py`; `verdicts.json` and `oracle.json`, staged and
+  moved into place at the end; an interrupt discards the run; a world is
+  searched once; a manifest that names a model arm, or that is not the
+  one its directory was landed for, is refused; test-seed worlds keep
+  their holdout figures off the console). `generate` fills
+  `search_space.pool_size` into the landed manifest, which is not written
+  again. `oracle --run DIR` previews the planted rule's train and
+  validation figures against `threshold(max_trials)` on a throw-away copy
+  — development seeds only, as the protocol says — and `calibrate --root
   DIR` tallies every searched world by kind and arm (the null false-call
   rate under the null definition named, the non-empty-verdict rate on
-  conditional worlds). `manifest_version` is 2: `search_space.candidate_order`
-  is now the enum `templates_then_grid`, the one order the runner walks.
+  conditional worlds; an arm whose seam failed is counted beside the rate,
+  not in it). `manifest_version` is 2: `search_space.candidate_order` is
+  now the enum `templates_then_grid`, the one order the runner walks.
   Follow-ups left to PR 4 are in `contrib/discovery/README.md`.
 
 ### Fixed

@@ -5,9 +5,10 @@ is taken through the protocol in the order the plan fixes, and the order
 is the point of this module:
 
 1. **The pool** is the manifest's (``SearchSpace.candidates``, written and
-   checked where the manifest is read), and its size is what ``pool_size``
-   is filled in with — the one field a landed manifest is written back
-   with (the run directory's name set it aside).
+   checked where the manifest is read; ``generate`` filled ``pool_size``
+   in when it landed the world, and the landed manifest is not written
+   again). The manifest has to be the directory's own — the directory is
+   named by its digest — and has to name no arm this build does not run.
 2. **Every arm copies the artifact** into its own store and opens its own
    experiment from the manifest's conditions (:func:`~contrib.discovery.landing.experiment_for`):
    one coin, one sqlite per arm, the same split, costs, window and
@@ -26,9 +27,8 @@ is the point of this module:
    after every arm has searched and chosen, and written to ``oracle.json``.
 
 Everything is built in a staging directory inside the run directory and
-moved into place at the end (the two records and the filled manifest,
-then ``arms/``), so a run that ends any other way leaves the directory
-as the landing left it. A run directory that already holds any of those
+moved into place at the end (the two records, then ``arms/``), so a run
+that ends any other way leaves the directory as the landing left it. A run directory that already holds any of those
 is a world searched before: refused, since a search is spent once —
 remove them by hand to search the world again.
 
@@ -64,6 +64,7 @@ from .landing import (
     experiment_for,
     open_staging,
     verify,
+    world_dir,
 )
 from .manifest import Manifest, SeedSet, WorldKind
 from .oracle import Oracle, PlantedFigures, frame_for, planted_figures, pool_reference
@@ -138,6 +139,10 @@ class ArmResult:
     def __post_init__(self) -> None:
         object.__setattr__(self, "arm", _read.enum(Arm, self.arm, "result.arm"))
         _read.whole(self.replicate, "result.replicate", minimum=0)
+        if self.arm is Arm.GRID and self.replicate != 0:
+            raise BenchError(
+                f"{self.experiment_id}: the grid arm is one deterministic search, replicate 0"
+            )
         if not isinstance(self.snapshot, ArmSnapshot):
             raise BenchError("result.snapshot: expected an ArmSnapshot")
         if self.snapshot.experiment.experiment_id != self.experiment_id:
@@ -168,7 +173,8 @@ class ArmResult:
     def experiment_id(self) -> str:
         return experiment_id(self.arm, self.replicate)
 
-    def describe(self) -> str:
+    def describe(self, *, holdout: bool = True) -> str:
+        """The result as a line; ``holdout`` False keeps the holdout figure off the console."""
         verdict = self.verdict
         line = (
             f"{self.experiment_id}: ended {verdict.ended.value}, {verdict.answers} answer(s), "
@@ -179,10 +185,12 @@ class ArmResult:
         if verdict.selected is None:
             return line + "; final eligible: none"
         assert self.holdout is not None  # the constructor's rule
-        return (
-            line + f"; final eligible: {list(verdict.final_eligible)}, selected trial "
-            f"#{verdict.selected} (holdout net sharpe {self.holdout.net.sharpe:.4f})"
+        line += (
+            f"; final eligible: {list(verdict.final_eligible)}, selected trial #{verdict.selected}"
         )
+        if holdout:
+            line += f" (holdout net sharpe {self.holdout.net.sharpe:.4f})"
+        return line
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -232,9 +240,10 @@ class Verdicts:
 
     The conditions are held here: every result's experiment is the same
     experiment but for its name and stamp (plan §4.3: three arms, one
-    split, one cost model, one penalty, one budget), on the world's coin.
-    ``pool_size`` is the pool the arms drew from, as the filled manifest
-    records it; the calibration holds the two equal.
+    split, one cost model, one penalty; the budget is the manifest's and is
+    not on the experiment), on the world's coin. ``pool_size`` is the pool
+    the arms drew from — no arm of it can have filed more rules than that —
+    and the calibration holds it to the manifest's.
     """
 
     world_id: str
@@ -256,6 +265,11 @@ class Verdicts:
             if experiment.coin != self.world_id:
                 raise BenchError(
                     f"{result.experiment_id} ran on coin {experiment.coin}, not {self.world_id}"
+                )
+            if result.snapshot.distinct_rules > self.pool_size:
+                raise BenchError(
+                    f"{result.experiment_id} tried {result.snapshot.distinct_rules} distinct "
+                    f"rule(s) from a pool of {self.pool_size}"
                 )
             if _conditions(experiment) != first:
                 raise BenchError(
@@ -322,6 +336,25 @@ def require_artifact(run_dir: Path) -> None:
         raise BenchError(f"{run_dir} holds no {ARTIFACT_FILENAME}; generate the world first")
 
 
+def landed_manifest(run_dir: Path) -> Manifest:
+    """The manifest a measuring verb runs under: read, with its artifact beside it, and the directory's own.
+
+    The directory is named by the manifest's digest (``landing.world_dir``),
+    so a ``manifest.json`` edited after the landing — a kind flipped, a
+    penalty or budget changed — names another directory, and is refused
+    rather than searched under conditions the directory does not describe.
+    """
+    manifest = read_manifest(run_dir)
+    require_artifact(run_dir)
+    expected = world_dir(run_dir.parent, manifest).name
+    if run_dir.resolve().name != expected:
+        raise BenchError(
+            f"{run_dir / MANIFEST_FILENAME} is not the manifest this directory was landed for: "
+            f"it names {expected}, the directory is {run_dir.resolve().name}"
+        )
+    return manifest
+
+
 def _copy_artifact(run_dir: Path, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(run_dir / ARTIFACT_FILENAME, target)
@@ -338,8 +371,7 @@ def preview_oracle(run_dir: Path) -> PlantedFigures:
     tuned and the oracle's figures are written by ``search`` after the arms
     (plan §4.2, §4.4). The holdout is not read here on any seed.
     """
-    manifest = read_manifest(run_dir)
-    require_artifact(run_dir)
+    manifest = landed_manifest(run_dir)
     world = manifest.world
     if world.planted is None:
         raise BenchError(
@@ -388,8 +420,7 @@ def run_world(
     ``oracle.json``.
     """
     say = on_line or (lambda line: None)
-    manifest = read_manifest(run_dir)
-    require_artifact(run_dir)
+    manifest = landed_manifest(run_dir)
     for name in (ARMS_DIRNAME, VERDICTS_FILENAME, ORACLE_FILENAME):
         if (run_dir / name).exists():
             raise BenchError(
@@ -397,11 +428,20 @@ def run_world(
                 f"spent once — remove {ARMS_DIRNAME}/, {VERDICTS_FILENAME} and "
                 f"{ORACLE_FILENAME} by hand to search it again"
             )
+    if manifest.arms.llm is not None:
+        # The manifest is the run's specification, and a world is searched
+        # once: a search that left out an arm the manifest names would be a
+        # calibration that silently lacks it. The model arm is plan PR 5's.
+        raise BenchError(
+            f"{run_dir / MANIFEST_FILENAME} names a model arm (arms.llm), which this build does "
+            f"not run; set arms.llm to null for the random and grid calibration"
+        )
     space = manifest.search_space
     pool_size = len(space.candidates)
     say(f"pool: {pool_size} candidate(s) ({space.enumerated} enumerated)")
-    if manifest.arms.llm is not None:
-        say("the model arm is not run by this build (plan PR 5); random and grid only")
+    # Test seeds keep their holdout figures in the records and off the
+    # console (plan §4.2: nothing is tuned on them).
+    show_holdout = manifest.world.seed_set is SeedSet.DEV
     world_id = manifest.world.id
     staging = open_staging(run_dir, ".search.partial-")
     try:
@@ -440,7 +480,7 @@ def run_world(
                     None if selected is None else promote(ledger, experiment, selected).holdout
                 )
                 result = ArmResult(arm=arm, replicate=replicate, snapshot=snapshot, holdout=holdout)
-                say(result.describe())
+                say(result.describe(holdout=show_holdout))
                 results.append(result)
         verdicts = Verdicts(world_id=world_id, pool_size=pool_size, results=tuple(results))
         # The oracle last (plan §4.4): read on the Grid arm's store — the
@@ -465,18 +505,16 @@ def run_world(
                 ledger, grid, [candidate.spec for candidate in space.candidates], frame=frame
             )
         oracle = Oracle(world_id=world_id, planted=planted, pool=reference)
-        for line in oracle.describe():
+        for line in oracle.describe(holdout=show_holdout):
             say(line)
-        # Written whole in staging, then moved: the two records and the
-        # filled manifest first (bytes, as the landing wrote it), the arms'
-        # directory last. A move that fails part-way leaves records without
-        # arms, never arms without records: the guard above refuses either,
-        # and the records are what the calibration reads.
+        # Written whole in staging, then moved: the two records first, the
+        # arms' directory last. A move that fails part-way leaves records
+        # without arms, never arms without records: the guard above refuses
+        # either, and the records are what the calibration reads. The
+        # landed manifest is not touched.
         (staging / VERDICTS_FILENAME).write_bytes(verdicts.dumps().encode("utf-8"))
         (staging / ORACLE_FILENAME).write_bytes(oracle.dumps().encode("utf-8"))
-        filled = replace(manifest, search_space=replace(space, pool_size=pool_size))
-        (staging / MANIFEST_FILENAME).write_bytes(filled.dumps().encode("utf-8"))
-        for name in (VERDICTS_FILENAME, ORACLE_FILENAME, MANIFEST_FILENAME):
+        for name in (VERDICTS_FILENAME, ORACLE_FILENAME):
             os.replace(staging / name, run_dir / name)
         (staging / ARMS_DIRNAME).rename(run_dir / ARMS_DIRNAME)
     finally:
@@ -495,6 +533,11 @@ class CalibrationRow:
     On a null world a non-empty final verdict is a false call under that
     null definition (plan §4.1's wording); on a conditional world it is a
     candidate recovery, not yet a recovery (plan PR 4 scores that).
+
+    A search is a run that answered — spent its budget or walked its pool
+    to the end; an arm whose seam failed never searched, is counted in
+    ``failed`` and is not in the rate's denominator, so a dead arm cannot
+    read as a clean search.
     """
 
     kind: WorldKind
@@ -502,17 +545,35 @@ class CalibrationRow:
     arm: Arm
     searches: int
     found: int
+    failed: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "kind", _read.enum(WorldKind, self.kind, "row.kind"))
+        _read.text(self.null_definition_version, "row.null_definition_version")
+        object.__setattr__(self, "arm", _read.enum(Arm, self.arm, "row.arm"))
+        _read.whole(self.searches, "row.searches", minimum=0)
+        _read.whole(self.found, "row.found", minimum=0)
+        _read.whole(self.failed, "row.failed", minimum=0)
+        if self.found > self.searches:
+            raise BenchError(f"row: {self.found} found in {self.searches} search(es)")
+        if self.searches + self.failed == 0:
+            raise BenchError("row: a row tallies at least one result")
 
     @property
-    def rate(self) -> float:
-        return self.found / self.searches
+    def rate(self) -> float | None:
+        """The share of searches that found something; ``None`` when nothing searched."""
+        return None if self.searches == 0 else self.found / self.searches
 
     def describe(self) -> str:
         what = "false calls" if self.kind is WorldKind.NULL_V1 else "non-empty verdicts"
-        return (
+        rate = "n/a" if self.rate is None else f"{self.rate:.1%}"
+        line = (
             f"{self.kind.value} ({self.null_definition_version}) {self.arm.value}: "
-            f"{self.found} {what} in {self.searches} search(es) = {self.rate:.1%}"
+            f"{self.found} {what} in {self.searches} search(es) = {rate}"
         )
+        if self.failed:
+            line += f"; {self.failed} seam failure(s) not counted"
+        return line
 
 
 def calibration_table(run_dirs: Iterable[Path]) -> list[CalibrationRow]:
@@ -520,8 +581,8 @@ def calibration_table(run_dirs: Iterable[Path]) -> list[CalibrationRow]:
 
     A directory without ``verdicts.json`` is a world not yet searched and is
     skipped; one whose records cannot be read, or whose verdicts are not
-    its manifest's, is refused by name. Rows come in the enums' own order:
-    kind, then the null definition, then arm.
+    its manifest's (another world, another pool), is refused by name. Rows
+    come in the enums' own order: kind, then the null definition, then arm.
     """
     tally: dict[tuple[WorldKind, str, Arm], list[int]] = {}
     for run_dir in run_dirs:
@@ -538,17 +599,21 @@ def calibration_table(run_dirs: Iterable[Path]) -> list[CalibrationRow]:
                 f"{run_dir / VERDICTS_FILENAME} is for {verdicts.world_id}, the manifest beside "
                 f"it for {manifest.world.id}"
             )
-        if verdicts.pool_size != manifest.search_space.pool_size:
+        pool_size = len(manifest.search_space.candidates)
+        if verdicts.pool_size != pool_size:
             raise BenchError(
                 f"{run_dir / VERDICTS_FILENAME} drew from a pool of {verdicts.pool_size}, the "
-                f"manifest beside it records {manifest.search_space.pool_size!r}"
+                f"manifest beside it writes one of {pool_size}"
             )
         for result in verdicts.results:
             counts = tally.setdefault(
-                (manifest.world.kind, manifest.null_definition_version, result.arm), [0, 0]
+                (manifest.world.kind, manifest.null_definition_version, result.arm), [0, 0, 0]
             )
-            counts[0] += 1
-            counts[1] += result.verdict.found
+            if result.snapshot.ended is Ended.SEAM_FAILED:
+                counts[2] += 1
+            else:
+                counts[0] += 1
+                counts[1] += result.verdict.found
     versions = sorted({version for _, version, _ in tally})
     return [
         CalibrationRow(
@@ -557,6 +622,7 @@ def calibration_table(run_dirs: Iterable[Path]) -> list[CalibrationRow]:
             arm=arm,
             searches=tally[kind, version, arm][0],
             found=tally[kind, version, arm][1],
+            failed=tally[kind, version, arm][2],
         )
         for kind in WorldKind
         for version in versions

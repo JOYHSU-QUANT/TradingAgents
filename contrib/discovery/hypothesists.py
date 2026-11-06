@@ -63,10 +63,14 @@ class Pool:
     def __post_init__(self) -> None:
         # Defects of construction, not of a manifest: the manifest wrote the
         # pool and holds these already; a pool built by hand must not say less.
-        if not self.candidates:
+        candidates = tuple(self.candidates)
+        if not candidates:
             raise ValueError("a pool holds at least one candidate")
-        if len({c.spec_hash for c in self.candidates}) != len(self.candidates):
+        if any(not isinstance(candidate, Candidate) for candidate in candidates):
+            raise ValueError("a pool holds Candidates")
+        if len({candidate.spec_hash for candidate in candidates}) != len(candidates):
             raise ValueError("a pool lists each rule once")
+        object.__setattr__(self, "candidates", candidates)
 
     @property
     def size(self) -> int:

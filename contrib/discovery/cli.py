@@ -43,6 +43,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from .bench import (
@@ -112,8 +113,12 @@ def _build_parser() -> argparse.ArgumentParser:
 def _cmd_generate(args: argparse.Namespace) -> int:
     # The manifest's read writes the pool and the world is built before
     # anything is written, so a manifest the language or the generator
-    # refuses leaves nothing behind.
+    # refuses leaves nothing behind. The pool's size is filled in here, so
+    # the landed manifest records it and is never rewritten after (the run
+    # directory's name sets the field aside, so it names the same place).
     manifest = Manifest.read(Path(args.manifest))
+    space = manifest.search_space
+    manifest = replace(manifest, search_space=replace(space, pool_size=len(space.candidates)))
     root = Path(args.root) if args.root else default_root()
     history = generate(manifest)
     target, fetched, landing = land_world(root, history)

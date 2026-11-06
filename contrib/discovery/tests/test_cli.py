@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -37,10 +38,15 @@ def test_generate_lands_the_world_and_its_null_twin_beside_it_and_refuses_a_repe
     argv = ["generate", "--manifest", str(_manifest_file(tmp_path)), "--root", str(root)]
     assert main(argv) == 0
     target = world_dir(root, manifest)
-    assert (target / MANIFEST_FILENAME).read_bytes() == manifest.dumps().encode("utf-8")
+    # Landed with the pool's size filled in: the one field the digest sets
+    # aside, so the directory is still the unfilled manifest's.
+    space = manifest.search_space
+    filled = replace(manifest, search_space=replace(space, pool_size=16))
+    assert (target / MANIFEST_FILENAME).read_bytes() == filled.dumps().encode("utf-8")
     assert (target / ARTIFACT_FILENAME).is_file()
     out = capsys.readouterr().out
     assert f"store: {target / ARTIFACT_FILENAME}" in out
+    assert "pool: 16 candidate(s) (16 enumerated)" in out
     assert "4h candles: 2 request(s)" in out
     assert "every feature has a value from bar" in out
     assert "split (4h): holdout:" in out

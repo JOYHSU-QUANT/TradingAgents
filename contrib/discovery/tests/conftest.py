@@ -285,11 +285,17 @@ def bench_manifest(**changes) -> Manifest:
 
 
 def land_run(root: Path, artifact: Path, manifest: Manifest) -> Path:
-    """A run directory as ``generate`` leaves it: the artifact copied in, the manifest beside it."""
-    run = world_dir(root, manifest)
+    """A run directory as ``generate`` leaves it: the artifact copied in, the manifest beside it.
+
+    As ``generate`` writes it, with ``pool_size`` filled in; the directory
+    is named by the manifest's digest, which sets that field aside.
+    """
+    space = manifest.search_space
+    filled = replace(manifest, search_space=replace(space, pool_size=len(space.candidates)))
+    run = world_dir(root, filled)
     run.mkdir(parents=True)
     shutil.copyfile(artifact, run / ARTIFACT_FILENAME)
-    (run / MANIFEST_FILENAME).write_bytes(manifest.dumps().encode("utf-8"))
+    (run / MANIFEST_FILENAME).write_bytes(filled.dumps().encode("utf-8"))
     return run
 
 

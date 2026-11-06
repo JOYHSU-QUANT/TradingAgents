@@ -57,6 +57,7 @@ from .upstream import (
     FeatureFrame,
     Ledger,
     SegmentMetrics,
+    SegmentName,
     SplitResult,
     StrategySpec,
     Verdict,
@@ -148,11 +149,14 @@ def evaluate_unfiled(
 class PlantedFigures:
     """The planted rule measured as a trial at the end of the budget (the module docstring).
 
-    ``threshold`` is the gate at ``budget`` rules tried; ``eligible`` is the
-    research package's whole gate there (trades, gain, not ruined, over
-    the threshold), ``margin`` the validation net Sharpe's distance over
-    the threshold, and ``passed`` both at once with the margin at least
-    ``oracle_margin``. ``holdout`` is ``None`` until the arms have searched.
+    ``threshold`` is the gate at ``budget`` rules tried and ``blockers``
+    what the research package's whole gate said there (the sentences, as
+    ``Verdict`` holds them: trades, gain, not ruined, over the threshold —
+    empty when it passed); ``eligible``, ``margin`` (the validation net
+    Sharpe's distance over the threshold) and ``passed`` (eligible with the
+    margin at least ``oracle_margin``) are derived, written for the reader
+    and checked on the read. ``holdout`` is ``None`` until the arms have
+    searched. Each figure is held to the window it is filed under.
     """
 
     train: SegmentMetrics
@@ -161,18 +165,38 @@ class PlantedFigures:
     budget: int
     threshold: float
     oracle_margin: float
-    eligible: bool
+    blockers: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        for name in ("train", "validation"):
-            if not isinstance(getattr(self, name), SegmentMetrics):
+        for name, window in (
+            ("train", SegmentName.TRAIN),
+            ("validation", SegmentName.VALIDATION),
+            ("holdout", SegmentName.HOLDOUT),
+        ):
+            figure = getattr(self, name)
+            if figure is None and name == "holdout":
+                continue
+            if not isinstance(figure, SegmentMetrics):
                 raise OracleError(f"planted.{name}: expected a SegmentMetrics")
-        if self.holdout is not None and not isinstance(self.holdout, SegmentMetrics):
-            raise OracleError("planted.holdout: expected a SegmentMetrics or None")
+            if figure.segment.name is not window:
+                raise OracleError(
+                    f"planted.{name}: a figure for {figure.segment.name.value}, filed as {name}"
+                )
         _read.whole(self.budget, "planted.budget", minimum=1)
         _read.number(self.threshold, "planted.threshold")
         _read.amount(self.oracle_margin, "planted.oracle_margin")
-        _read.flag(self.eligible, "planted.eligible")
+        object.__setattr__(
+            self,
+            "blockers",
+            tuple(
+                _read.text(sentence, f"planted.blockers[{index}]")
+                for index, sentence in enumerate(_read.sequence(self.blockers, "planted.blockers"))
+            ),
+        )
+
+    @property
+    def eligible(self) -> bool:
+        return not self.blockers
 
     @property
     def margin(self) -> float:
@@ -182,7 +206,8 @@ class PlantedFigures:
     def passed(self) -> bool:
         return self.eligible and self.margin >= self.oracle_margin
 
-    def describe(self) -> list[str]:
+    def describe(self, *, holdout: bool = True) -> list[str]:
+        """The figures as lines; ``holdout`` False keeps the holdout figure off the console."""
         lines = [
             f"planted rule: train net sharpe {self.train.net.sharpe:.4f}, validation "
             f"{self.validation.net.sharpe:.4f} against threshold({self.budget}) = "
@@ -191,7 +216,7 @@ class PlantedFigures:
             + ("eligible" if self.eligible else "not eligible")
             + f" at the end of the budget; the oracle {'has' if self.passed else 'has NO'} room"
         ]
-        if self.holdout is not None:
+        if self.holdout is not None and holdout:
             lines.append(f"planted rule: holdout net sharpe {self.holdout.net.sharpe:.4f}")
         return lines
 
@@ -203,6 +228,7 @@ class PlantedFigures:
             "budget": self.budget,
             "threshold": self.threshold,
             "oracle_margin": self.oracle_margin,
+            "blockers": list(self.blockers),
             "eligible": self.eligible,
             "margin": self.margin,
             "passed": self.passed,
@@ -219,6 +245,7 @@ class PlantedFigures:
                 "budget",
                 "threshold",
                 "oracle_margin",
+                "blockers",
                 "eligible",
                 "margin",
                 "passed",
@@ -235,17 +262,19 @@ class PlantedFigures:
                 budget=body["budget"],
                 threshold=body["threshold"],
                 oracle_margin=body["oracle_margin"],
-                eligible=body["eligible"],
+                blockers=body["blockers"],
             )
         except ValueError as exc:
             raise OracleError(f"planted: {exc}") from exc
         # Written for the reader of the file; checked against what they are
         # derived from, so a record edited by hand cannot say the oracle
         # passed when its figures say otherwise.
-        if body["margin"] != figures.margin or body["passed"] != figures.passed:
+        written = (body["eligible"], body["margin"], body["passed"])
+        derived = (figures.eligible, figures.margin, figures.passed)
+        if written != derived:
             raise OracleError(
-                f"planted: the record says margin {body['margin']!r} and passed "
-                f"{body['passed']!r}; its figures give {figures.margin!r} and {figures.passed!r}"
+                f"planted: the record says eligible, margin, passed = {written!r}; its figures "
+                f"give {derived!r}"
             )
         return figures
 
@@ -274,7 +303,7 @@ def planted_figures(
         budget=budget.max_trials,
         threshold=gate.threshold,
         oracle_margin=budget.oracle_margin,
-        eligible=gate.eligible,
+        blockers=gate.blockers,
     )
 
 
@@ -306,9 +335,13 @@ class PoolReference:
             raise OracleError("pool.validation_sharpes: a pool has at least one candidate")
         object.__setattr__(self, "validation_sharpes", sharpes)
         _read.number(self.threshold, "pool.threshold")
-        if _read.whole(self.clearing, "pool.clearing", minimum=0) > len(sharpes):
+        # A candidate clears the gate only with its Sharpe at the threshold or
+        # over it, so the count is bounded by the sharpes held beside it.
+        over = sum(sharpe >= self.threshold for sharpe in sharpes)
+        if _read.whole(self.clearing, "pool.clearing", minimum=0) > over:
             raise OracleError(
-                f"pool.clearing: {self.clearing} of {len(sharpes)} candidate(s) clear the gate"
+                f"pool.clearing: {self.clearing} clear the gate, but only {over} of "
+                f"{len(sharpes)} validation sharpe(s) reach threshold {self.threshold}"
             )
 
     @property
@@ -399,8 +432,8 @@ class Oracle:
         if not isinstance(self.pool, PoolReference):
             raise OracleError("pool: expected a PoolReference")
 
-    def describe(self) -> list[str]:
-        lines = [] if self.planted is None else self.planted.describe()
+    def describe(self, *, holdout: bool = True) -> list[str]:
+        lines = [] if self.planted is None else self.planted.describe(holdout=holdout)
         return [*lines, self.pool.describe()]
 
     def to_dict(self) -> dict[str, object]:

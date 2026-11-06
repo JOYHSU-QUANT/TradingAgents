@@ -38,10 +38,11 @@ What is borrowed and why:
 - the search loop itself (``search``), its report and its interrupt
   sentence (``SearchReport``, ``INTERRUPTED``), so every arm is one run of
   the research package's own loop (plan §1 #2) and how it ended is read
-  off the loop that ended it; the port an arm implements (``Hypothesist``)
-  and the one error the loop stops on (``HypothesistError``), which a
-  candidate pool walked to its end raises (plan §4.3: the research
-  package is not taught about pools);
+  off the loop that ended it, and the one error the loop stops on
+  (``HypothesistError``), which a candidate pool walked to its end raises
+  (plan §4.3: the research package is not taught about pools); the port an
+  arm implements (``Hypothesist``) is structural and is not borrowed —
+  ``search()`` takes anything that answers ``propose``;
 - the one promotion a run makes (``promote``): the trial the final verdict
   selects is promoted through the research package's own verb, which is
   what reads the holdout for it, after the verdict is snapshotted;
@@ -52,7 +53,8 @@ What is borrowed and why:
   decides it — and a candidate of the pool is written as one, labelled
   with the family its features earn;
 - the conditions a trial is measured under (``CostModel``, ``Split`` and
-  its default shares, ``SegmentMetrics``), serialised through their own
+  its default shares, ``SegmentMetrics`` and the window names
+  ``SegmentName`` a figure is filed under), serialised through their own
   ``to_dict``/``from_dict`` so the manifest and the verdict snapshot write
   the records the ledger writes, not copies of them;
 - the engine's indicator floor (``MIN_INDICATOR_LOOKBACK``), so a manifest
@@ -141,7 +143,7 @@ from contrib.autoresearch.ledger import (
     promotion_verdict,
 )
 from contrib.autoresearch.metrics import SegmentMetrics
-from contrib.autoresearch.ports import Hypothesist, HypothesistError
+from contrib.autoresearch.ports import HypothesistError
 from contrib.autoresearch.research import (
     first_measurable_index,
     promote,
@@ -151,6 +153,7 @@ from contrib.autoresearch.research import (
 from contrib.autoresearch.split import (
     DEFAULT_TRAIN_SHARE,
     DEFAULT_VALIDATION_SHARE,
+    SegmentName,
     Split,
     SplitError,
     studied_interval,
@@ -190,7 +193,6 @@ __all__ = [
     "FeatureFrame",
     "FeatureKind",
     "FundingPoint",
-    "Hypothesist",
     "HypothesistError",
     "Ledger",
     "Op",
@@ -198,6 +200,7 @@ __all__ = [
     "ResearchStore",
     "SearchReport",
     "SegmentMetrics",
+    "SegmentName",
     "SeriesBundle",
     "SeriesFetch",
     "SeriesSource",
@@ -290,7 +293,6 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.ledger", "Verdict"),
     ("contrib.autoresearch.ledger", "promotion_verdict"),
     ("contrib.autoresearch.metrics", "SegmentMetrics"),
-    ("contrib.autoresearch.ports", "Hypothesist"),
     ("contrib.autoresearch.ports", "HypothesistError"),
     ("contrib.autoresearch.research", "first_measurable_index"),
     ("contrib.autoresearch.research", "promote"),
@@ -298,6 +300,7 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.research", "require_measurable_tail"),
     ("contrib.autoresearch.split", "DEFAULT_TRAIN_SHARE"),
     ("contrib.autoresearch.split", "DEFAULT_VALIDATION_SHARE"),
+    ("contrib.autoresearch.split", "SegmentName"),
     ("contrib.autoresearch.split", "Split"),
     ("contrib.autoresearch.split", "SplitError"),
     ("contrib.autoresearch.split", "studied_interval"),

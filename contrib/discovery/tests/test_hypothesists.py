@@ -117,6 +117,15 @@ def test_two_spellings_of_one_rule_are_one_candidate(pool):
         Pool(pool.candidates + pool.candidates[:1])
     with pytest.raises(ValueError, match="at least one candidate"):
         Pool(())
+    with pytest.raises(ValueError, match="holds Candidates"):
+        Pool(("not a candidate",))
+    # A candidate is held to its fields; its hash is its spec's, not a field.
+    first = pool.candidates[0]
+    assert first.spec_hash == spec_hash(first.spec)
+    with pytest.raises(ManifestError, match="candidate.template"):
+        replace(first, template=-1)
+    with pytest.raises(ManifestError, match="candidate.gate"):
+        replace(first, gate=float("nan"))
 
 
 def test_a_candidate_answers_with_the_text_the_parser_reads_back_as_its_rule(pool):

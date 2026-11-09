@@ -41,7 +41,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
@@ -104,8 +104,9 @@ __all__ = [
 # version is refused by name, never read with a default filled in. Version 2
 # re-reads ``search_space.candidate_order`` as a :class:`CandidateOrder`
 # (plan PR 3); a version-1 manifest's free text there named no order a
-# runner could walk.
-MANIFEST_VERSION: Final = 2
+# runner could walk. Version 3 adds ``artifact_sha256``, the digest of the
+# landed ``world.sqlite`` the measuring verbs check before they copy it.
+MANIFEST_VERSION: Final = 3
 
 
 class ManifestError(ValueError):
@@ -169,6 +170,7 @@ class CandidateOrder(VocabEnum, noun="candidate order"):
 _ID_DIGITS: Final = 8
 _WORLD_ID: Final = re.compile(rf"SYN-[0-9A-F]{{{_ID_DIGITS}}}")
 _ID_NAMESPACE: Final = "contrib.discovery world"
+_ARTIFACT_SHA256: Final = re.compile(r"[0-9a-f]{64}")
 
 
 def opaque_world_id(seed_set: SeedSet, world_seed: int) -> str:
@@ -608,6 +610,11 @@ def _grid_value(value: Any, path: str) -> float | str:
     return value if isinstance(value, str) and value else _read.number(value, path)
 
 
+def _takes_labels(kind: FeatureKind) -> bool:
+    """Whether a threshold on ``kind`` is a label: the vocabulary's call, by the feature's unit."""
+    return spec_of(kind).unit is FeatureUnit.REGIME
+
+
 # The sizing every candidate of the pool is written with (plan §4.3). A fixed
 # fraction, because the evaluator sizes a fixed-fraction rule as that share
 # of equity at every bar, so its net Sharpe is the rule's and not the
@@ -671,11 +678,21 @@ class Candidate:
                 "candidate.spec: a pool candidate is one entry clause on one side and one gate"
             )
         for name, clause in (("entry", entries[0]), ("gate", self.spec.filters[0])):
+            # The rule the pool's grids are read under, held for a candidate
+            # built by hand too: a string on a numeric feature is a
+            # feature-to-feature comparison, which no grid writes.
+            threshold = getattr(self, name)
+            labels = _takes_labels(clause.left.kind)
+            if isinstance(threshold, str) != labels:
+                raise ManifestError(
+                    f"candidate.{name}: the threshold on {clause.left} is "
+                    f"{'a label' if labels else 'a number'}, got {threshold!r}"
+                )
             right = clause.right
             written = right.value if isinstance(right, VocabEnum) else right
-            if getattr(self, name) != written:
+            if threshold != written:
                 raise ManifestError(
-                    f"candidate.{name}: {getattr(self, name)!r} is not the spec's threshold "
+                    f"candidate.{name}: {threshold!r} is not the spec's threshold "
                     f"{written!r}"
                 )
 
@@ -789,7 +806,7 @@ class SearchSpace:
             # read a string on a numeric feature as a feature's name (a
             # feature-to-feature comparison is not a threshold of the grid),
             # and a number on the regime as a comparison it refuses.
-            categorical = spec_of(kind).unit is FeatureUnit.REGIME
+            categorical = _takes_labels(kind)
             if any(isinstance(value, str) != categorical for value in grid[feature]):
                 kind_of = (
                     "categorical, so its grid is labels"
@@ -1069,7 +1086,16 @@ class Scoring:
 
 @dataclass(frozen=True)
 class Manifest:
-    """One world, one run: every parameter of plan §5, versioned."""
+    """One world, one run: every parameter of plan §5, versioned.
+
+    ``artifact_sha256`` is the one field no author writes: ``generate``
+    fills it with the digest of the ``world.sqlite`` it landed, so a
+    landed manifest says which bytes it describes. The null twin of a seed
+    differs from its conditional world by the price path alone, and its
+    artifact copied into the other's directory passes every check of the
+    artifact's SHAPE; the measuring verbs compare this digest before they
+    copy the file. ``None`` until the world is landed.
+    """
 
     world: World
     split: Shares
@@ -1081,6 +1107,7 @@ class Manifest:
     arms: Arms
     scoring: Scoring
     null_definition_version: str
+    artifact_sha256: str | None = None
 
     def __post_init__(self) -> None:
         for name, kind in (
@@ -1101,6 +1128,14 @@ class Manifest:
         # frame at the first measurement, which is the wrong place to learn it.
         _read.whole(self.indicator_lookback, "indicator_lookback", minimum=MIN_INDICATOR_LOOKBACK)
         _read.text(self.null_definition_version, "null_definition_version")
+        if self.artifact_sha256 is not None and not (
+            isinstance(self.artifact_sha256, str)
+            and _ARTIFACT_SHA256.fullmatch(self.artifact_sha256)
+        ):
+            raise ManifestError(
+                f"artifact_sha256: a SHA-256 is 64 lower-case hex digits, or null until the world "
+                f"is landed, got {self.artifact_sha256!r}"
+            )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -1115,6 +1150,7 @@ class Manifest:
             "arms": self.arms.to_dict(),
             "scoring": self.scoring.to_dict(),
             "null_definition_version": self.null_definition_version,
+            "artifact_sha256": self.artifact_sha256,
         }
 
     @classmethod
@@ -1134,6 +1170,7 @@ class Manifest:
                 "arms",
                 "scoring",
                 "null_definition_version",
+                "artifact_sha256",
             ),
             "manifest",
         )
@@ -1153,21 +1190,28 @@ class Manifest:
             arms=Arms.from_dict(body["arms"]),
             scoring=Scoring.from_dict(body["scoring"]),
             null_definition_version=body["null_definition_version"],
+            artifact_sha256=body["artifact_sha256"],
         )
 
     def dumps(self) -> str:
         return dumps(self.to_dict())
 
     def identity(self) -> str:
-        """The canonical text with the one fill-in field set aside: what a landed run is keyed by.
+        """The canonical text with the two fill-in fields set aside: what a landed run is keyed by.
 
-        ``search_space.pool_size`` is filled in by ``generate`` before the
-        world lands, and is the one field a landed manifest carries that a
-        hand-written one may leave null; everything else is fixed before.
-        A digest of this text names the run directory, so the filled and
-        the unfilled manifest name the same place.
+        ``search_space.pool_size`` and ``artifact_sha256`` are filled in by
+        ``generate`` as the world lands, and are the two fields a landed
+        manifest carries that a hand-written one leaves null; everything
+        else is fixed before. A digest of this text names the run
+        directory, so the filled and the unfilled manifest name the same
+        place.
         """
-        return replace(self, search_space=replace(self.search_space, pool_size=None)).dumps()
+        # On the document, not through ``replace``: a new ``SearchSpace`` would
+        # write the whole pool out again for every digest taken.
+        document = json.loads(self.dumps())
+        document["search_space"]["pool_size"] = None
+        document["artifact_sha256"] = None
+        return dumps(document)
 
     def conditions(self) -> str:
         """The identity text with ``world_seed`` set aside too: what the worlds of one calibration share.

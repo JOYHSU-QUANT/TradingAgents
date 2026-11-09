@@ -32,8 +32,9 @@ establish general autonomous scientific discovery capability. Track B（開放�
 **PR 2（世界生成器，已落地）**：`worlds.py`（generator v1 與 `SyntheticHistory` port）、`landing.py`（經 autoresearch 的
 backfill 落地＋驗收）、`generate` 指令。
 **PR 3（Random／Grid 臂＋oracle 判定，已落地）**：`hypothesists.py`（候選池與兩臂）、`bench.py`（一個世界跑到判定）、
-`oracle.py` 的餘裕判定與 full-pool reference、`search`／`oracle`／`calibrate` 指令、manifest v2。評分器（PR 4）、LLM 臂（PR 5）、
-replay 消融（PR 6）都還沒有。
+`oracle.py` 的餘裕判定與 full-pool reference、`search`／`oracle`／`calibrate` 指令、manifest v2。
+**PR 4（評分器，已落地）**：`scoring.py`（三項分報指標、`scores.json`、跨世界的表）、`score`／`report` 指令、manifest v3（artifact 的
+SHA-256）、`oracle.json` v2（blockers 改 enum）。LLM 臂（PR 5）、replay 消融（PR 6）都還沒有。
 
 已經有的東西：
 
@@ -69,8 +70,10 @@ replay 消融（PR 6）都還沒有。
   research store（三條 walk 都要走到頭，否則拒絕）；`verify()` 跑 PR 2 的驗收清單並回 `Landing`；`split_of()`＝manifest
   的 `count` 根決策 bar 按 shares 切（`Split.by_shares`），`experiment_for()` 把 manifest 的條件綁成各臂 ledger 要建的
   `Experiment`；`world_dir()`／`land_world()`＝run 目錄的配置與分段落地（見「檔案配置」）。
+- [`scoring.py`](./scoring.py)：評分（計畫 §4.6）。`positions`／`direction_agreement`／`structural_distance` 是三個純函式，
+  `score_world(run_dir)` 寫 `scores.json`，`report_table(run_dirs)` 是跨世界的表；定義見「評分（PR 4）」一節。
 - [`cli.py`](./cli.py)：`python -m contrib.discovery generate --manifest <path> [--root <dir>]`、`oracle --run <dir>`、
-  `search --run <dir>`、`calibrate [--root <dir>]`。
+  `search --run <dir>`、`calibrate [--root <dir>]`、`score --run <dir>`、`report [--root <dir>]`。
 
 ## 世界生成器（generator v1）
 
@@ -107,7 +110,7 @@ python -m contrib.discovery generate --manifest dev-seed-0.json --root data/disc
 ```
 
 成功時 `<root>/<world id>-<manifest digest>/` 有 `world.sqlite`（唯讀 artifact，各臂複製它）與 `manifest.json`（canonical
-bytes，`search_space.pool_size` 已回填；digest 把它置空算，所以目錄名與手寫的 manifest 一致）。落地先在同一個 root 下的 staging 目錄做（`.<name>.partial-*`），驗收通過、manifest 寫好才 rename 到定位；任何原因
+bytes，`search_space.pool_size` 與 `artifact_sha256` 已回填；digest 把這兩個置空算，所以目錄名與手寫的 manifest 一致）。落地先在同一個 root 下的 staging 目錄做（`.<name>.partial-*`），驗收通過、manifest 寫好才 rename 到定位；任何原因
 中途結束都把 staging 整個移除，最終路徑永遠不會出現半成品。同一份 manifest 已落地就拒絕（exit 1）。stdout 印三條 walk 的
 結果、量到的第一根可量測 bar、三段 split 與各自的 bar 數、conditional 世界還有埋的規則在決策 bar 上持倉的根數與比例
 （規則在決策 bar 上從不持倉的 conditional 世界在生成時就拒絕）、池的大小（去重後／枚舉數）與 manifest 路徑；這些只給操作者看，
@@ -139,7 +142,7 @@ parser 讀成 feature 名、regime 給數字會被 parser 拒絕，兩種都在�
    不叫人刪活的 claim）；有紀錄＝這個世界搜過了，拒絕（一個世界只搜一次，要重搜就手動移除）；`arms.llm` 有填＝這一版跑不了 manifest 指名的臂，拒絕（`generate` 也拒絕，所以這種目錄只會
    是別的版本落的；要重跑就從 `llm: null` 的 manifest 重新落地——就地改 manifest 會改掉 digest、對不上目錄名；LLM 臂是 PR 5）。
    池與 `pool_size` 在讀 manifest 時就已核對（見「候選池」）。
-2. 每臂把 `world.sqlite` 複製到自己的 store（`arms/random/replicate-<search seed>.sqlite`、`arms/grid/replicate-0.sqlite`），
+2. 先核對 `world.sqlite` 的 SHA-256 等於 manifest 的 `artifact_sha256`（對不上拒絕：同 seed 的 null 雙胞胎 artifact 複製錯目錄，形狀檢查全部會過）；每臂把 `world.sqlite` 複製到自己的 store（`arms/random/replicate-<search seed>.sqlite`、`arms/grid/replicate-0.sqlite`），
    第一顆先跑 `verify()`（落地時的驗收再跑一次：artifact 真的是 manifest 描述的世界）；每臂以 `experiment_for()`＋
    `ledger.create_experiment()` 開自己的 experiment（id＝`random-<seed>`／`grid-0`）——同 coin、同 split／costs／window／
    penalty，`Verdicts` 的建構子守住這件事（也守住：必有 `grid-0`、各臂 distinct rules＝自己的 trials 數且不超過
@@ -188,21 +191,64 @@ verdict, holdout}]}`（`manifest_digest`＝跑的時候 run 目錄的 digest，�
 不超過 `pool_size`、答案數不超過 `pool_size`、`exhausted` 的答案數＝`pool_size`。`oracle.json`＝
 `{oracle_version, world_id, manifest_digest, planted: {train, validation, holdout, budget, threshold, oracle_margin, blockers[],
 eligible, margin, passed} | null, pool: {size, validation_sharpes[], best, threshold, clearing}}`：`blockers` 是 autoresearch
-閘門在 `threshold(max_trials)` 的句子（空＝過），而且句數要等於旁邊 validation 數字失敗的判斷式數（ruined／零交易／淨報酬不正／
-sharpe 低於門檻），所以手改 blockers 寫不出「有餘裕」；`eligible`／`margin`／`passed`／`best`／`size` 是衍生值，讀回對不上就
+閘門在 `threshold(max_trials)` 失敗的判斷式名稱（`GateBlocker`：`ruined`／`no_trades`／`no_gain`／`under_threshold`，按閘門順序，
+空＝過），由旁邊的 validation 數字衍生，所以手改 blockers 寫不出「有餘裕」；閘門的句子數若跟這四個判斷式對不上（上游多了新判斷式），
+`planted_figures` 拒絕；`blockers`／`eligible`／`margin`／`passed`／`best`／`size` 都是衍生值，讀回對不上就
 拒絕；三段數字各自要掛在自己的視窗名下；`planted` 有值時一定帶 holdout（紀錄是搜尋之後寫的）；`clearing` 不能超過
 validation sharpe ≥ threshold 的個數。
 
-**2026-11-06 範例世界（dev seed 0、400 根決策 bar）的煙霧讀數，給校準參考**：埋的規則 train net sharpe 5.31、validation −4.36
-→ oracle 無餘裕；同 seed 的 Null 世界整池 16 個候選有 8 個過 `threshold(16)`＝1.69、最佳 validation sharpe 9.3，Random／Grid
-預算 3 都「找到」＝誤判率 100%。80 根 4h 的 validation 視窗太短、年化 Sharpe 的變異太大：dev seeds 校準（計畫 §8 #1／#2）
-要先拉長 `bars.count` 或抬 penalty，範例 manifest 只是單元測試的夾具，不是校準過的世界。
+**2026-11-09 dev seeds 校準（計畫 §8 #1／#2）**：40 個 dev seed，`vol` 0.01、`funding.sigma` 1e-4，埋的規則＝`funding_zscore_14 < −1.5`＋`realized_vol_20 > 0.0095`＋`max_bars 6`（曝險約 17%），候選池 80 條（long／short × hold 6／12 × entry 四格 × gate 四格）。在記憶體裡算，不落 ledger、零 LLM 費用。純雜訊世界的誤判率：
+
+| validation 根數 | 門檻 base／k | Random 預算 30 | 整池 80 條 |
+|---|---|---|---|
+| 400 | 1.0／0.25（autoresearch 預設） | 78% | 88% |
+| 400 | 2.0／0.5 | 20% | 20% |
+| 1000 | 1.0／0.25（autoresearch 預設） | 60% | 62% |
+| 1000 | 2.0／0.25 | 5% | 15% |
+| 1000 | 2.0／0.5 | 0/40 | 0/40 |
+
+**定案**：`bars.count` 5000（validation 1000 根）、`penalty` 2.0／0.5、`max_trials` 30（`threshold(30)`＝3.70）、`oracle_margin` 0.25；β 三檔＝tight 0.0025（oracle 有餘裕 21/40）、easy 0.004（39/40）、trivial 0.008（40/40）。這組門檻只用於 discovery 的 manifest，不回套 BTC 的 store（計畫 §7）。範例 manifest（400 根）只是單元測試的夾具，不是校準過的世界。
 
 ```
 python -m contrib.discovery oracle --run data/discovery/SYN-EB3BC030-c5f56953
 python -m contrib.discovery search --run data/discovery/SYN-EB3BC030-c5f56953
 python -m contrib.discovery calibrate --root data/discovery
 ```
+
+## 評分（PR 4）
+
+`score --run <dir>`（`scoring.score_world`，計畫 §4.6）回答「選到的規則是不是埋的那條」，三項分開報、不合成一個數：
+
+| 指標 | 定義 | 用途 |
+|---|---|---|
+| 結構距離 `structural_distance` | 每個兩邊都有的 side 上，把兩條規則的條件（`entry.<side>` ＋ `filters`，同子句放哪都算一條；feature-to-feature 比較正規化方向）貪婪配對，每對的相似度＝（period 與 offset 相同 + op 相同 + 門檻接近度）／3（feature kind 不同＝0；接近度＝`1 − |a−b|/max(|a|,|b|)`，夾在 0，標籤或 feature 相同＝1），除以較長的條件數；再對「任一規則進場的 side」取平均，距離＝1 − 相似度。exit 不讀（持倉長短看持倉方向一致率） | 只報不判 |
+| 持倉方向一致率 `agreement` | 在 holdout 上逐 bar 比方向 ∈ {−1, 0, +1}，**只算至少一方有倉的 bar**；雙方全程空倉＝`undefined` | 主要判準 |
+| holdout 表現 | selected 的 holdout net sharpe，對照埋的規則的 | 判準之一＋對照 |
+
+**持倉的展開**（`positions`）從 holdout 的 `SegmentResult.trades` 來，每筆交易持有 `Trade.bars_held` 根：一般出場（exit 規則／`max_bars`／反手）在
+exit bar 開盤成交、**exit bar 不算持有**；窗口末端平倉（`segment_end`）與 `ruin` 在收盤成交、**exit bar 算持有**；反手的 exit bar 歸新方向。不用
+`replay_sides`（它回的是收盤決策後的方向，差一根，也不模擬破產與窗口末端平倉）。
+
+**找回**（`recovered`）＝`agreement ≥ scoring.recovery.theta_behavior` **且**（`require_positive_holdout` 時）selected 的 holdout net
+sharpe ＞ 0、holdout 沒有破產（破產的比率不讀，autoresearch 自己的規則）。沒選到規則、`undefined` 都不算找回、留在分母；`seam_failed` 的臂沒有搜尋過，跟 calibrate 一樣另計、不進分母。Null 世界沒有東西可找回，`recovered` 為 `null`，
+selected 就是一次誤判（holdout 數字照報）。
+
+**不憑空量測**：紀錄裡已經有每個 holdout 數字（selected 的由 `promote` 寫進 `verdicts.json`、埋的規則的由 oracle 寫進 `oracle.json`），評分重讀 holdout
+只是為了拿 trades，重讀的數字跟紀錄不是逐欄相等就拒絕（store 不是寫出那份紀錄的 store）。讀取走 oracle 的路徑（不落 ledger）、在 Grid 臂的 store 上、一個 frame、同一條規則只算一次；
+Null 世界與沒有任何臂選到規則的世界不開 store。`scores.json` 是紀錄與 store 的純函式，`score` 可以重跑、寫出同樣的 bytes。`manifest.scoring.version` 不是這版的 `"1"` 就拒絕（`generate` 也拒絕，否則會白花一次僅此一次的搜尋）。test seed 的 console 不印任何由 holdout 算出的東西（net sharpe、方向一致率、是否找回），`scores.json` 照寫。
+
+`report [--root <dir>]`（`scoring.report_table`）走 root 下每個搜過的世界，按 calibrate 同一組鍵（kind、null 定義、seed set、條件 digest、臂）分列：
+conditional 世界印找回率、oracle 有餘裕的比例（計畫 §4.2：**oracle 沒過也留著**）、「oracle 有餘裕時的找回率」、沒選到與 `undefined` 的數量、一致率中位數、結構距離平均、selected 對埋的規則的 holdout 平均（破產的不進平均，另外標出）、首次過門檻輪數中位數（診斷）；
+Null 世界印「false calls」（誤判率）。**開發 seed 的列**多印一行「在各 θ 下的找回數」（0.5–0.9），θ_b 從這行定（`theta_behavior` 在 manifest 的 digest 裡，靠改它試值等於開新目錄、重搜）；
+測試 seed 不印。`report` 不開任何 store（評過分的世界可以裁掉 stores）；搜過但沒評過分的世界點名拒絕；`scores.json` 的 world／digest／評分版本／恢復規則／埋的規則 holdout／臂集合要對得上旁邊的紀錄，各臂除了一致率（要開 store 才算得出來）以外的欄位要等於由紀錄重算的結果。
+
+```
+python -m contrib.discovery score --run data/discovery/SYN-EB3BC030-c5f56953
+python -m contrib.discovery report --root data/discovery
+```
+
+`scores.json`＝`{scores_version, world_id, manifest_digest, scoring_version, planted_holdout_sharpe, recovery, results: [{arm, replicate, ended, selected,
+structural_distance, agreement, bars_compared, holdout_sharpe, holdout_ruined, recovered}]}`；`recovered` 是衍生值，讀回對不上就拒絕。
 
 ## 測試釘住的隔離規則
 
@@ -220,14 +266,16 @@ python -m contrib.discovery calibrate --root data/discovery
 | 一次真的 `search`：`arms/` 兩顆 store、`verdicts.json`／`oracle.json` 讀回相等、`manifest.json` 不動且目錄名不變、artifact 位元組不變；各臂同條件、各自 store 裡只晉升 selected；oracle 在各臂之後印、holdout 有值、整池 16 個；再搜拒絕；帶 `llm` 的 manifest 拒絕；落地後改過的 manifest（digest 對不上目錄名）拒絕；calibrate 表（一列＝一組條件〔條件 digest〕、seam 失敗不進分母、artifact 裁掉仍可算、同一目錄只算一次、world_id／pool_size／臂集合不符與
 null 雙胞胎 digest 拒絕、紀錄對 manifest 的條件／預算／池／oracle 門檻與視窗、帶 `llm` 拒絕）；搜尋進行中（只有 `arms/`）拒絕且點名 staging；
 staging 開不起來時 claim 歸還；搬 store 失敗或中斷時保留 staging 並點名；紀錄閘門（verdict 對不上快照、selected 非首位、holdout 段位、`eligible`／`margin`／`passed`／段名／`clearing`、`best`／`size`、版本、grid replicate、trials ≤ pool_size、row 的計數）；holdout 旗標可關；dev-only／null 的 oracle 預覽拒絕；中斷＝目錄回到落地狀態；seam 失敗記錄後下一臂照跑 | `tests/test_bench.py` |
+| 三項指標各自的金標（出場原因對持倉 bar、只算有倉的 bar、未定義、結構距離的算式）；`recovered` 的判定；紀錄的閘門；一次真的評分（讀回相等、重跑同 bytes、store 不動、store 對不上紀錄就拒絕）；表（失敗留在分母、seam 另計、不開 store、沒評分拒絕、紀錄對不上拒絕） | `tests/test_scoring.py` |
+| artifact 的 SHA-256 對不上 manifest（雙胞胎的 `world.sqlite` 複製錯目錄）在複製前拒絕 | `tests/test_bench.py` |
 
-## Manifest 格式（v2）
+## Manifest 格式（v3）
 
 示意（空字串與 `{}` 是佔位，不是可載入的值）：
 
 ```json
 {
-  "manifest_version": 2,
+  "manifest_version": 3,
   "world": {
     "id": "SYN-EB3BC030",
     "kind": "null-v1 | conditional-v1",
@@ -249,7 +297,8 @@ staging 開不起來時 claim 歸還；搬 store 失敗或中斷時保留 stagin
   },
   "arms": {"random": {"search_seeds": [0, 1]}, "llm": null},
   "scoring": {"version": "1", "recovery": {"theta_behavior": 0.8, "require_positive_holdout": true}},
-  "null_definition_version": "v1"
+  "null_definition_version": "v1",
+  "artifact_sha256": null
 }
 ```
 
@@ -261,7 +310,9 @@ staging 開不起來時 claim 歸還；搬 store 失敗或中斷時保留 stagin
 `beta` 嚴格為正、方向＝「有利於埋的那一側的部位」（short 側的埋法＝負的價格漂移）。`origin_ms` 必須 ≥ 1 且落在 UTC 午夜（同時在 4h 與
 1d 格線上）。`indicator_lookback` 的下限＝引擎的 `MIN_INDICATOR_LOOKBACK`。`pool_size` 手寫時留 `null`，`generate` 落地時
 回填成這一版枚舉出的數；已填的值不等於枚舉數就拒絕。`candidate_order` 是 enum（v2 起；v1 的自由文字沒有指名 runner 走得出來的順序，所以版本號 bump、v1 檔拒絕），
-目前只有 `templates_then_grid`（定義見「三臂與判定」）。
+目前只有 `templates_then_grid`（定義見「三臂與判定」）。`artifact_sha256`（v3 起）手寫時留 `null`，`generate` 落地時回填成關閉後的
+`world.sqlite` 的 SHA-256，所有會複製 artifact 的指令在複製前核對：同 seed 的 null 雙胞胎與 conditional 世界只差價格路徑，形狀的檢查全部會過，
+這是唯一分得出來的東西；`calibrate`／`report`／`score` 不讀 artifact，不要求它存在。
 
 v1 候選池的兩個限制（寫在這裡，因為它們定義了 full-pool reference 的假說類）：每個 template 的 exit 只有 `max_bars`（LLM 臂可提
 exit 規則，池不行）；每個 template 都有 gate（池裡沒有「只有進場」的候選）。`arms.llm.world_subset` 不檢查是否含本世界，PR 5 的
@@ -288,7 +339,7 @@ runner 遇到「有 llm 區塊但本世界不在子集」應拒絕。
   arms/llm/replicate-<k>.sqlite                （PR 5）
   verdicts.json              每臂每 replicate 的快照、最終判定、selected 的 holdout（search 寫）
   oracle.json                各臂跑完後才寫：埋的規則三段數字＋餘裕判定、full-pool reference（search 寫）
-  scores.json                （PR 4）
+  scores.json                每臂每 replicate 的三項指標與找回判定（score 寫，可重跑）
 ```
 
 目錄用 **manifest 的 digest**（`search_space.pool_size` 置空後的 `sha256(manifest.dumps())` 前 8 碼——`generate` 回填池大小

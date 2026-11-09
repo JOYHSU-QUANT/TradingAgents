@@ -28,6 +28,7 @@ from contrib.discovery import landing
 from contrib.discovery.landing import (
     ARTIFACT_FILENAME,
     MANIFEST_FILENAME,
+    artifact_digest,
     default_root,
     experiment_for,
     land,
@@ -289,7 +290,9 @@ def test_a_landing_is_staged_and_only_a_verified_one_reaches_the_final_path(tmp_
     monkeypatch.setattr(landing, "verify", lambda store, m: None)
     target, fetched, _landing = land_world(tmp_path, history)
     assert target == world_dir(tmp_path, manifest)
-    assert (target / MANIFEST_FILENAME).read_bytes() == manifest.dumps().encode("utf-8")
+    # The landed manifest is the input with the artifact's digest filled in.
+    landed = replace(manifest, artifact_sha256=artifact_digest(target / ARTIFACT_FILENAME))
+    assert (target / MANIFEST_FILENAME).read_bytes() == landed.dumps().encode("utf-8")
     with ResearchStore(target / ARTIFACT_FILENAME) as store:
         assert store.count_candles(manifest.world.id, "4h") == 30
     assert sorted(p.name for p in target.iterdir()) == sorted(

@@ -9,10 +9,12 @@ from dataclasses import replace
 
 import pytest
 
-from contrib.autoresearch.dsl import MAX_HOLD_BARS
+from contrib.autoresearch.dsl import MAX_HOLD_BARS, MarketRegime, parse_spec
 from contrib.autoresearch.store import canonical_coin
 from contrib.discovery.manifest import (
     MANIFEST_VERSION,
+    POOL_SIZING,
+    Candidate,
     Manifest,
     ManifestError,
     SeedSet,
@@ -45,13 +47,19 @@ def test_a_null_world_writes_no_rule_and_a_conditional_one_writes_the_parsed_rul
     assert null["world"]["id"] == conditional["world"]["id"]
 
 
-def test_the_identity_text_is_the_canonical_text_with_the_pool_count_set_aside():
+def test_the_identity_text_is_the_canonical_text_with_the_two_fill_ins_set_aside():
     manifest = example_manifest()
     # Unfilled, the identity IS the file; filled, it is still the unfilled file.
     assert manifest.identity() == manifest.dumps()
-    filled = replace(manifest, search_space=replace(manifest.search_space, pool_size=16))
+    filled = replace(
+        manifest,
+        search_space=replace(manifest.search_space, pool_size=16),
+        artifact_sha256="0" * 64,
+    )
+    assert Manifest.loads(filled.dumps()) == filled
     assert filled.identity() == manifest.dumps()
-    assert Manifest.loads(filled.identity()).search_space.pool_size is None
+    read = Manifest.loads(filled.identity())
+    assert read.search_space.pool_size is None and read.artifact_sha256 is None
     # Any other field is part of the identity.
     assert replace(manifest, indicator_lookback=201).identity() != manifest.identity()
 
@@ -123,7 +131,11 @@ def _edited(**changes):
         ),
         ({"manifest_version": True}, "manifest_version"),
         ({"manifest_version": 1.0}, "manifest_version"),
-        ({"manifest_version": 3, "later": 1}, "this build reads version 2, got 3"),
+        ({"manifest_version": 4, "later": 1}, "this build reads version 3, got 4"),
+        ({"artifact_sha256": "abc"}, "artifact_sha256: a SHA-256 is 64"),
+        ({"artifact_sha256": "A" * 64}, "artifact_sha256: a SHA-256 is 64"),
+        ({"artifact_sha256": 7}, "artifact_sha256: a SHA-256 is 64"),
+        ({"artifact_sha256": _DROP}, "manifest: expected exactly the keys"),
         ({"search_space.threshold_grid.realized_vol_20": [0.002, ""]}, "realized_vol_20"),
         ({"arms.random.search_seeds": []}, "arms.random.search_seeds"),
         ({"arms.random.search_seeds": [0, 0]}, "arms.random.search_seeds"),
@@ -246,3 +258,26 @@ def test_the_id_is_spelled_as_the_store_files_it_and_spells_no_word(seed):
 def test_a_seed_that_is_not_a_whole_number_is_refused():
     with pytest.raises(ManifestError, match="world_seed"):
         opaque_world_id(SeedSet.DEV, -1)
+
+
+def test_a_candidate_built_by_hand_keeps_the_rule_the_grids_are_read_under():
+    # A string on a numeric feature would be a feature-to-feature comparison
+    # no grid writes; a number on the regime a comparison the language refuses.
+    candidate = example_manifest().search_space.candidates[0]
+    with pytest.raises(ManifestError, match="the threshold on funding_zscore_14 is a number"):
+        replace(candidate, entry="realized_vol_20")
+    with pytest.raises(ManifestError, match="the threshold on realized_vol_20 is a number"):
+        replace(candidate, gate="high")
+    label = next(iter(MarketRegime)).value
+    spec = parse_spec(
+        {
+            "family": "regime_filter",
+            "entry": {"long": [{"left": "funding_zscore_14", "op": "<", "right": -1.0}]},
+            "filters": [{"left": "regime", "op": "==", "right": label}],
+            "exit": {"max_bars": 6},
+            "sizing": POOL_SIZING,
+        }
+    )
+    assert Candidate(template=0, entry=-1.0, gate=label, spec=spec).gate == label
+    with pytest.raises(ManifestError, match="the threshold on regime is a label"):
+        Candidate(template=0, entry=-1.0, gate=1.0, spec=spec)

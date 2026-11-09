@@ -65,7 +65,9 @@ What is borrowed and why:
   ``require_measurable_tail``): the oracle scores the planted rule through
   the pure function the research package's own ``calibrate`` uses, so
   nothing it does is filed (plan
-  §1 #5), and checks the holdout's tail as ``promote`` does;
+  §1 #5), and checks the holdout's tail as ``promote`` does; the scorer
+  reads a rule's positions off the same result's ``Trade`` records and its
+  structure off the language's ``Condition`` and ``FeatureRef``;
 - the vocabulary the manifest validates its search space against
   (``parse_feature_name``), the declarations behind it (``FeatureKind``,
   ``FeatureUnit``, ``SeriesSource``, ``spec_of``: which series a
@@ -92,7 +94,8 @@ What is borrowed and why:
   and ``SplitError`` for a decision span too short to cut);
 - from the floor, the ``VocabEnum`` base every vocabulary here is spelled in
   and the venue's time form (``epoch_ms``, ``from_epoch_ms``, and its upper
-  edge ``MAX_EPOCH_MS``, which bounds the last stamp a world may write).
+  edge ``MAX_EPOCH_MS``, which bounds the last stamp a world may write), and
+  the atomic write a score is put in place with (``atomic_write_bytes``).
 """
 
 from __future__ import annotations
@@ -106,6 +109,7 @@ from contrib.autoresearch.constants import (
 from contrib.autoresearch.costs import CostModel, require_amount
 from contrib.autoresearch.dsl import (
     MAX_HOLD_BARS,
+    Condition,
     Family,
     Op,
     Side,
@@ -117,6 +121,7 @@ from contrib.autoresearch.dsl import (
 from contrib.autoresearch.evaluator import (
     EvaluationError,
     SplitResult,
+    Trade,
     evaluate_split,
     load_bundle,
     replay_sides,
@@ -166,6 +171,7 @@ from contrib.autoresearch.store import ResearchStore, StoreError, default_db_pat
 from contrib.autoresearch.upstream import Candle, FundingPoint, interval_to_ms
 from contrib.autoresearch.vocabulary import (
     FeatureKind,
+    FeatureRef,
     FeatureUnit,
     SeriesSource,
     SpecError,
@@ -173,6 +179,7 @@ from contrib.autoresearch.vocabulary import (
     require_number,
     spec_of,
 )
+from contrib.core.atomic_io import atomic_write_bytes
 from contrib.core.enum_guard import VocabEnum
 from contrib.core.instants import MAX_EPOCH_MS, epoch_ms, from_epoch_ms
 
@@ -190,6 +197,7 @@ __all__ = [
     "MS_PER_DAY",
     "UPSTREAM_PACKAGES",
     "Candle",
+    "Condition",
     "CostModel",
     "EvaluationError",
     "Experiment",
@@ -197,6 +205,7 @@ __all__ = [
     "FeatureError",
     "FeatureFrame",
     "FeatureKind",
+    "FeatureRef",
     "FeatureUnit",
     "FundingPoint",
     "HypothesistError",
@@ -218,10 +227,12 @@ __all__ = [
     "StopReason",
     "StoreError",
     "StrategySpec",
+    "Trade",
     "Trial",
     "TrialStatus",
     "Verdict",
     "VocabEnum",
+    "atomic_write_bytes",
     "backfill_candles",
     "backfill_funding",
     "bar_span_ms",
@@ -265,6 +276,7 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.costs", "CostModel"),
     ("contrib.autoresearch.costs", "require_amount"),
     ("contrib.autoresearch.dsl", "MAX_HOLD_BARS"),
+    ("contrib.autoresearch.dsl", "Condition"),
     ("contrib.autoresearch.dsl", "Family"),
     ("contrib.autoresearch.dsl", "Op"),
     ("contrib.autoresearch.dsl", "Side"),
@@ -274,6 +286,7 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.dsl", "spec_to_document"),
     ("contrib.autoresearch.evaluator", "EvaluationError"),
     ("contrib.autoresearch.evaluator", "SplitResult"),
+    ("contrib.autoresearch.evaluator", "Trade"),
     ("contrib.autoresearch.evaluator", "evaluate_split"),
     ("contrib.autoresearch.evaluator", "load_bundle"),
     ("contrib.autoresearch.evaluator", "replay_sides"),
@@ -320,12 +333,14 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.upstream", "FundingPoint"),
     ("contrib.autoresearch.upstream", "interval_to_ms"),
     ("contrib.autoresearch.vocabulary", "FeatureKind"),
+    ("contrib.autoresearch.vocabulary", "FeatureRef"),
     ("contrib.autoresearch.vocabulary", "FeatureUnit"),
     ("contrib.autoresearch.vocabulary", "SeriesSource"),
     ("contrib.autoresearch.vocabulary", "SpecError"),
     ("contrib.autoresearch.vocabulary", "parse_feature_name"),
     ("contrib.autoresearch.vocabulary", "require_number"),
     ("contrib.autoresearch.vocabulary", "spec_of"),
+    ("contrib.core.atomic_io", "atomic_write_bytes"),
     ("contrib.core.enum_guard", "VocabEnum"),
     ("contrib.core.instants", "MAX_EPOCH_MS"),
     ("contrib.core.instants", "epoch_ms"),

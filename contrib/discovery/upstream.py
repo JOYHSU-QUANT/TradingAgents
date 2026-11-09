@@ -43,7 +43,9 @@ What is borrowed and why:
   (``HypothesistError``), which a candidate pool walked to its end raises
   (plan §4.3: the research package is not taught about pools); the port an
   arm implements (``Hypothesist``) is structural and is not borrowed —
-  ``search()`` takes anything that answers ``propose``;
+  ``search()`` takes anything that answers ``propose``; the model arm is
+  the research package's own ``ChatHypothesist``, so the provider list and
+  the key handling are the ones it already has;
 - the one promotion an arm makes (``promote``): the trial the final verdict
   selects is promoted through the research package's own verb, which is
   what reads the holdout for it, after the verdict is snapshotted;
@@ -141,7 +143,12 @@ from contrib.autoresearch.fetch import (
     describe_stop,
     render_fetch,
 )
-from contrib.autoresearch.hypothesis import INTERRUPTED, SearchReport, search
+from contrib.autoresearch.hypothesis import (
+    INTERRUPTED,
+    ChatHypothesist,
+    SearchReport,
+    search,
+)
 from contrib.autoresearch.ledger import (
     Experiment,
     Ledger,
@@ -197,6 +204,7 @@ __all__ = [
     "MS_PER_DAY",
     "UPSTREAM_PACKAGES",
     "Candle",
+    "ChatHypothesist",
     "Condition",
     "CostModel",
     "EvaluationError",
@@ -302,6 +310,7 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.fetch", "describe_stop"),
     ("contrib.autoresearch.fetch", "render_fetch"),
     ("contrib.autoresearch.hypothesis", "INTERRUPTED"),
+    ("contrib.autoresearch.hypothesis", "ChatHypothesist"),
     ("contrib.autoresearch.hypothesis", "SearchReport"),
     ("contrib.autoresearch.hypothesis", "search"),
     ("contrib.autoresearch.ledger", "Experiment"),

@@ -32,7 +32,7 @@ from .conftest import example_manifest, small_manifest
 
 
 def _landable(manifest):
-    """The example manifest as this build lands it: no model arm (plan PR 5's)."""
+    """The example manifest without its model arm: these tests build no model."""
     return replace(manifest, arms=replace(manifest.arms, llm=None))
 
 
@@ -275,12 +275,20 @@ def test_generate_refuses_a_manifest_whose_pool_cannot_be_written_before_landing
     assert main(["generate", "--manifest", str(path), "--root", str(root)]) == 1
     assert "realized_vol_20 is a number, so its grid is numbers" in capsys.readouterr().err
     assert not root.exists()
-    # And a manifest naming a model arm: this build cannot search it, so
-    # landing it would only defer the refusal past the backfill.
-    with_model = tmp_path / "model.json"
-    with_model.write_bytes(example_manifest().dumps().encode("utf-8"))
-    assert main(["generate", "--manifest", str(with_model), "--root", str(root)]) == 1
-    assert "arms.llm: this build runs the random and grid arms only" in capsys.readouterr().err
+
+
+def test_generate_refuses_a_model_it_cannot_build_before_landing_anything(
+    tmp_path, capsys, monkeypatch
+):
+    def refuse(llm):
+        raise BenchError("arms.llm: the key is not set")
+
+    monkeypatch.setattr(cli, "model_hypothesist", refuse)
+    path = tmp_path / "model.json"
+    path.write_bytes(example_manifest().dumps().encode("utf-8"))
+    root = tmp_path / "bench"
+    assert main(["generate", "--manifest", str(path), "--root", str(root)]) == 1
+    assert "arms.llm: the key is not set" in capsys.readouterr().err
     assert not root.exists()
 
 

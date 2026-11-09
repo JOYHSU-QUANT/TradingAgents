@@ -12,9 +12,11 @@ them.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -47,11 +49,20 @@ from contrib.discovery.landing import (
     split_of,
     world_dir,
 )
-from contrib.discovery.manifest import ManifestError, SeedSet, WorldKind
+from contrib.discovery.manifest import LlmArm, ManifestError, SeedSet, WorldKind
 from contrib.discovery.oracle import GateBlocker, Oracle, OracleError, planted_figures
+from contrib.discovery.scoring import report_table, score_world
 from contrib.discovery.verdict import Ended, VerdictError, final_verdict
 
-from .conftest import COIN, FLAT, bench_manifest, example_manifest, land_run
+from .conftest import (
+    COIN,
+    FLAT,
+    PLANTED,
+    ScriptedHypothesist,
+    bench_manifest,
+    example_manifest,
+    land_run,
+)
 
 LANDED = sorted([MANIFEST_FILENAME, ARTIFACT_FILENAME])
 
@@ -520,16 +531,99 @@ def test_the_calibration_table_reads_a_world_whose_artifact_was_pruned(searched,
 # -- the manifest a search runs under -------------------------------------------------------------
 
 
-def test_a_manifest_naming_a_model_arm_is_refused_before_anything_is_searched(
-    landed_world, tmp_path
+def test_the_model_arm_searches_last_in_its_own_store_and_may_answer_outside_the_pool(
+    landed_world, tmp_path, monkeypatch
 ):
     artifact, _landing = landed_world
-    with_model = bench_manifest()
-    with_model = replace(with_model, arms=replace(with_model.arms, llm=example_manifest().arms.llm))
-    run = land_run(tmp_path, artifact, with_model)
-    with pytest.raises(BenchError, match="names a model arm"):
-        run_world(run)
-    assert _listing(run) == LANDED
+    llm = LlmArm(
+        provider="openrouter",
+        model="anthropic/claude-sonnet-5.5",
+        temperature=0.0,
+        replicates=2,
+        world_subset=(COIN,),
+    )
+    manifest = bench_manifest()
+    manifest = replace(manifest, arms=replace(manifest.arms, llm=llm))
+    run = land_run(tmp_path, artifact, manifest)
+    # One answer outside the pool and one refused; the script then runs
+    # dry, so the second replicate is a dead seam from its first round.
+    answering = ScriptedHypothesist(answers=[json.dumps(PLANTED), "not a rule"])
+    built = []
+
+    def fake(arm):
+        built.append(arm)
+        return answering
+
+    monkeypatch.setattr(bench, "model_hypothesist", fake)
+    verdicts, _oracle = run_world(run)
+    assert built == [llm]  # one adapter for every replicate
+    assert [(r.arm, r.replicate) for r in verdicts.results] == [
+        (Arm.RANDOM, 0),
+        (Arm.GRID, 0),
+        (Arm.LLM, 0),
+        (Arm.LLM, 1),
+    ]
+    assert verdicts.grid.arm is Arm.GRID
+    assert Verdicts.loads((run / VERDICTS_FILENAME).read_text(encoding="utf-8")) == verdicts
+    assert store_path(run, Arm.LLM, 0).is_file() and store_path(run, Arm.LLM, 1).is_file()
+    alive, failed = verdicts.results[2], verdicts.results[3]
+    assert (alive.snapshot.ended, alive.snapshot.answers) == (Ended.BUDGET_SPENT, 2)
+    assert len(alive.snapshot.trials) == 1  # the refused answer spent budget and filed nothing
+    pool = {candidate.spec_hash for candidate in read_manifest(run).search_space.candidates}
+    assert alive.snapshot.trials[0].spec_hash not in pool
+    assert (failed.snapshot.ended, failed.snapshot.answers) == (Ended.SEAM_FAILED, 0)
+    # The model sees the opaque coin and nothing about what the world is.
+    system, user = answering.prompts[0]
+    assert COIN in user and "conditional" not in f"{system}{user}".lower()
+    with ResearchStore(store_path(run, Arm.LLM, 0)) as store:
+        answers = Ledger(store).proposal_counts(experiment_id(Arm.LLM, 0))
+    assert sum(answers.values()) == 2
+    # The tables read it: the rule outside the pool is not refused, and the
+    # dead seam is counted apart.
+    rows = {row.arm: row for row in calibration_table([run])}
+    assert (rows[Arm.LLM].searches, rows[Arm.LLM].failed) == (1, 1)
+    score_world(run)
+    report = {row.arm: row for row in report_table([run])}
+    assert (report[Arm.LLM].searches, report[Arm.LLM].failed) == (1, 1)
+
+
+LLM_ARM = LlmArm(
+    provider="openrouter",
+    model="anthropic/claude-sonnet-5.5",
+    temperature=0.0,
+    replicates=1,
+    world_subset=(COIN,),
+)
+
+
+def test_a_model_that_cannot_be_built_is_a_named_refusal(monkeypatch):
+    def unset(*args, **kwargs):
+        raise ValueError("API key for provider 'openrouter' is not set")
+
+    monkeypatch.setattr(bench.ChatHypothesist, "build", unset)
+    with pytest.raises(BenchError, match="arms.llm: API key for provider"):
+        bench.model_hypothesist(LLM_ARM)
+
+
+def test_a_client_that_drops_the_temperature_is_refused(monkeypatch):
+    def built(temperature):
+        return lambda *args, **kwargs: SimpleNamespace(model=SimpleNamespace(temperature=temperature))
+
+    monkeypatch.setattr(bench.ChatHypothesist, "build", built(None))
+    with pytest.raises(BenchError, match="dropped temperature 0.0"):
+        bench.model_hypothesist(LLM_ARM)
+    monkeypatch.setattr(bench.ChatHypothesist, "build", built(0.0))
+    assert bench.model_hypothesist(LLM_ARM).model.temperature == 0.0
+
+
+def test_a_model_arm_has_no_pool_to_run_out_of_and_is_held_to_the_budget(searched):
+    run, verdicts, *_ = searched
+    grid = verdicts.grid
+    experiment = replace(grid.snapshot.experiment, experiment_id=experiment_id(Arm.LLM, 0))
+    snapshot = replace(grid.snapshot, experiment=experiment, ended=Ended.EXHAUSTED)
+    exhausted = replace(grid, arm=Arm.LLM, snapshot=snapshot)
+    with pytest.raises(BenchError, match="a model arm has no pool to walk to its end"):
+        replace(verdicts, results=(*verdicts.results, exhausted))
 
 
 def test_a_manifest_edited_after_the_landing_is_not_the_directory_s_own(fresh_run):
@@ -644,7 +738,7 @@ def test_an_artifact_that_is_not_the_one_landed_is_refused_before_it_is_copied(f
     assert not (fresh_run / ARMS_DIRNAME).exists()
 
 
-def test_the_calibration_holds_the_oracle_record_and_refuses_a_model_arm(searched, tmp_path):
+def test_the_calibration_holds_the_oracle_record_and_the_arms_the_manifest_names(searched, tmp_path):
     run, verdicts, oracle, *_ = searched
     manifest = read_manifest(run)
     # The oracle record beside the verdicts says which manifest it was read
@@ -662,14 +756,15 @@ def test_the_calibration_holds_the_oracle_record_and_refuses_a_model_arm(searche
     (stray / ORACLE_FILENAME).unlink()
     with pytest.raises(BenchError, match="a search of this world is running or did not finish"):
         calibration_table([stray])
-    # A manifest naming a model arm is not tallied, as it is not searched.
+    # A manifest naming a model arm whose records hold no model arm was
+    # not searched by this build.
     with_model = replace(manifest, arms=replace(manifest.arms, llm=example_manifest().arms.llm))
     modelled = world_dir(tmp_path, with_model)
     modelled.mkdir()
     (modelled / MANIFEST_FILENAME).write_bytes(with_model.dumps().encode("utf-8"))
     for name in (VERDICTS_FILENAME, ORACLE_FILENAME):
         (modelled / name).write_bytes((run / name).read_bytes())
-    with pytest.raises(BenchError, match="names a model arm"):
+    with pytest.raises(BenchError, match="holds the arms"):
         calibration_table([modelled])
     # And the records' digest is a digest.
     with pytest.raises(BenchError, match="manifest_digest: a manifest digest is 8 lower-case"):

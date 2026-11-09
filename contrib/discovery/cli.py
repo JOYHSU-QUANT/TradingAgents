@@ -22,13 +22,14 @@ Six so far, in the order a world goes through them (plan §3):
   its budget (``verdicts.json``), then the oracle's figures and the whole
   pool's reference (``oracle.json``), in that order (:mod:`.bench` keeps
   it). A world is searched once; a manifest that is not the directory's
-  own, or that names a model arm, is refused.
+  own is refused. A manifest that names a model arm runs it too, last: it
+  is the one arm that costs money.
 - ``calibrate --root DIR`` — every searched run directory under the root
   tallied by world kind, seed set, set of conditions (a digest printed on
   each row, so two calibrations under one root are two rows) and arm: on
   null worlds the false-call rate under the null definition named, on
   conditional worlds the rate of non-empty verdicts (plan §4.3's null
-  calibration, without a model).
+  calibration).
 - ``score --run DIR`` — how close each arm's selected rule came to the
   planted one on the holdout (structural distance, direction agreement,
   holdout performance, plan §4.6), written to ``scores.json`` (:mod:`.scoring`
@@ -68,6 +69,7 @@ from .bench import (
     VERDICTS_FILENAME,
     BenchError,
     calibration_table,
+    model_hypothesist,
     preview_oracle,
     run_world,
 )
@@ -113,7 +115,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     search_cmd = subparsers.add_parser(
         "search",
-        help="run the random and grid arms on a landed world, judge them, then read the oracle",
+        help="run the arms the manifest names on a landed world, judge them, then read the oracle",
     )
     search_cmd.add_argument(
         "--run", required=True, help="a landed run directory (manifest.json and world.sqlite)"
@@ -163,12 +165,10 @@ def _cmd_generate(args: argparse.Namespace) -> int:
     # that search and only then be refused.
     require_this_scorer(manifest)
     if manifest.arms.llm is not None:
-        # Landing a world this build cannot search only defers the refusal
-        # to after minutes of backfill; the model arm is plan PR 5's.
-        raise ManifestError(
-            "arms.llm: this build runs the random and grid arms only (the model arm is plan "
-            "PR 5); set arms.llm to null"
-        )
+        # The same: a model that cannot be built is refused here, not after
+        # the backfill (the provider is part of the directory's identity,
+        # so it cannot be corrected in place).
+        model_hypothesist(manifest.arms.llm)
     space = manifest.search_space
     manifest = replace(manifest, search_space=replace(space, pool_size=len(space.candidates)))
     root = Path(args.root) if args.root else default_root()
@@ -283,8 +283,8 @@ def main(argv: list[str] | None = None) -> int:
         # measurement refusals, and this package's own records' refusals
         # (one base, ``RecordError``, so any other ``RuntimeError`` — the
         # ledger's, say — propagates as the defect it is). ``OSError`` is
-        # on the list, unlike in the research package's CLI, because
-        # nothing here speaks to a network: an ``OSError`` can only be the
-        # manifest or the run directory.
+        # on the list, unlike in the research package's CLI, because a
+        # model's network errors become a failed seam before they reach
+        # here: an ``OSError`` can only be the manifest or the run directory.
         print(f"error: {exc}", file=sys.stderr)
         return 1

@@ -8,7 +8,7 @@ is the point of this module:
    checked where the manifest is read; ``generate`` filled ``pool_size``
    in when it landed the world, and the landed manifest is not written
    again). The manifest has to be the directory's own — the directory is
-   named by its digest — and has to name no arm this build does not run.
+   named by its digest.
 2. **Every arm copies the artifact** — its SHA-256 checked against the
    manifest's before any copy — into its own store and opens its own
    experiment from the manifest's conditions (:func:`~contrib.discovery.landing.experiment_for`):
@@ -83,10 +83,19 @@ from .landing import (
     verify,
     world_dir,
 )
-from .manifest import Manifest, SeedSet, WorldKind
+from .manifest import LlmArm, Manifest, SeedSet, WorldKind
 from .oracle import Oracle, PlantedFigures, frame_for, planted_figures, pool_reference
 from .records import Reader, RecordError, dumps
-from .upstream import Experiment, Ledger, ResearchStore, SegmentMetrics, VocabEnum, promote, search
+from .upstream import (
+    ChatHypothesist,
+    Experiment,
+    Ledger,
+    ResearchStore,
+    SegmentMetrics,
+    VocabEnum,
+    promote,
+    search,
+)
 from .verdict import ArmSnapshot, ArmVerdict, Ended, final_verdict, snapshot_arm
 
 __all__ = [
@@ -105,6 +114,7 @@ __all__ = [
     "experiment_id",
     "in_row_order",
     "iter_searched",
+    "model_hypothesist",
     "own_manifest",
     "preview_oracle",
     "read_manifest",
@@ -137,10 +147,16 @@ logger = logging.getLogger(__name__)
 
 
 class Arm(VocabEnum, noun="arm"):
-    """The arms this runner runs. The model arm is plan PR 5's."""
+    """The arms this runner runs: the two that walk the pool, and the model where one is named."""
 
     RANDOM = "random"
     GRID = "grid"
+    LLM = "llm"
+
+    @property
+    def walks_pool(self) -> bool:
+        """Whether this arm proposes from the candidate pool; the model may answer outside it."""
+        return self is not Arm.LLM
 
 
 # -- the records ------------------------------------------------------------------------------
@@ -278,7 +294,7 @@ class Verdicts:
     experiment but for its name and stamp (plan §4.3: three arms, one
     split, one cost model, one penalty; the budget is the manifest's and is
     not on the experiment), on the world's coin. ``pool_size`` is the pool
-    the arms drew from — no arm of it can have filed more rules than that —
+    the pool arms drew from — none of them can have filed more rules than that —
     and ``manifest_digest`` is the manifest the arms ran under
     (``landing.manifest_digest``: the run directory's own name), so the
     record is bound to its conditions and not only to a world id the null
@@ -311,7 +327,7 @@ class Verdicts:
                 raise BenchError(
                     f"{result.experiment_id} ran on coin {experiment.coin}, not {self.world_id}"
                 )
-            if result.snapshot.distinct_rules > self.pool_size:
+            if result.arm.walks_pool and result.snapshot.distinct_rules > self.pool_size:
                 raise BenchError(
                     f"{result.experiment_id} tried {result.snapshot.distinct_rules} distinct "
                     f"rule(s) from a pool of {self.pool_size}"
@@ -325,15 +341,22 @@ class Verdicts:
                     f"tried and holds {len(result.snapshot.trials)} trial(s); each arm searches "
                     f"in its own store"
                 )
-            # Every arm here is a pool arm, proposing each candidate at most
-            # once and running out exactly when it has proposed them all.
+            # A pool arm proposes each candidate at most once and runs out
+            # exactly when it has proposed them all; the model answers
+            # outside the pool (plan §4.3) and has no pool to run out of.
             answers = result.snapshot.answers
-            if answers > self.pool_size:
+            if not result.arm.walks_pool and result.snapshot.ended is Ended.EXHAUSTED:
+                raise BenchError(f"{result.experiment_id}: a model arm has no pool to walk to its end")
+            if result.arm.walks_pool and answers > self.pool_size:
                 raise BenchError(
                     f"{result.experiment_id} answered {answers} time(s) from a pool of "
                     f"{self.pool_size}"
                 )
-            if result.snapshot.ended is Ended.EXHAUSTED and answers != self.pool_size:
+            if (
+                result.arm.walks_pool
+                and result.snapshot.ended is Ended.EXHAUSTED
+                and answers != self.pool_size
+            ):
                 raise BenchError(
                     f"{result.experiment_id} walked its pool to the end in {answers} answer(s); "
                     f"the pool holds {self.pool_size}"
@@ -565,15 +588,45 @@ def preview_oracle(run_dir: Path) -> PlantedFigures:
 # -- the run -----------------------------------------------------------------------------------
 
 
-def _arms(manifest: Manifest) -> list[tuple[Arm, int, PoolHypothesist]]:
-    """The arms to run, in order: the Random replicates as the manifest lists their seeds, then Grid."""
+def model_hypothesist(llm: LlmArm) -> ChatHypothesist:
+    """The model the manifest names, built the way the research package builds it, or a named refusal.
+
+    Nothing is asked of the model here, so this is also the check that a
+    world can be searched at all (an unknown provider, a key that is not
+    set) before minutes of work or any money is spent. A client that dropped
+    the temperature is refused: the records would describe a condition the
+    run did not have.
+    """
+    try:
+        hypothesist = ChatHypothesist.build(llm.provider, llm.model, temperature=llm.temperature)
+    except ValueError as exc:
+        raise BenchError(f"arms.llm: {exc}") from exc
+    if getattr(hypothesist.model, "temperature", llm.temperature) is None:
+        raise BenchError(
+            f"arms.llm: the client for {llm.provider}/{llm.model} dropped temperature "
+            f"{llm.temperature}; the manifest would describe a run that did not use it"
+        )
+    return hypothesist
+
+
+def _arms(manifest: Manifest) -> list[tuple[Arm, int, PoolHypothesist | ChatHypothesist]]:
+    """The arms to run, in order: the Random replicates as listed, Grid, then the model's replicates.
+
+    The model last: it is the only arm that costs money, so a world whose
+    pool arms cannot run has spent nothing.
+    """
     pool = enumerate_pool(manifest.search_space)
     world_id = manifest.world.id
-    arms: list[tuple[Arm, int, PoolHypothesist]] = [
+    arms: list[tuple[Arm, int, PoolHypothesist | ChatHypothesist]] = [
         (Arm.RANDOM, seed, RandomHypothesist(pool, world_id=world_id, search_seed=seed))
         for seed in manifest.arms.random.search_seeds
     ]
     arms.append((Arm.GRID, 0, GridHypothesist(pool)))
+    llm = manifest.arms.llm
+    if llm is not None:
+        # One adapter: it holds a client and no state of a search.
+        model = model_hypothesist(llm)
+        arms += [(Arm.LLM, k, model) for k in range(llm.replicates)]
     return arms
 
 
@@ -609,17 +662,6 @@ def run_world(
             + " by hand to search it again"
         )
     require_artifact(run_dir, manifest)
-    if manifest.arms.llm is not None:
-        # The manifest is the run's specification, and a world is searched
-        # once: a search that left out an arm the manifest names would be a
-        # calibration that silently lacks it. The model arm is plan PR 5's;
-        # `generate` refuses such a manifest too, so this is a directory
-        # landed by another build.
-        raise BenchError(
-            f"{run_dir / MANIFEST_FILENAME} names a model arm (arms.llm), which this build does "
-            f"not run; land the world again from a manifest with arms.llm null (editing this "
-            f"one in place would change its digest, which names this directory)"
-        )
     digest = manifest_digest(manifest)
     space = manifest.search_space
     pool_size = len(space.candidates)
@@ -667,12 +709,17 @@ def run_world(
                     ledger,
                     experiment,
                     hypothesist,
-                    model=arm.value,
+                    model=hypothesist.label if isinstance(hypothesist, ChatHypothesist) else arm.value,
                     max_trials=manifest.budget.max_trials,
                 )
                 for line in report.describe():
                     say(line)
-                snapshot = snapshot_arm(ledger, experiment, report, exhausted=hypothesist.exhausted)
+                snapshot = snapshot_arm(
+                    ledger,
+                    experiment,
+                    report,
+                    exhausted=isinstance(hypothesist, PoolHypothesist) and hypothesist.exhausted,
+                )
                 if snapshot.ended is Ended.INTERRUPTED:
                     # A replicate is one search and is not resumed (plan §9
                     # (14)): the run ends here, its staging goes with it, and
@@ -838,8 +885,8 @@ def read_searched(run_dir: Path) -> Searched | None:
     holding some of it but not both records is a search in progress or one
     that did not finish, refused by name rather than dropped without a
     word. A record that cannot be read, or that is not its manifest's —
-    another world, pool, arm set, digest, set of conditions, budget, or
-    rule outside the pool — is refused by name. Every reader of the
+    another world, pool, arm set, digest, set of conditions, budget, or a
+    pool arm's rule outside the pool — is refused by name. Every reader of the
     records comes through here.
     """
     left = _search_left(run_dir)
@@ -851,14 +898,6 @@ def read_searched(run_dir: Path) -> Searched | None:
         # sentence says so and prescribes nothing while one may be running.
         raise BenchError(_unfinished(run_dir, left))
     manifest = own_manifest(run_dir)
-    if manifest.arms.llm is not None:
-        # The same refusal ``search`` makes: a tally under a manifest that
-        # names an arm this build never ran would be a calibration that
-        # silently lacks it.
-        raise BenchError(
-            f"{run_dir / MANIFEST_FILENAME} names a model arm (arms.llm), which this build "
-            f"does not run or tally"
-        )
     verdicts = read_record(run_dir / VERDICTS_FILENAME, Verdicts.loads)
     if verdicts.world_id != manifest.world.id:
         raise BenchError(
@@ -871,11 +910,12 @@ def read_searched(run_dir: Path) -> Searched | None:
             f"{run_dir / VERDICTS_FILENAME} drew from a pool of {verdicts.pool_size}, the "
             f"manifest beside it writes one of {pool_size}"
         )
-    # The arms the manifest names, no fewer and no others: a search
-    # that left one out is refused before it runs (``run_world``), so a
-    # record missing one was not written by this build's search.
+    # The arms the manifest names, no fewer and no others: a record
+    # missing one was not written by this build's search.
     expected = {(Arm.RANDOM, seed) for seed in manifest.arms.random.search_seeds}
     expected.add((Arm.GRID, 0))
+    if manifest.arms.llm is not None:
+        expected |= {(Arm.LLM, k) for k in range(manifest.arms.llm.replicates)}
     held = {(result.arm, result.replicate) for result in verdicts.results}
     if held != expected:
         raise BenchError(
@@ -1005,7 +1045,8 @@ def _hold_to_manifest(path: Path, verdicts: Verdicts, manifest: Manifest) -> Non
     verdict is re-derived from the snapshot. Each arm's answers are bounded
     by the manifest's budget and a spent budget is exactly it (the pool's
     half of those bounds is the record's own, held in ``Verdicts``), and
-    every rule it filed is a rule of the pool.
+    every rule a pool arm filed is a rule of the pool (the model may
+    propose outside it, plan §4.3).
     """
     first = verdicts.results[0].snapshot.experiment
     if _conditions(first) != _conditions(experiment_for(manifest, "arm")):
@@ -1028,7 +1069,7 @@ def _hold_to_manifest(path: Path, verdicts: Verdicts, manifest: Manifest) -> Non
                 f"budget of {budget}"
             )
         outside = [trial.trial_id for trial in snapshot.trials if trial.spec_hash not in pool]
-        if outside:
+        if outside and result.arm.walks_pool:
             raise BenchError(
                 f"{path}: {result.experiment_id} filed trial(s) {outside} that are not rules of "
                 f"the pool"

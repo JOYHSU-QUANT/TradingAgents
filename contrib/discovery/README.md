@@ -34,7 +34,7 @@ backfill 落地＋驗收）、`generate` 指令。
 **PR 3（Random／Grid 臂＋oracle 判定，已落地）**：`hypothesists.py`（候選池與兩臂）、`bench.py`（一個世界跑到判定）、
 `oracle.py` 的餘裕判定與 full-pool reference、`search`／`oracle`／`calibrate` 指令、manifest v2。
 **PR 4（評分器，已落地）**：`scoring.py`（三項分報指標、`scores.json`、跨世界的表）、`score`／`report` 指令、manifest v3（artifact 的
-SHA-256）、`oracle.json` v2（blockers 改 enum）。LLM 臂（PR 5）、replay 消融（PR 6）都還沒有。
+SHA-256）、`oracle.json` v2（blockers 改 enum）。**PR 5（LLM 臂，已落地）**：`bench.py` 在 Random／Grid 之後跑 manifest 指名的模型；定義見「LLM 臂（PR 5）」一節。replay 消融（PR 6）還沒有。
 
 已經有的東西：
 
@@ -79,8 +79,7 @@ SHA-256）、`oracle.json` v2（blockers 改 enum）。LLM 臂（PR 5）、repla
 
 一個世界由 manifest 決定（`world` 區塊，加上 conditional 世界才讀的 `indicator_lookback`）；`generator_version` 不是 `"1"`、
 `price.drift` 不是 0（有價格漂移的世界是另一種世界，不是這種世界的參數）、`bars.interval` 不是 4h、最後一筆 funding 戳記（加上
-autoresearch funding walk 多問的 20 天）超出 venue 時間戳上限的 manifest 直接拒絕；價格路徑衝出 float 範圍也拒絕。帶 `arms.llm`
-的 manifest 也在 `generate` 就拒絕（這一版跑不了那個臂，落地只是把拒絕延到 `search`；LLM 臂是 PR 5）。
+autoresearch funding walk 多問的 20 天）超出 venue 時間戳上限的 manifest 直接拒絕；價格路徑衝出 float 範圍也拒絕。
 
 - **亂數流**：三條（`price`／`wicks`／`funding`），都從不透明 id 派生（`random.Random(f"{id}/{name}")`），**kind 不進種子**，
   所以同 seed 的 Null 與 Conditional 共用同一組抽樣、只差埋入效果。每根 bar 的抽樣按 bar 順序消耗，短世界是長世界的
@@ -139,8 +138,7 @@ parser 讀成 feature 名、regime 給數字會被 parser 拒絕，兩種都在�
 **`search --run <dir>`**（`bench.run_world`，計畫 §3 步驟 2–5，順序就是重點）：
 1. 讀落地的 `manifest.json`（必須是這個目錄自己的：目錄名＝manifest 的 digest，落地後手改過 kind／penalty／budget 的
    manifest 會指到別的目錄名，拒絕）；只有 `arms/`＝另一個搜尋正在跑或沒跑完，拒絕（句子只說「等沒有搜尋在跑再手動移除」，
-   不叫人刪活的 claim）；有紀錄＝這個世界搜過了，拒絕（一個世界只搜一次，要重搜就手動移除）；`arms.llm` 有填＝這一版跑不了 manifest 指名的臂，拒絕（`generate` 也拒絕，所以這種目錄只會
-   是別的版本落的；要重跑就從 `llm: null` 的 manifest 重新落地——就地改 manifest 會改掉 digest、對不上目錄名；LLM 臂是 PR 5）。
+   不叫人刪活的 claim）；有紀錄＝這個世界搜過了，拒絕（一個世界只搜一次，要重搜就手動移除）。
    池與 `pool_size` 在讀 manifest 時就已核對（見「候選池」）。
 2. 先核對 `world.sqlite` 的 SHA-256 等於 manifest 的 `artifact_sha256`（對不上拒絕：同 seed 的 null 雙胞胎 artifact 複製錯目錄，形狀檢查全部會過）；每臂把 `world.sqlite` 複製到自己的 store（`arms/random/replicate-<search seed>.sqlite`、`arms/grid/replicate-0.sqlite`），
    第一顆先跑 `verify()`（落地時的驗收再跑一次：artifact 真的是 manifest 描述的世界）；每臂以 `experiment_for()`＋
@@ -178,10 +176,9 @@ null 世界沒有東西可看。holdout 在任何 seed 上都不在這裡讀。
 verdicts 一致、`planted` 有無要對得上世界的 kind、`pool.size` 要等於 `len(candidates)`、門檻（`budget`／`oracle_margin`／
 `threshold`、池的 `threshold`）要等於 manifest 的 budget 與 penalty 算出的值；`verdicts.json` 裡各臂 experiment 的條件
 （split／costs／window／penalty）要等於 `experiment_for(manifest)`、`budget_spent` 的答案數＝預算、任何臂（含 `seam_failed`）
-的答案數不超過預算、每筆 trial 都是池裡的規則；`oracle.json` 埋的規則三段數字的視窗要等於 manifest 的 split
+的答案數不超過預算、Random／Grid 的每筆 trial 都是池裡的規則；`oracle.json` 埋的規則三段數字的視窗要等於 manifest 的 split
 （`exhausted` 的答案數＝池大小是紀錄本身的閘門、每次讀都檢查）；同一個目錄被走到兩次（root 裡有連到它的連結）只算一次；壞掉的紀錄（含 manifest）拒絕句子帶檔案路徑；兩份紀錄沒有都在的目錄（只有 `arms/`＝搜尋進行中或沒跑完、
-只有 `verdicts.json`＝停在兩次搬檔之間）拒絕而不是跳過，句子只說「等沒有搜尋在跑再手動移除」；帶 `llm` 的 manifest 整個 calibrate
-拒絕；不要求 `world.sqlite`（artifact 可裁掉省空間）。
+只有 `verdicts.json`＝停在兩次搬檔之間）拒絕而不是跳過，句子只說「等沒有搜尋在跑再手動移除」；不要求 `world.sqlite`（artifact 可裁掉省空間）。
 
 **兩份紀錄**：`verdicts.json`＝`{verdicts_version, world_id, pool_size, manifest_digest, results: [{arm, replicate, snapshot,
 verdict, holdout}]}`（`manifest_digest`＝跑的時候 run 目錄的 digest，把紀錄綁在它的條件上、不只綁 world id——同 seed 的 null
@@ -214,6 +211,22 @@ python -m contrib.discovery oracle --run data/discovery/SYN-EB3BC030-c5f56953
 python -m contrib.discovery search --run data/discovery/SYN-EB3BC030-c5f56953
 python -m contrib.discovery calibrate --root data/discovery
 ```
+
+## LLM 臂（PR 5）
+
+manifest 的 `arms.llm` 有填時，`search` 在 Random／Grid 之後多跑模型臂。它排在最後，因為它是唯一花錢的臂：前面的臂若跑不起來，一毛都還沒花。
+每個 replicate 一顆 store（`arms/llm/replicate-<k>.sqlite`），經 autoresearch 自己的 `ChatHypothesist` 建模型（provider、model、temperature 取自 manifest，
+API key 由 provider 從環境變數讀），用同一個 `search()`、同一份 split／成本／penalty／預算。
+
+模型看得到 prompt 與失敗回饋，可以提池外的門檻與結構（計畫 §4.3），所以「trial 都在池裡」「答案數不超過池大小」只對 Random／Grid 成立；預算照樣是
+`max_trials`，被拒絕的答案也扣預算。模型臂沒有池可走完，`exhausted` 對它不成立。seam 失敗記 `seam_failed`，照 calibrate 的規則不進分母、另計；
+中斷或收尾前的任何失敗，整個 run 丟掉、已花的費用也白費（replicate 不 resume，計畫 §9 (14)）。provider 打錯或 API key 沒設，在 `generate` 與 `search` 開始時就具名拒絕；客戶端若丟掉 temperature 也拒絕，否則紀錄描述的是沒有發生的條件。
+
+**一個世界兩個目錄**（計畫 §8 #5）：Random／Grid 全量用 `arms.llm: null` 的 manifest；要三臂並欄的子集用另一份帶 `arms.llm` 的 manifest，**同 seed 重新落地**。
+`arms.llm` 在 manifest 的身分裡，所以這是另一個目錄、另一個條件 digest，`calibrate`／`report` 會把它分成自己的列；裡面的 Random／Grid 重跑一次，只花 CPU。
+這樣三臂並欄永遠只比同一批世界，「一個世界只搜一次」也不用改。`arms.llm.world_subset` 必須含本世界，否則讀 manifest 時就拒絕；同一批世界的 manifest 要寫**同一份** `world_subset`（它在條件 digest 裡，各寫各的會讓每個世界自成一列）。
+
+呼叫次數＝子集世界數 × `replicates` × `max_trials`。
 
 ## 評分（PR 4）
 
@@ -263,8 +276,8 @@ structural_distance, agreement, bars_compared, holdout_sharpe, holdout_ruined, r
 | store 的三條序列逐筆等於生成結果；`first_measurable_index ≤ warmup`；tail 通過；三段長度＝manifest；walk 沒走到頭拒絕 | `tests/test_landing.py` |
 | `generate` 寫出 canonical manifest、第二次拒絕、失敗不留半成品；`generate` 拒絕這一版沒有的 scorer；`search`／`oracle`／`calibrate`／`score`／`report` 的輸出與各錯誤家族的 exit code | `tests/test_cli.py` |
 | 池＝templates × grids 按 `candidate_order`、去重後編號、每個候選寫法正規（gate 在 `filters`、`max_bars`、`POOL_SIZING`、family）、parser 拒絕就 manifest 拒絕；Random 是 seed＋world 決定的排列、不放回；Grid 按編號；池走完 raise `CandidatesExhausted`＋旗標；經真的 `search()` 每個候選只 file 一次、以 `exhausted` 結束 | `tests/test_hypothesists.py` |
-| 一次真的 `search`：`arms/` 兩顆 store、`verdicts.json`／`oracle.json` 讀回相等、`manifest.json` 不動且目錄名不變、artifact 位元組不變；各臂同條件、各自 store 裡只晉升 selected；oracle 在各臂之後印、holdout 有值、整池 16 個；再搜拒絕；帶 `llm` 的 manifest 拒絕；落地後改過的 manifest（digest 對不上目錄名）拒絕；calibrate 表（一列＝一組條件〔條件 digest〕、seam 失敗不進分母、artifact 裁掉仍可算、同一目錄只算一次、world_id／pool_size／臂集合不符與
-null 雙胞胎 digest 拒絕、紀錄對 manifest 的條件／預算／池／oracle 門檻與視窗、帶 `llm` 拒絕）；搜尋進行中（只有 `arms/`）拒絕且點名 staging；
+| 一次真的 `search`：`arms/` 兩顆 store、`verdicts.json`／`oracle.json` 讀回相等、`manifest.json` 不動且目錄名不變、artifact 位元組不變；各臂同條件、各自 store 裡只晉升 selected；oracle 在各臂之後印、holdout 有值、整池 16 個；再搜拒絕；模型臂最後跑、各自一顆 store、可答池外規則、seam 失敗另計；落地後改過的 manifest（digest 對不上目錄名）拒絕；calibrate 表（一列＝一組條件〔條件 digest〕、seam 失敗不進分母、artifact 裁掉仍可算、同一目錄只算一次、world_id／pool_size／臂集合不符與
+null 雙胞胎 digest 拒絕、紀錄對 manifest 的條件／預算／池／oracle 門檻與視窗）；搜尋進行中（只有 `arms/`）拒絕且點名 staging；
 staging 開不起來時 claim 歸還；搬 store 失敗或中斷時保留 staging 並點名；紀錄閘門（verdict 對不上快照、selected 非首位、holdout 段位、`eligible`／`margin`／`passed`／段名／`clearing`、`best`／`size`、版本、grid replicate、trials ≤ pool_size、row 的計數）；holdout 旗標可關；dev-only／null 的 oracle 預覽拒絕；中斷＝目錄回到落地狀態；seam 失敗記錄後下一臂照跑 | `tests/test_bench.py` |
 | 三項指標各自的金標（出場原因對持倉 bar、只算有倉的 bar、未定義、結構距離的算式）；`recovered` 的判定；紀錄的閘門；一次真的評分（讀回相等、重跑同 bytes、store 不動、store 對不上紀錄就拒絕）；表（失敗留在分母、seam 另計、不開 store、沒評分拒絕、紀錄對不上拒絕） | `tests/test_scoring.py` |
 | artifact 的 SHA-256 對不上 manifest（雙胞胎的 `world.sqlite` 複製錯目錄）在複製前拒絕 | `tests/test_bench.py` |
@@ -304,8 +317,7 @@ staging 開不起來時 claim 歸還；搬 store 失敗或中斷時保留 stagin
 
 與計畫 §5 的差異：`seed_set` 放在 `world` 裡（id 是 seed_set＋world_seed 的函數，`World.id` 是衍生屬性，讀檔時寫的 id
 跟算出來的不符就拒絕）；Grid 臂沒有自己的區塊（它只走 `search_space` 的 `candidate_order`）；`arms.llm` 可為 `null`
-（Null 校準先只跑 Random＋Grid；**這一版的 `search` 要 `llm: null`**，填了的形式 `{"provider", "model", "temperature",
-"replicates", "world_subset"}` 是 PR 5 的 LLM 臂讀的，現在填了會被 `search` 拒絕）。`costs` 是 `CostModel.to_dict()`、`penalty` 是 `Penalty.to_dict()`，不另造型別。`planted` 在 null 世界
+（Null 校準先只跑 Random＋Grid；填了的形式是 `{"provider", "model", "temperature", "replicates", "world_subset"}`，見「LLM 臂（PR 5）」）。`costs` 是 `CostModel.to_dict()`、`penalty` 是 `Penalty.to_dict()`，不另造型別。`planted` 在 null 世界
 為 `null`；conditional 世界的 `planted.spec` 必須通過 autoresearch 的 parser，每個進場側都要有 exit（exit 規則或 `max_bars`），
 `beta` 嚴格為正、方向＝「有利於埋的那一側的部位」（short 側的埋法＝負的價格漂移）。`origin_ms` 必須 ≥ 1 且落在 UTC 午夜（同時在 4h 與
 1d 格線上）。`indicator_lookback` 的下限＝引擎的 `MIN_INDICATOR_LOOKBACK`。`pool_size` 手寫時留 `null`，`generate` 落地時
@@ -315,8 +327,7 @@ staging 開不起來時 claim 歸還；搬 store 失敗或中斷時保留 stagin
 這是唯一分得出來的東西；`calibrate`／`report`／`score` 不讀 artifact，不要求它存在。
 
 v1 候選池的兩個限制（寫在這裡，因為它們定義了 full-pool reference 的假說類）：每個 template 的 exit 只有 `max_bars`（LLM 臂可提
-exit 規則，池不行）；每個 template 都有 gate（池裡沒有「只有進場」的候選）。`arms.llm.world_subset` 不檢查是否含本世界，PR 5 的
-runner 遇到「有 llm 區塊但本世界不在子集」應拒絕。
+exit 規則，池不行）；每個 template 都有 gate（池裡沒有「只有進場」的候選）。`arms.llm.world_subset` 必須含本世界，否則讀 manifest 時就拒絕。
 
 ## 最終判定（verdict.py）
 
@@ -336,7 +347,7 @@ runner 遇到「有 llm 區塊但本世界不在子集」應拒絕。
   world.sqlite               生成器落地的 candles／funding（generate 寫；唯讀 artifact，各臂複製它）
   arms/random/replicate-<search seed>.sqlite   每個 Random replicate 自己的 store（search 寫；k＝search seed）
   arms/grid/replicate-0.sqlite                 Grid 臂的 store（確定性，只有一個 replicate）
-  arms/llm/replicate-<k>.sqlite                （PR 5）
+  arms/llm/replicate-<k>.sqlite                每個模型 replicate 自己的 store（search 寫；k 從 0 起）
   verdicts.json              每臂每 replicate 的快照、最終判定、selected 的 holdout（search 寫）
   oracle.json                各臂跑完後才寫：埋的規則三段數字＋餘裕判定、full-pool reference（search 寫）
   scores.json                每臂每 replicate 的三項指標與找回判定（score 寫，可重跑）

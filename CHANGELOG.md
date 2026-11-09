@@ -76,8 +76,8 @@ Breaking changes within the 0.x line are called out explicitly.
   nowhere (`bench.py`; `verdicts.json` and `oracle.json`, staged and
   moved into place at the end; an interrupt before the records are in
   discards the run, one after keeps the stores not yet moved; a world is
-  searched once; a manifest that names a model arm, or that is not the
-  one its directory was landed for, is refused; test-seed worlds keep
+  searched once; a manifest that is not the one its directory was landed
+  for is refused; test-seed worlds keep
   their holdout figures off the console). `generate` fills
   `search_space.pool_size` into the landed manifest, which is not written
   again. `oracle --run DIR` previews the planted rule's train and

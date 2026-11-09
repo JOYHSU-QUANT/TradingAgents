@@ -63,10 +63,11 @@ import logging
 import os
 import shutil
 import tempfile
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from functools import cached_property
 from pathlib import Path
+from statistics import median
 from typing import TypeVar
 
 from .hypothesists import GridHypothesist, PoolHypothesist, RandomHypothesist, enumerate_pool
@@ -111,6 +112,7 @@ __all__ = [
     "Searched",
     "Verdicts",
     "calibration_table",
+    "effort_note",
     "experiment_id",
     "in_row_order",
     "iter_searched",
@@ -167,7 +169,8 @@ class ArmResult:
     """One arm's one search: its snapshot, the selected trial's holdout, and the verdict read off it.
 
     ``replicate`` numbers the search: the search seed for the Random arm,
-    0 for the Grid arm (deterministic, one search). ``holdout`` is the
+    0 for the Grid arm (deterministic, one search), the replicate's index
+    for the model arm. ``holdout`` is the
     selected trial's figure from its promotion, present exactly when a
     trial was selected. The verdict is DERIVED — :func:`final_verdict` of
     the snapshot, as the package's other records derive what a reader
@@ -588,18 +591,28 @@ def preview_oracle(run_dir: Path) -> PlantedFigures:
 # -- the run -----------------------------------------------------------------------------------
 
 
+_MODEL_RETRIES = 6
+
+
 def model_hypothesist(llm: LlmArm) -> ChatHypothesist:
     """The model the manifest names, built the way the research package builds it, or a named refusal.
 
     Nothing is asked of the model here, so this is also the check that a
-    world can be searched at all (an unknown provider, a key that is not
-    set) before minutes of work or any money is spent. A client that dropped
-    the temperature is refused: the records would describe a condition the
-    run did not have.
+    world can be searched at all before minutes of work or any money is
+    spent: an unknown provider, and a key that is not set wherever the
+    client checks one as it is built (OpenRouter and the other
+    OpenAI-compatible providers do; Anthropic direct and Bedrock notice at
+    the first call, and that search ends as a failed seam). A client that
+    dropped the temperature is refused: the records would describe a
+    condition the run did not have. Retries are raised past the client's
+    default because a replicate is not resumed: a transient failure at
+    round 28 would throw away the 27 calls before it.
     """
     try:
-        hypothesist = ChatHypothesist.build(llm.provider, llm.model, temperature=llm.temperature)
-    except ValueError as exc:
+        hypothesist = ChatHypothesist.build(
+            llm.provider, llm.model, temperature=llm.temperature, max_retries=_MODEL_RETRIES
+        )
+    except Exception as exc:  # noqa: BLE001 - the clients share no base class for this
         raise BenchError(f"arms.llm: {exc}") from exc
     if getattr(hypothesist.model, "temperature", llm.temperature) is None:
         raise BenchError(
@@ -836,6 +849,7 @@ class CalibrationRow:
     searches: int
     found: int
     failed: int
+    effort: tuple[tuple[int, int], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "kind", _read.enum(WorldKind, self.kind, "row.kind"))
@@ -865,7 +879,7 @@ class CalibrationRow:
         return (
             f"{head}{self.found} {what} in {self.searches} search(es) = {rate}"
             f"{seam_note(self.failed)}"
-        )
+        ) + (f"; {effort_note(self.effort)}" if self.effort else "")
 
 
 @dataclass(frozen=True)
@@ -1005,6 +1019,21 @@ def seam_note(failed: int) -> str:
     return f"; {failed} seam failure(s) not counted" if failed else ""
 
 
+def effort_note(effort: Sequence[tuple[int, int]]) -> str:
+    """The answers and the distinct rules each search spent: what a clean row actually searched.
+
+    A search whose every answer was refused files no rule and cannot call
+    anything, so on a null world it reads as no false call; this is what
+    tells that from a search of thirty rules.
+    """
+    answers = [pair[0] for pair in effort]
+    rules = [pair[1] for pair in effort]
+    return (
+        f"answers median {median(answers):g} (min {min(answers)}), distinct rules median "
+        f"{median(rules):g} (min {min(rules)})"
+    )
+
+
 def in_row_order(keys: Iterable[RowKey]) -> list[RowKey]:
     """The keys as a table prints them: kind, seed set and arm in their enums' order, the texts in text order."""
     kinds = {kind: index for index, kind in enumerate(WorldKind)}
@@ -1025,15 +1054,24 @@ def calibration_table(run_dirs: Iterable[Path]) -> list[CalibrationRow]:
     conditions digest in text order.
     """
     tally: dict[RowKey, list[int]] = {}
+    effort: dict[RowKey, list[tuple[int, int]]] = {}
     for _run_dir, searched in iter_searched(run_dirs):
         for result in searched.verdicts.results:
-            counts = tally.setdefault(row_key(searched.manifest, result.arm), [0, 0, 0])
+            key = row_key(searched.manifest, result.arm)
+            counts = tally.setdefault(key, [0, 0, 0])
             if result.snapshot.ended is Ended.SEAM_FAILED:
                 counts[2] += 1
             else:
                 counts[0] += 1
                 counts[1] += result.verdict.found
-    return [CalibrationRow(*key, *tally[key]) for key in in_row_order(tally)]
+                effort.setdefault(key, []).append(
+                    (result.verdict.answers, result.verdict.distinct_rules)
+                )
+    rows: list[CalibrationRow] = []
+    for key in in_row_order(tally):
+        searches, found, failed = tally[key]
+        rows.append(CalibrationRow(*key, searches, found, failed, tuple(effort.get(key, ()))))
+    return rows
 
 
 def _hold_to_manifest(path: Path, verdicts: Verdicts, manifest: Manifest) -> None:

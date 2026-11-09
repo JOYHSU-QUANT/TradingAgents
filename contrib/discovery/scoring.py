@@ -68,6 +68,7 @@ from .bench import (
     ArmResult,
     RowKey,
     Searched,
+    effort_note,
     experiment_id,
     in_row_order,
     iter_searched,
@@ -849,6 +850,7 @@ class ReportEntry:
     first_eligible_round: int | None
     oracle_passed: bool
     readable_planted: float | None
+    effort: tuple[int, int]
 
     def __post_init__(self) -> None:
         _read.text(self.world_id, "entry.world_id")
@@ -862,6 +864,9 @@ class ReportEntry:
         if self.first_eligible_round is not None:
             _read.whole(self.first_eligible_round, "entry.first_eligible_round", minimum=1)
         _read.flag(self.oracle_passed, "entry.oracle_passed")
+        answers, rules = self.effort
+        _read.whole(answers, "entry.answers", minimum=0)
+        _read.whole(rules, "entry.distinct_rules", minimum=0)
         if self.readable_planted is not None:
             _read.number(self.readable_planted, "entry.readable_planted")
         if self.score.recovery is None and (
@@ -978,7 +983,15 @@ class ReportRow:
         ]
 
     def describe(self, *, unseal: bool = False) -> list[str]:
-        """The row as lines: the headline first, then the diagnostics; see the class docstring on sealing."""
+        """The row as lines: the headline first, then the diagnostics; see the class docstring on sealing.
+
+        The last line says what the row's searches actually spent, and is
+        no holdout figure, so a sealed row prints it too.
+        """
+        effort = [f"  {effort_note([e.effort for e in self.entries])}"] if self.entries else []
+        return [*self._lines(unseal=unseal), *effort]
+
+    def _lines(self, *, unseal: bool) -> list[str]:
         head = row_head(
             (self.kind, self.null_definition_version, self.seed_set, self.conditions, self.arm)
         )
@@ -1067,6 +1080,10 @@ def report_table(run_dirs: Iterable[Path]) -> list[ReportRow]:
                     ].verdict.first_eligible_round,
                     oracle_passed=oracle.planted is not None and oracle.planted.passed,
                     readable_planted=scores.readable_planted,
+                    effort=(
+                        by_arm[(score.arm, score.replicate)].verdict.answers,
+                        by_arm[(score.arm, score.replicate)].verdict.distinct_rules,
+                    ),
                 )
             )
     return [

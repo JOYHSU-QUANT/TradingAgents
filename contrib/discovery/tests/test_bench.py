@@ -58,7 +58,6 @@ from .conftest import (
     COIN,
     FLAT,
     PLANTED,
-    ScriptedHypothesist,
     bench_manifest,
     example_manifest,
     land_run,
@@ -531,32 +530,54 @@ def test_the_calibration_table_reads_a_world_whose_artifact_was_pruned(searched,
 # -- the manifest a search runs under -------------------------------------------------------------
 
 
+LLM_ARM = LlmArm(
+    provider="openrouter",
+    model="anthropic/claude-sonnet-5.5",
+    temperature=0.0,
+    replicates=1,
+    world_subset=(COIN,),
+)
+
+
+class _ScriptedModel:
+    """A chat client that answers a script, then fails as a provider that went away."""
+
+    temperature = 0.0
+
+    def __init__(self, answers):
+        self.answers = list(answers)
+        self.prompts = []
+
+    def invoke(self, messages):
+        self.prompts.append(messages)
+        if not self.answers:
+            raise RuntimeError("the provider is down")
+        return SimpleNamespace(content=self.answers.pop(0))
+
+
 def test_the_model_arm_searches_last_in_its_own_store_and_may_answer_outside_the_pool(
     landed_world, tmp_path, monkeypatch
 ):
     artifact, _landing = landed_world
-    llm = LlmArm(
-        provider="openrouter",
-        model="anthropic/claude-sonnet-5.5",
-        temperature=0.0,
-        replicates=2,
-        world_subset=(COIN,),
-    )
+    llm = replace(LLM_ARM, replicates=2)
     manifest = bench_manifest()
     manifest = replace(manifest, arms=replace(manifest.arms, llm=llm))
     run = land_run(tmp_path, artifact, manifest)
     # One answer outside the pool and one refused; the script then runs
     # dry, so the second replicate is a dead seam from its first round.
-    answering = ScriptedHypothesist(answers=[json.dumps(PLANTED), "not a rule"])
+    model = _ScriptedModel([json.dumps(PLANTED), "not a rule"])
     built = []
 
-    def fake(arm):
-        built.append(arm)
-        return answering
+    def build(provider, name, base_url=None, **kwargs):
+        built.append((provider, name, kwargs))
+        return bench.ChatHypothesist(model=model, label=f"{provider}/{name}")
 
-    monkeypatch.setattr(bench, "model_hypothesist", fake)
+    monkeypatch.setattr(bench.ChatHypothesist, "build", build)
     verdicts, _oracle = run_world(run)
-    assert built == [llm]  # one adapter for every replicate
+    # One adapter for every replicate, built as the manifest says, retrying.
+    assert built == [
+        (llm.provider, llm.model, {"temperature": llm.temperature, "max_retries": 6})
+    ]
     assert [(r.arm, r.replicate) for r in verdicts.results] == [
         (Arm.RANDOM, 0),
         (Arm.GRID, 0),
@@ -573,35 +594,44 @@ def test_the_model_arm_searches_last_in_its_own_store_and_may_answer_outside_the
     assert alive.snapshot.trials[0].spec_hash not in pool
     assert (failed.snapshot.ended, failed.snapshot.answers) == (Ended.SEAM_FAILED, 0)
     # The model sees the opaque coin and nothing about what the world is.
-    system, user = answering.prompts[0]
+    (_, system), (_, user) = model.prompts[0]
     assert COIN in user and "conditional" not in f"{system}{user}".lower()
+    # The ledger files its answers under the model's own name.
     with ResearchStore(store_path(run, Arm.LLM, 0)) as store:
-        answers = Ledger(store).proposal_counts(experiment_id(Arm.LLM, 0))
-    assert sum(answers.values()) == 2
-    # The tables read it: the rule outside the pool is not refused, and the
-    # dead seam is counted apart.
-    rows = {row.arm: row for row in calibration_table([run])}
-    assert (rows[Arm.LLM].searches, rows[Arm.LLM].failed) == (1, 1)
+        ledger = Ledger(store)
+        assert sum(ledger.proposal_counts(experiment_id(Arm.LLM, 0)).values()) == 2
+        rows = store.conn.execute(
+            "SELECT DISTINCT model FROM proposals WHERE experiment_id = ?",
+            (experiment_id(Arm.LLM, 0),),
+        ).fetchall()
+    assert [row[0] for row in rows] == [f"{llm.provider}/{llm.model}"]
+    # The tables read it: the rule outside the pool is not refused, the dead
+    # seam is counted apart, and the row says what the search actually spent.
+    calibration = {row.arm: row for row in calibration_table([run])}
+    assert (calibration[Arm.LLM].searches, calibration[Arm.LLM].failed) == (1, 1)
+    assert calibration[Arm.LLM].effort == ((2, 1),)
+    assert calibration[Arm.LLM].describe().endswith(
+        "answers median 2 (min 2), distinct rules median 1 (min 1)"
+    )
     score_world(run)
     report = {row.arm: row for row in report_table([run])}
     assert (report[Arm.LLM].searches, report[Arm.LLM].failed) == (1, 1)
+    assert report[Arm.LLM].describe()[-1] == (
+        "  answers median 2 (min 2), distinct rules median 1 (min 1)"
+    )
 
 
-LLM_ARM = LlmArm(
-    provider="openrouter",
-    model="anthropic/claude-sonnet-5.5",
-    temperature=0.0,
-    replicates=1,
-    world_subset=(COIN,),
+@pytest.mark.parametrize(
+    "raised",
+    [ValueError("API key for provider is not set"), RuntimeError("the client cannot be made")],
+    ids=["value-error", "any-other"],
 )
+def test_a_model_that_cannot_be_built_is_a_named_refusal(monkeypatch, raised):
+    def refuse(*args, **kwargs):
+        raise raised
 
-
-def test_a_model_that_cannot_be_built_is_a_named_refusal(monkeypatch):
-    def unset(*args, **kwargs):
-        raise ValueError("API key for provider 'openrouter' is not set")
-
-    monkeypatch.setattr(bench.ChatHypothesist, "build", unset)
-    with pytest.raises(BenchError, match="arms.llm: API key for provider"):
+    monkeypatch.setattr(bench.ChatHypothesist, "build", refuse)
+    with pytest.raises(BenchError, match=f"arms.llm: {raised}"):
         bench.model_hypothesist(LLM_ARM)
 
 

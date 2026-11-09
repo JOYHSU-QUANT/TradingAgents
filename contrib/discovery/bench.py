@@ -355,11 +355,7 @@ class Verdicts:
                     f"{result.experiment_id} answered {answers} time(s) from a pool of "
                     f"{self.pool_size}"
                 )
-            if (
-                result.arm.walks_pool
-                and result.snapshot.ended is Ended.EXHAUSTED
-                and answers != self.pool_size
-            ):
+            if result.snapshot.ended is Ended.EXHAUSTED and answers != self.pool_size:
                 raise BenchError(
                     f"{result.experiment_id} walked its pool to the end in {answers} answer(s); "
                     f"the pool holds {self.pool_size}"

@@ -646,6 +646,27 @@ def test_a_client_that_drops_the_temperature_is_refused(monkeypatch):
     assert bench.model_hypothesist(LLM_ARM).model.temperature == 0.0
 
 
+def test_the_pool_s_bounds_do_not_hold_the_model_arm(searched):
+    _run, verdicts, oracle, *_ = searched
+    grid = verdicts.grid
+    merged = {t.spec_hash: t for r in verdicts.results for t in r.snapshot.trials}
+    trials = tuple(replace(t, trial_id=i) for i, t in enumerate(merged.values()))
+    assert len(trials) > 2  # more distinct rules than the shrunken pool below holds
+    snapshot = replace(
+        grid.snapshot,
+        experiment=replace(grid.snapshot.experiment, experiment_id=experiment_id(Arm.LLM, 0)),
+        answers=len(trials),
+        distinct_rules=len(trials),
+        first_eligible_round=1,
+        trials=trials,
+    )
+    assert oracle.planted is not None
+    holdout = oracle.planted.holdout if final_verdict(snapshot).selected is not None else None
+    model = ArmResult(arm=Arm.LLM, replicate=0, snapshot=snapshot, holdout=holdout)
+    widened = replace(verdicts, pool_size=2, results=(*verdicts.results, model))
+    assert widened.results[-1].snapshot.distinct_rules > widened.pool_size
+
+
 def test_a_model_arm_has_no_pool_to_run_out_of_and_is_held_to_the_budget(searched):
     run, verdicts, *_ = searched
     grid = verdicts.grid

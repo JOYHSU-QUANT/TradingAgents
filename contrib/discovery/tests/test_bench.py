@@ -12,9 +12,11 @@ them.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -47,11 +49,19 @@ from contrib.discovery.landing import (
     split_of,
     world_dir,
 )
-from contrib.discovery.manifest import ManifestError, SeedSet, WorldKind
+from contrib.discovery.manifest import LlmArm, ManifestError, SeedSet, WorldKind
 from contrib.discovery.oracle import GateBlocker, Oracle, OracleError, planted_figures
+from contrib.discovery.scoring import report_table, score_world
 from contrib.discovery.verdict import Ended, VerdictError, final_verdict
 
-from .conftest import COIN, FLAT, bench_manifest, example_manifest, land_run
+from .conftest import (
+    COIN,
+    FLAT,
+    PLANTED,
+    bench_manifest,
+    example_manifest,
+    land_run,
+)
 
 LANDED = sorted([MANIFEST_FILENAME, ARTIFACT_FILENAME])
 
@@ -520,16 +530,151 @@ def test_the_calibration_table_reads_a_world_whose_artifact_was_pruned(searched,
 # -- the manifest a search runs under -------------------------------------------------------------
 
 
-def test_a_manifest_naming_a_model_arm_is_refused_before_anything_is_searched(
-    landed_world, tmp_path
+LLM_ARM = LlmArm(
+    provider="openrouter",
+    model="anthropic/claude-sonnet-5.5",
+    temperature=0.0,
+    replicates=1,
+    world_subset=(COIN,),
+)
+
+
+class _ScriptedModel:
+    """A chat client that answers a script, then fails as a provider that went away."""
+
+    temperature = 0.0
+
+    def __init__(self, answers):
+        self.answers = list(answers)
+        self.prompts = []
+
+    def invoke(self, messages):
+        self.prompts.append(messages)
+        if not self.answers:
+            raise RuntimeError("the provider is down")
+        return SimpleNamespace(content=self.answers.pop(0))
+
+
+def test_the_model_arm_searches_last_in_its_own_store_and_may_answer_outside_the_pool(
+    landed_world, tmp_path, monkeypatch
 ):
     artifact, _landing = landed_world
-    with_model = bench_manifest()
-    with_model = replace(with_model, arms=replace(with_model.arms, llm=example_manifest().arms.llm))
-    run = land_run(tmp_path, artifact, with_model)
-    with pytest.raises(BenchError, match="names a model arm"):
-        run_world(run)
-    assert _listing(run) == LANDED
+    llm = replace(LLM_ARM, replicates=2)
+    manifest = bench_manifest()
+    manifest = replace(manifest, arms=replace(manifest.arms, llm=llm))
+    run = land_run(tmp_path, artifact, manifest)
+    # One answer outside the pool and one refused; the script then runs
+    # dry, so the second replicate is a dead seam from its first round.
+    model = _ScriptedModel([json.dumps(PLANTED), "not a rule"])
+    built = []
+
+    def build(provider, name, base_url=None, **kwargs):
+        built.append((provider, name, kwargs))
+        return bench.ChatHypothesist(model=model, label=f"{provider}/{name}")
+
+    monkeypatch.setattr(bench.ChatHypothesist, "build", build)
+    verdicts, _oracle = run_world(run)
+    # One adapter for every replicate, built as the manifest says, retrying.
+    assert built == [
+        (llm.provider, llm.model, {"temperature": llm.temperature, "max_retries": 6})
+    ]
+    assert [(r.arm, r.replicate) for r in verdicts.results] == [
+        (Arm.RANDOM, 0),
+        (Arm.GRID, 0),
+        (Arm.LLM, 0),
+        (Arm.LLM, 1),
+    ]
+    assert verdicts.grid.arm is Arm.GRID
+    assert Verdicts.loads((run / VERDICTS_FILENAME).read_text(encoding="utf-8")) == verdicts
+    assert store_path(run, Arm.LLM, 0).is_file() and store_path(run, Arm.LLM, 1).is_file()
+    alive, failed = verdicts.results[2], verdicts.results[3]
+    assert (alive.snapshot.ended, alive.snapshot.answers) == (Ended.BUDGET_SPENT, 2)
+    assert len(alive.snapshot.trials) == 1  # the refused answer spent budget and filed nothing
+    pool = {candidate.spec_hash for candidate in read_manifest(run).search_space.candidates}
+    assert alive.snapshot.trials[0].spec_hash not in pool
+    assert (failed.snapshot.ended, failed.snapshot.answers) == (Ended.SEAM_FAILED, 0)
+    # The model sees the opaque coin and nothing about what the world is.
+    (_, system), (_, user) = model.prompts[0]
+    assert COIN in user and "conditional" not in f"{system}{user}".lower()
+    # The ledger files its answers under the model's own name.
+    with ResearchStore(store_path(run, Arm.LLM, 0)) as store:
+        ledger = Ledger(store)
+        assert sum(ledger.proposal_counts(experiment_id(Arm.LLM, 0)).values()) == 2
+        rows = store.conn.execute(
+            "SELECT DISTINCT model FROM proposals WHERE experiment_id = ?",
+            (experiment_id(Arm.LLM, 0),),
+        ).fetchall()
+    assert [row[0] for row in rows] == [f"{llm.provider}/{llm.model}"]
+    # The tables read it: the rule outside the pool is not refused, the dead
+    # seam is counted apart, and the row says what the search actually spent.
+    calibration = {row.arm: row for row in calibration_table([run])}
+    assert (calibration[Arm.LLM].searches, calibration[Arm.LLM].failed) == (1, 1)
+    assert calibration[Arm.LLM].effort == ((2, 1),)
+    assert calibration[Arm.LLM].describe().endswith(
+        "answers median 2 (min 2), distinct rules median 1 (min 1)"
+    )
+    score_world(run)
+    report = {row.arm: row for row in report_table([run])}
+    assert (report[Arm.LLM].searches, report[Arm.LLM].failed) == (1, 1)
+    assert report[Arm.LLM].describe()[-1] == (
+        "  answers median 2 (min 2), distinct rules median 1 (min 1)"
+    )
+
+
+@pytest.mark.parametrize(
+    "raised",
+    [ValueError("API key for provider is not set"), RuntimeError("the client cannot be made")],
+    ids=["value-error", "any-other"],
+)
+def test_a_model_that_cannot_be_built_is_a_named_refusal(monkeypatch, raised):
+    def refuse(*args, **kwargs):
+        raise raised
+
+    monkeypatch.setattr(bench.ChatHypothesist, "build", refuse)
+    with pytest.raises(BenchError, match=f"arms.llm: {raised}"):
+        bench.model_hypothesist(LLM_ARM)
+
+
+def test_a_client_that_drops_the_temperature_is_refused(monkeypatch):
+    def built(temperature):
+        return lambda *args, **kwargs: SimpleNamespace(model=SimpleNamespace(temperature=temperature))
+
+    monkeypatch.setattr(bench.ChatHypothesist, "build", built(None))
+    with pytest.raises(BenchError, match="dropped temperature 0.0"):
+        bench.model_hypothesist(LLM_ARM)
+    monkeypatch.setattr(bench.ChatHypothesist, "build", built(0.0))
+    assert bench.model_hypothesist(LLM_ARM).model.temperature == 0.0
+
+
+def test_the_pool_s_bounds_do_not_hold_the_model_arm(searched):
+    _run, verdicts, oracle, *_ = searched
+    grid = verdicts.grid
+    merged = {t.spec_hash: t for r in verdicts.results for t in r.snapshot.trials}
+    trials = tuple(replace(t, trial_id=i) for i, t in enumerate(merged.values()))
+    assert len(trials) > 2  # more distinct rules than the shrunken pool below holds
+    snapshot = replace(
+        grid.snapshot,
+        experiment=replace(grid.snapshot.experiment, experiment_id=experiment_id(Arm.LLM, 0)),
+        answers=len(trials),
+        distinct_rules=len(trials),
+        first_eligible_round=1,
+        trials=trials,
+    )
+    assert oracle.planted is not None
+    holdout = oracle.planted.holdout if final_verdict(snapshot).selected is not None else None
+    model = ArmResult(arm=Arm.LLM, replicate=0, snapshot=snapshot, holdout=holdout)
+    widened = replace(verdicts, pool_size=2, results=(*verdicts.results, model))
+    assert widened.results[-1].snapshot.distinct_rules > widened.pool_size
+
+
+def test_a_model_arm_has_no_pool_to_run_out_of_and_is_held_to_the_budget(searched):
+    run, verdicts, *_ = searched
+    grid = verdicts.grid
+    experiment = replace(grid.snapshot.experiment, experiment_id=experiment_id(Arm.LLM, 0))
+    snapshot = replace(grid.snapshot, experiment=experiment, ended=Ended.EXHAUSTED)
+    exhausted = replace(grid, arm=Arm.LLM, snapshot=snapshot)
+    with pytest.raises(BenchError, match="a model arm has no pool to walk to its end"):
+        replace(verdicts, results=(*verdicts.results, exhausted))
 
 
 def test_a_manifest_edited_after_the_landing_is_not_the_directory_s_own(fresh_run):
@@ -644,7 +789,7 @@ def test_an_artifact_that_is_not_the_one_landed_is_refused_before_it_is_copied(f
     assert not (fresh_run / ARMS_DIRNAME).exists()
 
 
-def test_the_calibration_holds_the_oracle_record_and_refuses_a_model_arm(searched, tmp_path):
+def test_the_calibration_holds_the_oracle_record_and_the_arms_the_manifest_names(searched, tmp_path):
     run, verdicts, oracle, *_ = searched
     manifest = read_manifest(run)
     # The oracle record beside the verdicts says which manifest it was read
@@ -662,14 +807,15 @@ def test_the_calibration_holds_the_oracle_record_and_refuses_a_model_arm(searche
     (stray / ORACLE_FILENAME).unlink()
     with pytest.raises(BenchError, match="a search of this world is running or did not finish"):
         calibration_table([stray])
-    # A manifest naming a model arm is not tallied, as it is not searched.
+    # A manifest naming a model arm whose records hold no model arm was
+    # not searched by this build.
     with_model = replace(manifest, arms=replace(manifest.arms, llm=example_manifest().arms.llm))
     modelled = world_dir(tmp_path, with_model)
     modelled.mkdir()
     (modelled / MANIFEST_FILENAME).write_bytes(with_model.dumps().encode("utf-8"))
     for name in (VERDICTS_FILENAME, ORACLE_FILENAME):
         (modelled / name).write_bytes((run / name).read_bytes())
-    with pytest.raises(BenchError, match="names a model arm"):
+    with pytest.raises(BenchError, match="holds the arms"):
         calibration_table([modelled])
     # And the records' digest is a digest.
     with pytest.raises(BenchError, match="manifest_digest: a manifest digest is 8 lower-case"):

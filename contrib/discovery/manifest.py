@@ -1138,6 +1138,14 @@ class Manifest:
                 f"artifact_sha256: a SHA-256 is 64 lower-case hex digits, or null until the world "
                 f"is landed, got {self.artifact_sha256!r}"
             )
+        # The model arm runs the subset's worlds; a manifest is one world,
+        # and one naming a subset it is not in has an arm it will not run.
+        llm = self.arms.llm
+        if llm is not None and self.world.id not in llm.world_subset:
+            raise ManifestError(
+                f"arms.llm.world_subset: {self.world.id} is not in it, and this manifest is that "
+                f"world; a world outside the subset is run from a manifest with arms.llm null"
+            )
 
     def to_dict(self) -> dict[str, object]:
         return {

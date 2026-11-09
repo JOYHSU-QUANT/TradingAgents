@@ -675,13 +675,16 @@ def test_a_conditional_world_where_nothing_was_selected_needs_no_store(scored):
 # -- the table ----------------------------------------------------------------------------------
 
 
-def _entry(score: ArmScore, *, first=None, passed=True, planted=2.0, world="A") -> ReportEntry:
+def _entry(
+    score: ArmScore, *, first=None, passed=True, planted=2.0, world="A", effort=(30, 28)
+) -> ReportEntry:
     return ReportEntry(
         world_id=world,
         score=score,
         first_eligible_round=first,
         oracle_passed=passed,
         readable_planted=planted,
+        effort=effort,
     )
 
 
@@ -729,6 +732,7 @@ def test_a_conditional_row_keeps_every_failure_in_the_denominator():
         "  holdout net sharpe over 3 pair(s): selected mean 0.6667, the planted rule mean 2.0000; "
         "first eligible round median 3 (a diagnostic)",
         "  recovered at theta (development seeds): 0.5: 2, 0.6: 1, 0.7: 1, 0.8: 1, 0.9: 1",
+        EFFORT,
     ]
 
 
@@ -771,6 +775,7 @@ def test_a_ruined_run_on_either_side_leaves_the_pair_and_stays_in_the_denominato
 
 
 SEALED = "the figures read from the holdout are sealed on a test seed; --unseal prints them"
+EFFORT = "  answers median 30 (min 30), distinct rules median 28 (min 28)"
 
 
 def test_a_test_seed_row_is_sealed_unless_it_is_asked_for():
@@ -779,11 +784,12 @@ def test_a_test_seed_row_is_sealed_unless_it_is_asked_for():
         "conditional-v1 (v1) test [0badf00d] grid: 1 search(es) over 1 world(s); the oracle had "
         "room on 1/1 = 100.0% of the worlds; a rule selected in 1/1 = 100.0%",
         f"  first eligible round median 2 (a diagnostic); {SEALED}",
+        EFFORT,
     ]
     opened = row.describe(unseal=True)
     assert opened[0].startswith("conditional-v1 (v1) test [0badf00d] grid: recovered 1/1")
     # Unsealed is still a test seed: nothing here is for choosing theta.
-    assert len(opened) == 3 and not any("theta" in line for line in opened)
+    assert len(opened) == 4 and not any("theta" in line for line in opened)
 
 
 def test_a_null_row_reads_false_calls_and_a_failed_seam_is_counted_apart():
@@ -806,6 +812,7 @@ def test_a_null_row_reads_false_calls_and_a_failed_seam_is_counted_apart():
         "1 seam failure(s) not counted",
         "  first eligible round median 2 (a diagnostic); holdout net sharpe of the false calls, "
         "mean -0.5000",
+        EFFORT,
     ]
     # A false call is read off validation; its holdout figure is what a test seed seals.
     sealed = replace(row, seed_set=SeedSet.TEST).describe()

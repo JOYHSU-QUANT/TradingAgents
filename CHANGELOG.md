@@ -10,6 +10,19 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **Discovery Lab PR 5: the model arm.** A manifest that names `arms.llm`
+  now runs it: `search` runs the Random and Grid arms and then each model
+  replicate in its own store (`arms/llm/replicate-<k>.sqlite`), through
+  autoresearch's own `ChatHypothesist` and `search()`, under the same
+  split, costs, penalty and budget. It runs last, since it is the one arm
+  that costs money. The model may answer outside the candidate pool, so the
+  pool's bounds hold only for the Random and Grid arms; a failed seam is
+  counted apart, as the calibration counts it. Three-arm comparisons use
+  one world in two directories: the Random and Grid arms run on every
+  world from a manifest with `arms.llm` null, and the model's subset is
+  landed again from a manifest that names it, which is a separate set of
+  conditions and so its own row in `calibrate` and `report`. A manifest
+  naming a subset that does not include its own world is refused.
 - **Discovery Lab PR 4: the scorer, and whether the rule an arm chose is
   the rule that was planted.** `python -m contrib.discovery score --run
   DIR` reads a searched world's records and writes `scores.json`: on the
@@ -63,8 +76,8 @@ Breaking changes within the 0.x line are called out explicitly.
   nowhere (`bench.py`; `verdicts.json` and `oracle.json`, staged and
   moved into place at the end; an interrupt before the records are in
   discards the run, one after keeps the stores not yet moved; a world is
-  searched once; a manifest that names a model arm, or that is not the
-  one its directory was landed for, is refused; test-seed worlds keep
+  searched once; a manifest that is not the one its directory was landed
+  for is refused; test-seed worlds keep
   their holdout figures off the console). `generate` fills
   `search_space.pool_size` into the landed manifest, which is not written
   again. `oracle --run DIR` previews the planted rule's train and

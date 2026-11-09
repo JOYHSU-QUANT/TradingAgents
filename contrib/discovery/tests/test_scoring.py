@@ -13,6 +13,7 @@ import json
 import shutil
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -205,6 +206,14 @@ def test_a_different_period_or_op_is_a_third_of_a_clause():
     assert structural_distance(period, planted) == pytest.approx(1 / 3)
     op = _spec(entry=[_clause("funding_zscore_14", "<=", -1.5)])
     assert structural_distance(op, planted) == pytest.approx(1 / 3)
+
+
+def test_a_different_offset_is_a_different_reach_like_a_different_period():
+    planted = _spec(entry=[Z])
+    back = {"feature": "funding_zscore_14", "offset": 1}
+    assert structural_distance(_spec(entry=[_clause(back, "<", -1.5)]), planted) == pytest.approx(
+        1 / 3
+    )
 
 
 def test_thresholds_of_opposite_sign_are_nothing_alike_but_the_clause_still_pairs():
@@ -422,6 +431,13 @@ def test_a_record_that_could_not_have_been_written_is_refused(changes, fragment)
         _scores(**changes)
 
 
+def test_a_ruined_planted_run_is_marked_and_not_read():
+    scores = _scores(planted_holdout_ruined=True)
+    assert scores.describe()[0] == "planted rule: holdout net sharpe 2.0000 (ruined)"
+    assert scores.planted_holdout_sharpe == 2.0 and scores.readable_planted is None
+    assert _scores().readable_planted == 2.0
+
+
 def test_the_world_describes_itself_with_the_holdout_figures_or_without():
     lines = _scores().describe()
     assert lines[0] == "planted rule: holdout net sharpe 2.0000"
@@ -561,6 +577,43 @@ def test_a_store_that_does_not_reproduce_its_records_is_refused(scored):
         score_records(searched, read=_reader_returning(searched, planted=other))
     with pytest.raises(ScoreError, match="holdout read from the store is not the figure its"):
         score_records(searched, read=_reader_returning(searched, chosen=other))
+
+
+def _with_every_holdout_ruined(searched: Searched) -> Searched:
+    """The same records, every holdout figure on them marked ruined."""
+    assert searched.oracle.planted is not None and searched.oracle.planted.holdout is not None
+    results = tuple(
+        result
+        if result.holdout is None
+        else replace(result, holdout=replace(result.holdout, ruined=True))
+        for result in searched.verdicts.results
+    )
+    planted = replace(
+        searched.oracle.planted, holdout=replace(searched.oracle.planted.holdout, ruined=True)
+    )
+    return replace(
+        searched,
+        verdicts=replace(searched.verdicts, results=results),
+        oracle=replace(searched.oracle, planted=planted),
+    )
+
+
+def test_a_ruined_holdout_on_record_reaches_the_score_and_the_table(scored, monkeypatch):
+    run, *_ = scored
+    searched = read_searched(run)
+    assert searched is not None
+    ruinous = _with_every_holdout_ruined(searched)
+    scores = score_records(ruinous, read=_reader_returning(ruinous))
+    selected = [s for s in scores.results if s.found]
+    assert selected and all(s.holdout_ruined and s.readable_holdout is None for s in selected)
+    assert scores.planted_holdout_ruined is True and scores.readable_planted is None
+    assert Scores.loads(scores.dumps()) == scores
+    # Into the table: every pair has a ruined side, so none is averaged.
+    monkeypatch.setattr(scoring, "read_scores", lambda run_dir, held: scores)
+    for row in report_table([run]):
+        if row.found:
+            assert "over 0 pair(s)" in row.describe()[2]
+            assert f"({row.found} ruined run(s) left out)" in row.describe()[2]
 
 
 def test_a_selection_on_a_world_that_plants_a_rule_needs_a_reader(scored):
@@ -760,6 +813,18 @@ def test_a_null_row_reads_false_calls_and_a_failed_seam_is_counted_apart():
     assert sealed[1] == f"  first eligible round median 2 (a diagnostic); {SEALED}"
 
 
+def test_a_ruined_false_call_is_left_out_of_the_mean_and_said_to_be():
+    ruined = _score(
+        structural_distance=None,
+        agreement=None,
+        bars_compared=0,
+        holdout_ruined=True,
+        recovery=None,
+    )
+    row = _row(_entry(ruined, passed=False, planted=None), kind=WorldKind.NULL_V1)
+    assert row.describe()[1].endswith("mean n/a (1 ruined run(s) left out)")
+
+
 def test_a_null_row_tells_the_replicates_apart_too():
     def search(world, replicate, call):
         fields = {"arm": Arm.RANDOM, "replicate": replicate, "recovery": None}
@@ -837,6 +902,33 @@ def test_the_table_reads_the_world_and_no_store(scored, tmp_path):
     assert [row.arm for row in rows] == [Arm.RANDOM, Arm.GRID]
     by_arm = {score.arm: score for score in scores.results}
     assert all(row.searches == 1 and row.entries[0].score == by_arm[row.arm] for row in rows)
+
+
+def test_the_table_carries_each_world_s_figures_into_its_entries(scored):
+    run, scores, _ = scored
+    searched = read_searched(run)
+    assert searched is not None and searched.oracle.planted is not None
+    verdicts = {result.arm: result.verdict for result in searched.verdicts.results}
+    for row in report_table([run]):
+        entry = row.entries[0]
+        assert entry.world_id == scores.world_id
+        assert entry.oracle_passed is searched.oracle.planted.passed
+        assert entry.first_eligible_round == verdicts[row.arm].first_eligible_round
+        assert entry.readable_planted == scores.readable_planted
+
+
+def test_the_table_reads_the_oracle_s_pass_from_the_oracle(scored, monkeypatch):
+    # The example world's oracle has no room, so a constant False would pass
+    # the test above; here it has room.
+    run, scores, _ = scored
+    searched = read_searched(run)
+    assert searched is not None
+    roomy = SimpleNamespace(planted=SimpleNamespace(passed=True))
+    monkeypatch.setattr(
+        scoring, "iter_searched", lambda dirs: [(run, replace(searched, oracle=roomy))]
+    )
+    monkeypatch.setattr(scoring, "read_scores", lambda run_dir, held: scores)
+    assert all(row.entries[0].oracle_passed is True for row in report_table([run]))
 
 
 def test_the_table_refuses_a_searched_world_nobody_scored(scored, tmp_path):

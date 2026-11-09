@@ -773,7 +773,7 @@ class CalibrationRow:
     two rows, each printed with its digest — never one rate over both.
 
     A search is a run that answered — spent its budget or walked its pool
-    to the end; an arm whose seam failed never searched, is counted in
+    to the end; an arm whose seam failed did not finish its search, is counted in
     ``failed`` and is not in the rate's denominator, so a dead arm cannot
     read as a clean search. Whatever a dead arm's verdict holds (a seam
     can fail after some trials were filed) is set aside with it, on

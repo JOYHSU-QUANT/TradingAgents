@@ -73,7 +73,7 @@ SHA-256）、`oracle.json` v2（blockers 改 enum）。LLM 臂（PR 5）、repla
 - [`scoring.py`](./scoring.py)：評分（計畫 §4.6）。`positions`／`direction_agreement`／`structural_distance` 是三個純函式，
   `score_world(run_dir)` 寫 `scores.json`，`report_table(run_dirs)` 是跨世界的表；定義見「評分（PR 4）」一節。
 - [`cli.py`](./cli.py)：`python -m contrib.discovery generate --manifest <path> [--root <dir>]`、`oracle --run <dir>`、
-  `search --run <dir>`、`calibrate [--root <dir>]`、`score --run <dir>`、`report [--root <dir>]`。
+  `search --run <dir>`、`calibrate [--root <dir>]`、`score --run <dir>`、`report [--root <dir>] [--unseal]`。
 
 ## 世界生成器（generator v1）
 
@@ -172,7 +172,7 @@ null 世界沒有東西可看。holdout 在任何 seed 上都不在這裡讀。
 `world_seed`（與由它衍生的 id）置空後的 manifest digest（`landing.conditions_digest`），印在每一列的方括號裡：同一組條件的
 多個 seed 合成一列，β 檔、penalty、預算、bars、seed set 任何一個不同就是另一列——同一個 root 放幾組校準都不會被合成一個比率。null 世界那行叫「false calls」（報表措辭
 照計畫 §4.1：Null-v1 定義下的誤判率）；conditional 世界那行叫「non-empty verdicts」——找到的規則是不是埋的那條是 PR 4 評分器
-的事。`seam_failed` 的臂沒有搜尋過：不進分母，另計「n seam failure(s) not counted」印在同一行（它已 file 的判定也一併
+的事。`seam_failed` 的臂沒有跑完搜尋：不進分母，另計「n seam failure(s) not counted」印在同一行（它已 file 的判定也一併
 擱置：被切短的搜尋不是預算買到的那次）。沒搜過的目錄跳過；`verdicts.json` 的 `world_id`／`pool_size`／臂集合／`manifest_digest`
 對不上旁邊 manifest（id、`len(candidates)`、`arms`、目錄的 digest）就拒絕；`oracle.json` 也一起讀：world_id／digest 要跟
 verdicts 一致、`planted` 有無要對得上世界的 kind、`pool.size` 要等於 `len(candidates)`、門檻（`budget`／`oracle_margin`／

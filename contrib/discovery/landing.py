@@ -49,7 +49,7 @@ import logging
 import os
 import shutil
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .manifest import Manifest, Shares, World
@@ -79,6 +79,7 @@ __all__ = [
     "ARTIFACT_FILENAME",
     "MANIFEST_FILENAME",
     "Landing",
+    "artifact_digest",
     "default_root",
     "discard_staging",
     "experiment_for",
@@ -124,6 +125,15 @@ def manifest_digest(manifest: Manifest) -> str:
 def conditions_digest(manifest: Manifest) -> str:
     """The same digest of ``Manifest.conditions``: one per calibration, shared by its seeds' worlds."""
     return hashlib.sha256(manifest.conditions().encode("utf-8")).hexdigest()[:_DIGEST_DIGITS]
+
+
+def artifact_digest(path: Path) -> str:
+    """The SHA-256 of the file at ``path``, as ``Manifest.artifact_sha256`` holds it."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1 << 20):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def world_dir(root: Path, manifest: Manifest) -> Path:
@@ -333,9 +343,12 @@ def land_world(root: Path, history: WorldHistory) -> tuple[Path, tuple[SeriesFet
             raise WorldError(
                 f"{staging / ARTIFACT_FILENAME} did not close cleanly: {leftover} left beside it"
             )
-        # Bytes, not text: the canonical manifest's newlines are its own,
-        # not the platform's.
-        (staging / MANIFEST_FILENAME).write_bytes(manifest.dumps().encode("utf-8"))
+        # The closed artifact's digest goes into the manifest beside it, so
+        # the two are one landing; the digest naming the directory sets the
+        # field aside. Bytes, not text: the canonical manifest's newlines
+        # are its own, not the platform's.
+        landed = replace(manifest, artifact_sha256=artifact_digest(staging / ARTIFACT_FILENAME))
+        (staging / MANIFEST_FILENAME).write_bytes(landed.dumps().encode("utf-8"))
         staging.rename(target)
     except BaseException:
         discard_staging(staging)

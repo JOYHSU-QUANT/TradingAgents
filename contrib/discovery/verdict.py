@@ -406,7 +406,7 @@ class ArmVerdict:
 
     def __post_init__(self) -> None:
         # The correlations the docstring states, checked — a verdict built by
-        # hand (plan PR 4's report) must not be able to say what this one
+        # hand must not be able to say what this one
         # cannot (the rule ``Round`` and ``Trial`` follow upstream).
         object.__setattr__(self, "ended", _read.enum(Ended, self.ended, "verdict.ended"))
         _read.whole(self.answers, "verdict.answers", minimum=0)

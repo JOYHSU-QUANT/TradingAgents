@@ -62,6 +62,7 @@ from .upstream import (
     SplitResult,
     StrategySpec,
     Verdict,
+    VocabEnum,
     evaluate_split,
     load_bundle,
     require_clean_history,
@@ -71,6 +72,7 @@ from .verdict import gate_at
 
 __all__ = [
     "ORACLE_VERSION",
+    "GateBlocker",
     "Oracle",
     "OracleError",
     "PlantedFigures",
@@ -81,8 +83,9 @@ __all__ = [
     "pool_reference",
 ]
 
-# Bumped when a key of ``oracle.json`` is added, removed or re-read.
-ORACLE_VERSION = 1
+# Bumped when a key of ``oracle.json`` is added, removed or re-read. Version
+# 2 re-reads ``planted.blockers`` as :class:`GateBlocker` names.
+ORACLE_VERSION = 2
 
 
 class OracleError(RecordError):
@@ -130,7 +133,7 @@ def evaluate_unfiled(
     """``spec`` scored on ``experiment``'s windows (the holdout only when named), filed nowhere.
 
     The full result, trades included, is returned: the scorer (plan §4.6)
-    reads the planted side's positions off it, and
+    reads each rule's positions off it, and
     ``SegmentMetrics.from_result`` gives the figures. ``frame`` is a frame
     :func:`frame_for` already read for this experiment, under at least the
     lock ``holdout`` names — a bar's features never read past it, so a
@@ -146,18 +149,30 @@ def evaluate_unfiled(
 # -- the planted rule's room over the gate -------------------------------------------------
 
 
+class GateBlocker(VocabEnum, noun="gate blocker"):
+    """The research package's gate, by what it reads: each a predicate on the validation figures.
+
+    The gate's fifth blocker, "already promoted", is structurally absent:
+    the rule is rebuilt as measured (:func:`~contrib.discovery.verdict.gate_at`).
+    """
+
+    RUINED = "ruined"
+    NO_TRADES = "no_trades"
+    NO_GAIN = "no_gain"
+    UNDER_THRESHOLD = "under_threshold"
+
+
 @dataclass(frozen=True)
 class PlantedFigures:
     """The planted rule measured as a trial at the end of the budget (the module docstring).
 
-    ``threshold`` is the gate at ``budget`` rules tried and ``blockers``
-    what the research package's whole gate said there (the sentences, as
-    ``Verdict`` holds them: trades, gain, not ruined, over the threshold —
-    empty when it passed); ``eligible``, ``margin`` (the validation net
-    Sharpe's distance over the threshold) and ``passed`` (eligible with the
-    margin at least ``oracle_margin``) are derived, written for the reader
-    and checked on the read. ``holdout`` is ``None`` until the arms have
-    searched. Each figure is held to the window it is filed under.
+    ``threshold`` is the gate at ``budget`` rules tried. ``blockers``
+    (which of the gate's predicates the validation figures fail),
+    ``eligible``, ``margin`` (the validation net Sharpe's distance over the
+    threshold) and ``passed`` (eligible with the margin at least
+    ``oracle_margin``) are derived, written for the reader and checked on
+    the read. ``holdout`` is ``None`` until the arms have searched. Each
+    figure is held to the window it is filed under.
     """
 
     train: SegmentMetrics
@@ -166,7 +181,6 @@ class PlantedFigures:
     budget: int
     threshold: float
     oracle_margin: float
-    blockers: tuple[str, ...]
 
     def __post_init__(self) -> None:
         for name, window in (
@@ -186,29 +200,25 @@ class PlantedFigures:
         _read.whole(self.budget, "planted.budget", minimum=1)
         _read.number(self.threshold, "planted.threshold")
         _read.amount(self.oracle_margin, "planted.oracle_margin")
-        blockers = tuple(
-            _read.text(sentence, f"planted.blockers[{index}]")
-            for index, sentence in enumerate(_read.sequence(self.blockers, "planted.blockers"))
-        )
-        # The gate's sentences are held to the figures beside them: every
-        # predicate the research package's gate reads (ruined, no trades, no
-        # gain, under the threshold; "already promoted" is structurally
-        # absent, the rule is rebuilt as measured) is on this record, and
-        # the gate writes one sentence per failing predicate. A record whose
-        # blockers say otherwise was not written by the gate.
+
+    @property
+    def blockers(self) -> tuple[GateBlocker, ...]:
+        """The gate's predicates the validation figures fail, in the gate's order."""
         validation = self.validation
-        failing = (
-            validation.ruined,
-            validation.trades == 0,
-            validation.net.total_return <= 0,
-            validation.net.sharpe < self.threshold,
-        )
-        if len(blockers) != sum(failing):
-            raise OracleError(
-                f"planted.blockers: {len(blockers)} blocker(s) written, but the validation "
-                f"figures fail {sum(failing)} of the gate's predicates"
+        return tuple(
+            blocker
+            for blocker, failing in (
+                (GateBlocker.RUINED, validation.ruined),
+                (GateBlocker.NO_TRADES, validation.trades == 0),
+                (GateBlocker.NO_GAIN, validation.net.total_return <= 0),
+                (GateBlocker.UNDER_THRESHOLD, validation.net.sharpe < self.threshold),
             )
-        object.__setattr__(self, "blockers", blockers)
+            if failing
+        )
+
+    @property
+    def blocker_names(self) -> list[str]:
+        return [blocker.value for blocker in self.blockers]
 
     @property
     def eligible(self) -> bool:
@@ -229,7 +239,11 @@ class PlantedFigures:
             f"{self.validation.net.sharpe:.4f} against threshold({self.budget}) = "
             f"{self.threshold:.4f}: margin {self.margin:+.4f} "
             f"(oracle_margin {self.oracle_margin:g}), "
-            + ("eligible" if self.eligible else "not eligible")
+            + (
+                "eligible"
+                if self.eligible
+                else f"not eligible ({', '.join(self.blocker_names)})"
+            )
             + f" at the end of the budget; the oracle {'has' if self.passed else 'has NO'} room"
         ]
         if self.holdout is not None and holdout:
@@ -244,7 +258,7 @@ class PlantedFigures:
             "budget": self.budget,
             "threshold": self.threshold,
             "oracle_margin": self.oracle_margin,
-            "blockers": list(self.blockers),
+            "blockers": self.blocker_names,
             "eligible": self.eligible,
             "margin": self.margin,
             "passed": self.passed,
@@ -278,19 +292,23 @@ class PlantedFigures:
                 budget=body["budget"],
                 threshold=body["threshold"],
                 oracle_margin=body["oracle_margin"],
-                blockers=body["blockers"],
             )
         except ValueError as exc:
             raise OracleError(f"planted: {exc}") from exc
         # Written for the reader of the file; checked against what they are
         # derived from, so a record edited by hand cannot say the oracle
         # passed when its figures say otherwise.
-        written = (body["eligible"], body["margin"], body["passed"])
-        derived = (figures.eligible, figures.margin, figures.passed)
+        written = (body["blockers"], body["eligible"], body["margin"], body["passed"])
+        derived = (
+            figures.blocker_names,
+            figures.eligible,
+            figures.margin,
+            figures.passed,
+        )
         if written != derived:
             raise OracleError(
-                f"planted: the record says eligible, margin, passed = {written!r}; its figures "
-                f"give {derived!r}"
+                f"planted: the record says blockers, eligible, margin, passed = {written!r}; its "
+                f"figures give {derived!r}"
             )
         return figures
 
@@ -312,15 +330,23 @@ def planted_figures(
     # budget, the most the arm's own count can reach; its threshold is the
     # one it judged by.
     gate = gate_at(experiment, planted.spec, train, validation, budget.max_trials)
-    return PlantedFigures(
+    figures = PlantedFigures(
         train=train,
         validation=validation,
         holdout=None if result.holdout is None else SegmentMetrics.from_result(result.holdout),
         budget=budget.max_trials,
         threshold=gate.threshold,
         oracle_margin=budget.oracle_margin,
-        blockers=gate.blockers,
     )
+    # The record names the predicates; the gate is still what judged. One
+    # sentence per failing predicate, so a gate that grew a predicate this
+    # list does not have is refused here rather than read as a pass.
+    if len(gate.blockers) != len(figures.blockers):
+        raise OracleError(
+            f"planted.blockers: the research package's gate says {list(gate.blockers)!r}, and "
+            f"this build reads the figures as {figures.blocker_names!r}"
+        )
+    return figures
 
 
 # -- the pool, whole ----------------------------------------------------------------------------

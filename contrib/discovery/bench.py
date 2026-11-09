@@ -9,7 +9,8 @@ is the point of this module:
    in when it landed the world, and the landed manifest is not written
    again). The manifest has to be the directory's own — the directory is
    named by its digest — and has to name no arm this build does not run.
-2. **Every arm copies the artifact** into its own store and opens its own
+2. **Every arm copies the artifact** — its SHA-256 checked against the
+   manifest's before any copy — into its own store and opens its own
    experiment from the manifest's conditions (:func:`~contrib.discovery.landing.experiment_for`):
    one coin, one sqlite per arm, the same split, costs, window and
    penalty for all (plan §1 #6; held by :class:`Verdicts`). The first copy
@@ -62,7 +63,7 @@ import logging
 import os
 import shutil
 import tempfile
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, replace
 from functools import cached_property
 from pathlib import Path
@@ -73,6 +74,7 @@ from .landing import (
     ARTIFACT_FILENAME,
     MANIFEST_FILENAME,
     Landing,
+    artifact_digest,
     conditions_digest,
     discard_staging,
     experiment_for,
@@ -96,14 +98,23 @@ __all__ = [
     "ArmResult",
     "BenchError",
     "CalibrationRow",
+    "RowKey",
+    "Searched",
     "Verdicts",
     "calibration_table",
     "experiment_id",
+    "in_row_order",
+    "iter_searched",
     "own_manifest",
     "preview_oracle",
     "read_manifest",
+    "read_record",
+    "read_searched",
     "require_artifact",
+    "row_head",
+    "row_key",
     "run_world",
+    "seam_note",
     "store_path",
 ]
 
@@ -335,6 +346,11 @@ class Verdicts:
                 )
         object.__setattr__(self, "results", results)
 
+    @property
+    def grid(self) -> ArmResult:
+        """The Grid arm's result: every run has one, and its store is what the oracle and the scorer read."""
+        return next(result for result in self.results if result.arm is Arm.GRID)
+
     def to_dict(self) -> dict[str, object]:
         return {
             "verdicts_version": VERDICTS_VERSION,
@@ -395,7 +411,7 @@ def _record_text(path: Path) -> str:
         raise BenchError(f"cannot read {path}: {exc}") from exc
 
 
-def _read_record(path: Path, loads: Callable[[str], _R]) -> _R:
+def read_record(path: Path, loads: Callable[[str], _R]) -> _R:
     """A record read from its file, every refusal — unreadable or malformed — naming the file.
 
     The records' own readers name the path inside the document, not the
@@ -458,10 +474,24 @@ def _unfinished(run_dir: Path, left: list[str]) -> str:
     )
 
 
-def require_artifact(run_dir: Path) -> None:
-    """Refuse a run directory an arm could not copy its world from."""
-    if not (run_dir / ARTIFACT_FILENAME).is_file():
+def require_artifact(run_dir: Path, manifest: Manifest) -> None:
+    """Refuse a run directory whose artifact is absent, or is not the file ``manifest`` landed.
+
+    The artifact's shape proves little: the null twin of a seed shares its
+    conditional world's coin, origin, bar count, settlement grid and even
+    its funding and wick draws, and differs by the price path alone, so
+    its ``world.sqlite`` copied into the other's directory passes ``verify``.
+    The digest the landing wrote does not.
+    """
+    path = run_dir / ARTIFACT_FILENAME
+    if not path.is_file():
         raise BenchError(f"{run_dir} holds no {ARTIFACT_FILENAME}; generate the world first")
+    held = artifact_digest(path)
+    if held != manifest.artifact_sha256:
+        raise BenchError(
+            f"{path} is not the artifact this directory's manifest landed: its SHA-256 is {held}, "
+            f"the manifest records {manifest.artifact_sha256}"
+        )
 
 
 def own_manifest(run_dir: Path) -> Manifest:
@@ -488,7 +518,7 @@ def own_manifest(run_dir: Path) -> Manifest:
 def landed_manifest(run_dir: Path) -> Manifest:
     """The manifest a measuring verb runs under: the directory's own, with its artifact beside it."""
     manifest = own_manifest(run_dir)
-    require_artifact(run_dir)
+    require_artifact(run_dir, manifest)
     return manifest
 
 
@@ -578,7 +608,7 @@ def run_world(
             + (" and the kept staging" if kept else "")
             + " by hand to search it again"
         )
-    require_artifact(run_dir)
+    require_artifact(run_dir, manifest)
     if manifest.arms.llm is not None:
         # The manifest is the run's specification, and a world is searched
         # once: a search that left out an arm the manifest names would be a
@@ -661,10 +691,10 @@ def run_world(
             manifest_digest=digest,
             results=tuple(results),
         )
-        # The oracle last (plan §4.4): read on the Grid arm's store — the
-        # last result's — after every arm has searched and chosen. The
-        # oracle path files nothing, so the store is the arm's record still.
-        grid = results[-1].snapshot.experiment
+        # The oracle last (plan §4.4): read on the Grid arm's store after
+        # every arm has searched and chosen. The oracle path files nothing,
+        # so the store is the arm's record still.
+        grid = verdicts.grid.snapshot.experiment
         with ResearchStore(store_path(staging, Arm.GRID, 0)) as store:
             ledger = Ledger(store)
             # One frame for both readers: a bar's features never read past
@@ -743,7 +773,7 @@ class CalibrationRow:
     two rows, each printed with its digest — never one rate over both.
 
     A search is a run that answered — spent its budget or walked its pool
-    to the end; an arm whose seam failed never searched, is counted in
+    to the end; an arm whose seam failed did not finish its search, is counted in
     ``failed`` and is not in the rate's denominator, so a dead arm cannot
     read as a clean search. Whatever a dead arm's verdict holds (a seam
     can fail after some trials were filed) is set aside with it, on
@@ -782,152 +812,188 @@ class CalibrationRow:
     def describe(self) -> str:
         what = "false calls" if self.kind is WorldKind.NULL_V1 else "non-empty verdicts"
         rate = "n/a" if self.rate is None else f"{self.rate:.1%}"
-        line = (
-            f"{self.kind.value} ({self.null_definition_version}) {self.seed_set.value} "
-            f"[{self.conditions}] {self.arm.value}: "
-            f"{self.found} {what} in {self.searches} search(es) = {rate}"
+        head = row_head(
+            (self.kind, self.null_definition_version, self.seed_set, self.conditions, self.arm)
         )
-        if self.failed:
-            line += f"; {self.failed} seam failure(s) not counted"
-        return line
+        return (
+            f"{head}{self.found} {what} in {self.searches} search(es) = {rate}"
+            f"{seam_note(self.failed)}"
+        )
+
+
+@dataclass(frozen=True)
+class Searched:
+    """A searched run directory read and held together: its manifest and the two records."""
+
+    manifest: Manifest
+    verdicts: Verdicts
+    oracle: Oracle
+
+
+def read_searched(run_dir: Path) -> Searched | None:
+    """``run_dir``'s manifest and records, each held to the others; ``None`` if nothing searched it.
+
+    A directory holding none of what a search leaves (``arms/``,
+    ``verdicts.json``, ``oracle.json``) is a world not yet searched; one
+    holding some of it but not both records is a search in progress or one
+    that did not finish, refused by name rather than dropped without a
+    word. A record that cannot be read, or that is not its manifest's —
+    another world, pool, arm set, digest, set of conditions, budget, or
+    rule outside the pool — is refused by name. Every reader of the
+    records comes through here.
+    """
+    left = _search_left(run_dir)
+    if not left:
+        return None
+    if VERDICTS_FILENAME not in left or ORACLE_FILENAME not in left:
+        # ``arms/`` alone is also what a search in progress leaves (the
+        # claim is made first, the records moved in last), so the
+        # sentence says so and prescribes nothing while one may be running.
+        raise BenchError(_unfinished(run_dir, left))
+    manifest = own_manifest(run_dir)
+    if manifest.arms.llm is not None:
+        # The same refusal ``search`` makes: a tally under a manifest that
+        # names an arm this build never ran would be a calibration that
+        # silently lacks it.
+        raise BenchError(
+            f"{run_dir / MANIFEST_FILENAME} names a model arm (arms.llm), which this build "
+            f"does not run or tally"
+        )
+    verdicts = read_record(run_dir / VERDICTS_FILENAME, Verdicts.loads)
+    if verdicts.world_id != manifest.world.id:
+        raise BenchError(
+            f"{run_dir / VERDICTS_FILENAME} is for {verdicts.world_id}, the manifest beside "
+            f"it for {manifest.world.id}"
+        )
+    pool_size = len(manifest.search_space.candidates)
+    if verdicts.pool_size != pool_size:
+        raise BenchError(
+            f"{run_dir / VERDICTS_FILENAME} drew from a pool of {verdicts.pool_size}, the "
+            f"manifest beside it writes one of {pool_size}"
+        )
+    # The arms the manifest names, no fewer and no others: a search
+    # that left one out is refused before it runs (``run_world``), so a
+    # record missing one was not written by this build's search.
+    expected = {(Arm.RANDOM, seed) for seed in manifest.arms.random.search_seeds}
+    expected.add((Arm.GRID, 0))
+    held = {(result.arm, result.replicate) for result in verdicts.results}
+    if held != expected:
+        raise BenchError(
+            f"{run_dir / VERDICTS_FILENAME} holds the arms "
+            f"{sorted(experiment_id(a, r) for a, r in held)}, the manifest beside it names "
+            f"{sorted(experiment_id(a, r) for a, r in expected)}"
+        )
+    # And the manifest itself: the null twin of a seed shares the id and
+    # the pool, and differs by the digest alone.
+    if verdicts.manifest_digest != manifest_digest(manifest):
+        raise BenchError(
+            f"{run_dir / VERDICTS_FILENAME} was written under manifest "
+            f"{verdicts.manifest_digest}, the manifest beside it is {manifest_digest(manifest)}"
+        )
+    _hold_to_manifest(run_dir / VERDICTS_FILENAME, verdicts, manifest)
+    # The oracle's record is written with the verdicts and read with
+    # them, and both say which world and which manifest they were read
+    # under.
+    oracle = read_record(run_dir / ORACLE_FILENAME, Oracle.loads)
+    if (oracle.world_id, oracle.manifest_digest) != (
+        verdicts.world_id,
+        verdicts.manifest_digest,
+    ):
+        raise BenchError(
+            f"{run_dir / ORACLE_FILENAME} is for {oracle.world_id} under manifest "
+            f"{oracle.manifest_digest}; {VERDICTS_FILENAME} beside it is for "
+            f"{verdicts.world_id} under {verdicts.manifest_digest}"
+        )
+    # And it describes this world: a planted figure exactly when the
+    # world plants something, and the pool the manifest writes.
+    if (oracle.planted is None) != (manifest.world.planted is None):
+        raise BenchError(
+            f"{run_dir / ORACLE_FILENAME} "
+            + ("has no planted figure" if oracle.planted is None else "has a planted figure")
+            + f" for a {manifest.world.kind.value} world"
+        )
+    if oracle.pool.size != pool_size:
+        raise BenchError(
+            f"{run_dir / ORACLE_FILENAME} scores a pool of {oracle.pool.size}, the manifest "
+            f"beside it writes one of {pool_size}"
+        )
+    _hold_oracle_to_manifest(run_dir / ORACLE_FILENAME, oracle, manifest)
+    return Searched(manifest=manifest, verdicts=verdicts, oracle=oracle)
+
+
+def iter_searched(run_dirs: Iterable[Path]) -> Iterator[tuple[Path, Searched]]:
+    """Every searched directory of ``run_dirs`` with its records, each world once.
+
+    A directory the walk meets twice (a link to it in the root, a backup
+    alias say) is yielded the first time only; one no search has touched
+    is skipped; one :func:`read_searched` refuses ends the walk.
+    """
+    seen: set[Path] = set()
+    for run_dir in run_dirs:
+        real = run_dir.resolve()
+        if real in seen:
+            continue
+        seen.add(real)
+        searched = read_searched(run_dir)
+        if searched is not None:
+            yield run_dir, searched
+
+
+RowKey = tuple[WorldKind, str, SeedSet, str, Arm]
+
+
+def row_key(manifest: Manifest, arm: Arm) -> RowKey:
+    """What one row of a table over worlds tallies: one rate is never taken over two of these."""
+    world = manifest.world
+    return (
+        world.kind,
+        manifest.null_definition_version,
+        world.seed_set,
+        conditions_digest(manifest),
+        arm,
+    )
+
+
+def row_head(key: RowKey) -> str:
+    """What a table's row opens with, so ``calibrate`` and ``report`` label one key alike."""
+    kind, version, seed_set, conditions, arm = key
+    return f"{kind.value} ({version}) {seed_set.value} [{conditions}] {arm.value}: "
+
+
+def seam_note(failed: int) -> str:
+    """What a table's row closes with when arms' seams failed; they are not in its denominator."""
+    return f"; {failed} seam failure(s) not counted" if failed else ""
+
+
+def in_row_order(keys: Iterable[RowKey]) -> list[RowKey]:
+    """The keys as a table prints them: kind, seed set and arm in their enums' order, the texts in text order."""
+    kinds = {kind: index for index, kind in enumerate(WorldKind)}
+    seed_sets = {seed_set: index for index, seed_set in enumerate(SeedSet)}
+    arms = {arm: index for index, arm in enumerate(Arm)}
+    return sorted(
+        keys, key=lambda key: (kinds[key[0]], key[1], seed_sets[key[2]], key[3], arms[key[4]])
+    )
 
 
 def calibration_table(run_dirs: Iterable[Path]) -> list[CalibrationRow]:
     """Every searched run directory's verdicts, tallied per row key (the module docstring).
 
-    A directory holding none of what a search leaves (``arms/``,
-    ``verdicts.json``, ``oracle.json``) is a world not yet searched and is
-    skipped; one holding some of it but not both records is a search in
-    progress or one that did not finish, refused by name rather than
-    dropped from the table without a word. A record that cannot be read,
-    or that is not its manifest's — another world, pool, arm set, digest,
-    set of conditions, budget, or rule outside the pool — is refused by
-    name. A directory the walk meets twice (a link to it in the root) is
-    counted once. Rows are keyed by kind, null definition, seed set,
-    conditions and arm, and come in that order: the kind, seed set and arm
-    in their enums' order, the null definition and the conditions digest in
-    text order.
+    What is read and refused is :func:`read_searched`'s, over the worlds
+    :func:`iter_searched` walks. Rows are keyed by kind, null definition,
+    seed set, conditions and arm, and come in that order: the kind, seed
+    set and arm in their enums' order, the null definition and the
+    conditions digest in text order.
     """
-    tally: dict[tuple[WorldKind, str, SeedSet, str, Arm], list[int]] = {}
-    seen: set[Path] = set()
-    for run_dir in run_dirs:
-        # One world once: a link in the root to a run directory (a backup
-        # alias, say) would otherwise be tallied a second time.
-        real = run_dir.resolve()
-        if real in seen:
-            continue
-        seen.add(real)
-        left = _search_left(run_dir)
-        if not left:
-            continue
-        if VERDICTS_FILENAME not in left or ORACLE_FILENAME not in left:
-            # ``arms/`` alone is also what a search in progress leaves (the
-            # claim is made first, the records moved in last), so the
-            # sentence says so and prescribes nothing while one may be running.
-            raise BenchError(_unfinished(run_dir, left))
-        manifest = own_manifest(run_dir)
-        if manifest.arms.llm is not None:
-            # The same refusal ``search`` makes: a tally under a manifest that
-            # names an arm this build never ran would be a calibration that
-            # silently lacks it.
-            raise BenchError(
-                f"{run_dir / MANIFEST_FILENAME} names a model arm (arms.llm), which this build "
-                f"does not run or tally"
-            )
-        verdicts = _read_record(run_dir / VERDICTS_FILENAME, Verdicts.loads)
-        if verdicts.world_id != manifest.world.id:
-            raise BenchError(
-                f"{run_dir / VERDICTS_FILENAME} is for {verdicts.world_id}, the manifest beside "
-                f"it for {manifest.world.id}"
-            )
-        pool_size = len(manifest.search_space.candidates)
-        if verdicts.pool_size != pool_size:
-            raise BenchError(
-                f"{run_dir / VERDICTS_FILENAME} drew from a pool of {verdicts.pool_size}, the "
-                f"manifest beside it writes one of {pool_size}"
-            )
-        # The arms the manifest names, no fewer and no others: a search
-        # that left one out is refused before it runs (``run_world``), so a
-        # record missing one was not written by this build's search.
-        expected = {(Arm.RANDOM, seed) for seed in manifest.arms.random.search_seeds}
-        expected.add((Arm.GRID, 0))
-        held = {(result.arm, result.replicate) for result in verdicts.results}
-        if held != expected:
-            raise BenchError(
-                f"{run_dir / VERDICTS_FILENAME} holds the arms "
-                f"{sorted(experiment_id(a, r) for a, r in held)}, the manifest beside it names "
-                f"{sorted(experiment_id(a, r) for a, r in expected)}"
-            )
-        # And the manifest itself: the null twin of a seed shares the id and
-        # the pool, and differs by the digest alone.
-        if verdicts.manifest_digest != manifest_digest(manifest):
-            raise BenchError(
-                f"{run_dir / VERDICTS_FILENAME} was written under manifest "
-                f"{verdicts.manifest_digest}, the manifest beside it is {manifest_digest(manifest)}"
-            )
-        _hold_to_manifest(run_dir / VERDICTS_FILENAME, verdicts, manifest)
-        # The oracle's record is written with the verdicts and read with
-        # them, and both say which world and which manifest they were read
-        # under.
-        oracle = _read_record(run_dir / ORACLE_FILENAME, Oracle.loads)
-        if (oracle.world_id, oracle.manifest_digest) != (
-            verdicts.world_id,
-            verdicts.manifest_digest,
-        ):
-            raise BenchError(
-                f"{run_dir / ORACLE_FILENAME} is for {oracle.world_id} under manifest "
-                f"{oracle.manifest_digest}; {VERDICTS_FILENAME} beside it is for "
-                f"{verdicts.world_id} under {verdicts.manifest_digest}"
-            )
-        # And it describes this world: a planted figure exactly when the
-        # world plants something, and the pool the manifest writes.
-        if (oracle.planted is None) != (manifest.world.planted is None):
-            raise BenchError(
-                f"{run_dir / ORACLE_FILENAME} "
-                + ("has no planted figure" if oracle.planted is None else "has a planted figure")
-                + f" for a {manifest.world.kind.value} world"
-            )
-        if oracle.pool.size != pool_size:
-            raise BenchError(
-                f"{run_dir / ORACLE_FILENAME} scores a pool of {oracle.pool.size}, the manifest "
-                f"beside it writes one of {pool_size}"
-            )
-        _hold_oracle_to_manifest(run_dir / ORACLE_FILENAME, oracle, manifest)
-        conditions = conditions_digest(manifest)
-        for result in verdicts.results:
-            key = (
-                manifest.world.kind,
-                manifest.null_definition_version,
-                manifest.world.seed_set,
-                conditions,
-                result.arm,
-            )
-            counts = tally.setdefault(key, [0, 0, 0])
+    tally: dict[RowKey, list[int]] = {}
+    for _run_dir, searched in iter_searched(run_dirs):
+        for result in searched.verdicts.results:
+            counts = tally.setdefault(row_key(searched.manifest, result.arm), [0, 0, 0])
             if result.snapshot.ended is Ended.SEAM_FAILED:
                 counts[2] += 1
             else:
                 counts[0] += 1
                 counts[1] += result.verdict.found
-    kinds = {kind: index for index, kind in enumerate(WorldKind)}
-    seed_sets = {seed_set: index for index, seed_set in enumerate(SeedSet)}
-    arms = {arm: index for index, arm in enumerate(Arm)}
-    ordered = sorted(
-        tally,
-        key=lambda key: (kinds[key[0]], key[1], seed_sets[key[2]], key[3], arms[key[4]]),
-    )
-    return [
-        CalibrationRow(
-            kind=kind,
-            null_definition_version=version,
-            seed_set=seed_set,
-            conditions=conditions,
-            arm=arm,
-            searches=tally[kind, version, seed_set, conditions, arm][0],
-            found=tally[kind, version, seed_set, conditions, arm][1],
-            failed=tally[kind, version, seed_set, conditions, arm][2],
-        )
-        for kind, version, seed_set, conditions, arm in ordered
-    ]
+    return [CalibrationRow(*key, *tally[key]) for key in in_row_order(tally)]
 
 
 def _hold_to_manifest(path: Path, verdicts: Verdicts, manifest: Manifest) -> None:

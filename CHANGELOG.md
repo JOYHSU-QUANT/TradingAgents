@@ -10,6 +10,37 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **Discovery Lab PR 4: the scorer, and whether the rule an arm chose is
+  the rule that was planted.** `python -m contrib.discovery score --run
+  DIR` reads a searched world's records and writes `scores.json`: on the
+  holdout, each selected rule's direction agreement with the planted
+  rule, bar by bar over the bars at least one of the two holds a position
+  (the main reading; undefined when neither held anything), its
+  structural distance from the planted rule (reported, never judged on),
+  and its holdout net Sharpe beside the planted rule's. A rule is
+  recovered at agreement of at least `scoring.recovery.theta_behavior`
+  with a positive holdout Sharpe on an unruined run when the manifest
+  requires one; an arm
+  that selected nothing and an undefined agreement stay in the
+  denominator, and on a null world a selection is a false call. Positions
+  are expanded from the holdout's trades, an ordinary exit's bar not held
+  and a window-end flatten's or a ruin's bar held. The holdout is re-read
+  only to get the trades, and has to reproduce the figures already on
+  record or the score is refused; re-scoring writes the same bytes.
+  `report --root DIR` puts every scored world in one table per arm and
+  set of conditions (recovery, false calls, the oracle's pass rate and
+  the recovery where it had room, with the failures in the denominator),
+  and on development seeds the recoveries at a range of thresholds, to
+  choose `theta_behavior` from. It opens no store, and on a test seed
+  keeps everything read from the holdout sealed unless given `--unseal`.
+  The manifest is
+  version 3: `generate` writes the landed `world.sqlite`'s SHA-256 into
+  it, and every verb that copies the artifact checks it first, since a
+  null twin's artifact copied into the conditional world's directory
+  passes every check of its shape. `oracle.json` is version 2: the gate's
+  blockers are named predicates derived from the validation figures
+  rather than sentences. A hand-built `Candidate` is held to the rule the
+  grids are read under: a label only on a categorical feature.
 - **Discovery Lab PR 3: the Random and Grid arms, the final verdicts on
   disk, the oracle's room over the gate, and three commands.** A landed
   world (PR 2) can now be searched: `python -m contrib.discovery search

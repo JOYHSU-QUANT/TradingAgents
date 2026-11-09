@@ -1,14 +1,14 @@
 """The strict readers the package's JSON records share: one spelling, parameterised by the refusal.
 
 The manifest (:mod:`.manifest`), the verdict snapshot (:mod:`.verdict`),
-``verdicts.json`` (:mod:`.bench`) and ``oracle.json`` (:mod:`.oracle`) are
-frozen values written as JSON and read back EXACTLY — every key present
+``verdicts.json`` (:mod:`.bench`), ``oracle.json`` (:mod:`.oracle`) and
+``scores.json`` (:mod:`.scoring`) are frozen values written as JSON and read back EXACTLY — every key present
 and no other, every value checked, a refusal naming the path inside the
 document. The research package's own records read theirs the same way,
-each with a private copy of these helpers; this package has four records
-and will have more (plan PR 4's scores), so the helpers live here once,
-and each record module instantiates a :class:`Reader` with its own error
-class — the three records' errors sharing :class:`RecordError`.
+each with a private copy of these helpers; this package has five records,
+so the helpers live here once, and each record module instantiates a
+:class:`Reader` with its own error class — every record's error but the
+manifest's sharing :class:`RecordError`.
 
 The division of labour is the upstream pattern (``Penalty.from_dict``,
 ``CostModel.from_dict``): a record's ``from_dict`` reads the KEY SET and

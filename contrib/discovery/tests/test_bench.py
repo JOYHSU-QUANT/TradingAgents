@@ -22,7 +22,7 @@ from contrib.autoresearch.dsl import parse_spec
 from contrib.autoresearch.ledger import Ledger, TrialStatus
 from contrib.autoresearch.ports import HypothesistError
 from contrib.autoresearch.store import ResearchStore
-from contrib.discovery import bench
+from contrib.discovery import bench, oracle as oracle_module
 from contrib.discovery.bench import (
     ARMS_DIRNAME,
     ORACLE_FILENAME,
@@ -48,7 +48,7 @@ from contrib.discovery.landing import (
     world_dir,
 )
 from contrib.discovery.manifest import ManifestError, SeedSet, WorldKind
-from contrib.discovery.oracle import Oracle, OracleError
+from contrib.discovery.oracle import GateBlocker, Oracle, OracleError, planted_figures
 from contrib.discovery.verdict import Ended, VerdictError, final_verdict
 
 from .conftest import COIN, FLAT, bench_manifest, example_manifest, land_run
@@ -322,7 +322,7 @@ def test_a_run_directory_without_the_manifest_or_the_artifact_is_not_a_run(tmp_p
     (run / MANIFEST_FILENAME).write_bytes(manifest.dumps().encode("utf-8"))
     assert read_manifest(run) == manifest
     with pytest.raises(BenchError, match=f"holds no {ARTIFACT_FILENAME}"):
-        require_artifact(run)
+        require_artifact(run, manifest)
     with pytest.raises(BenchError, match=f"holds no {ARTIFACT_FILENAME}"):
         run_world(run)
     assert _listing(run) == [MANIFEST_FILENAME]
@@ -405,7 +405,7 @@ def test_the_oracle_record_refuses_derived_values_that_are_not_its_figures(searc
     ):
         tampered = oracle.to_dict()
         tampered["planted"][key] = value
-        with pytest.raises(OracleError, match="planted: the record says eligible, margin, passed"):
+        with pytest.raises(OracleError, match="planted: the record says blockers, eligible, margin, passed"):
             Oracle.from_dict(tampered)
     # A figure filed under another window is refused by its own name.
     swapped = oracle.to_dict()
@@ -431,8 +431,8 @@ def test_the_oracle_record_refuses_derived_values_that_are_not_its_figures(searc
     with pytest.raises(OracleError, match="pool: the record says size 15"):
         Oracle.from_dict(tampered)
     # Another build's record is refused by its version, before its keys.
-    with pytest.raises(OracleError, match="oracle_version: this build reads version 1, got 2"):
-        Oracle.from_dict({**document, "oracle_version": 2, "later": 1})
+    with pytest.raises(OracleError, match="oracle_version: this build reads version 2, got 3"):
+        Oracle.from_dict({**document, "oracle_version": 3, "later": 1})
 
 
 def test_a_holdout_figure_for_another_window_is_refused(searched):
@@ -588,19 +588,60 @@ def test_the_oracle_s_blockers_are_held_to_its_figures(searched):
     _run, _verdicts, oracle, *_ = searched
     assert oracle.planted is not None
     document = oracle.to_dict()
-    # One sentence per failing predicate: fewer, more, or none at all when
-    # a predicate fails, is a record the gate did not write.
-    failing = len(oracle.planted.blockers)
-    for blockers in (["made up"] * (failing + 1), [] if failing else ["made up"]):
+    # By name, in the gate's order: a list naming other predicates than the
+    # figures fail is refused even at the same length, and so is one with
+    # the two fields that follow from it edited to match.
+    held = list(document["planted"]["blockers"])
+    other = next(b.value for b in GateBlocker if b.value not in held)
+    for blockers in ([other, *held[1:]], [*held, other], ["made up"]):
         tampered = oracle.to_dict()
         tampered["planted"]["blockers"] = blockers
         tampered["planted"]["eligible"] = not blockers
         tampered["planted"]["passed"] = (not blockers) and tampered["planted"][
             "margin"
         ] >= tampered["planted"]["oracle_margin"]
-        with pytest.raises(OracleError, match="planted.blockers: .* of the gate's predicates"):
+        with pytest.raises(OracleError, match="the record says blockers"):
             Oracle.from_dict(tampered)
     assert Oracle.from_dict(document) == oracle
+    if held:
+        assert f"not eligible ({', '.join(held)})" in oracle.planted.describe()[0]
+
+
+def test_a_gate_with_a_predicate_this_build_does_not_read_is_refused(searched, monkeypatch):
+    run, verdicts, oracle, *_ = searched
+    manifest = read_manifest(run)
+    assert manifest.world.planted is not None and oracle.planted is not None
+    grid = verdicts.results[-1].snapshot.experiment
+    real = oracle_module.gate_at
+
+    def grown(*args, **kwargs):
+        gate = real(*args, **kwargs)
+        return replace(gate, blockers=(*gate.blockers, "a predicate added upstream"))
+
+    monkeypatch.setattr(oracle_module, "gate_at", grown)
+    with (
+        ResearchStore(store_path(run, Arm.GRID, 0)) as store,
+        pytest.raises(OracleError, match="the research package's gate says"),
+    ):
+        planted_figures(Ledger(store), grid, manifest.world.planted, manifest.budget, holdout=False)
+
+
+def test_a_landed_manifest_that_records_no_digest_is_refused(fresh_run):
+    unfilled = replace(read_manifest(fresh_run), artifact_sha256=None)
+    with pytest.raises(BenchError, match="the manifest records None"):
+        require_artifact(fresh_run, unfilled)
+
+
+def test_an_artifact_that_is_not_the_one_landed_is_refused_before_it_is_copied(fresh_run):
+    # One byte is what the digest sees of the null twin's ``world.sqlite``
+    # copied here, which every check of the artifact's shape would pass.
+    with (fresh_run / ARTIFACT_FILENAME).open("ab") as handle:
+        handle.write(b"\0")
+    with pytest.raises(BenchError, match="is not the artifact this directory's manifest landed"):
+        preview_oracle(fresh_run)
+    with pytest.raises(BenchError, match="is not the artifact this directory's manifest landed"):
+        run_world(fresh_run)
+    assert not (fresh_run / ARMS_DIRNAME).exists()
 
 
 def test_the_calibration_holds_the_oracle_record_and_refuses_a_model_arm(searched, tmp_path):

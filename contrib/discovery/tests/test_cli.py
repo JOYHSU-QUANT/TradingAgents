@@ -18,11 +18,13 @@ from contrib.discovery.cli import main
 from contrib.discovery.landing import (
     ARTIFACT_FILENAME,
     MANIFEST_FILENAME,
+    artifact_digest,
     conditions_digest,
     world_dir,
 )
 from contrib.discovery.manifest import ManifestError, WorldKind
 from contrib.discovery.oracle import OracleError
+from contrib.discovery.scoring import SCORES_FILENAME, ScoreError
 from contrib.discovery.verdict import VerdictError
 from contrib.discovery.worlds import WorldError
 
@@ -48,10 +50,15 @@ def test_generate_lands_the_world_and_its_null_twin_beside_it_and_refuses_a_repe
     argv = ["generate", "--manifest", str(_manifest_file(tmp_path)), "--root", str(root)]
     assert main(argv) == 0
     target = world_dir(root, manifest)
-    # Landed with the pool's size filled in: the one field the digest sets
-    # aside, so the directory is still the unfilled manifest's.
+    # Landed with the pool's size and the artifact's digest filled in: the
+    # two fields the directory's digest sets aside, so it is still the
+    # unfilled manifest's.
     space = manifest.search_space
-    filled = replace(manifest, search_space=replace(space, pool_size=16))
+    filled = replace(
+        manifest,
+        search_space=replace(space, pool_size=16),
+        artifact_sha256=artifact_digest(target / ARTIFACT_FILENAME),
+    )
     assert (target / MANIFEST_FILENAME).read_bytes() == filled.dumps().encode("utf-8")
     assert (target / ARTIFACT_FILENAME).is_file()
     out = capsys.readouterr().out
@@ -92,7 +99,7 @@ def test_a_manifest_that_cannot_be_read_is_a_named_refusal(tmp_path, capsys):
     assert "cannot read the manifest" in capsys.readouterr().err
     other = tmp_path / "other.json"
     other.write_text(
-        example_manifest().dumps().replace('"manifest_version": 2', '"manifest_version": 3'),
+        example_manifest().dumps().replace('"manifest_version": 3', '"manifest_version": 4'),
         encoding="utf-8",
     )
     assert main(["generate", "--manifest", str(other), "--root", root]) == 1
@@ -286,3 +293,71 @@ def test_a_ledger_refusal_inside_a_search_is_not_dressed_as_one(tmp_path, monkey
     monkeypatch.setattr(cli, "run_world", defect)
     with pytest.raises(LedgerError):
         main(["search", "--run", str(tmp_path)])
+
+
+# -- score / report (PR 4) ------------------------------------------------------------------------
+
+
+def test_score_prints_what_the_scorer_reports_and_names_the_record(tmp_path, capsys, monkeypatch):
+    def fake(run_dir, *, on_line):
+        on_line("grid-0: trial #3: recovered")
+
+    monkeypatch.setattr(cli, "score_world", fake)
+    assert main(["score", "--run", str(tmp_path)]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "grid-0: trial #3: recovered",
+        f"scores: {tmp_path / SCORES_FILENAME}",
+    ]
+
+
+def test_report_prints_the_rows_and_says_when_nothing_is_searched(tmp_path, capsys, monkeypatch):
+    class Row:
+        unsealed = []
+
+        def describe(self, *, unseal):
+            self.unsealed.append(unseal)
+            return ["headline", "  diagnostics"]
+
+    (tmp_path / "world").mkdir()
+    (tmp_path / "a-file").write_text("not a run", encoding="utf-8")
+    seen = {}
+
+    def fake_table(run_dirs):
+        seen["dirs"] = run_dirs
+        return [Row()]
+
+    monkeypatch.setattr(cli, "report_table", fake_table)
+    assert main(["report", "--root", str(tmp_path)]) == 0
+    assert seen["dirs"] == [tmp_path / "world"]
+    assert capsys.readouterr().out.splitlines() == ["headline", "  diagnostics"]
+    assert main(["report", "--root", str(tmp_path), "--unseal"]) == 0
+    capsys.readouterr()
+    assert Row.unsealed == [False, True]
+    monkeypatch.setattr(cli, "report_table", lambda run_dirs: [])
+    assert main(["report", "--root", str(tmp_path)]) == 0
+    assert capsys.readouterr().out == f"no searched world under {tmp_path}\n"
+    assert main(["report", "--root", str(tmp_path / "missing")]) == 1
+    assert "is not a directory" in capsys.readouterr().err
+
+
+def test_generate_refuses_a_scorer_this_build_does_not_have_before_landing_anything(
+    tmp_path, capsys
+):
+    # A world is searched once; one this build cannot score would spend it.
+    path = tmp_path / "other-scorer.json"
+    text = _landable(example_manifest()).dumps()
+    assert text.count('"version": "1"') == 1
+    path.write_text(text.replace('"version": "1"', '"version": "2"'), encoding="utf-8")
+    root = tmp_path / "bench"
+    assert main(["generate", "--manifest", str(path), "--root", str(root)]) == 1
+    assert "this build scores by version 1" in capsys.readouterr().err
+    assert not root.exists()
+
+
+def test_a_score_refusal_exits_1_with_its_sentence(tmp_path, capsys, monkeypatch):
+    def refuse(run_dir, *, on_line):
+        raise ScoreError("this world was not searched")
+
+    monkeypatch.setattr(cli, "score_world", refuse)
+    assert main(["score", "--run", str(tmp_path)]) == 1
+    assert "error: this world was not searched" in capsys.readouterr().err

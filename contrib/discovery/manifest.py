@@ -666,8 +666,9 @@ class Candidate:
             raise ManifestError(f"candidate.spec: expected a StrategySpec, got {self.spec!r}")
         # The thresholds are provenance of the spec, held to it: a pool
         # candidate is one entry clause on one side and one gate under
-        # ``filters`` (``_candidate_document``), and the two numbers are
-        # those clauses' right-hand sides.
+        # ``filters`` (``_candidate_document``), and the two thresholds
+        # (numbers, or a label on a categorical feature) are those clauses'
+        # right-hand sides.
         entries = self.spec.entry_long or self.spec.entry_short
         if (
             len(entries) != 1
@@ -1088,7 +1089,8 @@ class Scoring:
 class Manifest:
     """One world, one run: every parameter of plan §5, versioned.
 
-    ``artifact_sha256`` is the one field no author writes: ``generate``
+    ``artifact_sha256``, like ``search_space.pool_size``, is a field no
+    author writes (:meth:`identity` sets the two aside): ``generate``
     fills it with the digest of the ``world.sqlite`` it landed, so a
     landed manifest says which bytes it describes. The null twin of a seed
     differs from its conditional world by the price path alone, and its

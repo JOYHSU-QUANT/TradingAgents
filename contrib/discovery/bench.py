@@ -9,7 +9,8 @@ is the point of this module:
    in when it landed the world, and the landed manifest is not written
    again). The manifest has to be the directory's own — the directory is
    named by its digest — and has to name no arm this build does not run.
-2. **Every arm copies the artifact** into its own store and opens its own
+2. **Every arm copies the artifact** — its SHA-256 checked against the
+   manifest's before any copy — into its own store and opens its own
    experiment from the manifest's conditions (:func:`~contrib.discovery.landing.experiment_for`):
    one coin, one sqlite per arm, the same split, costs, window and
    penalty for all (plan §1 #6; held by :class:`Verdicts`). The first copy
@@ -104,7 +105,6 @@ __all__ = [
     "experiment_id",
     "in_row_order",
     "iter_searched",
-    "seam_note",
     "own_manifest",
     "preview_oracle",
     "read_manifest",
@@ -114,6 +114,7 @@ __all__ = [
     "row_head",
     "row_key",
     "run_world",
+    "seam_note",
     "store_path",
 ]
 

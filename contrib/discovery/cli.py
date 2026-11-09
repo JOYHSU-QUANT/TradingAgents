@@ -7,8 +7,8 @@ Six so far, in the order a world goes through them (plan §3):
   digest>/world.sqlite`` through the research package's own backfill,
   check the landed history the way an experiment would (plan PR 2's
   acceptance list), and write the canonical ``manifest.json`` beside it
-  with ``search_space.pool_size`` filled in — the one field the run
-  directory's digest sets aside (:mod:`.landing` owns the layout and the
+  with ``search_space.pool_size`` and ``artifact_sha256`` filled in — the
+  two fields the run directory's digest sets aside (:mod:`.landing` owns the layout and the
   staged landing). The artifact and the manifest are read-only from then
   on: an arm copies the artifact (plan §2), the manifest is never written
   again, and a second ``generate`` of a manifest already landed is
@@ -37,7 +37,8 @@ Six so far, in the order a world goes through them (plan §3):
 - ``report --root DIR`` — every searched and scored world under the root
   in one table per arm and set of conditions: recovery, false calls, the
   oracle's pass rate and the recovery where it had room, the diagnostics
-  (plan §3's last step). Reads no store.
+  (plan §3's last step). Reads no store. A test seed's rows keep everything
+  read from the holdout sealed unless ``--unseal`` is given (plan §4.2).
 
 What the commands print is for the operator: the world's kind and rule
 are in the manifest, which a model never sees (plan §1 #7). Nothing
@@ -142,6 +143,11 @@ def _build_parser() -> argparse.ArgumentParser:
     report_cmd.add_argument(
         "--root", default=None, help=f"the bench root to walk (default: {shown_root})"
     )
+    report_cmd.add_argument(
+        "--unseal",
+        action="store_true",
+        help="print a test seed's recovery and holdout figures, which are sealed by default",
+    )
     return parser
 
 
@@ -150,7 +156,8 @@ def _cmd_generate(args: argparse.Namespace) -> int:
     # anything is written, so a manifest the language or the generator
     # refuses leaves nothing behind. The pool's size is filled in here, so
     # the landed manifest records it and is never rewritten after (the run
-    # directory's name sets the field aside, so it names the same place).
+    # directory's name sets it and the artifact's digest aside, so it names
+    # the same place).
     manifest = Manifest.read(Path(args.manifest))
     # A world is searched once: one this build could not score would spend
     # that search and only then be refused.
@@ -233,7 +240,7 @@ def _cmd_report(args: argparse.Namespace) -> int:
         print(f"no searched world under {root}")
         return 0
     for row in rows:
-        for line in row.describe():
+        for line in row.describe(unseal=args.unseal):
             print(line)
     return 0
 

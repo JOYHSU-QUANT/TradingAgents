@@ -31,7 +31,9 @@ Breaking changes within the 0.x line are called out explicitly.
   set of conditions (recovery, false calls, the oracle's pass rate and
   the recovery where it had room, with the failures in the denominator),
   and on development seeds the recoveries at a range of thresholds, to
-  choose `theta_behavior` from. It opens no store. The manifest is
+  choose `theta_behavior` from. It opens no store, and on a test seed
+  keeps everything read from the holdout sealed unless given `--unseal`.
+  The manifest is
   version 3: `generate` writes the landed `world.sqlite`'s SHA-256 into
   it, and every verb that copies the artifact checks it first, since a
   null twin's artifact copied into the conditional world's directory

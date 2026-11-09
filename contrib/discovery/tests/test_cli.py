@@ -312,7 +312,10 @@ def test_score_prints_what_the_scorer_reports_and_names_the_record(tmp_path, cap
 
 def test_report_prints_the_rows_and_says_when_nothing_is_searched(tmp_path, capsys, monkeypatch):
     class Row:
-        def describe(self):
+        unsealed = []
+
+        def describe(self, *, unseal):
+            self.unsealed.append(unseal)
             return ["headline", "  diagnostics"]
 
     (tmp_path / "world").mkdir()
@@ -327,6 +330,9 @@ def test_report_prints_the_rows_and_says_when_nothing_is_searched(tmp_path, caps
     assert main(["report", "--root", str(tmp_path)]) == 0
     assert seen["dirs"] == [tmp_path / "world"]
     assert capsys.readouterr().out.splitlines() == ["headline", "  diagnostics"]
+    assert main(["report", "--root", str(tmp_path), "--unseal"]) == 0
+    capsys.readouterr()
+    assert Row.unsealed == [False, True]
     monkeypatch.setattr(cli, "report_table", lambda run_dirs: [])
     assert main(["report", "--root", str(tmp_path)]) == 0
     assert capsys.readouterr().out == f"no searched world under {tmp_path}\n"

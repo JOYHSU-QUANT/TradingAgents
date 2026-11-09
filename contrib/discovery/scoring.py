@@ -19,10 +19,11 @@ are reported apart and never blended (plan §4.6):
 A selected rule counts as RECOVERED at direction agreement of at least
 ``scoring.recovery.theta_behavior`` and, when the manifest requires it, a
 positive holdout net Sharpe on a holdout it did not ruin (no ratio of a
-ruined run is read, which is the research package's own rule). An arm that selected nothing and an agreement
-that is undefined (neither rule held anything in the holdout) are not
-recoveries and stay in the denominator; an arm whose seam failed never
-searched, and is counted apart, as the calibration counts it.
+ruined run is read, which is the research package's own rule). An arm
+that selected nothing and an agreement that is undefined (neither rule
+held anything in the holdout) are not recoveries and stay in the
+denominator; an arm whose seam failed did not finish its search, and is
+counted apart, as the calibration counts it.
 
 **Positions are expanded from the holdout's trades** (:func:`positions`),
 not from the research package's ``replay_sides``: that reports the side
@@ -48,8 +49,8 @@ report reads the records and the scores and no store, so a world's stores
 may be pruned once it is scored. On a test seed ``score``'s console keeps
 off everything read from the holdout — the Sharpe, the direction agreement
 and whether the rule was recovered (plan §4.2) — as ``search``'s keeps its
-figures off; the report is where a test seed set is read, once, when the
-benchmark is frozen.
+figures off. The report seals the same figures on a test seed unless told
+to ``--unseal`` them, which is the one deliberate reading of a test set.
 """
 
 from __future__ import annotations
@@ -267,7 +268,7 @@ def structural_distance(selected: StrategySpec, planted: StrategySpec) -> float:
     """0 for the same entry conditions, 1 for nothing in common (the module docstring).
 
     Averaged over the sides either rule enters; a side only one of them
-    enters contributes nothing to the similarity.
+    enters counts as similarity 0 in the average.
     """
     sides = [side for side in Side if selected.entries(side) or planted.entries(side)]
     similarity = fmean(_side_similarity(selected, planted, side) for side in sides)
@@ -309,6 +310,8 @@ class ArmScore:
     def __post_init__(self) -> None:
         object.__setattr__(self, "arm", _read.enum(Arm, self.arm, "score.arm"))
         _read.whole(self.replicate, "score.replicate", minimum=0)
+        if self.arm is Arm.GRID and self.replicate != 0:
+            raise ScoreError(f"{self.experiment_id}: the grid arm is one deterministic search")
         object.__setattr__(self, "ended", _read.enum(Ended, self.ended, "score.ended"))
         if self.selected is not None:
             _read.whole(self.selected, "score.selected", minimum=0)
@@ -348,6 +351,15 @@ class ArmScore:
                 raise ScoreError(
                     f"{self.experiment_id}: agreement {self.agreement!r} over "
                     f"{self.bars_compared} bar(s); it is undefined exactly when no bar is compared"
+                )
+            if (
+                self.agreement is not None
+                and round(self.agreement * self.bars_compared) / self.bars_compared
+                != self.agreement
+            ):
+                raise ScoreError(
+                    f"{self.experiment_id}: agreement {self.agreement!r} is not a whole count of "
+                    f"{self.bars_compared} bar(s)"
                 )
 
     @property
@@ -471,8 +483,10 @@ class Scores:
     """``scores.json``: every arm of one world, scored under the manifest's recovery rule.
 
     ``planted_holdout_sharpe`` is the planted rule's own holdout figure,
-    for the reader to set each selected rule's beside; it and ``recovery``
-    are ``None`` together, on a null world. ``manifest_digest`` binds the
+    for the reader to set each selected rule's beside, and
+    ``planted_holdout_ruined`` says whether that ratio may be read at all;
+    the figure and ``recovery`` are ``None`` together, on a null world.
+    ``manifest_digest`` binds the
     record to its conditions, as the other two records' does.
     """
 
@@ -480,6 +494,7 @@ class Scores:
     manifest_digest: str
     scoring_version: str
     planted_holdout_sharpe: float | None
+    planted_holdout_ruined: bool
     recovery: Recovery | None
     results: tuple[ArmScore, ...]
 
@@ -496,6 +511,9 @@ class Scores:
                 "planted_holdout_sharpe and recovery are both present on a world that plants a "
                 "rule and both null on one that does not"
             )
+        _read.flag(self.planted_holdout_ruined, "planted_holdout_ruined")
+        if self.planted_holdout_ruined and self.planted_holdout_sharpe is None:
+            raise ScoreError("planted_holdout_ruined: nothing was planted to be ruined")
         results = tuple(_read.sequence(self.results, "results"))
         if not results or any(not isinstance(result, ArmScore) for result in results):
             raise ScoreError("results: at least one ArmScore")
@@ -506,10 +524,18 @@ class Scores:
             raise ScoreError("results: every arm is scored under the world's one recovery rule")
         object.__setattr__(self, "results", results)
 
+    @property
+    def readable_planted(self) -> float | None:
+        """The planted rule's holdout net Sharpe, unless its run was ruined."""
+        return None if self.planted_holdout_ruined else self.planted_holdout_sharpe
+
     def describe(self, *, holdout: bool = True) -> list[str]:
         """The world's scores as lines; ``holdout`` False keeps every holdout figure off the console."""
         lines = (
-            [f"planted rule: holdout net sharpe {self.planted_holdout_sharpe:.4f}"]
+            [
+                f"planted rule: holdout net sharpe {self.planted_holdout_sharpe:.4f}"
+                + (" (ruined)" if self.planted_holdout_ruined else "")
+            ]
             if holdout and self.planted_holdout_sharpe is not None
             else []
         )
@@ -522,6 +548,7 @@ class Scores:
             "manifest_digest": self.manifest_digest,
             "scoring_version": self.scoring_version,
             "planted_holdout_sharpe": self.planted_holdout_sharpe,
+            "planted_holdout_ruined": self.planted_holdout_ruined,
             "recovery": None if self.recovery is None else self.recovery.to_dict(),
             "results": [result.to_dict() for result in self.results],
         }
@@ -537,6 +564,7 @@ class Scores:
                 "manifest_digest",
                 "scoring_version",
                 "planted_holdout_sharpe",
+                "planted_holdout_ruined",
                 "recovery",
                 "results",
             ),
@@ -551,6 +579,7 @@ class Scores:
             manifest_digest=body["manifest_digest"],
             scoring_version=body["scoring_version"],
             planted_holdout_sharpe=body["planted_holdout_sharpe"],
+            planted_holdout_ruined=body["planted_holdout_ruined"],
             recovery=recovery,
             results=tuple(
                 ArmScore.from_dict(item, recovery)
@@ -616,12 +645,17 @@ def _no_reader(spec: StrategySpec) -> HoldoutRead:
     )
 
 
-def _world_rule(searched: Searched) -> tuple[Recovery | None, float | None]:
-    """The world's recovery rule and the planted rule's holdout net Sharpe; both ``None`` on a null world."""
+def _world_rule(searched: Searched) -> tuple[Recovery | None, SegmentMetrics | None]:
+    """The world's recovery rule and the planted rule's holdout figure; both ``None`` on a null world."""
     figures = searched.oracle.planted
     if searched.manifest.world.planted is None or figures is None or figures.holdout is None:
         return None, None
-    return searched.manifest.scoring.recovery, figures.holdout.net.sharpe
+    return searched.manifest.scoring.recovery, figures.holdout
+
+
+def _planted_pair(figure: SegmentMetrics | None) -> tuple[float | None, bool]:
+    """The two fields of ``Scores`` the planted rule's holdout figure gives."""
+    return (None, False) if figure is None else (figure.net.sharpe, figure.ruined)
 
 
 def _selected_spec(result: ArmResult) -> StrategySpec | None:
@@ -667,9 +701,9 @@ def score_records(
     Each read has to reproduce the figure already on record for that rule
     (the module docstring).
     """
-    manifest, verdicts, oracle = searched.manifest, searched.verdicts, searched.oracle
-    recovery, planted_sharpe = _world_rule(searched)
-    planted_figure = None if oracle.planted is None else oracle.planted.holdout
+    manifest, verdicts = searched.manifest, searched.verdicts
+    recovery, planted_figure = _world_rule(searched)
+    planted_sharpe, planted_ruined = _planted_pair(planted_figure)
     rule = _rule_to_compare(searched)
     baseline: HoldoutRead | None = None
     if rule is not None:
@@ -700,6 +734,7 @@ def score_records(
         manifest_digest=verdicts.manifest_digest,
         scoring_version=manifest.scoring.version,
         planted_holdout_sharpe=planted_sharpe,
+        planted_holdout_ruined=planted_ruined,
         recovery=recovery,
         results=tuple(results),
     )
@@ -758,11 +793,12 @@ def read_scores(run_dir: Path, searched: Searched) -> Scores:
             f"records beside it are for {verdicts.world_id} under {verdicts.manifest_digest}"
         )
     require_this_scorer(manifest)
-    recovery, planted_sharpe = _world_rule(searched)
+    recovery, planted_figure = _world_rule(searched)
     if (
         scores.scoring_version != manifest.scoring.version
         or scores.recovery != recovery
-        or scores.planted_holdout_sharpe != planted_sharpe
+        or (scores.planted_holdout_sharpe, scores.planted_holdout_ruined)
+        != _planted_pair(planted_figure)
     ):
         raise ScoreError(
             f"{path}: its scoring version, recovery rule or planted holdout figure is not the one "
@@ -773,8 +809,9 @@ def read_scores(run_dir: Path, searched: Searched) -> Scores:
         raise ScoreError(f"{path} does not score the arms {sorted(by_arm, key=str)}")
     for score in scores.results:
         result = by_arm[(score.arm, score.replicate)]
-        # Everything but the agreement is a function of the records; the
-        # agreement needs a store, which the table does not open.
+        # Everything but the agreement and the bars it was taken over is a
+        # function of the records; those two need a store, which the table
+        # does not open.
         if score != _arm_score(
             result, searched, agreement=score.agreement, bars=score.bars_compared
         ):
@@ -782,6 +819,13 @@ def read_scores(run_dir: Path, searched: Searched) -> Scores:
                 f"{path}: {score.experiment_id} is not scored as {VERDICTS_FILENAME} records it"
             )
     return scores
+
+
+_SEALED: Final = "the figures read from the holdout are sealed on a test seed; --unseal prints them"
+
+
+def _left_out(ruined: int) -> str:
+    return f" ({ruined} ruined run(s) left out)" if ruined else ""
 
 
 def _ratio(count: int, of: int) -> str:
@@ -794,12 +838,38 @@ def _mean(values: Sequence[float]) -> str:
 
 @dataclass(frozen=True)
 class ReportEntry:
-    """One finished search on one world, as the table reads it."""
+    """One finished search on one world, as the table reads it; a failed seam is not one.
 
+    ``readable_planted`` is ``Scores.readable_planted``: ``None`` on a null
+    world and where the planted rule's own holdout run was ruined.
+    """
+
+    world_id: str
     score: ArmScore
     first_eligible_round: int | None
     oracle_passed: bool
-    planted_holdout_sharpe: float | None
+    readable_planted: float | None
+
+    def __post_init__(self) -> None:
+        _read.text(self.world_id, "entry.world_id")
+        if not isinstance(self.score, ArmScore):
+            raise ScoreError("entry.score: expected an ArmScore")
+        if self.score.ended is Ended.SEAM_FAILED:
+            raise ScoreError(
+                f"{self.score.experiment_id}: an arm whose seam failed is counted apart, not "
+                f"entered"
+            )
+        if self.first_eligible_round is not None:
+            _read.whole(self.first_eligible_round, "entry.first_eligible_round", minimum=1)
+        _read.flag(self.oracle_passed, "entry.oracle_passed")
+        if self.readable_planted is not None:
+            _read.number(self.readable_planted, "entry.readable_planted")
+        if self.score.recovery is None and (
+            self.oracle_passed or self.readable_planted is not None
+        ):
+            raise ScoreError(
+                "entry: a null world plants nothing, so it has no oracle pass or planted figure"
+            )
 
 
 @dataclass(frozen=True)
@@ -807,12 +877,20 @@ class ReportRow:
     """One arm on one set of conditions across a root: the plan §3 table, row by row.
 
     Keyed as the calibration's rows are, so one rate is never taken over
-    two sets of conditions. ``failed`` counts arms whose seam failed, set
-    apart as the calibration sets them apart. A search that selected
-    nothing, and an agreement that is undefined, stay in the denominator
-    (plan §4.6); a selected rule that ruined the holdout stays there too and
-    is left out of the Sharpe means, named beside them. The oracle's pass is the world's, counted once per search
-    so its denominator is the row's.
+    two sets of conditions. The headline counts SEARCHES, as the
+    calibration does (every world of a row has the same replicates), and
+    says over how many worlds; the oracle's pass is a world's and is counted
+    per world, and where a world has several replicates a line says how
+    they agreed, which is what tells a hard world from an unlucky search
+    (plan §4.2). ``failed`` counts arms whose seam failed, set apart as the
+    calibration sets them apart. A search that selected nothing, and an
+    agreement that is undefined, stay in the denominator (plan §4.6); so
+    does a run that was ruined, whose ratio is not read: the holdout means
+    are over the pairs where neither side was ruined.
+
+    On a test seed everything read from the holdout is SEALED unless asked
+    for (:meth:`describe`), so reading the test set is a deliberate act
+    (plan §4.2) and not a side effect of looking at a half-scored root.
     """
 
     kind: WorldKind
@@ -823,9 +901,42 @@ class ReportRow:
     entries: tuple[ReportEntry, ...]
     failed: int
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "kind", _read.enum(WorldKind, self.kind, "row.kind"))
+        _read.text(self.null_definition_version, "row.null_definition_version")
+        object.__setattr__(self, "seed_set", _read.enum(SeedSet, self.seed_set, "row.seed_set"))
+        _read.digest(self.conditions, "row.conditions")
+        object.__setattr__(self, "arm", _read.enum(Arm, self.arm, "row.arm"))
+        _read.whole(self.failed, "row.failed", minimum=0)
+        entries = tuple(_read.sequence(self.entries, "row.entries"))
+        if any(not isinstance(entry, ReportEntry) for entry in entries):
+            raise ScoreError("row.entries: expected ReportEntries")
+        if not entries and not self.failed:
+            raise ScoreError("row: a row tallies at least one result")
+        strangers = [e.score.experiment_id for e in entries if e.score.arm is not self.arm]
+        if strangers:
+            raise ScoreError(f"row: {strangers} are not of this row's arm, {self.arm.value}")
+        if entries and (self.kind is WorldKind.NULL_V1) != all(
+            entry.score.recovery is None for entry in entries
+        ):
+            raise ScoreError(
+                f"row.kind: a {self.kind.value} row holds scores of the other kind of world"
+            )
+        object.__setattr__(self, "entries", entries)
+
     @property
     def searches(self) -> int:
         return len(self.entries)
+
+    def _by_world(self) -> dict[str, list[ReportEntry]]:
+        grouped: dict[str, list[ReportEntry]] = {}
+        for entry in self.entries:
+            grouped.setdefault(entry.world_id, []).append(entry)
+        return grouped
+
+    @property
+    def worlds(self) -> int:
+        return len(self._by_world())
 
     @property
     def found(self) -> int:
@@ -836,7 +947,12 @@ class ReportRow:
         return sum(entry.score.recovered is True for entry in self.entries)
 
     @property
-    def oracle_passed(self) -> int:
+    def oracle_worlds(self) -> int:
+        """The worlds the oracle had room on: a fact about the world, counted once."""
+        return sum(group[0].oracle_passed for group in self._by_world().values())
+
+    @property
+    def searches_with_room(self) -> int:
         return sum(entry.oracle_passed for entry in self.entries)
 
     @property
@@ -849,42 +965,71 @@ class ReportRow:
         ]
         return "n/a" if not rounds else f"{median(rounds):g}"
 
-    def describe(self) -> list[str]:
-        """The row as lines: the headline rate first, then the diagnostics."""
+    def _replicate_spread(self, hit: Callable[[ArmScore], bool], what: str) -> list[str]:
+        """How each world's replicates agreed; no line where every world has one."""
+        if self.searches == self.worlds:
+            return []
+        hits = [[hit(entry.score) for entry in group] for group in self._by_world().values()]
+        every = sum(all(world) for world in hits)
+        none = sum(not any(world) for world in hits)
+        return [
+            f"  worlds by replicates {what}: all {every}, some {len(hits) - every - none}, "
+            f"none {none}"
+        ]
+
+    def describe(self, *, unseal: bool = False) -> list[str]:
+        """The row as lines: the headline first, then the diagnostics; see the class docstring on sealing."""
         head = row_head(
             (self.kind, self.null_definition_version, self.seed_set, self.conditions, self.arm)
         )
         tail = seam_note(self.failed)
-        chosen = [
-            e.score.readable_holdout for e in self.entries if e.score.readable_holdout is not None
-        ]
-        ruined = sum(e.score.holdout_ruined for e in self.entries)
-        unread = f" ({ruined} ruined, not averaged)" if ruined else ""
+        over = f"{self.searches} search(es) over {self.worlds} world(s)"
+        first = f"first eligible round median {self._first_eligible()} (a diagnostic)"
+        sealed = self.seed_set is SeedSet.TEST and not unseal
         if self.kind is WorldKind.NULL_V1:
+            calls = [
+                e.score.readable_holdout
+                for e in self.entries
+                if e.score.readable_holdout is not None
+            ]
+            figure = (
+                _SEALED
+                if sealed
+                else f"holdout net sharpe of the false calls, mean {_mean(calls)}"
+                f"{_left_out(self.found - len(calls))}"
+            )
             return [
-                f"{head}false calls {_ratio(self.found, self.searches)}{tail}",
-                f"  first eligible round median {self._first_eligible()} (a diagnostic); holdout "
-                f"net sharpe of the false calls, mean {_mean(chosen)}{unread}",
+                f"{head}false calls {_ratio(self.found, self.searches)} ({over}){tail}",
+                *self._replicate_spread(lambda s: s.found, "with a false call"),
+                f"  {first}; {figure}",
+            ]
+        room = f"the oracle had room on {_ratio(self.oracle_worlds, self.worlds)} of the worlds"
+        if sealed:
+            return [
+                f"{head}{over}; {room}; a rule selected in "
+                f"{_ratio(self.found, self.searches)}{tail}",
+                f"  {first}; {_SEALED}",
             ]
         scores = [entry.score for entry in self.entries]
         agreements = [s.agreement for s in scores if s.agreement is not None]
         distances = [s.structural_distance for s in scores if s.structural_distance is not None]
-        planted = [
-            e.planted_holdout_sharpe
+        pairs = [
+            (e.score.readable_holdout, e.readable_planted)
             for e in self.entries
-            if e.score.readable_holdout is not None and e.planted_holdout_sharpe is not None
+            if e.score.readable_holdout is not None and e.readable_planted is not None
         ]
         lines = [
-            f"{head}recovered {_ratio(self.recovered, self.searches)}; the oracle had room on "
-            f"{_ratio(self.oracle_passed, self.searches)}; recovered where it had room "
-            f"{_ratio(self.recovered_with_room, self.oracle_passed)}{tail}",
+            f"{head}recovered {_ratio(self.recovered, self.searches)} ({over}); {room}; recovered "
+            f"where it had room {_ratio(self.recovered_with_room, self.searches_with_room)}{tail}",
+            *self._replicate_spread(lambda s: s.recovered is True, "recovered"),
             f"  nothing selected {self.searches - self.found}, agreement undefined "
             f"{sum(s.undefined for s in scores)}; direction agreement median "
             f"{'n/a' if not agreements else f'{median(agreements):.4f}'}, structural distance "
             f"mean {_mean(distances)}",
-            f"  holdout net sharpe: selected mean {_mean(chosen)}{unread}, the planted rule on those "
-            f"worlds mean {_mean(planted)}; first eligible round median {self._first_eligible()} "
-            f"(a diagnostic)",
+            f"  holdout net sharpe over {len(pairs)} pair(s): selected mean "
+            f"{_mean([ours for ours, _ in pairs])}, the planted rule mean "
+            f"{_mean([theirs for _, theirs in pairs])}{_left_out(self.found - len(pairs))}; "
+            f"{first}",
         ]
         if self.seed_set is SeedSet.DEV:
             at_theta = ", ".join(
@@ -915,12 +1060,13 @@ def report_table(run_dirs: Iterable[Path]) -> list[ReportRow]:
                 continue
             entries.append(
                 ReportEntry(
+                    world_id=scores.world_id,
                     score=score,
                     first_eligible_round=by_arm[
                         (score.arm, score.replicate)
                     ].verdict.first_eligible_round,
                     oracle_passed=oracle.planted is not None and oracle.planted.passed,
-                    planted_holdout_sharpe=scores.planted_holdout_sharpe,
+                    readable_planted=scores.readable_planted,
                 )
             )
     return [

@@ -133,7 +133,7 @@ def evaluate_unfiled(
     """``spec`` scored on ``experiment``'s windows (the holdout only when named), filed nowhere.
 
     The full result, trades included, is returned: the scorer (plan §4.6)
-    reads the planted side's positions off it, and
+    reads each rule's positions off it, and
     ``SegmentMetrics.from_result`` gives the figures. ``frame`` is a frame
     :func:`frame_for` already read for this experiment, under at least the
     lock ``holdout`` names — a bar's features never read past it, so a

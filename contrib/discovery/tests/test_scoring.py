@@ -266,7 +266,7 @@ NOTHING = {
 
 def test_a_rule_at_or_over_theta_with_a_profitable_holdout_is_recovered():
     assert _score(agreement=0.8).recovered is True
-    assert _score(agreement=0.79).recovered is False
+    assert _score(agreement=0.775).recovered is False  # 31 of the 40 bars
 
 
 def test_a_holdout_that_is_not_positive_is_not_a_recovery_when_the_manifest_requires_one():
@@ -345,6 +345,8 @@ def test_a_score_describes_itself_and_keeps_the_holdout_figure_off_when_asked():
         ({"bars_compared": -1}, "score.bars_compared"),
         ({"holdout_sharpe": float("nan")}, "score.holdout_sharpe"),
         ({"holdout_ruined": 1}, "score.holdout_ruined"),
+        ({"agreement": 0.83, "bars_compared": 7}, "not a whole count of 7"),
+        ({"replicate": 3}, "the grid arm is one deterministic search"),
         ({**NOTHING, "holdout_ruined": True}, "nothing was selected to be ruined"),
     ],
 )
@@ -362,6 +364,7 @@ def _scores(**changes) -> Scores:
         "manifest_digest": "0badf00d",
         "scoring_version": "1",
         "planted_holdout_sharpe": 2.0,
+        "planted_holdout_ruined": False,
         "recovery": RECOVERY,
         "results": (_score(),),
     }
@@ -395,6 +398,19 @@ def test_the_record_refuses_another_version_and_unknown_keys():
         ({"results": ()}, "at least one ArmScore"),
         ({"results": (_score(), _score())}, "each arm and replicate once"),
         ({"manifest_digest": "x"}, "manifest_digest"),
+        (
+            {
+                "planted_holdout_sharpe": None,
+                "recovery": None,
+                "planted_holdout_ruined": True,
+                "results": (
+                    _score(
+                        structural_distance=None, agreement=None, bars_compared=0, recovery=None
+                    ),
+                ),
+            },
+            "nothing was planted to be ruined",
+        ),
         (
             {"results": (_score(recovery=Recovery(theta_behavior=0.5)),)},
             "one recovery rule",
@@ -606,12 +622,13 @@ def test_a_conditional_world_where_nothing_was_selected_needs_no_store(scored):
 # -- the table ----------------------------------------------------------------------------------
 
 
-def _entry(score: ArmScore, *, first=None, passed=True, planted=2.0) -> ReportEntry:
+def _entry(score: ArmScore, *, first=None, passed=True, planted=2.0, world="A") -> ReportEntry:
     return ReportEntry(
+        world_id=world,
         score=score,
         first_eligible_round=first,
         oracle_passed=passed,
-        planted_holdout_sharpe=planted,
+        readable_planted=planted,
     )
 
 
@@ -630,41 +647,90 @@ def _row(*entries, **changes) -> ReportRow:
 
 def test_a_conditional_row_keeps_every_failure_in_the_denominator():
     row = _row(
-        _entry(_score(agreement=0.9, holdout_sharpe=1.0), first=3),
-        _entry(_score(agreement=0.5, holdout_sharpe=0.5, structural_distance=0.75), first=5),
-        _entry(_score(**NOTHING), passed=False),
-        _entry(_score(agreement=None, bars_compared=0, holdout_sharpe=0.5), first=1, passed=False),
+        _entry(_score(agreement=0.9, holdout_sharpe=1.0), first=3, world="A"),
+        _entry(
+            _score(agreement=0.5, holdout_sharpe=0.5, structural_distance=0.75), first=5, world="B"
+        ),
+        _entry(_score(**NOTHING), passed=False, world="C"),
+        _entry(
+            _score(agreement=None, bars_compared=0, holdout_sharpe=0.5),
+            first=1,
+            passed=False,
+            world="D",
+        ),
     )
-    assert (row.searches, row.found, row.recovered, row.oracle_passed, row.recovered_with_room) == (
-        4,
-        3,
-        1,
-        2,
-        1,
-    )
+    assert (
+        row.searches,
+        row.worlds,
+        row.found,
+        row.recovered,
+        row.oracle_worlds,
+        row.recovered_with_room,
+    ) == (4, 4, 3, 1, 2, 1)
     assert row.describe() == [
-        "conditional-v1 (v1) dev [0badf00d] grid: recovered 1/4 = 25.0%; the oracle had room on "
-        "2/4 = 50.0%; recovered where it had room 1/2 = 50.0%",
+        "conditional-v1 (v1) dev [0badf00d] grid: recovered 1/4 = 25.0% (4 search(es) over 4 "
+        "world(s)); the oracle had room on 2/4 = 50.0% of the worlds; recovered where it had room "
+        "1/2 = 50.0%",
         "  nothing selected 1, agreement undefined 1; direction agreement median 0.7000, "
         "structural distance mean 0.4167",
-        "  holdout net sharpe: selected mean 0.6667, the planted rule on those worlds mean "
-        "2.0000; first eligible round median 3 (a diagnostic)",
+        "  holdout net sharpe over 3 pair(s): selected mean 0.6667, the planted rule mean 2.0000; "
+        "first eligible round median 3 (a diagnostic)",
         "  recovered at theta (development seeds): 0.5: 2, 0.6: 1, 0.7: 1, 0.8: 1, 0.9: 1",
     ]
 
 
-def test_a_ruined_holdout_stays_in_the_denominator_and_out_of_the_means():
-    row = _row(_entry(_score(holdout_ruined=True)), _entry(_score(holdout_sharpe=1.0)))
-    assert (row.searches, row.found, row.recovered) == (2, 2, 1)
+def test_the_replicates_of_a_world_are_told_apart_from_the_worlds():
+    def search(world, replicate, agreement):
+        score = _score(arm=Arm.RANDOM, replicate=replicate, agreement=agreement)
+        return _entry(score, world=world, passed=world != "C")
+
+    row = _row(
+        search("A", 0, 0.9),
+        search("A", 1, 0.9),
+        search("B", 0, 0.9),
+        search("B", 1, 0.5),
+        search("C", 0, 0.5),
+        search("C", 1, 0.5),
+        arm=Arm.RANDOM,
+    )
+    assert (row.searches, row.worlds, row.recovered) == (6, 3, 3)
+    lines = row.describe()
+    # The oracle's pass is per world; the recovery where it had room per search.
+    assert lines[0] == (
+        "conditional-v1 (v1) dev [0badf00d] random: recovered 3/6 = 50.0% (6 search(es) over 3 "
+        "world(s)); the oracle had room on 2/3 = 66.7% of the worlds; recovered where it had room "
+        "3/4 = 75.0%"
+    )
+    assert lines[1] == "  worlds by replicates recovered: all 1, some 1, none 1"
+
+
+def test_a_ruined_run_on_either_side_leaves_the_pair_and_stays_in_the_denominator():
+    row = _row(
+        _entry(_score(holdout_ruined=True), world="A"),
+        _entry(_score(holdout_sharpe=1.0), world="B"),
+        _entry(_score(holdout_sharpe=3.0), world="C", planted=None),  # its planted run was ruined
+    )
+    assert (row.searches, row.found, row.recovered) == (3, 3, 2)
     assert row.describe()[2].startswith(
-        "  holdout net sharpe: selected mean 1.0000 (1 ruined, not averaged), the planted rule on "
-        "those worlds mean 2.0000"
+        "  holdout net sharpe over 1 pair(s): selected mean 1.0000, the planted rule mean 2.0000 "
+        "(2 ruined run(s) left out)"
     )
 
 
-def test_a_test_seed_row_does_not_print_the_theta_sensitivity():
-    lines = _row(_entry(_score()), seed_set=SeedSet.TEST).describe()
-    assert len(lines) == 3 and not any("theta" in line for line in lines)
+SEALED = "the figures read from the holdout are sealed on a test seed; --unseal prints them"
+
+
+def test_a_test_seed_row_is_sealed_unless_it_is_asked_for():
+    row = _row(_entry(_score(), first=2), seed_set=SeedSet.TEST)
+    assert row.describe() == [
+        "conditional-v1 (v1) test [0badf00d] grid: 1 search(es) over 1 world(s); the oracle had "
+        "room on 1/1 = 100.0% of the worlds; a rule selected in 1/1 = 100.0%",
+        f"  first eligible round median 2 (a diagnostic); {SEALED}",
+    ]
+    opened = row.describe(unseal=True)
+    assert opened[0].startswith("conditional-v1 (v1) test [0badf00d] grid: recovered 1/1")
+    # Unsealed is still a test seed: nothing here is for choosing theta.
+    assert len(opened) == 3 and not any("theta" in line for line in opened)
 
 
 def test_a_null_row_reads_false_calls_and_a_failed_seam_is_counted_apart():
@@ -677,24 +743,83 @@ def test_a_null_row_reads_false_calls_and_a_failed_seam_is_counted_apart():
         recovery=None,
     )
     row = _row(
-        _entry(call, first=2, passed=False, planted=None),
-        _entry(clean, passed=False, planted=None),
+        _entry(call, first=2, passed=False, planted=None, world="A"),
+        _entry(clean, passed=False, planted=None, world="B"),
         kind=WorldKind.NULL_V1,
         failed=1,
     )
     assert row.describe() == [
-        "null-v1 (v1) dev [0badf00d] grid: false calls 1/2 = 50.0%; 1 seam failure(s) not counted",
+        "null-v1 (v1) dev [0badf00d] grid: false calls 1/2 = 50.0% (2 search(es) over 2 world(s)); "
+        "1 seam failure(s) not counted",
         "  first eligible round median 2 (a diagnostic); holdout net sharpe of the false calls, "
         "mean -0.5000",
     ]
+    # A false call is read off validation; its holdout figure is what a test seed seals.
+    sealed = replace(row, seed_set=SeedSet.TEST).describe()
+    assert sealed[0].startswith("null-v1 (v1) test [0badf00d] grid: false calls 1/2")
+    assert sealed[1] == f"  first eligible round median 2 (a diagnostic); {SEALED}"
+
+
+def test_a_null_row_tells_the_replicates_apart_too():
+    def search(world, replicate, call):
+        fields = {"arm": Arm.RANDOM, "replicate": replicate, "recovery": None}
+        if call:
+            fields |= {"structural_distance": None, "agreement": None, "bars_compared": 0}
+        else:
+            fields |= NOTHING
+        return _entry(_score(**fields), passed=False, planted=None, world=world)
+
+    row = _row(
+        search("A", 0, True),
+        search("A", 1, False),
+        search("B", 0, False),
+        search("B", 1, False),
+        kind=WorldKind.NULL_V1,
+        arm=Arm.RANDOM,
+    )
+    assert row.describe()[1] == "  worlds by replicates with a false call: all 0, some 1, none 1"
 
 
 def test_a_row_with_no_finished_search_says_so_rather_than_dividing():
     row = _row(failed=2)
     assert row.describe()[0] == (
-        "conditional-v1 (v1) dev [0badf00d] grid: recovered 0/0 = n/a; the oracle had room on "
-        "0/0 = n/a; recovered where it had room 0/0 = n/a; 2 seam failure(s) not counted"
+        "conditional-v1 (v1) dev [0badf00d] grid: recovered 0/0 = n/a (0 search(es) over 0 "
+        "world(s)); the oracle had room on 0/0 = n/a of the worlds; recovered where it had room "
+        "0/0 = n/a; 2 seam failure(s) not counted"
     )
+
+
+NULL_CALL = {"structural_distance": None, "agreement": None, "bars_compared": 0, "recovery": None}
+
+
+@pytest.mark.parametrize(
+    ("build", "fragment"),
+    [
+        (lambda: _entry(_score(ended=Ended.SEAM_FAILED)), "counted apart, not entered"),
+        (
+            lambda: _entry(_score(**NULL_CALL), passed=True, planted=None),
+            "a null world plants nothing",
+        ),
+        (lambda: _entry(_score(), first=0), "entry.first_eligible_round"),
+        (
+            lambda: _entry(_score(**NULL_CALL), passed=False, planted=2.0),
+            "a null world plants nothing",
+        ),
+        (lambda: _entry("not a score"), "entry.score"),
+        (lambda: _entry(_score(), world=""), "entry.world_id"),
+        (lambda: _row(), "at least one result"),
+        (lambda: _row(failed=-1), "row.failed"),
+        (lambda: _row(_entry(_score()), conditions="x"), "row.conditions"),
+        (lambda: _row(_entry(_score()), kind=WorldKind.NULL_V1), "holds scores of the other kind"),
+        (
+            lambda: _row(_entry(_score(arm=Arm.RANDOM))),
+            "are not of this row's arm, grid",
+        ),
+    ],
+)
+def test_a_row_that_could_not_have_been_tallied_is_refused(build, fragment):
+    with pytest.raises(ScoreError, match=fragment):
+        build()
 
 
 def _copy(run: Path, tmp_path: Path, name: str = "copy") -> Path:
@@ -735,10 +860,11 @@ def _edit_scores(run: Path, edit) -> None:
         (lambda d: d.update(manifest_digest="00000000"), "the records beside it are for"),
         (lambda d: d.update(scoring_version="9"), "is not the one the manifest and oracle"),
         (lambda d: d.update(planted_holdout_sharpe=99.0), "is not the one the manifest and oracle"),
+        (lambda d: d.update(planted_holdout_ruined=True), "is not the one the manifest and oracle"),
         (lambda d: d["results"].pop(), "does not score the arms"),
         (lambda d: d["results"][0].update(replicate=7), "does not score the arms"),
     ],
-    ids=["world", "digest", "version", "planted", "missing-arm", "other-arm"],
+    ids=["world", "digest", "version", "planted", "planted-ruin", "missing-arm", "other-arm"],
 )
 def test_the_table_refuses_scores_that_are_not_the_records_beside_them(
     scored, tmp_path, edit, fragment

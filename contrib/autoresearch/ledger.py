@@ -1047,8 +1047,8 @@ def _penalty_moved(coin: str, pinned: Penalty, offered: Penalty) -> str:
         f"its experiments, so every experiment on it holds them to the same bar. To add to "
         f"{coin}, give the experiment its pinned values, or use a new store."
         + (
-            f" This store was pinned before the current default (sharpe_base {SHARPE_BASE:g}, "
-            f"k {PENALTY_K:g})."
+            f" The current default (sharpe_base {SHARPE_BASE:g}, k {PENALTY_K:g}) differs "
+            f"from this pin."
             if offered == Penalty()
             else ""
         )

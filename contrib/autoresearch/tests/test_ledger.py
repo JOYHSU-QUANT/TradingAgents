@@ -218,7 +218,7 @@ def test_every_experiment_on_a_coin_holds_rules_to_the_same_penalty(ledger):
 def test_a_store_pinned_before_the_default_rose_names_the_flags_that_reach_it(ledger):
     """A coin pinned at 1, 0.25 refuses the 2, 0.5 default, and says how to add to it (2026-11-10)."""
     ledger.create_experiment(_experiment("old", penalty=PLAN_PENALTY))
-    with pytest.raises(LedgerError, match=r"pinned before the current default \(sharpe_base 2, k 0.5\)"):
+    with pytest.raises(LedgerError, match=r"current default \(sharpe_base 2, k 0.5\) differs from this pin"):
         ledger.create_experiment(_experiment("new-default"))
     ledger.create_experiment(_experiment("explicit", penalty=PLAN_PENALTY))
 

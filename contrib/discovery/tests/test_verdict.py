@@ -39,6 +39,7 @@ from .conftest import (
     BUY,
     BUY_12,
     COIN,
+    FIXTURE_PENALTY,
     FLAT,
     SHORT,
     START_MS,
@@ -248,7 +249,9 @@ def test_the_rule_count_is_the_coin_s_not_the_experiment_s(arm):
     # Another experiment on the same coin filed a second rule: the ledger's
     # ``rules_tried`` counts it, and the snapshot carries that count beside
     # its own single trial (plan §1 #6).
-    experiment, _hypothesist, report = _run(arm, [_json(BUY)], penalty=Penalty(), max_trials=1)
+    experiment, _hypothesist, report = _run(
+        arm, [_json(BUY)], penalty=FIXTURE_PENALTY, max_trials=1
+    )
     other = open_arm(arm, name="other")
     measure(arm, other, parse_spec(FLAT))
     snapshot = snapshot_arm(arm, experiment, report, exhausted=False)

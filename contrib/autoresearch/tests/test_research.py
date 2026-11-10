@@ -478,7 +478,7 @@ def test_calibrate_scores_the_baselines_on_both_windows_and_files_nothing(ledger
 
 
 def test_experiment_names_the_flags_of_a_coins_pinned_penalty(history, tmp_path, capsys):
-    """A store pinned under the old default refuses the new one and names the flags (2026-11-10)."""
+    """A coin pinned under the old default refuses the new one and names the flags (2026-11-10)."""
     db = tmp_path / "autoresearch.sqlite"
     shutil.copy(history, db)
     base = ["experiment", "--indicator-lookback", str(_LOOKBACK), "--db", str(db)]
@@ -488,9 +488,27 @@ def test_experiment_names_the_flags_of_a_coins_pinned_penalty(history, tmp_path,
     for dry in ([], ["--dry-run"]):
         assert main([*base, "--name", "new", *dry]) == 1
         err = capsys.readouterr().err
-        assert "pinned before the current default" in err
-        assert "--sharpe-base 1 --penalty-k 0.25." in err
+        assert "differs from this pin" in err
+        assert "--sharpe-base 1.0 --penalty-k 0.25." in err
+    # Another refusal does not carry the flags: a reused name, at the pinned values.
+    assert main([*base, "--name", "old", *old]) == 1
+    err = capsys.readouterr().err
+    assert "already has an experiment named 'old'" in err
+    assert "--sharpe-base" not in err
     assert main([*base, "--name", "explicit", *old]) == 0
+
+
+def test_the_flags_named_for_a_pinned_penalty_reach_it_exactly(history, tmp_path, capsys):
+    """Printed with ``repr``: ``:g`` would round 1.2345678 to a value the pin refuses."""
+    db = tmp_path / "autoresearch.sqlite"
+    shutil.copy(history, db)
+    base = ["experiment", "--indicator-lookback", str(_LOOKBACK), "--db", str(db)]
+    odd = ["--sharpe-base", "1.2345678", "--penalty-k", "0.3"]
+    assert main([*base, "--name", "odd", *odd]) == 0
+    capsys.readouterr()
+    assert main([*base, "--name", "default"]) == 1
+    assert "--sharpe-base 1.2345678 --penalty-k 0.3." in capsys.readouterr().err
+    assert main([*base, "--name", "copied", *odd]) == 0
 
 
 def test_the_commands_walk_an_experiment_from_creation_to_promotion(history, tmp_path, capsys):

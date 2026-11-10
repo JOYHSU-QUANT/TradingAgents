@@ -578,7 +578,9 @@ Hyperliquid SDK）。所以 `gaps`／`vocab`／`validate-spec` 三個指令一�
   差的只有成本項，這才是「gross 好看、net 不好看」要比的東西。
 - **交接文件的帶邊界是一個約定，不是量出來的**：`CONFIDENCE_EDGES` 與 `DRAWDOWN_EDGES`
   的值寫在 `signal.py`（這裡不抄一份，抄了就會過期），沒有對任何東西擬合過。
-  confidence 的下限刻意放在 promote 門檻**之上**：門檻是 `sharpe_base + k·ln(n)`，只會
+  confidence 的下限原本刻意放在 promote 門檻**之上**（舊預設 base 1.0；2026-11-10 預設改成 2.0
+  之後，新預設下晉升的規則只會讀成 medium／strong。帶界沒跟著改，好讓 pin 在舊值的 store 讀數
+  不變）：門檻是 `sharpe_base + k·ln(n)`，只會
   隨試過的規則數上升，所以把帶界綁在門檻上，會讓「比較晚才試出來、因此要跨過比較高的
   那根桿子」的規則讀起來反而比較有信心。代價是下限與門檻的關係取決於 `sharpe_base`——
   它是 `experiment` 的一個旗標，不是常數，調低了 `weak` 就會涵蓋到門檻以下的規則。

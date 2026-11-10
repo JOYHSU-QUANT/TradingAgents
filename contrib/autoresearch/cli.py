@@ -632,29 +632,32 @@ def _cmd_experiment(args: argparse.Namespace) -> int:
     store, ledger = _open_ledger(args)
     with store:
         pinned = ledger.holdout_pin(_coin(args))
-        penalty_pin = ledger.penalty_pin(_coin(args))
         try:
-            experiment = plan_experiment(
-                ledger,
-                experiment_id=args.name,
-                coin=_coin(args),
-                interval=args.interval,
-                costs=costs,
-                indicator_lookback=lookback,
-                penalty=penalty,
-                train_share=args.train_share,
-                validation_share=args.validation_share,
-                notes=args.notes,
-            )
-            if not args.dry_run:
-                experiment = ledger.create_experiment(experiment)
+            # Checked on its own first, so the flags go on this refusal only.
+            ledger.require_pinned_penalty(_coin(args), penalty)
         except LedgerError as exc:
-            if penalty_pin is None or penalty_pin == penalty:
+            held = ledger.penalty_pin(_coin(args))
+            if held is None:
                 raise
+            # ``repr``, not ``:g``: the flags must round-trip to the pin exactly.
             raise LedgerError(
                 f"{exc} The flags for the pinned values: --sharpe-base "
-                f"{penalty_pin.sharpe_base:g} --penalty-k {penalty_pin.k:g}."
+                f"{held.sharpe_base!r} --penalty-k {held.k!r}."
             ) from exc
+        experiment = plan_experiment(
+            ledger,
+            experiment_id=args.name,
+            coin=_coin(args),
+            interval=args.interval,
+            costs=costs,
+            indicator_lookback=lookback,
+            penalty=penalty,
+            train_share=args.train_share,
+            validation_share=args.validation_share,
+            notes=args.notes,
+        )
+        if not args.dry_run:
+            experiment = ledger.create_experiment(experiment)
         for line in experiment.describe():
             print(line)
         print(_shares(experiment))

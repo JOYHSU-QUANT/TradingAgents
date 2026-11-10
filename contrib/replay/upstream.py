@@ -57,7 +57,8 @@ What is borrowed and why:
   (``paper/fill_model``), the position and side records the fill effect
   takes, the unrealised-P&L formula, the funding cadence and the research
   ledger's promote threshold (``Penalty``), so the account is the paper
-  books' own arithmetic and the bar is the research package's own;
+  books' own arithmetic and the bar is the research package's formula (the
+  values are pinned in ``gate``);
 - for the guardrail's shadow report: the research package's guardrail rule
   and its side at every close (``load_rule``, ``build_timeline``), so the
   side a recorded decision is read against is the one that package replays.

@@ -94,11 +94,15 @@ __all__ = [
     "promotion_verdict",
 ]
 
-# Plan §3.10's starting values. Chosen by the FIRST experiment on a coin, which
-# pins them for every later one (:meth:`Ledger.penalty_pin`), and recorded there
-# when they are, because a threshold is part of what "promoted" meant.
-SHARPE_BASE: Final = 1.0
-PENALTY_K: Final = 0.25
+# Chosen by the FIRST experiment on a coin, which pins them for every later
+# one (:meth:`Ledger.penalty_pin`), and recorded there when they are, because a
+# threshold is part of what "promoted" meant.
+#
+# contrib/discovery's calibration (validation 1000 4h bars); its README has
+# the false-promote rates of these and of plan §3.10's 1.0, 0.25, which a
+# store pinned before 2026-11-10 keeps.
+SHARPE_BASE: Final = 2.0
+PENALTY_K: Final = 0.5
 
 # What an experiment may be called: it is typed on every command line that
 # reads the experiment, and printed in every report.
@@ -127,7 +131,7 @@ class Penalty:
     """The promote threshold as a function of how many trials the experiment holds.
 
     ``threshold(n) = sharpe_base + k * ln(n)``: the first trial must reach the
-    base, and every tenfold increase in trials adds ``k * ln 10`` (0.58 at the
+    base, and every tenfold increase in trials adds ``k * ln 10`` (1.15 at the
     defaults). Deflated Sharpe is the principled version and is deferred
     (plan §8); this is the simple one plan §6.7 asks to see working.
     """
@@ -1040,7 +1044,14 @@ def _penalty_moved(coin: str, pinned: Penalty, offered: Penalty) -> str:
         f"{coin}'s promote threshold is sharpe_base {pinned.sharpe_base:g}, k {pinned.k:g}, pinned "
         f"by the first experiment on it, and this experiment asks for sharpe_base "
         f"{offered.sharpe_base:g}, k {offered.k:g}. The rules tried on a coin are counted across "
-        f"its experiments, so every experiment on it holds them to the same bar."
+        f"its experiments, so every experiment on it holds them to the same bar. To add to "
+        f"{coin}, give the experiment its pinned values, or use a new store."
+        + (
+            f" This store was pinned before the current default (sharpe_base {SHARPE_BASE:g}, "
+            f"k {PENALTY_K:g})."
+            if offered == Penalty()
+            else ""
+        )
     )
 
 

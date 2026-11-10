@@ -70,8 +70,12 @@ POOLED_MIN_QUESTIONS: Final = 100
 ALPHA: Final = 0.05
 # The horizon the paired hits are read at: one bar, the scorecard's first.
 _PAIRED_HORIZON: Final = HORIZONS[0]
-# The research ledger's own promote penalty, at its defaults.
-_PENALTY: Final = Penalty()
+# The research ledger's promote penalty at plan §3.10's starting values. It
+# was ``Penalty()`` until autoresearch's default rose to 2.0 + 0.5 ln n
+# (contrib/discovery's calibration); that calibration measured
+# 30-trial rule searches, not a variant compared over about a hundred
+# questions, so §5's bar stays where it was decided (2026-11-10).
+_PENALTY: Final = Penalty(sharpe_base=1.0, k=0.25)
 _FLAT: Final = Target(TargetSide.FLAT, Decimal(0))
 
 # What each question asks of the account, in the question's order.

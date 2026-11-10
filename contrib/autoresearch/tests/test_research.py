@@ -490,11 +490,13 @@ def test_experiment_names_the_flags_of_a_coins_pinned_penalty(history, tmp_path,
         err = capsys.readouterr().err
         assert "differs from this pin" in err
         assert "--sharpe-base 1.0 --penalty-k 0.25." in err
-    # Another refusal does not carry the flags: a reused name, at the pinned values.
-    assert main([*base, "--name", "old", *old]) == 1
-    err = capsys.readouterr().err
-    assert "already has an experiment named 'old'" in err
-    assert "--sharpe-base" not in err
+    # Another refusal does not carry the flags, and the name is checked first,
+    # as the plan checks it: a reused name, at the default and at the pin.
+    for flags in ([], old):
+        assert main([*base, "--name", "old", *flags]) == 1
+        err = capsys.readouterr().err
+        assert "already has an experiment named 'old'" in err
+        assert "--sharpe-base" not in err
     assert main([*base, "--name", "explicit", *old]) == 0
 
 

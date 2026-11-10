@@ -198,13 +198,13 @@ validation sharpe ≥ threshold 的個數。
 
 | validation 根數 | 門檻 base／k | Random 預算 30 | 整池 128 條 |
 |---|---|---|---|
-| 400 | 1.0／0.25（autoresearch 預設） | 78% | 88% |
+| 400 | 1.0／0.25（autoresearch 舊預設） | 78% | 88% |
 | 400 | 2.0／0.5 | 20% | 20% |
-| 1000 | 1.0／0.25（autoresearch 預設） | 60% | 62% |
+| 1000 | 1.0／0.25（autoresearch 舊預設） | 60% | 62% |
 | 1000 | 2.0／0.25 | 5% | 15% |
 | 1000 | 2.0／0.5 | 0/40 | 0/40 |
 
-**定案**：`bars.count` 5000（validation 1000 根）、`penalty` 2.0／0.5、`max_trials` 30（`threshold(30)`＝3.70）、`oracle_margin` 0.25；β 三檔＝tight 0.0025（oracle 有餘裕 21/40）、easy 0.004（39/40）、trivial 0.008（40/40）。這組門檻只用於 discovery 的 manifest，不回套 BTC 的 store（計畫 §7）。**θ_b＝0.8**（同一批 40 個 dev seed × 三檔 β）：埋的規則對自己一致率 1.00，池 128 條裡 θ=0.8 平均 1.82 條算「就是埋的那條」（本尊＋相鄰一格 gate），持有 12 根的版本（0.51）不算；0.8–0.85 之間找回數是平台。範例 manifest（400 根）只是單元測試的夾具，不是校準過的世界。
+**定案**：`bars.count` 5000（validation 1000 根）、`penalty` 2.0／0.5、`max_trials` 30（`threshold(30)`＝3.70）、`oracle_margin` 0.25；β 三檔＝tight 0.0025（oracle 有餘裕 21/40）、easy 0.004（39/40）、trivial 0.008（40/40）。這組門檻 2026-11-10 起也是 autoresearch 的預設（模型臂 dev 跑完後使用者拍板）；門檻按 coin pin，所以既有的 BTC store 仍是舊值 1.0／0.25，不會被改寫（計畫 §7）。**θ_b＝0.8**（同一批 40 個 dev seed × 三檔 β）：埋的規則對自己一致率 1.00，池 128 條裡 θ=0.8 平均 1.82 條算「就是埋的那條」（本尊＋相鄰一格 gate），持有 12 根的版本（0.51）不算；0.8–0.85 之間找回數是平台。範例 manifest（400 根）只是單元測試的夾具，不是校準過的世界。
 
 ```
 python -m contrib.discovery oracle --run data/discovery/SYN-EB3BC030-c5f56953

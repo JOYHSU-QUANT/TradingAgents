@@ -345,14 +345,16 @@ segment 才會；`by_shares` 會貼格線）。這幾種都是「換窗口或補
   計畫 §11 原本寫「不得更早」，這裡改成**完全相同**：更晚的起點會把舊 holdout 放進新的
   validation，更早的起點會把舊 trial 挑選時看過的 validation 放進新的 holdout——兩邊都讓
   holdout 不再是「沒有被挑選過的歷史」。
-- **門檻＝`sharpe_base + k·ln(n)`**（預設 1.0、0.25），`n` 是**這個 coin 所有 experiment**
+- **門檻＝`sharpe_base + k·ln(n)`**（預設 2.0、0.5，contrib/discovery 校準過的值；原本的 1.0、0.25 在純雜訊、預算 30 的 Random 搜尋上誤判 60%（validation 1000 根）到 78%（400 根）），`n` 是**這個 coin 所有 experiment**
   在 **promote 當下**試過的**不同規則**數（按 `spec_hash` 去重，`Ledger.rules_tried`）。不按
   family 算（改標籤就能歸零）、不按 experiment 算（holdout 每個 coin 一個 pin，store 沒變時換個
   名字開新 experiment 切出來是同一組窗口，n 卻會歸零；2026-09-14 拍板），也不用 trial 自己的序號
   （第 1 個 trial 在試了 500 條之後才 promote，它是從 501 條裡挑出來的）。同一條規則換成本在另一個
   experiment 重量，在那裡是一個 trial，但仍是一條規則、`n` 不加。**`sharpe_base`／`k` 也按 coin
   pin**：第一個 experiment 定下之後，同 coin 的 experiment 帶不同的 penalty 會被具名拒絕（`--dry-run`
-  也會），否則 `--penalty-k 0` 就能繞過跨 experiment 的 `n`。
+  也會），否則 `--penalty-k 0` 就能繞過跨 experiment 的 `n`。2026-11-10 預設從 1.0／0.25 改成 2.0／0.5
+  之後，pin 在舊值的 store 不帶旗標開 experiment 會被拒絕；要嘛明寫 `--sharpe-base 1 --penalty-k 0.25`，
+  要嘛開新 store（拒絕訊息會列出該 coin pin 住的值）。
 - **同一條規則只是一個 trial**：`spec_hash` 看規則不看文件——clause 順序、重複 clause、param
   名字、family 標籤、feature 對 feature 的比較寫在哪一邊、`30` 或 `30.0` 都不影響；門檻、op、
   offset、side、`max_bars`、sizing 會。重複的規則 `evaluate` 直接回報舊 trial，不重算、`n`
@@ -576,7 +578,9 @@ Hyperliquid SDK）。所以 `gaps`／`vocab`／`validate-spec` 三個指令一�
   差的只有成本項，這才是「gross 好看、net 不好看」要比的東西。
 - **交接文件的帶邊界是一個約定，不是量出來的**：`CONFIDENCE_EDGES` 與 `DRAWDOWN_EDGES`
   的值寫在 `signal.py`（這裡不抄一份，抄了就會過期），沒有對任何東西擬合過。
-  confidence 的下限刻意放在 promote 門檻**之上**：門檻是 `sharpe_base + k·ln(n)`，只會
+  confidence 的下限原本刻意放在 promote 門檻**之上**（舊預設 base 1.0；2026-11-10 預設改成 2.0
+  之後，新預設下晉升的規則只會讀成 medium／strong。帶界沒跟著改，好讓 pin 在舊值的 store 讀數
+  不變）：門檻是 `sharpe_base + k·ln(n)`，只會
   隨試過的規則數上升，所以把帶界綁在門檻上，會讓「比較晚才試出來、因此要跨過比較高的
   那根桿子」的規則讀起來反而比較有信心。代價是下限與門檻的關係取決於 `sharpe_base`——
   它是 `experiment` 的一個旗標，不是常數，調低了 `weak` 就會涵蓋到門檻以下的規則。

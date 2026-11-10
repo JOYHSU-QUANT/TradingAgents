@@ -243,13 +243,17 @@ def test_check_one_needs_strictly_more_than_every_control():
     assert verdict.describe()[-1].endswith("does not pass; the holdout stays locked")
 
 
-def test_check_two_is_the_research_ledgers_threshold_at_the_trials_tried():
+def test_check_two_is_the_plan_threshold_at_the_trials_tried():
     # Unannualised, GOOD's sharpe is about 2.1: above the base of 1.0 for
-    # one trial, below the 3.88 that 100,000 trials raise the bar to.
-    assert _judge(trials=1, bars_per_year=1.0).checks[1].passed
+    # one trial, below the 3.88 that 100,000 trials raise the bar to. The
+    # bar is plan §3.10's 1 + 0.25 ln n, not autoresearch's default.
+    plan = Penalty(sharpe_base=1.0, k=0.25)
+    one = _judge(trials=1, bars_per_year=1.0)
+    assert one.checks[1].passed
+    assert "vs 1.00" in one.checks[1].detail
     many = _judge(trials=100_000, bars_per_year=1.0)
     assert not many.checks[1].passed
-    assert f"vs {Penalty().threshold(100_000):.2f}" in many.checks[1].detail
+    assert f"vs {plan.threshold(100_000):.2f}" in many.checks[1].detail
     with pytest.raises(ValueError, match="at least one"):
         _judge(trials=0)
 

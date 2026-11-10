@@ -495,7 +495,7 @@ python -m contrib.replay backtest --db paper_trading.db --run-id paper-BTC-7 --r
 
 1. validation 段淨 Sharpe 高於四個對照（嚴格大於）；Sharpe＝成績單同一個定義（`score.sharpe`）套在帳戶的
    每題報酬上、以一年的根數年化，跨 run 把各 run 的 validation 報酬**串接**合併。
-2. 高於 `Penalty.threshold(n)`，n＝`replay.sqlite` 裡試過的 variant repeat 數（`answers ∪ failures` 的
+2. 高於 `Penalty.threshold(n)`（固定 `1 + 0.25·ln n`，2026-11-10 起不跟 autoresearch 的預設走），n＝`replay.sqlite` 裡試過的 variant repeat 數（`answers ∪ failures` 的
    `(variant, repeat)` 各算一個，至少 1；報表印 `variant repeat(s) tried`）。每個 repeat 每個 run 另印
    「範圍內的題問了幾題（答了／被拒／沒問）」，沒問的題帳戶是抱著不動。
 3. 與 paper 的配對命中（成績單 4h 的模型讀法 `ai_hit`）：跨 run 合併的 validation 題 ≥ 100、候選多命中、

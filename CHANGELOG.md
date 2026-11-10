@@ -96,6 +96,27 @@ Breaking changes within the 0.x line are called out explicitly.
   null twin of a seed — same id, same pool — cannot be filed under the
   other kind. The hand-over to PR 4 is in the local plan.
 
+### Changed
+
+- **Breaking: autoresearch's default promote threshold is now
+  `2.0 + 0.5·ln(n)`, up from `1.0 + 0.25·ln(n)`.** On Discovery Lab's
+  synthetic noise worlds, the old default promoted a rule in 60% of
+  30-trial random searches with a 1000-bar validation window and 78% with
+  a 400-bar one, so a promotion under it said little; the new values are
+  the ones that benchmark calibrated (1000-bar validation). The threshold
+  is pinned per coin by the first experiment, so a store whose coins were
+  pinned under the old values keeps them, and a new experiment on such a
+  coin is refused, naming the pinned values, unless it passes
+  `--sharpe-base 1.0 --penalty-k 0.25` (the CLI prints these flags), or
+  uses a new store. At a 400-bar validation window the new default still
+  promoted on noise in 20% of searches. The research signal's confidence
+  edges stay `(1.5, 2.5)`, so a signal from a store pinned under the old
+  values reads as it did; a rule promoted under the new default clears 2.0
+  and so reads "medium" or "strong". The replay gate's §5 bar used the
+  same default and now pins `1.0 + 0.25·ln(n)` instead, so it does not
+  move: the calibration measured 30-trial rule searches, not a variant
+  compared over about a hundred questions.
+
 ### Fixed
 
 - **The replay retries an OpenRouter routing error instead of recording the

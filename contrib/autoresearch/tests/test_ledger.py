@@ -45,6 +45,12 @@ def _split(offset_bars: int = 0, bars: int = 100) -> Split:
     )
 
 
+# Plan §3.10's starting values, the default before contrib/discovery's
+# calibration raised it. The tests below that work the gate's arithmetic on
+# hand-picked sharpes pin it, so they test the arithmetic, not the default.
+PLAN_PENALTY = Penalty(sharpe_base=1.0, k=0.25)
+
+
 def _experiment(name: str = "btc-4h", **overrides) -> Experiment:
     body = {
         "experiment_id": name,
@@ -200,13 +206,21 @@ def test_every_experiment_on_a_coin_holds_rules_to_the_same_penalty(ledger):
     first = ledger.create_experiment(_experiment("first"))
     assert ledger.penalty_pin("btc") == first.penalty == Penalty()
     for looser in (Penalty(k=0.0), Penalty(sharpe_base=0.5)):
-        with pytest.raises(LedgerError, match="promote threshold is sharpe_base 1, k 0.25, pinned"):
+        with pytest.raises(LedgerError, match="promote threshold is sharpe_base 2, k 0.5, pinned"):
             ledger.create_experiment(_experiment("looser", penalty=looser))
     ledger.create_experiment(_experiment("same"))
     ledger.create_experiment(
         _experiment("eth", coin="ETH", split=_split(offset_bars=10), penalty=Penalty(k=0.0))
     )
     assert ledger.penalty_pin("ETH") == Penalty(k=0.0)
+
+
+def test_a_store_pinned_before_the_default_rose_names_the_flags_that_reach_it(ledger):
+    """A coin pinned at 1, 0.25 refuses the 2, 0.5 default, and says how to add to it (2026-11-10)."""
+    ledger.create_experiment(_experiment("old", penalty=PLAN_PENALTY))
+    with pytest.raises(LedgerError, match=r"current default \(sharpe_base 2, k 0.5\) differs from this pin"):
+        ledger.create_experiment(_experiment("new-default"))
+    ledger.create_experiment(_experiment("explicit", penalty=PLAN_PENALTY))
 
 
 # -- trials ------------------------------------------------------------------------
@@ -320,7 +334,7 @@ def test_the_threshold_rises_with_the_log_of_the_trial_count():
 
 def test_a_trial_that_clears_the_bar_alone_does_not_clear_it_after_more_were_tried(ledger):
     """``n`` is the coin's count at promote time, not the trial's ordinal."""
-    experiment = ledger.create_experiment(_experiment())
+    experiment = ledger.create_experiment(_experiment(penalty=PLAN_PENALTY))
     trial = _file(ledger, experiment, sharpe=1.2)
     assert ledger.verdict(experiment, trial).eligible
     for threshold in (40, 50):
@@ -335,10 +349,10 @@ def test_a_trial_that_clears_the_bar_alone_does_not_clear_it_after_more_were_tri
 
 def test_a_new_experiment_on_the_coin_does_not_start_the_count_again(ledger):
     """A second name over the same pinned windows is not a fresh validation window (2026-09-14)."""
-    first = ledger.create_experiment(_experiment("first"))
+    first = ledger.create_experiment(_experiment("first", penalty=PLAN_PENALTY))
     for threshold in (30, 40, 50):
         _file(ledger, first, _spec(threshold), sharpe=0.1)
-    renamed = ledger.create_experiment(_experiment("renamed"))
+    renamed = ledger.create_experiment(_experiment("renamed", penalty=PLAN_PENALTY))
     trial = _file(ledger, renamed, _spec(60), sharpe=1.3)
     verdict = ledger.verdict(renamed, trial)
     assert verdict.trials == 4
@@ -348,7 +362,7 @@ def test_a_new_experiment_on_the_coin_does_not_start_the_count_again(ledger):
 
 
 def test_the_gate_lists_every_blocker(ledger):
-    experiment = ledger.create_experiment(_experiment())
+    experiment = ledger.create_experiment(_experiment(penalty=PLAN_PENALTY))
     trial = _file(ledger, experiment, sharpe=-0.5, total=-0.2, trades=0, ruined=True)
     blockers = promotion_verdict(experiment, trial, 1).blockers
     assert len(blockers) == 4

@@ -632,6 +632,20 @@ def _cmd_experiment(args: argparse.Namespace) -> int:
     store, ledger = _open_ledger(args)
     with store:
         pinned = ledger.holdout_pin(_coin(args))
+        # The plan's first two checks, run here in its order (the name first)
+        # so the flags go on the penalty refusal only.
+        ledger.require_unused_name(args.name)
+        try:
+            ledger.require_pinned_penalty(_coin(args), penalty)
+        except LedgerError as exc:
+            held = ledger.penalty_pin(_coin(args))
+            if held is None:
+                raise
+            # ``repr``, not ``:g``: the flags must round-trip to the pin exactly.
+            raise LedgerError(
+                f"{exc} The flags for the pinned values: --sharpe-base "
+                f"{held.sharpe_base!r} --penalty-k {held.k!r}."
+            ) from exc
         experiment = plan_experiment(
             ledger,
             experiment_id=args.name,

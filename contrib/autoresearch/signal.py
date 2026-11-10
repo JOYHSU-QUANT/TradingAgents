@@ -78,8 +78,11 @@ class SignalError(ValueError):
 
 # Where the selection window's return-to-volatility ratio is cut into three.
 #
-# The lower edge sits ABOVE the promote gate rather than at it, so "weak"
-# reads as "cleared the gate and not much more". The gate is
+# The lower edge sat ABOVE the promote gate rather than at it, so "weak"
+# read as "cleared the gate and not much more" — under plan §3.10's base of
+# 1.0. The default base is now 2.0, above the lower edge, so a rule
+# promoted under it reads "medium" or "strong"; the edges were kept so that
+# stores pinned under the old base read as they did (2026-11-10). The gate is
 # ``sharpe_base + k * ln(n)``, and ``Penalty.sharpe_base`` takes its value
 # from ``ledger.SHARPE_BASE`` — a DEFAULT, not a floor: ``experiment
 # --sharpe-base`` can set it lower, and the lowest band then covers rules

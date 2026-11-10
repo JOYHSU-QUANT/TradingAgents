@@ -224,7 +224,7 @@ def test_one_row_is_one_set_of_conditions():
     assert conditions_digest(base) != conditions_digest(bench_manifest(seed_set=SeedSet.TEST))
     assert conditions_digest(base) != conditions_digest(bench_manifest(kind=WorldKind.NULL_V1))
     for changed in (
-        replace(base, penalty=replace(base.penalty, k=0.5)),
+        replace(base, penalty=replace(base.penalty, k=base.penalty.k + 0.25)),
         replace(base, budget=replace(base.budget, max_trials=3)),
         replace(base, world=replace(base.world, bars=replace(base.world.bars, count=401))),
         replace(

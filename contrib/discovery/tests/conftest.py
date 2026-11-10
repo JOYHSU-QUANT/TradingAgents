@@ -93,6 +93,9 @@ LOOKBACK = 50  # the engine's floor: the indicator walk is what every frame here
 
 # The coin every arm in this suite files under: world 0 of the development set.
 COIN = opaque_world_id(SeedSet.DEV, 0)
+# The penalty the fixtures open arms and manifests at: plan §3.10's, pinned so
+# autoresearch's default can move without moving these tests' worlds.
+FIXTURE_PENALTY = Penalty(sharpe_base=1.0, k=0.25)
 
 SIZING = {"mode": "fixed_margin_fraction", "fraction": 0.5}
 BUY = {
@@ -209,7 +212,7 @@ def open_arm(
         interval="4h",
         costs=CostModel(),
         indicator_lookback=LOOKBACK,
-        penalty=Penalty() if penalty is None else penalty,
+        penalty=FIXTURE_PENALTY if penalty is None else penalty,
     )
 
 
@@ -399,7 +402,7 @@ def example_manifest(
         split=Shares(),
         indicator_lookback=200,
         costs=CostModel(),
-        penalty=Penalty(),
+        penalty=FIXTURE_PENALTY,  # the README's example manifest shows it
         budget=Budget(max_trials=10, oracle_margin=0.25),
         search_space=search_space,
         arms=Arms(

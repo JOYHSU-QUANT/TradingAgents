@@ -2,7 +2,9 @@
 # text. Everything but ``extra_context`` is research-long.yaml's; the
 # reasons for each line are written there.
 #
-# The control the other two are read against. A model that moves when it is
+# The placebo: asked first, against research-none (research-none.yaml says
+# why). The long and short arms are read against it only as a second
+# reading; their conclusion is long against short. A model that moves when it is
 # shown the research section may be moving because it was shown one more
 # section, whatever it says; this arm adds a section of the same shape (a
 # headed block of six indented lines, each within a few characters of the

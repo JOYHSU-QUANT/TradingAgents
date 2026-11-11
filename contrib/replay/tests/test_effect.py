@@ -34,6 +34,7 @@ from contrib.replay.effect import (
     Arm,
     ArmRun,
     Reading,
+    arm_run,
     describe_effect,
     differences,
     mentions,
@@ -234,7 +235,8 @@ def test_the_report_counts_the_moves_on_the_questions_both_read():
         "  two repeats of plain: one repeat was asked, so there is nothing to compare",
         "  told against plain, same repeat: side differs in 3 of 5 pair(s) (60.0%), mean absolute "
         "exposure difference 0.240",
-        "verdict: cannot be judged: told has no two repeats of one question to take a spread from",
+        "verdict: cannot be judged: told has no question with a readable claim on two repeats to "
+        "take a spread from",
     ]
 
 
@@ -307,30 +309,49 @@ def test_a_mean_of_equal_answers_is_not_a_move():
     assert lines[start + 3] == "  toward long 0, toward short 0, unchanged 1 (sign test p 1.000)"
 
 
+def _verdict(shift: float, low: float, high: float, **changes) -> str:
+    terms = {"spreads": [("told", 0.05), ("plain", 0.02)], "block": 6, "blocks": 5, **changes}
+    return verdict(shift, low, high, **terms)
+
+
 def test_the_verdict_is_the_bar_decided_before_any_answer_was_bought():
     """The interval clear of 0 AND the shift larger than either variant's own spread."""
-    spreads = {"told": 0.05, "plain": 0.02}
     moves = "the extra context moves the decision"
-    assert verdict(0.2, 0.1, 0.3, spreads=spreads, blocks=5) == f"{moves} toward long"
-    assert verdict(-0.2, -0.3, -0.1, spreads=spreads, blocks=5) == f"{moves} toward short"
+    assert _verdict(0.2, 0.1, 0.3) == f"{moves} toward long"
+    assert _verdict(-0.2, -0.3, -0.1) == f"{moves} toward short"
+    assert _verdict(0.2, 0.1, 0.3, spreads=[("told", 0.0), ("plain", 0.0)]) == f"{moves} toward long"
     holds = "no measurable effect: the interval of the shift holds 0"
-    assert verdict(0.2, -0.01, 0.3, spreads=spreads, blocks=5) == holds
-    assert verdict(0.2, 0.0, 0.3, spreads=spreads, blocks=5) == holds  # touching 0 holds it
+    assert _verdict(0.2, -0.01, 0.3) == holds
+    # An interval that touches 0, from either side, holds it.
+    assert _verdict(0.2, 0.0, 0.3) == holds
+    assert _verdict(-0.2, -0.3, 0.0) == holds
     small = (
         "no measurable effect: the shift is no larger than the spread between two repeats of "
         "one variant (0.050)"
     )
-    assert verdict(0.04, 0.03, 0.05, spreads=spreads, blocks=5) == small
-    assert verdict(-0.05, -0.06, -0.04, spreads=spreads, blocks=5) == small  # equal is not larger
-    assert verdict(0.2, 0.1, 0.3, spreads=spreads, blocks=4) == (
+    assert _verdict(0.04, 0.03, 0.05) == small
+    assert _verdict(-0.05, -0.06, -0.04) == small  # equal is not larger
+    # The larger spread is the bar, whichever variant it is.
+    assert _verdict(0.04, 0.03, 0.05, spreads=[("told", 0.02), ("plain", 0.05)]) == small
+
+
+def test_the_verdict_is_not_judged_without_a_spread_or_off_the_bars_blocks():
+    assert _verdict(0.2, 0.1, 0.3, spreads=[("told", 0.05), ("plain", None)]) == (
+        "cannot be judged: plain has no question with a readable claim on two repeats to take a "
+        "spread from"
+    )
+    # One question a block would draw neighbouring questions as if they were independent.
+    assert _verdict(0.2, 0.1, 0.3, block=1, blocks=30) == (
+        "cannot be judged: the bar is read with blocks of 6 question(s), not 1"
+    )
+    assert _verdict(0.2, 0.1, 0.3, blocks=4) == (
         "cannot be judged: 4 block(s), fewer than the 5 an interval is read with"
     )
-    assert verdict(0.2, 0.1, 0.3, spreads={"told": 0.05, "plain": None}, blocks=9) == (
-        "cannot be judged: plain has no two repeats of one question to take a spread from"
-    )
+    with pytest.raises(ValueError, match="none was given"):
+        _verdict(0.2, 0.1, 0.3, spreads=[])
 
 
-def test_the_report_ends_on_the_verdict_read_off_the_per_question_shift():
+def test_the_report_ends_on_the_verdict():
     def asked(*exposures: float) -> dict[int, list[Reading]]:
         return {
             repeat: [_reading(slot, LONG, exposure) for slot in range(30)]
@@ -359,7 +380,7 @@ def test_arms_that_do_not_line_up_are_refused():
         _describe(told, swapped)
     with pytest.raises(ScoreError, match="compared run by run, in one order"):
         _describe(told, Arm(plain.variant, plain.runs[:1], MENTION))
-    with pytest.raises(ScoreError, match="floor only under the same phrases"):
+    with pytest.raises(ScoreError, match="only under the same phrases"):
         _describe(told, Arm(plain.variant, plain.runs, ["radar"]))
 
 
@@ -549,6 +570,15 @@ def test_a_refused_question_is_counted_and_a_fail_closed_one_claims_nothing(stor
     )
     responses = {clamped: "Per the Research rule.", prose: "No research debate, no call."}
     readings, refused = read_rows(card.rows, responses, MENTION)
+    # The same card as a repeat of a variant that also holds one answer the lock leaves
+    # unread, beside a repeat with no row at all: one refused, one unread, one repeat.
+    nothing = score_run(
+        decisions.questions, [], step_ms=STEP_MS, costs=facts.costs, split=split, only=set()
+    )
+    stored = {0: {**responses, "a-holdout-question": "Long."}}
+    part = arm_run(RUN_ID, {0: card, 1: nothing}, stored, MENTION)
+    assert (part.refused, part.unread, list(part.repeats)) == (1, 1, [0])
+    assert part.repeats[0] == readings
     assert refused == 1
     assert set(readings) == {clamped, prose}
     # Slot 4 asks for short at 80%, which the gate clamps to the 60% cap.
@@ -686,7 +716,7 @@ def test_the_command_reads_one_run(asked, capsys):
         "difference 0.000",
         "  told against plain, same repeat: side differs in 2 of 14 pair(s) (14.3%), mean absolute "
         "exposure difference 0.043",
-        "verdict: cannot be judged: 1 block(s), fewer than the 5 an interval is read with",
+        "verdict: cannot be judged: the bar is read with blocks of 6 question(s), not 7",
     ]
 
 
@@ -867,3 +897,32 @@ def test_a_variant_asked_only_the_holdout_is_refused_not_reported_empty(
         f"variant 'held' was asked only holdout questions of run {RUN_ID!r}, which effect never "
         "reads"
     ) in capsys.readouterr().err
+
+
+def test_a_variant_refused_throughout_is_reported_not_called_holdout_only(asked, tmp_path, capsys):
+    """Refused questions are train and validation questions it WAS asked: nothing is behind the lock."""
+    refused = _variant_file(tmp_path, "refused", "Research signal: flat.")
+    replay_db = asked.parent / "replay.sqlite"
+    assert cli.main(["register", "--variant", str(refused), "--replay-db", str(replay_db)]) == 0
+    conn = sqlite3.connect(replay_db)
+    try:
+        with conn:
+            (sha,) = conn.execute(
+                "SELECT variant_sha FROM variants WHERE name = 'refused'"
+            ).fetchone()
+            conn.executemany(
+                "INSERT INTO failures (variant_sha, run_id, input_id, repeat, failed_at, error) "
+                "VALUES (?, ?, ?, 0, '2027-01-20T00:00:00+00:00', 'HTTP 400: too long')",
+                [(sha, RUN_ID, papers.input_id(slot)) for slot in (0, 1)],
+            )
+    finally:
+        conn.close()
+    capsys.readouterr()
+    argv = _effect(asked, "--run-id", RUN_ID, "--draws", "20", variants=("refused",))
+    assert cli.main(argv) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[8].startswith(
+        "  refused: 0 answer(s) in 0 repeat(s): long 0, short 0, flat 0, fail-closed 0; 2 refused "
+        "by the provider; "
+    )
+    assert out[-1] == "verdict: cannot be judged: no question has a readable claim from both"

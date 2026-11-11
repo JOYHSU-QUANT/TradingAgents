@@ -467,7 +467,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--against",
         required=True,
         metavar="NAME",
-        help="the variant the others are compared with (the one without the section)",
+        help=(
+            "the variant the others are compared with: the one without the section, or the "
+            "one whose section says the opposite"
+        ),
     )
     effect.add_argument(
         "--mention",
@@ -1552,7 +1555,7 @@ def _arm(
             )
         cards = cards_by_repeat(_locked_card(run), answers, failed)
         part = arm_run(run_id, cards, store.responses(variant.sha, run_id), phrases)
-        if not part.refused and not any(part.repeats.values()):
+        if not part.refused and not part.repeats:
             raise _Refused(
                 f"variant {variant.name!r} was asked only holdout questions of run {run_id!r}, "
                 "which effect never reads: ask it the train and validation segments"

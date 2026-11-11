@@ -20,8 +20,10 @@ stores and prints:
   differs.
 - **Uptake**: how many answers mention the section, as a case-insensitive
   search of the stored answer text for the phrases given (:data:`MENTION`
-  by default). The same count on the variant without the section is the
-  floor it is read against. The phrases name the section, not the word
+  by default). The same count on the other variant is what it is read
+  against: a variant never shown the section should mention it nowhere,
+  and one that does says the phrases are too loose. The phrases name the
+  section, not the word
   "research" alone: the shipped system prompt tells every variant that the
   "research debate" is absent, and an answer saying so mentions no section.
 - **Decision effect**: on each question both variants answered, whether the
@@ -58,7 +60,6 @@ The definitions, once:
   repeats of the other, and between the two variants on the same repeat.
   A shift between variants that is no larger than the spread between two
   repeats of one variant is noise.
-
 - **The verdict** (the bar, decided 2026-11-11, before any answer was
   bought) is read off the per-question mean shift, and says the extra
   context moves the decision only when both hold: the shift's interval
@@ -67,11 +68,15 @@ The definitions, once:
   The second is a bar on size, not on evidence: a shift smaller than what
   one variant does between two askings of one question is not worth
   wiring a section for, however many questions agree on its sign.
-  Otherwise the verdict is "no measurable effect", with the half that
-  failed. It is not judged at all when a variant has no two repeats of a
-  question to take a spread from, or on fewer blocks than the pool reads
-  an interval with (:data:`~.pool.MIN_BLOCKS`): an interval drawn from a
-  few blocks collapses onto the point.
+  Otherwise the verdict is "no measurable effect", naming the first of
+  the two that failed. It is not judged at all when no question has a
+  readable claim from both variants; when a variant has no question with
+  a readable claim on two of its repeats to take a spread from; with a
+  block size other than the pool's (:data:`~.pool.BLOCK`: a block of one
+  question would draw neighbours as if they were independent); or on
+  fewer blocks than the pool reads an interval with
+  (:data:`~.pool.MIN_BLOCKS`: an interval drawn from a few blocks
+  collapses onto the point).
 
 No later price is read, so a variant's ``model_cutoff`` plays no part. The
 holdout is never read: the rows come through the scorecard's own lock,
@@ -81,8 +86,9 @@ What this cannot show: these are one-completion answers to a message that
 is the context alone, with the section after the position block (an extra
 context follows the whole recorded context), not before it where the
 daemon renders it. The shipped section is dated to the context's own
-close, the freshest the daemon's could be, so a shift is an upper bound on
-what a section up to two research bars old would do. The shipped system
+close, the freshest the daemon's could be, so as far as freshness goes a
+shift is an upper bound on what a section up to two research bars old
+would do. The shipped system
 prompt tells the model that "the research debate" is not in the message
 before the section is shown to it, so "no measurable effect" may be that
 sentence discounting the section. A shift says the model is sensitive to
@@ -101,7 +107,7 @@ from statistics import fmean
 from typing import Final
 
 from .compare import Table
-from .pool import LEVEL, MIN_BLOCKS, block_count, circular_draw, quantile
+from .pool import BLOCK, LEVEL, MIN_BLOCKS, block_count, circular_draw, quantile
 from .score import (
     FAIL_CLOSED,
     Question,
@@ -142,10 +148,10 @@ NO_EFFECT: Final = "no measurable effect"
 UNJUDGED: Final = "cannot be judged"
 
 # What an answer is searched for to count as mentioning the research section:
-# the section's own title, the name it gives its source, the phrase an answer
-# is likely to use for the rule it reports, and that rule's family id. An
-# answer that leans on the section under other words is missed, so the count
-# is a floor.
+# the section's own title, the phrase an answer is likely to use for the rule
+# it reports, the name the section gives its source, and that rule's family
+# id. An answer that leans on the section under other words is missed, so
+# the count is a lower bound.
 MENTION: Final = ("research signal", "research rule", "research radar", "btc-4h-maker")
 
 # Exposures closer than this are the same exposure. They are margins in
@@ -277,8 +283,13 @@ def arm_run(
     repeats = {}
     refused = 0
     for repeat, card in cards.items():
-        repeats[repeat], lost = read_rows(card.rows, responses.get(repeat, {}), phrases)
+        found, lost = read_rows(card.rows, responses.get(repeat, {}), phrases)
         refused += lost
+        if found:
+            # A repeat with nothing read (asked the holdout only, or refused
+            # throughout) is not a repeat the report has: counting it would
+            # print "2 repeat(s)" over one repeat's answers.
+            repeats[repeat] = found
     stored = sum(len(texts) for texts in responses.values())
     return ArmRun(run_id, repeats, refused, stored - sum(len(read) for read in repeats.values()))
 
@@ -555,24 +566,36 @@ def _between_repeats(arm: Arm) -> str:
 
 
 def verdict(
-    shift: float, low: float, high: float, *, spreads: Mapping[str, float | None], blocks: int
+    shift: float,
+    low: float,
+    high: float,
+    *,
+    spreads: Sequence[tuple[str, float | None]],
+    block: int,
+    blocks: int,
 ) -> str:
     """Whether a per-question mean ``shift`` clears the bar (module docstring), as a sentence.
 
-    ``low`` and ``high`` bound its interval, drawn in ``blocks`` blocks;
-    ``spreads`` is each variant's mean absolute exposure difference between
-    two repeats, by name (``None`` where it has no such pair).
+    ``low`` and ``high`` bound its interval, drawn in ``blocks`` blocks of
+    ``block`` questions; ``spreads`` is each variant's name and its mean
+    absolute exposure difference between two repeats (``None`` where it has
+    no such pair): both variants', or the size half of the bar reads one.
     """
-    for name, spread in spreads.items():
+    if not spreads:
+        raise ValueError("a verdict is read against each variant's spread; none was given")
+    for name, spread in spreads:
         if spread is None:
             return (
-                f"{UNJUDGED}: {name} has no two repeats of one question to take a spread from"
+                f"{UNJUDGED}: {name} has no question with a readable claim on two repeats to "
+                "take a spread from"
             )
+    if block != BLOCK:
+        return f"{UNJUDGED}: the bar is read with blocks of {BLOCK} question(s), not {block}"
     if blocks < MIN_BLOCKS:
         return f"{UNJUDGED}: {blocks} block(s), fewer than the {MIN_BLOCKS} an interval is read with"
     if low <= TOLERANCE and high >= -TOLERANCE:
         return f"{NO_EFFECT}: the interval of the shift holds 0"
-    widest = max(spread for spread in spreads.values() if spread is not None)
+    widest = max(spread for _, spread in spreads if spread is not None)
     if abs(shift) <= widest + TOLERANCE:
         return (
             f"{NO_EFFECT}: the shift is no larger than the spread between two repeats of one "
@@ -615,8 +638,8 @@ def describe_effect(treatment: Arm, control: Arm, *, block: int, draws: int, see
     if list(treatment.phrases) != list(control.phrases):
         raise ScoreError(
             f"{name} was searched for {list(treatment.phrases)} and {other} for "
-            f"{list(control.phrases)}: one arm's mentions are the other's floor only under "
-            "the same phrases"
+            f"{list(control.phrases)}: one arm's mentions are read against the other's only "
+            "under the same phrases"
         )
     differ = differences(treatment.variant, control.variant)
     # ``differences`` spells the identity's ``extra_context`` key this way.
@@ -702,7 +725,8 @@ def describe_effect(treatment: Arm, control: Arm, *, block: int, draws: int, see
             read.shift,
             read.low,
             read.high,
-            spreads={arm.name: _gap(_repeat_pairs(arm)) for arm in (treatment, control)},
+            spreads=[(arm.name, _gap(_repeat_pairs(arm))) for arm in (treatment, control)],
+            block=block,
             blocks=read.blocks,
         )
     lines.append(f"verdict: {judged}")

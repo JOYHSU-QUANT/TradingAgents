@@ -431,7 +431,7 @@ research 段與 daemon 渲染的差兩處：標題的日期寫成「這份 conte
   variant **還差在哪**（模型、system prompt、temperature、cap）。只差 `extra context` 時，位移才能算在那一段頭上；
   差更多時報表會明說。四臂的訊息長什麼樣由 `tests/test_effect.py` 用渲染出來的文字斷言。
 - **Uptake（有沒有引用）**：答案原文不分大小寫搜尋 `--mention` 的字串（預設四個：`research signal`、`research rule`、
-  `research radar`、`btc-4h-maker`——那一段的標題、它對來源的稱呼、答案最可能用來稱呼那條規則的說法、規則的 family
+  `research radar`、`btc-4h-maker`——那一段的標題、答案最可能用來稱呼那條規則的說法、它對來源的稱呼、規則的 family
   id），印幾個答案提到。換別的說法引用的答案數不到，所以這個數字是下界。不單搜 `research`：四臂共用的 system prompt 自己
   就說「research debate 不在訊息裡」，照抄這句的答案沒有引用任何一段。對照組同一個數字是基準：沒看過那一段的模型
   也提到，就是搜尋字串太鬆。
@@ -453,8 +453,10 @@ research 段與 daemon 渲染的差兩處：標題的日期寫成「這份 conte
 - **最後一行是判定**（`verdict:`；門檻 2026-11-11 拍板、寫死在 `effect.py`）：讀「每題、repeat 取平均」的平均位移，
   兩個條件都成立才印 `the extra context moves the decision toward long｜short`——(a) 位移的 90% 區間不含 0；(b) 位移
   的大小超過**兩個 variant 各自**兩次回答之間的平均絕對差。(b) 管的是大小不是證據：比模型自己問兩次的差還小的位移，
-  就算每一題方向都一致，也不值得為它接一段。其中一條不過印 `no measurable effect`，並說是哪一條。某個 variant 沒有
-  同一題的兩個 repeat（量不到 (b)），或抽樣不到 5 塊（區間會縮成一個點，同 `pool` 的規則），印 `cannot be judged`。
+  就算每一題方向都一致，也不值得為它接一段。有一條不過就印 `no measurable effect`，並說是哪一條（兩條都不過時說 (a)）。
+  四種情況不判、印 `cannot be judged` 與原因：沒有任何一題兩邊都有可讀主張；某個 variant 沒有同一題在兩個 repeat
+  都有可讀主張（量不到 (b)）；`--block` 不是預設的 6（一題一塊會把相鄰的題當成獨立樣本）；抽樣不到 5 塊（區間會
+  縮成一個點）。後兩條與 `pool` 的門檻同一個規則。
 - **只讀**：不寫任何 store、不記 ledger；不讀事後價格，所以不需要 `model_cutoff`；holdout 永遠不讀（列走成績單同一道
   鎖；有 variant 問過 holdout 段時，那些答案不讀、但那一行會寫有幾個）。每個 run 要已經在這個 `replay.sqlite` 釘過 split；題目記錄時 context 已經帶 research 段的 run 照讀，但報表會逐 run
   印一行 `note:` 說有幾題（那是「多一段」對「一段」，不是這個實驗）；variant 在某個 run 沒有答案（或只問過 holdout 段）、或是 graph variant（每題從自己
@@ -463,9 +465,10 @@ research 段與 daemon 渲染的差兩處：標題的日期寫成「這份 conte
 
 **這個實驗證明不了的事**：這是一次 completion、訊息只有 context 的簡單版。位移只說明模型對這段文字敏感，不說明
 research 段照正式接線（位置、時效、與其他段落衝突時）有效。四臂的 research 段都標成「跟 context 同一根收盤」，是 daemon
-那一段最新鮮的情況（實際可以落後兩根 research bar），所以量到的位移是上界。四臂共用的 system prompt 有一句「research
+那一段最新鮮的情況（實際可以落後兩根 research bar），所以就時效這一項來說，量到的位移是上界。四臂共用的 system prompt 有一句「research
 debate 不在訊息裡」，接著訊息裡卻出現 research 段；結果若是 `no measurable effect`，可能是這句話讓模型把那一段打了折
-（2026-11-11 拍板沿用這份 prompt，才能跟 `current-sonnet` 既有的答案對照）。
+（2026-11-11 拍板沿用 `current-sonnet` 用的這一份，不另外維護第二份：那句話講的是多空辯論，而 research 段在
+context 裡，「只從 context 決定」本來就包含它）。
 
 ## 趨勢護欄的影子報表
 

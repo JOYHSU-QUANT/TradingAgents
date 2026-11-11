@@ -24,7 +24,7 @@ Breaking changes within the 0.x line are called out explicitly.
   sign test), the mean shift per question with a 90% circular
   block-bootstrap interval, and the same yardstick between two repeats of
   one variant as the noise the shift is read against. It names anything
-  else the two variants differ in. Reads only, scores no later price (no
+  else the two variants differ in (and then gives no verdict). Reads only, scores no later price (no
   `model_cutoff` needed), never reads the holdout, refuses graph variants.
   Its last line is a verdict against a bar fixed before any answer was
   bought: the extra context "moves the decision" only when the interval of

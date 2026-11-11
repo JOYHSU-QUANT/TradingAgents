@@ -225,14 +225,15 @@ def test_the_report_counts_the_moves_on_the_questions_both_read():
         "]: 1 circular block(s) of 6 question(s) within each run, 200 draws, seed 0"
     )
     assert lines[17] == "  toward long 3, toward short 1, unchanged 1 (sign test p 0.625)"
-    assert lines[18] == (
-        "-- how far apart two answers to one question are (readable claims; exposure as a "
-        "multiple of equity) --"
+    assert lines[18] == "  by run: run-0 5"
+    assert lines[19] == (
+        "-- how far apart two answers to one question are (readable claims on the questions "
+        "read by both; exposure as a multiple of equity) --"
     )
     # Same repeat: the side differs on q0, q2 and q3; |shift| sums to 1.2 over five pairs.
-    assert lines[19:] == [
-        "  two repeats of told: one repeat was asked, so there is nothing to compare",
-        "  two repeats of plain: one repeat was asked, so there is nothing to compare",
+    assert lines[20:] == [
+        "  two repeats of told: fewer than two repeats hold an answer, so there is nothing to compare",
+        "  two repeats of plain: fewer than two repeats hold an answer, so there is nothing to compare",
         "  told against plain, same repeat: side differs in 3 of 5 pair(s) (60.0%), mean absolute "
         "exposure difference 0.240",
         "verdict: cannot be judged: told has no question with a readable claim on two repeats to "
@@ -266,9 +267,10 @@ def test_a_question_counts_once_however_often_it_was_asked():
         "within each run, 200 draws, seed 0"
     )
     assert lines[start + 3] == "  toward long 3, toward short 0, unchanged 0 (sign test p 0.250)"
+    assert lines[start + 4] == "  by run: run-0 2, run-1 1"
     # Between two repeats: told's q0 of run-0 (0.4 against 0.2) is its one pair both read;
     # plain has that pair (equal) and run-1's q0 (equal).
-    assert lines[start + 5 :] == [
+    assert lines[start + 6 :] == [
         "  two repeats of told: side differs in 0 of 1 pair(s) (0.0%), mean absolute exposure "
         "difference 0.200",
         "  two repeats of plain: side differs in 0 of 2 pair(s) (0.0%), mean absolute exposure "
@@ -293,8 +295,27 @@ def test_a_repeat_one_side_lacks_on_a_run_is_named_and_not_paired_there():
     half = lines.index(
         "-- repeat 1: 1 question(s) answered by both, 1 with a readable claim from both --"
     )
-    assert lines[half + 1] == "  run-1: no repeat 1 from plain, so nothing is paired there"
+    assert lines[half + 1] == "  run-1: no answer read on repeat 1 from plain, so nothing is paired there"
     assert lines[half + 2].startswith("  model reading: toward long 1, toward short 0, ")
+    # ``plain`` has two repeats on run-0 alone, and that is where its spread is read.
+    assert lines[-3] == (
+        "  two repeats of plain: side differs in 0 of 1 pair(s) (0.0%), mean absolute exposure "
+        "difference 0.000"
+    )
+
+
+def test_a_repeat_only_the_other_variant_holds_gets_its_own_block():
+    one = {0: [_reading(0, LONG, 0.3)]}
+    told = _arm("told", one, one)
+    plain = _arm("plain", {**one, 2: [_reading(0, LONG, 0.3)]}, one, extra=None)
+    lines = _describe(told, plain)
+    start = lines.index(
+        "-- repeat 2: 0 question(s) answered by both, 0 with a readable claim from both --"
+    )
+    assert lines[start + 1 : start + 3] == [
+        "  run-0: no answer read on repeat 2 from told, so nothing is paired there",
+        "  run-1: no answer read on repeat 2 from told or plain, so nothing is paired there",
+    ]
 
 
 def test_a_mean_of_equal_answers_is_not_a_move():
@@ -349,6 +370,13 @@ def test_the_verdict_is_not_judged_without_a_spread_or_off_the_bars_blocks():
     )
     with pytest.raises(ValueError, match="none was given"):
         _verdict(0.2, 0.1, 0.3, spreads=[])
+    # Each comes before the bar: an interval holding 0 is no finding where nothing is judged.
+    for unjudged in (
+        {"spreads": [("told", None), ("plain", 0.02)]},
+        {"block": 1, "blocks": 30},
+        {"blocks": 4},
+    ):
+        assert _verdict(0.2, -0.01, 0.3, **unjudged).startswith("cannot be judged: ")
 
 
 def test_the_report_ends_on_the_verdict():
@@ -369,6 +397,39 @@ def test_the_report_ends_on_the_verdict():
         "verdict: no measurable effect: the shift is no larger than the spread between two "
         "repeats of one variant (0.100)"
     )
+
+
+def test_the_spread_is_read_on_the_questions_the_shift_is():
+    """Questions one variant alone answered must not move the bar the shift is held against."""
+
+    def asked(slots: range, *exposures: float) -> dict[int, list[Reading]]:
+        return {
+            repeat: [_reading(slot, LONG, exposure) for slot in slots]
+            for repeat, exposure in enumerate(exposures)
+        }
+
+    plain = _arm("plain", asked(range(30), 0.1, 0.1), extra=None)
+    steady = asked(range(30), 0.3, 0.3)
+    # Forty more questions only ``told`` was asked, on which its two repeats are 1.0 apart.
+    wild = asked(range(30, 70), 0.0, 1.0)
+    told = _arm("told", {repeat: steady[repeat] + wild[repeat] for repeat in (0, 1)})
+    lines = _describe(told, plain)
+    assert "  two repeats of told: side differs in 0 of 30 pair(s) (0.0%), mean absolute " in (
+        lines[-4]
+    )
+    assert lines[-1] == "verdict: the extra context moves the decision toward long"
+
+
+def test_a_run_with_no_question_in_common_shows_as_zero():
+    """Both variants answered it, on different questions: the pooled count alone would hide it."""
+    told = _arm("told", {0: [_reading(0, LONG, 0.3)]}, {0: [_reading(0, LONG, 0.3)]})
+    plain = _arm(
+        "plain", {0: [_reading(0, LONG, 0.1)]}, {0: [_reading(1, LONG, 0.1)]}, extra=None
+    )
+    lines = _describe(told, plain)
+    start = lines.index("-- per question, repeats averaged --")
+    assert lines[start + 1].startswith("  1 question(s) read by both: ")
+    assert lines[start + 4] == "  by run: run-0 1, run-1 0"
 
 
 def test_arms_that_do_not_line_up_are_refused():
@@ -401,6 +462,9 @@ def test_the_same_variant_twice_is_said_to_differ_in_nothing():
     asked = {0: [_reading(0, LONG, 0.3)]}
     lines = _describe(_arm("a", asked), _arm("b", asked))
     assert lines[3] == "the two differ in nothing that reaches the model"
+    assert lines[-1] == (
+        "verdict: cannot be judged: the variants differ in nothing that reaches the model"
+    )
 
 
 def test_the_opening_of_a_long_extra_context_is_cut_at_sixty_characters():
@@ -421,10 +485,11 @@ def test_nothing_read_by_both_says_so():
         "mean shift -0.300",
         "-- per question, repeats averaged --",
         "  no question has a readable claim from both",
-        "-- how far apart two answers to one question are (readable claims; exposure as a "
-        "multiple of equity) --",
-        "  two repeats of told: one repeat was asked, so there is nothing to compare",
-        "  two repeats of plain: one repeat was asked, so there is nothing to compare",
+        "  by run: run-0 0",
+        "-- how far apart two answers to one question are (readable claims on the questions "
+        "read by both; exposure as a multiple of equity) --",
+        "  two repeats of told: fewer than two repeats hold an answer, so there is nothing to compare",
+        "  two repeats of plain: fewer than two repeats hold an answer, so there is nothing to compare",
         "  told against plain, same repeat: no pair with a readable claim from both",
         "verdict: cannot be judged: no question has a readable claim from both",
     ]
@@ -433,9 +498,15 @@ def test_nothing_read_by_both_says_so():
 def test_variants_that_differ_in_more_are_said_to():
     told = _arm("told", {0: [_reading(0, LONG, 0.3)]})
     other = _arm("other", {0: [_reading(0, LONG, 0.3)]}, extra=None, model="c/d")
-    assert _describe(told, other)[3] == (
+    lines = _describe(told, other)
+    assert lines[3] == (
         "the two differ in: model, extra context; a shift between them is not the extra "
         "context's alone"
+    )
+    # And the verdict, whose sentence is about the extra context, is not given.
+    assert lines[-1] == (
+        "verdict: cannot be judged: the variants differ in more than their extra context "
+        "(model, extra context)"
     )
 
 
@@ -570,14 +641,15 @@ def test_a_refused_question_is_counted_and_a_fail_closed_one_claims_nothing(stor
     )
     responses = {clamped: "Per the Research rule.", prose: "No research debate, no call."}
     readings, refused = read_rows(card.rows, responses, MENTION)
-    # The same card as a repeat of a variant that also holds one answer the lock leaves
-    # unread, beside a repeat with no row at all: one refused, one unread, one repeat.
+    # The same card as a repeat of a variant that also holds one answer and one refusal
+    # the lock leaves unread (two refusals recorded, one of them read), beside a repeat
+    # with no row at all: one refused, two unread, one repeat.
     nothing = score_run(
         decisions.questions, [], step_ms=STEP_MS, costs=facts.costs, split=split, only=set()
     )
     stored = {0: {**responses, "a-holdout-question": "Long."}}
-    part = arm_run(RUN_ID, {0: card, 1: nothing}, stored, MENTION)
-    assert (part.refused, part.unread, list(part.repeats)) == (1, 1, [0])
+    part = arm_run(RUN_ID, {0: card, 1: nothing}, stored, MENTION, refusals=2)
+    assert (part.refused, part.unread, list(part.repeats)) == (1, 2, [0])
     assert part.repeats[0] == readings
     assert refused == 1
     assert set(readings) == {clamped, prose}
@@ -708,8 +780,9 @@ def test_the_command_reads_one_run(asked, capsys):
         "  90% interval of the shift [+0.043, +0.043]: 1 circular block(s) of 7 question(s) "
         "within each run, 50 draws, seed 0",
         "  toward long 1, toward short 0, unchanged 6 (sign test p 1.000)",
-        "-- how far apart two answers to one question are (readable claims; exposure as a "
-        "multiple of equity) --",
+        f"  by run: {RUN_ID} 7",
+        "-- how far apart two answers to one question are (readable claims on the questions "
+        "read by both; exposure as a multiple of equity) --",
         "  two repeats of told: side differs in 0 of 7 pair(s) (0.0%), mean absolute exposure "
         "difference 0.000",
         "  two repeats of plain: side differs in 0 of 7 pair(s) (0.0%), mean absolute exposure "
@@ -752,6 +825,10 @@ def test_the_command_pools_runs_and_reads_each_variant_against_the_one_control(
     assert second[11] == (
         "  model reading: toward long 0, toward short 0, unchanged 14 (sign test p 1.000); "
         "mean shift +0.000"
+    )
+    assert second[-1] == (
+        "verdict: cannot be judged: the variants differ in more than their extra context "
+        "(model, extra context)"
     )
 
 
@@ -881,7 +958,7 @@ def test_answers_to_holdout_questions_are_counted_as_unread_not_dropped(
     # Two holdout questions, two repeats: stored, and behind the lock.
     assert out[8] == (
         "  told: 16 answer(s) in 2 repeat(s): long 12, short 2, flat 0, fail-closed 2; 0 refused "
-        f"by the provider; {SEARCHED}: 4/16 (25.0%); 4 more stored for holdout questions, not read"
+        f"by the provider; {SEARCHED}: 4/16 (25.0%); 4 more answer(s) or refusal(s) recorded outside train and validation, not read"
     )
     assert out[9].endswith(f"{SEARCHED}: 0/16 (0.0%)")
 
@@ -913,7 +990,8 @@ def test_a_variant_refused_throughout_is_reported_not_called_holdout_only(asked,
             conn.executemany(
                 "INSERT INTO failures (variant_sha, run_id, input_id, repeat, failed_at, error) "
                 "VALUES (?, ?, ?, 0, '2027-01-20T00:00:00+00:00', 'HTTP 400: too long')",
-                [(sha, RUN_ID, papers.input_id(slot)) for slot in (0, 1)],
+                # Two train questions, and one of the holdout's.
+                [(sha, RUN_ID, papers.input_id(slot)) for slot in (0, 1, 8)],
             )
     finally:
         conn.close()
@@ -921,8 +999,9 @@ def test_a_variant_refused_throughout_is_reported_not_called_holdout_only(asked,
     argv = _effect(asked, "--run-id", RUN_ID, "--draws", "20", variants=("refused",))
     assert cli.main(argv) == 0
     out = capsys.readouterr().out.splitlines()
-    assert out[8].startswith(
+    assert out[8] == (
         "  refused: 0 answer(s) in 0 repeat(s): long 0, short 0, flat 0, fail-closed 0; 2 refused "
-        "by the provider; "
+        f"by the provider; {SEARCHED}: 0/0; 1 more answer(s) or refusal(s) recorded outside "
+        "train and validation, not read"
     )
     assert out[-1] == "verdict: cannot be judged: no question has a readable claim from both"

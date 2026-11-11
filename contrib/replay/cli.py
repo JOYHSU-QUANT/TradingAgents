@@ -444,7 +444,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "context moves the decision when that interval does not hold 0 and the shift is "
             "larger than the spread between two repeats of either variant. The variants are "
             "meant to differ in their extra_context alone; the report names whatever else "
-            "differs. Simple variants only. Reads only: no later price is scored and the "
+            "differs, and then gives no verdict. Simple variants only. Reads only: no later price is scored and the "
             "holdout is never read."
         ),
     )
@@ -485,7 +485,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--block",
         type=int,
         default=BLOCK,
-        help=f"consecutive questions per bootstrap block, within a run (default: {BLOCK})",
+        help=(
+            f"consecutive questions per bootstrap block, within a run (default: {BLOCK}); the "
+            "verdict is read only at the default"
+        ),
     )
     effect.add_argument(
         "--draws", type=int, default=DRAWS, help=f"bootstrap draws (default: {DRAWS})"
@@ -1554,7 +1557,13 @@ def _arm(
                 f"variant {variant.name!r} has no answers for run {run_id!r} in {store.path}"
             )
         cards = cards_by_repeat(_locked_card(run), answers, failed)
-        part = arm_run(run_id, cards, store.responses(variant.sha, run_id), phrases)
+        part = arm_run(
+            run_id,
+            cards,
+            store.responses(variant.sha, run_id),
+            phrases,
+            refusals=sum(len(refused) for refused in failed.values()),
+        )
         if not part.refused and not part.repeats:
             raise _Refused(
                 f"variant {variant.name!r} was asked only holdout questions of run {run_id!r}, "

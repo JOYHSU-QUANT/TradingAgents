@@ -391,7 +391,7 @@ down」兩個 Brier skill score，都對「模型自己的先驗」比，各自 
 python -m contrib.replay effect --db paper_trading.db --replay-db replay.sqlite \
     --run-id paper-BTC-3 --run-id paper-BTC-4 --run-id paper-BTC-5 \
     --variant research-long --against research-short \
-    [--mention TEXT ...] [--block 6] [--draws 10000] [--seed 0] [--out DIR]
+    [--mention TEXT [--mention TEXT ...]] [--block 6] [--draws 10000] [--seed 0] [--out DIR]
 ```
 
 要回答的問題：**research 段到底有沒有進決策**（discovery 計畫 §4.7 的實驗 B）。成績單的 `research effect`
@@ -429,7 +429,7 @@ research 段與 daemon 渲染的差兩處：標題的日期寫成「這份 conte
 
 - **Exposure（有沒有那一段）**不用問模型：報表印每個 variant 的 `extra_context` 幾個字元、開頭是什麼，並列出兩個
   variant **還差在哪**（模型、system prompt、temperature、cap）。只差 `extra context` 時，位移才能算在那一段頭上；
-  差更多時報表會明說。四臂的訊息長什麼樣由 `tests/test_effect.py` 用渲染出來的文字斷言。
+  差更多時報表會明說，而且不下判定。四臂的訊息長什麼樣由 `tests/test_effect.py` 用渲染出來的文字斷言。
 - **Uptake（有沒有引用）**：答案原文不分大小寫搜尋 `--mention` 的字串（預設四個：`research signal`、`research rule`、
   `research radar`、`btc-4h-maker`——那一段的標題、答案最可能用來稱呼那條規則的說法、它對來源的稱呼、規則的 family
   id），印幾個答案提到。換別的說法引用的答案數不到，所以這個數字是下界。不單搜 `research`：四臂共用的 system prompt 自己
@@ -444,17 +444,21 @@ research 段與 daemon 渲染的差兩處：標題的日期寫成「這份 conte
 讀數字時要知道：
 
 - **一對**＝同一題、同一個 repeat 的兩個答案。repeat 之間可以互換，repeat 0 配 repeat 0 只是慣例；每個 repeat 各印
-  一段，看得出計數在 repeat 之間晃多少。某個 run 有一邊沒問過那個 repeat 時，那一段會逐 run 寫明沒有配對。
+  一段，看得出計數在 repeat 之間晃多少。某個 run 有一邊在那個 repeat 沒有讀到任何答案時（沒問過、全被拒答、或只問了
+  holdout），那一段會逐 run 寫明沒有配對。
 - **sign test 的 p 偏小**。相鄰的 4h 題在同一個盤勢，不是獨立樣本；p 只用來排序，不是門檻。
 - **「每題、repeat 取平均」那一段**先把每個 variant 可讀的 repeat 平均成一題一個數，再算位移；區間用 `pool` 的循環
-  block bootstrap（各 run 自己繞一圈、連續 6 題一塊、塊不跨 run），補上 sign test 沒有的相依性。
+  block bootstrap（各 run 自己繞一圈、連續 6 題一塊、塊不跨 run），補上 sign test 沒有的相依性。最後一行 `by run:`
+  印每個 run 各有幾題；某個 run 兩邊答的題沒有交集時是 0，從合併的數字看不出來。
 - **最後一段是雜訊底**：同一個 variant 兩個 repeat 之間、與兩個 variant 同一個 repeat 之間，用同一把尺（方向不同的
   比例、曝險差的平均絕對值）。variant 之間的差沒有比同一個 variant 自己兩次回答的差大，就是雜訊。
+  前兩個只算兩邊都讀得到的題（位移用的那一批），免得只有一邊答過的題把判定的 (b) 推高或拉低。
 - **最後一行是判定**（`verdict:`；門檻 2026-11-11 拍板、寫死在 `effect.py`）：讀「每題、repeat 取平均」的平均位移，
   兩個條件都成立才印 `the extra context moves the decision toward long｜short`——(a) 位移的 90% 區間不含 0；(b) 位移
   的大小超過**兩個 variant 各自**兩次回答之間的平均絕對差。(b) 管的是大小不是證據：比模型自己問兩次的差還小的位移，
   就算每一題方向都一致，也不值得為它接一段。有一條不過就印 `no measurable effect`，並說是哪一條（兩條都不過時說 (a)）。
-  四種情況不判、印 `cannot be judged` 與原因：沒有任何一題兩邊都有可讀主張；某個 variant 沒有同一題在兩個 repeat
+  五種情況不判、印 `cannot be judged` 與原因：兩個 variant 不是只差 extra context（差了模型的話，這句判定會把模型
+  造成的位移算在那一段頭上）；沒有任何一題兩邊都有可讀主張；某個 variant 沒有同一題在兩個 repeat
   都有可讀主張（量不到 (b)）；`--block` 不是預設的 6（一題一塊會把相鄰的題當成獨立樣本）；抽樣不到 5 塊（區間會
   縮成一個點）。後兩條與 `pool` 的門檻同一個規則。
 - **只讀**：不寫任何 store、不記 ledger；不讀事後價格，所以不需要 `model_cutoff`；holdout 永遠不讀（列走成績單同一道

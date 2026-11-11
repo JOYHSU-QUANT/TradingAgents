@@ -1,6 +1,6 @@
 """Whether one more section of text moves the decision (discovery plan §4.7, experiment B).
 
-The paper trader was shown a research section for seven runs and the
+The paper trader was shown a research section for six runs and the
 scorecard could not say whether it read it: the rule behind the section
 barely changed side, so "the model agreed with the rule" and "the model
 would have done that anyway" looked the same (``score``'s ``research
@@ -53,13 +53,17 @@ The definitions, once:
   the mean shift is the pool's circular block bootstrap
   (:func:`~.pool.circular_draw`): each run redrawn on its own circle in
   blocks of consecutive questions, which is what the sign test's p-value
-  lacks.
+  lacks. Each run's own count of questions is printed under the pooled
+  figures: a run both variants answered on no question in common adds
+  nothing to them, and nothing else would say so.
 - **How far apart two answers are** is read three times with one
   yardstick (the share of pairs whose side differs, and the mean absolute
   exposure difference): between two repeats of the variant, between two
   repeats of the other, and between the two variants on the same repeat.
-  A shift between variants that is no larger than the spread between two
-  repeats of one variant is noise.
+  The first two are read on the questions the per-question shift is read
+  on, so that a question one variant alone answered cannot move the spread
+  the shift is held against. A shift between variants that is no larger
+  than the spread between two repeats of one variant is noise.
 - **The verdict** (the bar, decided 2026-11-11, before any answer was
   bought) is read off the per-question mean shift, and says the extra
   context moves the decision only when both hold: the shift's interval
@@ -69,8 +73,10 @@ The definitions, once:
   one variant does between two askings of one question is not worth
   wiring a section for, however many questions agree on its sign.
   Otherwise the verdict is "no measurable effect", naming the first of
-  the two that failed. It is not judged at all when no question has a
-  readable claim from both variants; when a variant has no question with
+  the two that failed. It is not judged at all when the two variants
+  do not differ in their extra context alone (the sentence would credit the
+  extra context with a shift a model could have made, or with noise); when no question has
+  a readable claim from both variants; when a variant has no question with
   a readable claim on two of its repeats to take a spread from; with a
   block size other than the pool's (:data:`~.pool.BLOCK`: a block of one
   question would draw neighbours as if they were independent); or on
@@ -258,9 +264,10 @@ def read_rows(
 class ArmRun:
     """One variant's answers on one run: its readings by repeat, then by question.
 
-    ``refused`` counts the questions the provider refused; ``unread`` the
-    stored answers the report does not read because their questions are not
-    in the run's train or validation segment (asked of the holdout).
+    ``refused`` counts the questions read that the provider refused;
+    ``unread`` the stored answers and recorded refusals the report does not
+    read, because their questions are outside the run's train and
+    validation segments: the holdout.
     """
 
     run_id: str
@@ -274,11 +281,14 @@ def arm_run(
     cards: Mapping[int, Scorecard],
     responses: Mapping[int, Mapping[str, str]],
     phrases: Sequence[str],
+    *,
+    refusals: int = 0,
 ) -> ArmRun:
     """One variant's answers on one run, from its card per repeat and what it said per repeat.
 
-    ``responses`` holds every stored answer's text; the ones no card has a
-    row for are the answers the lock leaves unread, and are counted.
+    ``responses`` holds every stored answer's text and ``refusals`` counts
+    every refusal recorded for the variant on the run; the ones no card has
+    a row for are what the lock leaves unread, and are counted.
     """
     repeats = {}
     refused = 0
@@ -290,8 +300,9 @@ def arm_run(
             # throughout) is not a repeat the report has: counting it would
             # print "2 repeat(s)" over one repeat's answers.
             repeats[repeat] = found
-    stored = sum(len(texts) for texts in responses.values())
-    return ArmRun(run_id, repeats, refused, stored - sum(len(read) for read in repeats.values()))
+    recorded = sum(len(texts) for texts in responses.values()) + refusals
+    read = sum(len(found) for found in repeats.values()) + refused
+    return ArmRun(run_id, repeats, refused, recorded - read)
 
 
 @dataclass(frozen=True)
@@ -310,12 +321,12 @@ class Arm:
     def __post_init__(self) -> None:
         # A bare string is a sequence of its characters, and a search for
         # single letters matches every answer.
-        if isinstance(self.phrases, str) or not self.phrases or not all(
-            isinstance(phrase, str) and phrase.strip() for phrase in self.phrases
-        ):
+        phrases = () if isinstance(self.phrases, str) else tuple(self.phrases)
+        if not phrases or not all(isinstance(phrase, str) and phrase.strip() for phrase in phrases):
             raise ScoreError(
                 f"the phrases an answer is searched for are non-blank texts, got {self.phrases!r}"
             )
+        object.__setattr__(self, "phrases", phrases)
 
     @property
     def name(self) -> str:
@@ -437,7 +448,12 @@ def _answers_line(arm: Arm) -> str:
         + f", fail-closed {sides[None]}; {sum(run.refused for run in arm.runs)} refused by the "
         "provider; "
         f"mentioning {searched}: {rate(said, len(readings))}"
-        + (f"; {unread} more stored for holdout questions, not read" if unread else "")
+        + (
+            f"; {unread} more answer(s) or refusal(s) recorded outside train and validation, "
+            "not read"
+            if unread
+            else ""
+        )
     )
 
 
@@ -499,18 +515,30 @@ class _Shift:
 
 def _question_lines(
     treatment: Arm, control: Arm, *, block: int, draws: int, seed: int
-) -> tuple[list[str], _Shift | None]:
-    """The per-question block, and the shift the verdict reads (``None`` with no question)."""
+) -> tuple[list[str], _Shift | None, list[frozenset[str]]]:
+    """The per-question block, the shift the verdict reads, and the questions it is read on.
+
+    The shift is ``None`` with no question read by both; the questions are
+    per run, and are what a spread the shift is held against is read on too.
+    """
     lines = ["-- per question, repeats averaged --"]
     runs: list[list[tuple[float, float]]] = []
+    questions = []
     for mine, theirs in zip(treatment.runs, control.runs, strict=True):
         ours, others = _question_means(mine), _question_means(theirs)
-        runs.append([(ours[input_id], others[input_id]) for input_id in ours if input_id in others])
+        common = [input_id for input_id in ours if input_id in others]
+        questions.append(frozenset(common))
+        runs.append([(ours[input_id], others[input_id]) for input_id in common])
     means = [pair for run in runs for pair in run]
     shifts = [[mine - theirs for mine, theirs in run] for run in runs]
+    # A run both variants answered, on no question in common, adds nothing
+    # to the pooled figures below: its own count is where that shows.
+    by_run = "  by run: " + ", ".join(
+        f"{mine.run_id} {len(run)}" for mine, run in zip(treatment.runs, runs, strict=True)
+    )
     found = shift_interval(shifts, block=block, draws=draws, seed=seed)
     if found is None:
-        return [*lines, "  no question has a readable claim from both"], None
+        return [*lines, "  no question has a readable claim from both", by_run], None, questions
     flat = [shift for run in shifts for shift in run]
     read = _Shift(fmean(flat), *found, block_count(shifts, block))
     lines.append(
@@ -524,7 +552,7 @@ def _question_lines(
         f"draws, seed {seed}"
     )
     lines.append(f"  {_moves(flat)}")
-    return lines, read
+    return [*lines, by_run], read, questions
 
 
 def _gap(pairs: Sequence[_Pair]) -> float | None:
@@ -548,21 +576,27 @@ def _apart(label: str, pairs: Sequence[_Pair]) -> str:
     )
 
 
-def _repeat_pairs(arm: Arm) -> list[_Pair]:
-    """Every pair of answers one variant gave one question on two of its repeats."""
+def _repeat_pairs(arm: Arm, questions: Sequence[frozenset[str]]) -> list[_Pair]:
+    """Every pair of answers one variant gave one question on two of its repeats.
+
+    Only on ``questions`` (per run, the ones the shift is read on): a spread
+    taken on questions the other variant never read would move the bar
+    without moving the shift it is held against.
+    """
     return [
         pair
-        for run in arm.runs
+        for run, within in zip(arm.runs, questions, strict=True)
         for first, second in combinations(sorted(run.repeats), 2)
         for pair in _paired(run.repeats[first], run.repeats[second])
+        if pair[0].input_id in within
     ]
 
 
-def _between_repeats(arm: Arm) -> str:
+def _between_repeats(arm: Arm, questions: Sequence[frozenset[str]]) -> str:
     label = f"two repeats of {arm.name}"
     if len(arm.repeats) < 2:
-        return f"  {label}: one repeat was asked, so there is nothing to compare"
-    return _apart(label, _repeat_pairs(arm))
+        return f"  {label}: fewer than two repeats hold an answer, so there is nothing to compare"
+    return _apart(label, _repeat_pairs(arm, questions))
 
 
 def verdict(
@@ -685,11 +719,12 @@ def describe_effect(treatment: Arm, control: Arm, *, block: int, draws: int, see
                 if repeat not in run.repeats
             ]
             if lacking:
-                # Said per run: a repeat asked on some runs only is paired
-                # on fewer questions than its neighbours, and must say so.
+                # Said per run: a repeat with nothing read on some run (not
+                # asked there, refused throughout, or asked the holdout only)
+                # is paired on fewer questions than its neighbours.
                 absent.append(
-                    f"  {mine.run_id}: no repeat {repeat} from {' or '.join(lacking)}, so "
-                    "nothing is paired there"
+                    f"  {mine.run_id}: no answer read on repeat {repeat} from "
+                    f"{' or '.join(lacking)}, so nothing is paired there"
                 )
                 continue
             found = _paired(mine.repeats[repeat], theirs.repeats[repeat])
@@ -707,25 +742,37 @@ def describe_effect(treatment: Arm, control: Arm, *, block: int, draws: int, see
             )
         lines.extend(_repeat_lines(repeat, pairs, name, other, absent))
         same_repeat.extend(pairs)
-    per_question, read = _question_lines(treatment, control, block=block, draws=draws, seed=seed)
+    per_question, read, questions = _question_lines(
+        treatment, control, block=block, draws=draws, seed=seed
+    )
     lines.extend(per_question)
     lines.extend(
         [
-            "-- how far apart two answers to one question are (readable claims; exposure as a "
-            "multiple of equity) --",
-            _between_repeats(treatment),
-            _between_repeats(control),
+            "-- how far apart two answers to one question are (readable claims on the questions "
+            "read by both; exposure as a multiple of equity) --",
+            _between_repeats(treatment, questions),
+            _between_repeats(control, questions),
             _apart(f"{name} against {other}, same repeat", same_repeat),
         ]
     )
-    if read is None:
+    if differ != ["extra context"]:
+        # The bar's sentence is about the extra context: said of variants
+        # that differ in a model as well, it would credit the wrong thing.
+        judged = f"{UNJUDGED}: " + (
+            f"the variants differ in more than their extra context ({', '.join(differ)})"
+            if differ
+            else "the variants differ in nothing that reaches the model"
+        )
+    elif read is None:
         judged = f"{UNJUDGED}: no question has a readable claim from both"
     else:
         judged = verdict(
             read.shift,
             read.low,
             read.high,
-            spreads=[(arm.name, _gap(_repeat_pairs(arm))) for arm in (treatment, control)],
+            spreads=[
+                (arm.name, _gap(_repeat_pairs(arm, questions))) for arm in (treatment, control)
+            ],
             block=block,
             blocks=read.blocks,
         )

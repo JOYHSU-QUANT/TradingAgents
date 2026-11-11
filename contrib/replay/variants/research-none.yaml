@@ -1,0 +1,18 @@
+# Experiment B of the discovery plan (section 4.7), arm 1 of 4: no extra
+# context. The questions as they were recorded, on the model and prompt the
+# other three research-* variants use; research-long.yaml says why each
+# line is what it is.
+#
+# This arm against research-neutral reads what ANY added section does;
+# research-long and research-short are then read against research-neutral,
+# so that what is left is the section's content.
+#
+#   python -m contrib.replay replay --db paper_trading.db --run-id paper-BTC-3 \
+#       --variant contrib/replay/variants/research-none.yaml --dry-run
+name: research-none
+model:
+  provider: openrouter
+  id: anthropic/claude-sonnet-5.5
+system_prompt_path: current_system.md
+max_tokens: 16384
+model_cutoff: 2026-06-30

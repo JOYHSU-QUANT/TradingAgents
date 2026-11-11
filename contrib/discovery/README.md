@@ -34,7 +34,9 @@ backfill 落地＋驗收）、`generate` 指令。
 **PR 3（Random／Grid 臂＋oracle 判定，已落地）**：`hypothesists.py`（候選池與兩臂）、`bench.py`（一個世界跑到判定）、
 `oracle.py` 的餘裕判定與 full-pool reference、`search`／`oracle`／`calibrate` 指令、manifest v2。
 **PR 4（評分器，已落地）**：`scoring.py`（三項分報指標、`scores.json`、跨世界的表）、`score`／`report` 指令、manifest v3（artifact 的
-SHA-256）、`oracle.json` v2（blockers 改 enum）。**PR 5（LLM 臂，已落地）**：`bench.py` 在 Random／Grid 之後跑 manifest 指名的模型；定義見「LLM 臂（PR 5）」一節。replay 消融（PR 6）還沒有。
+SHA-256）、`oracle.json` v2（blockers 改 enum）。**PR 5（LLM 臂，已落地）**：`bench.py` 在 Random／Grid 之後跑 manifest 指名的模型；定義見「LLM 臂（PR 5）」一節。**PR 6（實驗 B：research 段有沒有進決策，已落地）**不在這個套件：它是
+`contrib/replay` 的四個 `research-*` variant 與 `effect` 指令（[replay README](../replay/README.md) 的「多一段文字有沒有推動決策」一節），
+兩個實驗只共用結論、不共用 import。
 
 已經有的東西：
 

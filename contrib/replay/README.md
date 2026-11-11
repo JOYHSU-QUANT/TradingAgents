@@ -385,6 +385,71 @@ down」兩個 Brier skill score，都對「模型自己的先驗」比，各自 
 **訓練資料**截止（2026 年 1 月，取月底 2026-01-31；它的 reliable knowledge cutoff 是 2025 年 8 月，
 比較早，但洩漏看的是訓練資料）。paper 資料從 2026-08-28 起，全部在它之後。
 
+## 多一段文字有沒有推動決策（`effect`）
+
+```
+python -m contrib.replay effect --db paper_trading.db --replay-db replay.sqlite \
+    --run-id paper-BTC-3 --run-id paper-BTC-4 --run-id paper-BTC-5 \
+    --variant research-long --variant research-short --against research-neutral \
+    [--mention TEXT ...] [--block 6] [--draws 10000] [--seed 0] [--out DIR]
+```
+
+要回答的問題：**research 段到底有沒有進決策**（discovery 計畫 §4.7 的實驗 B）。成績單的 `research effect`
+那幾行在 paper 上量不出來：規則幾乎沒換過邊，「模型跟著規則」和「模型本來就會這樣做」看起來一樣。重放可以做
+paper 做不到的事：**同一批題目**問幾個只差 `extra_context` 的 variant，逐題比答案。
+
+`variants/` 下有這個實驗的四臂，除了 `extra_context` 完全相同（Sonnet 5.5、`current_system.md`、cap 16384、
+不設 temperature）：
+
+| variant | `extra_context` |
+|---|---|
+| `research-none` | 沒有 |
+| `research-neutral` | 一段形狀相同的中性文字：一行標題加六行縮排，每行與 research 段差不到 3 個字元；不談市場、不提方向、不含報表搜尋的字串（整段沒有 research 這個字） |
+| `research-long` | paper-BTC-7 當時渲染的 research 段，逐字照抄，方向是 long |
+| `research-short` | 同上，方向是 short（paper 從沒出現過這一邊：那條規則只持有過 long 或空手） |
+
+research 段與 daemon 渲染的差兩處：標題的日期寫成「這份 context 自己的那一根收盤」（context 開頭的 `As of:`），不寫
+時間戳（寫死的時間戳拿去問六週的題目，除了一題以外都會讀成過期訊號）；位置在倉位段之後，不是 daemon 放的倉位段
+之前（`extra_context` 接在整份記錄的 context 之後、format 區塊之前）。
+
+題庫是 paper-BTC-3、-4、-5：`context_shape` 有記錄、而且沒有 `autoresearch` 的 run（train＋validation 共 103 題）。
+run 6 到 11 每一題都已經帶著 research 段，再塞一段是另一個實驗；run 3 之前沒有倉位段，也沒記 shape。
+四臂各自用 `replay` 問 train 與 validation 兩段，再跑 `effect`。
+
+報表讀三件事，定義寫死在 `effect.py`：
+
+- **Exposure（有沒有那一段）**不用問模型：報表印每個 variant 的 `extra_context` 幾個字元、開頭是什麼，並列出兩個
+  variant **還差在哪**（模型、system prompt、temperature、cap）。只差 `extra context` 時，位移才能算在那一段頭上；
+  差更多時報表會明說。四臂的訊息長什麼樣由 `tests/test_effect.py` 用渲染出來的文字斷言。
+- **Uptake（有沒有引用）**：答案原文不分大小寫搜尋 `--mention` 的字串（預設 `research signal`、`research rule`、
+  `research radar` 三個：那一段對自己與來源的稱呼），印幾個答案提到。不單搜 `research`：四臂共用的 system prompt 自己
+  就說「research debate 不在訊息裡」，照抄這句的答案沒有引用任何一段。對照組同一個數字是基準：沒看過那一段的模型
+  也提到，就是搜尋字串太鬆。
+- **Decision effect（決策有沒有動）**：兩邊都答了的題，比模型讀法的曝險（成績單同一套讀法：要了目標就是要的方向與
+  margin、維持就是持有的那邊、fail-closed 沒有主張；單位是權益的倍數，帶正負號）。variant 比對照高＝`toward long`、
+  低＝`toward short`（差距在 1e-9 以內算沒動：同樣的答案、不同 repeat 數取平均的浮點誤差不算位移），所以加碼的多單跟
+  空手轉多都算往多。旁邊印方向轉移表、執行讀法（閘門放行之後）的位移，以及
+  兩邊都有 confidence 的題的平均。
+
+讀數字時要知道：
+
+- **一對**＝同一題、同一個 repeat 的兩個答案。repeat 之間可以互換，repeat 0 配 repeat 0 只是慣例；每個 repeat 各印
+  一段，看得出計數在 repeat 之間晃多少。某個 run 有一邊沒問過那個 repeat 時，那一段會逐 run 寫明沒有配對。
+- **sign test 的 p 偏小**。相鄰的 4h 題在同一個盤勢，不是獨立樣本；p 只用來排序，不是門檻。
+- **「每題、repeat 取平均」那一段**先把每個 variant 可讀的 repeat 平均成一題一個數，再算位移；區間用 `pool` 的循環
+  block bootstrap（各 run 自己繞一圈、連續 6 題一塊、塊不跨 run），補上 sign test 沒有的相依性。
+- **最後一段是雜訊底**：同一個 variant 兩個 repeat 之間、與兩個 variant 同一個 repeat 之間，用同一把尺（方向不同的
+  比例、曝險差的平均絕對值）。variant 之間的差沒有比同一個 variant 自己兩次回答的差大，就是雜訊。
+- **不印判定**。多大的位移算「那一段有作用」還沒拍板，報表只給數字。
+- **只讀**：不寫任何 store、不記 ledger；不讀事後價格，所以不需要 `model_cutoff`；holdout 永遠不讀（列走成績單同一道
+  鎖）。每個 run 要已經在這個 `replay.sqlite` 釘過 split；題目記錄時 context 已經帶 research 段的 run 照讀，但報表會逐 run
+  印一行 `note:` 說有幾題（那是「多一段」對「一段」，不是這個實驗）；variant 在某個 run 沒有答案、或是 graph variant（每題從自己
+  的模擬帳戶問，兩個 graph variant 問的不是同一題），具名拒絕。
+- `--out DIR` 每個 variant 寫 `effect-<variant>-against-<against>-decisions.csv`（一對一列）與 `-summary.txt`。
+
+**這個實驗證明不了的事**：這是一次 completion、訊息只有 context 的簡單版。位移只說明模型對這段文字敏感，不說明
+research 段照正式接線（位置、時效、與其他段落衝突時）有效。
+
 ## 趨勢護欄的影子報表
 
 ```

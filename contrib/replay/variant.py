@@ -220,8 +220,8 @@ class Variant:
         return bool(self.system_prompt.strip())
 
     @property
-    def sha(self) -> str:
-        """``sha256:<hex>`` over what reaches the model (module docstring), as canonical JSON."""
+    def identity(self) -> dict[str, object]:
+        """What reaches the model, part by part: the mapping :attr:`sha` is the digest of."""
         identity: dict[str, object] = {
             "provider": self.provider,
             "model": self.model,
@@ -240,7 +240,14 @@ class Variant:
                 else {"provider": self.quick_provider, "id": self.quick_model}
             )
             identity["guardrail"] = self.guardrail
-        canonical = json.dumps(identity, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        return identity
+
+    @property
+    def sha(self) -> str:
+        """``sha256:<hex>`` over what reaches the model (module docstring), as canonical JSON."""
+        canonical = json.dumps(
+            self.identity, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+        )
         return f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
 
     @property

@@ -33,7 +33,6 @@ from contrib.replay.pool import (
     MIN_BLOCKS,
     Interval,
     RunScores,
-    _quantile,
     _verdict,
     block_count,
     bootstrap,
@@ -41,6 +40,7 @@ from contrib.replay.pool import (
     circular_draw,
     describe_pool,
     pooled_skill,
+    quantile,
 )
 from contrib.replay.probe import load_probe
 from contrib.replay.probe_score import (
@@ -123,9 +123,9 @@ def test_a_circular_draw_wraps_within_the_run_and_keeps_its_size():
 
 def test_the_quantile_interpolates_between_order_statistics():
     ordered = [0.0, 1.0, 2.0, 3.0, 4.0]
-    assert _quantile(ordered, 0.05) == pytest.approx(0.2)
-    assert _quantile(ordered, 0.95) == pytest.approx(3.8)
-    assert _quantile([7.0], 0.05) == 7.0
+    assert quantile(ordered, 0.05) == pytest.approx(0.2)
+    assert quantile(ordered, 0.95) == pytest.approx(3.8)
+    assert quantile([7.0], 0.05) == 7.0
 
 
 def test_each_run_is_redrawn_on_its_own_circle():

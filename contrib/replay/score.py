@@ -101,6 +101,7 @@ from .upstream import (
 
 __all__ = [
     "BASELINES",
+    "FAIL_CLOSED",
     "HORIZONS",
     "Answer",
     "Baseline",
@@ -119,6 +120,7 @@ __all__ = [
     "bars_per_year",
     "build_split",
     "csv_table",
+    "has_research_section",
     "paired_hits",
     "rate",
     "score_run",
@@ -1217,7 +1219,8 @@ def _research_follow(answered: Sequence[Scored]) -> tuple[ResearchFollow, ...]:
     )
 
 
-def _has_section(question: Question) -> bool:
+def has_research_section(question: Question) -> bool:
+    """Whether the context the question was asked with carried the research section."""
     return "autoresearch" in (question.context_shape or "").split("|")
 
 
@@ -1311,7 +1314,7 @@ def _summarise(card: Scorecard) -> Summary:
         research_unrecorded=sum(
             1
             for row in answered_rows
-            if row.question.research_bias is None and _has_section(row.question)
+            if row.question.research_bias is None and has_research_section(row.question)
         ),
         research=_research_follow(answered_rows),
         horizons=tuple(horizons),

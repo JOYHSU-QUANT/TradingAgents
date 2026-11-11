@@ -923,6 +923,21 @@ class ReplayStore:
             by_repeat.setdefault(row["repeat"], []).append(answer_from_row(row))
         return by_repeat
 
+    def responses(self, variant_sha: str, run_id: str) -> Mapping[int, Mapping[str, str]]:
+        """What the model said, word for word, for every stored answer: by repeat, then ``input_id``.
+
+        The text :meth:`answers` leaves behind: a scorecard reads what the
+        gate made of an answer, the ``effect`` report also reads whether the
+        answer mentions what it was shown.
+        """
+        by_repeat: dict[int, dict[str, str]] = {}
+        for row in self.conn.execute(
+            "SELECT repeat, input_id, raw_response FROM answers WHERE variant_sha = ? AND run_id = ?",
+            (variant_sha, run_id),
+        ):
+            by_repeat.setdefault(row["repeat"], {})[row["input_id"]] = row["raw_response"]
+        return by_repeat
+
     # -- graph answers (plan PR 3b) -------------------------------------------
 
     def _require_graph_tables(self) -> None:

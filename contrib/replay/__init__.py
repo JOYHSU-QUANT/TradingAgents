@@ -23,6 +23,11 @@ The guardrail report (:mod:`~contrib.replay.guardrail`) reads the same
 recorded decisions against the side a fixed rule held at each one, and says
 what a guardrail built on that rule would have done. It scores nothing.
 
+The effect report (:mod:`~contrib.replay.effect`) compares the stored
+answers of variants that differ in their extra context alone, question by
+question: whether one more section of text moved the decision. It reads no
+later price either.
+
 It was the first package under ``contrib/`` to import BOTH neighbours
 (``contrib.carry`` follows the same funnel) —
 ``contrib.hyperliquid_perp`` for the decision vocabulary, the store, the

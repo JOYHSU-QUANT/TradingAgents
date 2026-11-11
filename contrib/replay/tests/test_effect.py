@@ -387,7 +387,15 @@ def test_the_verdict_is_not_judged_without_a_spread_or_off_the_bars_blocks():
     )
     with pytest.raises(ValueError, match="none was given"):
         _verdict(0.2, 0.1, 0.3, spreads=[])
-    # Coverage: 80% of what was asked, in whole numbers (0.8 * 130 is not 104 in floats).
+    # In the order the module states them: coverage, then the spread, then the block size,
+    # then the block count.
+    no_spread = {"spreads": [("told", None), ("plain", 0.02)], "block": 1, "blocks": 4}
+    assert "to take a spread from" in _verdict(0.2, 0.1, 0.3, **no_spread)
+    assert _verdict(0.2, 0.1, 0.3, **no_spread, readable=1, asked=60) == (
+        "cannot be judged: coverage is under 80%"
+    )
+    assert "blocks of 6 question(s), not 1" in _verdict(0.2, 0.1, 0.3, block=1, blocks=4)
+    # Coverage: 80% of what was asked, compared in whole numbers; 104 of 130 is the bar.
     assert _verdict(0.2, 0.1, 0.3, readable=103, asked=130) == (
         "cannot be judged: coverage is under 80%"
     )
@@ -460,13 +468,21 @@ def test_coverage_counts_what_was_asked_of_either_variant():
     plain = Arm(variant(name="plain"), [ArmRun("run-0", one)], MENTION)
     assert coverage(told, plain) == (1, 3)
     assert coverage(plain, told) == (1, 3)
+    # A repeat on which one variant was refused throughout, and the other holds nothing,
+    # is known only by what was asked: it counts all the same.
+    refused = ArmRun("run-0", one, refused=1, asked={0: frozenset({"q0"}), 1: frozenset({"q0"})})
+    assert coverage(Arm(told.variant, [refused], MENTION), plain) == (1, 2)
     # A repeat only one variant was asked is asked and unpaired.
     twice = Arm(told.variant, [ArmRun("run-0", {**one, 1: one[0]})], MENTION)
     assert coverage(twice, plain) == (1, 2)
 
 
 def test_a_variant_that_fails_closed_where_it_is_shown_the_section_is_not_called_no_effect():
-    """Thirty-six questions twice; ``told`` claims nothing on most and agrees on the rest."""
+    """Sixty questions twice; ``told`` claims nothing on half and agrees on the rest.
+
+    The thirty left are five blocks and both spreads are 0: without the coverage rule the
+    report would end on "no measurable effect".
+    """
 
     def asked(broken: range) -> dict[int, list[Reading]]:
         return {
@@ -474,19 +490,18 @@ def test_a_variant_that_fails_closed_where_it_is_shown_the_section_is_not_called
                 _reading(slot, None, None, executed=0.0)
                 if slot in broken
                 else _reading(slot, LONG, 0.3)
-                for slot in range(36)
+                for slot in range(60)
             ]
             for repeat in (0, 1)
         }
 
     plain = _arm("plain", asked(range(0)), extra=None)
-    lines = _describe(_arm("told", asked(range(12, 36))), plain)
-    assert "  12 question(s) read by both: " in lines[lines.index("-- per question, repeats averaged --") + 1]
-    assert lines[-1] == "verdict: cannot be judged: coverage is under 80%" + _covered(24, 72)
-    # Six broken questions in thirty-six leave 83% read, on thirty questions (five blocks):
-    # judged, and nothing moved on what was read.
-    assert _describe(_arm("told", asked(range(30, 36))), plain)[-1] == (
-        "verdict: no measurable effect: the interval of the shift holds 0" + _covered(60, 72)
+    lines = _describe(_arm("told", asked(range(30, 60))), plain)
+    assert "  30 question(s) read by both: " in lines[lines.index("-- per question, repeats averaged --") + 1]
+    assert lines[-1] == "verdict: cannot be judged: coverage is under 80%" + _covered(60, 120)
+    # Six broken questions in sixty leave 90% read: judged, and nothing moved on what was.
+    assert _describe(_arm("told", asked(range(54, 60))), plain)[-1] == (
+        "verdict: no measurable effect: the interval of the shift holds 0" + _covered(108, 120)
     )
 
 
@@ -578,6 +593,12 @@ def test_variants_that_differ_in_more_are_said_to():
     assert lines[-1] == (
         "verdict: cannot be judged: the variants differ in model, extra context, not in their "
         "extra context alone" + _covered(1, 1)
+    )
+    # The difference is named before anything else is looked at, a pair with no readable
+    # question included.
+    silent = _arm("silent", {0: [_reading(0, None, None, executed=0.0)]}, model="c/d")
+    assert "the variants differ in model, not in their extra context alone" in (
+        _describe(told, silent)[-1]
     )
     # Nor for two variants shown the same extra context by different models.
     lines = _describe(told, _arm("another", {0: [_reading(0, LONG, 0.3)]}, model="c/d"))
@@ -1092,3 +1113,32 @@ def test_a_variant_refused_throughout_is_reported_not_called_holdout_only(asked,
     assert out[-1] == (
         "verdict: cannot be judged: no question has a readable claim from both" + _covered(0, 16)
     )
+
+
+def test_the_verdict_reads_net_direction_and_the_last_block_shows_what_it_does_not():
+    """Answers moved both ways cancel in the mean shift: a known limit, written into the protocol."""
+    half = range(18)
+
+    def asked(first: float, second: float) -> dict[int, list[Reading]]:
+        return {
+            repeat: [
+                _reading(slot, LONG if exposure > 0 else SHORT, exposure)
+                for slot in range(36)
+                for exposure in [first if slot in half else second]
+            ]
+            for repeat in (0, 1)
+        }
+
+    lines = _describe(_arm("told", asked(-0.3, 0.3)), _arm("plain", asked(0.3, -0.3), extra=None))
+    assert lines[-1] == (
+        "verdict: no measurable effect: the interval of the shift holds 0" + _covered(72, 72)
+    )
+    # Every answer changed side, and the block above the verdict says so.
+    assert lines[-4:-1] == [
+        "  two repeats of told: side differs in 0 of 36 pair(s) (0.0%), mean absolute exposure "
+        "difference 0.000",
+        "  two repeats of plain: side differs in 0 of 36 pair(s) (0.0%), mean absolute exposure "
+        "difference 0.000",
+        "  told against plain, same repeat: side differs in 72 of 72 pair(s) (100.0%), mean "
+        "absolute exposure difference 0.600",
+    ]

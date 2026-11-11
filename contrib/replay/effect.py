@@ -93,6 +93,12 @@ The definitions, once:
   over a section that broke the answer. The answers line counts each
   variant's fail-closed and refused rounds; the coverage is the one
   figure that puts them against what was asked.
+- **What the verdict does not read**: the shift is a signed mean, so
+  answers moved in both directions cancel in it, and a text that scatters
+  the decision without leaning it reads "no measurable effect". The last
+  block is where that shows: the difference between the two variants on
+  the same repeat, well above either variant's own between two repeats.
+  Whoever uses the verdict as a gate reads that block beside it.
 
 No later price is read, so a variant's ``model_cutoff`` plays no part. The
 holdout is never read: the rows come through the scorecard's own lock,
@@ -626,7 +632,7 @@ def coverage(treatment: Arm, control: Arm) -> tuple[int, int]:
     ``asked`` counts the question-repeats put to either variant (answered,
     failed closed or refused by the provider); ``readable`` the ones on
     which both variants claim a side. The shift, the spread and the verdict
-    are read on the second alone, so a variant that fails closed or is
+    are read only on questions both variants claim a side on, so a variant that fails closed or is
     refused wherever it is shown the extra context leaves them looking like
     "nothing moved": the share is what says otherwise.
     """
@@ -670,8 +676,8 @@ def verdict(
     if not spreads:
         raise ValueError("a verdict is read against each variant's spread; none was given")
     if readable * 100 < COVERAGE_PCT * asked:
-        # In whole numbers: 0.8 * 130 is a hair over 104 in floats, and a
-        # run at exactly the bar must not fall under it.
+        # In whole numbers, so that a run at exactly the bar never turns on
+        # how a float product happens to round.
         return f"{UNJUDGED}: coverage is under {COVERAGE_PCT}%"
     for name, spread in spreads:
         if spread is None:

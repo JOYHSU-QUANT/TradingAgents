@@ -420,7 +420,10 @@ research 段與 daemon 渲染的差兩處：標題的日期寫成「這份 conte
 **怎麼跑、看哪一個結論**（2026-11-11 拍板，在買任何答案之前寫死）：
 
 1. **先只問 `research-none` 與 `research-neutral`**，跑 `effect --variant research-neutral --against research-none`。
-   verdict 是 `no measurable effect` 才往下；neutral 文字自己就會推動決策的話，重寫 neutral（新名字）、只重問那一臂。
+   兩件事都成立才往下：(i) verdict 是 `no measurable effect`；(ii) 報表最後一段「兩個 variant、同一個 repeat」那一行的
+   兩個數字（方向不同的比例、曝險差的平均絕對值）沒有明顯大於它上面兩行「同一個 variant 兩個 repeat」。(ii) 是人看的、
+   沒有寫成門檻：verdict 只讀淨方向，neutral 若把答案一半推多、一半推空，平均位移會互相抵消、照樣印 `no measurable
+   effect`。有一項不成立，就重寫 neutral（新名字）、只重問那一臂。
 2. 再問 `research-long` 與 `research-short`。
 3. **結論只讀一個比較**：`effect --variant research-long --against research-short` 的 verdict。兩段文字只差一個字，
    neutral 文字寫得好不好的影響互相抵消。long、short 各自對 neutral 照樣可以印，只當輔助，不決定任何事。
@@ -465,6 +468,8 @@ research 段與 daemon 渲染的差兩處：標題的日期寫成「這份 conte
   兩邊都有主張的題，所以某一臂一看到那段文字就 fail-closed、或被供應商拒答時，那些題會整批從數字裡消失，剩下的題看
   起來「沒有位移」。涵蓋率不到 80% 就不判（2026-11-11 拍板）：把答案弄壞也是一種作用，不能印成 `no measurable
   effect`。某一邊多問了一個 repeat 時，多出來的沒有配對、也算在分母裡——先把另一邊缺的 repeat 補問。
+- **判定只讀淨方向**：平均位移帶正負號，兩個方向的變化會互相抵消；一段文字把決策攪亂、卻沒有偏向哪一邊時，判定照樣是
+  `no measurable effect`。這種情況要看最後一段：variant 之間的差遠大於同一個 variant 自己兩次回答的差。
 - **只讀**：不寫任何 store、不記 ledger；不讀事後價格，所以不需要 `model_cutoff`；holdout 永遠不讀（列走成績單同一道
   鎖；有 variant 問過 holdout 段時，那些答案與拒答紀錄不讀、但那一行會寫有幾個）。每個 run 要已經在這個 `replay.sqlite` 釘過 split；題目記錄時 context 已經帶 research 段的 run 照讀，但報表會逐 run
   印一行 `note:` 說有幾題（那是「多一段」對「一段」，不是這個實驗）；variant 在某個 run 沒有答案也沒有拒答紀錄（或只問過 holdout 段）、或是 graph variant（每題從自己

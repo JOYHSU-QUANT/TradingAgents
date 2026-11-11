@@ -73,16 +73,26 @@ The definitions, once:
   one variant does between two askings of one question is not worth
   wiring a section for, however many questions agree on its sign.
   Otherwise the verdict is "no measurable effect", naming the first of
-  the two that failed. It is not judged at all when the two variants
-  do not differ in their extra context alone (the sentence would credit the
-  extra context with a shift a model could have made, or with noise); when no question has
-  a readable claim from both variants; when a variant has no question with
-  a readable claim on two of its repeats to take a spread from; with a
-  block size other than the pool's (:data:`~.pool.BLOCK`: a block of one
-  question would draw neighbours as if they were independent); or on
-  fewer blocks than the pool reads an interval with
-  (:data:`~.pool.MIN_BLOCKS`: an interval drawn from a few blocks
-  collapses onto the point).
+  the two that failed. It is not judged at all, in this order: when the
+  two variants do not differ in their extra context alone (the sentence
+  would credit the extra context with a shift a model could have made, or
+  with noise); when no question has a readable claim from both variants;
+  when fewer than :data:`COVERAGE_PCT` percent of the question-repeats put
+  to either variant carry a readable claim from both (:func:`coverage`);
+  when a variant has no question with a readable claim on two of its
+  repeats to take a spread from; with a block size other than the pool's
+  (:data:`~.pool.BLOCK`: a block of one question would draw neighbours as
+  if they were independent); or on fewer blocks than the pool reads an
+  interval with (:data:`~.pool.MIN_BLOCKS`: an interval drawn from a few
+  blocks collapses onto the point).
+- **Coverage** is why the third of those exists, and it is printed on the
+  verdict line whatever the verdict. The shift and the spread are read
+  only where both variants claim a side, so a variant that fails closed
+  or is refused by the provider wherever it is shown the extra context
+  drops out of both, and what is left can read "no measurable effect"
+  over a section that broke the answer. The answers line counts each
+  variant's fail-closed and refused rounds; the coverage is the one
+  figure that puts them against what was asked.
 
 No later price is read, so a variant's ``model_cutoff`` plays no part. The
 holdout is never read: the rows come through the scorecard's own lock,
@@ -107,7 +117,7 @@ from __future__ import annotations
 import random
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import combinations
 from statistics import fmean
 from typing import Final
@@ -128,6 +138,7 @@ from .upstream import TargetSide, from_epoch_ms
 from .variant import Variant
 
 __all__ = [
+    "COVERAGE_PCT",
     "EFFECT",
     "MENTION",
     "NO_EFFECT",
@@ -139,6 +150,7 @@ __all__ = [
     "Reading",
     "already_carried",
     "arm_run",
+    "coverage",
     "describe_effect",
     "differences",
     "mentions",
@@ -159,6 +171,12 @@ UNJUDGED: Final = "cannot be judged"
 # id. An answer that leans on the section under other words is missed, so
 # the count is a lower bound.
 MENTION: Final = ("research signal", "research rule", "research radar", "btc-4h-maker")
+
+# The share of the question-repeats put to either variant that must carry a
+# readable claim from both for a verdict to be given, in percent (decided
+# 2026-11-11). Under it, what the comparison is read on is too little of
+# what was asked to say "no measurable effect" of.
+COVERAGE_PCT: Final = 80
 
 # Exposures closer than this are the same exposure. They are margins in
 # whole percent times a leverage, so real differences are far above it and
@@ -267,13 +285,20 @@ class ArmRun:
     ``refused`` counts the questions read that the provider refused;
     ``unread`` the stored answers and recorded refusals the report does not
     read, because their questions are outside the run's train and
-    validation segments: the holdout.
+    validation segments: the holdout. ``asked`` is, per repeat, every
+    question read that was put to the variant, answered or refused: what
+    the verdict's coverage is counted over.
     """
 
     run_id: str
     repeats: Mapping[int, Mapping[str, Reading]]
     refused: int = 0
     unread: int = 0
+    asked: Mapping[int, frozenset[str]] = field(default_factory=dict)
+
+    def put(self, repeat: int) -> frozenset[str]:
+        """The questions put to the variant on ``repeat``: asked, or holding a reading."""
+        return self.asked.get(repeat, frozenset()) | frozenset(self.repeats.get(repeat, ()))
 
 
 def arm_run(
@@ -291,10 +316,13 @@ def arm_run(
     a row for are what the lock leaves unread, and are counted.
     """
     repeats = {}
+    asked = {}
     refused = 0
     for repeat, card in cards.items():
         found, lost = read_rows(card.rows, responses.get(repeat, {}), phrases)
         refused += lost
+        if card.rows:
+            asked[repeat] = frozenset(row.question.input_id for row in card.rows)
         if found:
             # A repeat with nothing read (asked the holdout only, or refused
             # throughout) is not a repeat the report has: counting it would
@@ -302,7 +330,7 @@ def arm_run(
             repeats[repeat] = found
     recorded = sum(len(texts) for texts in responses.values()) + refusals
     read = sum(len(found) for found in repeats.values()) + refused
-    return ArmRun(run_id, repeats, refused, recorded - read)
+    return ArmRun(run_id, repeats, refused, recorded - read, asked)
 
 
 @dataclass(frozen=True)
@@ -592,6 +620,26 @@ def _repeat_pairs(arm: Arm, questions: Sequence[frozenset[str]]) -> list[_Pair]:
     ]
 
 
+def coverage(treatment: Arm, control: Arm) -> tuple[int, int]:
+    """``(readable, asked)``: how much of what was asked the comparison is read on.
+
+    ``asked`` counts the question-repeats put to either variant (answered,
+    failed closed or refused by the provider); ``readable`` the ones on
+    which both variants claim a side. The shift, the spread and the verdict
+    are read on the second alone, so a variant that fails closed or is
+    refused wherever it is shown the extra context leaves them looking like
+    "nothing moved": the share is what says otherwise.
+    """
+    readable = asked = 0
+    for mine, theirs in zip(treatment.runs, control.runs, strict=True):
+        for repeat in {*mine.asked, *mine.repeats, *theirs.asked, *theirs.repeats}:
+            asked += len(mine.put(repeat) | theirs.put(repeat))
+            readable += len(
+                _exposures(_paired(mine.repeats.get(repeat, {}), theirs.repeats.get(repeat, {})))
+            )
+    return readable, asked
+
+
 def _between_repeats(arm: Arm, questions: Sequence[frozenset[str]]) -> str:
     label = f"two repeats of {arm.name}"
     if len(arm.repeats) < 2:
@@ -607,6 +655,8 @@ def verdict(
     spreads: Sequence[tuple[str, float | None]],
     block: int,
     blocks: int,
+    readable: int,
+    asked: int,
 ) -> str:
     """Whether a per-question mean ``shift`` clears the bar (module docstring), as a sentence.
 
@@ -614,9 +664,15 @@ def verdict(
     ``block`` questions; ``spreads`` is each variant's name and its mean
     absolute exposure difference between two repeats (``None`` where it has
     no such pair): both variants', or the size half of the bar reads one.
+    ``readable`` of the ``asked`` question-repeats put to either variant
+    carry a readable claim from both (:func:`coverage`).
     """
     if not spreads:
         raise ValueError("a verdict is read against each variant's spread; none was given")
+    if readable * 100 < COVERAGE_PCT * asked:
+        # In whole numbers: 0.8 * 130 is a hair over 104 in floats, and a
+        # run at exactly the bar must not fall under it.
+        return f"{UNJUDGED}: coverage is under {COVERAGE_PCT}%"
     for name, spread in spreads:
         if spread is None:
             return (
@@ -683,8 +739,8 @@ def describe_effect(treatment: Arm, control: Arm, *, block: int, draws: int, see
         differ_line = "the two differ in: extra context"
     else:
         differ_line = (
-            f"the two differ in: {', '.join(differ)}; a shift between them is not the extra "
-            "context's alone"
+            f"the two differ in: {', '.join(differ)}; a shift between them cannot be put down to "
+            "the extra context"
         )
     preamble = [
         f"decision effect: {name} against {other}",
@@ -755,11 +811,13 @@ def describe_effect(treatment: Arm, control: Arm, *, block: int, draws: int, see
             _apart(f"{name} against {other}, same repeat", same_repeat),
         ]
     )
+    readable, asked = coverage(treatment, control)
     if differ != ["extra context"]:
         # The bar's sentence is about the extra context: said of variants
-        # that differ in a model as well, it would credit the wrong thing.
+        # that differ in a model (as well, or instead), it would credit the
+        # wrong thing.
         judged = f"{UNJUDGED}: " + (
-            f"the variants differ in more than their extra context ({', '.join(differ)})"
+            f"the variants differ in {', '.join(differ)}, not in their extra context alone"
             if differ
             else "the variants differ in nothing that reaches the model"
         )
@@ -775,6 +833,13 @@ def describe_effect(treatment: Arm, control: Arm, *, block: int, draws: int, see
             ],
             block=block,
             blocks=read.blocks,
+            readable=readable,
+            asked=asked,
         )
-    lines.append(f"verdict: {judged}")
+    # The coverage is said whatever the verdict: it is what the verdict's
+    # own figures cannot show.
+    lines.append(
+        f"verdict: {judged}; {readable} of {asked} question-repeat(s) put to either variant "
+        "carry a readable claim from both"
+    )
     return Effect(preamble, lines, (header, rows))

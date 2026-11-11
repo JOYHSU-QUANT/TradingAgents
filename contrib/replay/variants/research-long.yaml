@@ -17,7 +17,8 @@
 # The conclusion is read off ONE comparison, named before any answer was
 # bought (2026-11-11): this arm against research-short, two texts one word
 # apart, so whatever the neutral text does cancels. Each against
-# research-neutral is printed beside it and decides nothing.
+# research-neutral can be printed too (two --variant flags, --against
+# research-neutral) and decides nothing.
 #
 #   python -m contrib.replay effect --db paper_trading.db --replay-db replay.sqlite \
 #       --run-id paper-BTC-3 --run-id paper-BTC-4 --run-id paper-BTC-5 \

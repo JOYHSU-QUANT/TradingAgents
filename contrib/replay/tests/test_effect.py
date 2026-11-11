@@ -35,6 +35,7 @@ from contrib.replay.effect import (
     ArmRun,
     Reading,
     arm_run,
+    coverage,
     describe_effect,
     differences,
     mentions,
@@ -71,6 +72,14 @@ ARMS = ("none", "neutral", "long", "short")
 SEARCHED = (
     "mentioning 'research signal' or 'research rule' or 'research radar' or 'btc-4h-maker'"
 )
+
+
+def _covered(readable: int, asked: int) -> str:
+    """How every verdict line ends: what the comparison was read on, of what was asked."""
+    return (
+        f"; {readable} of {asked} question-repeat(s) put to either variant carry a readable "
+        "claim from both"
+    )
 
 
 def _reading(
@@ -236,8 +245,7 @@ def test_the_report_counts_the_moves_on_the_questions_both_read():
         "  two repeats of plain: fewer than two repeats hold an answer, so there is nothing to compare",
         "  told against plain, same repeat: side differs in 3 of 5 pair(s) (60.0%), mean absolute "
         "exposure difference 0.240",
-        "verdict: cannot be judged: told has no question with a readable claim on two repeats to "
-        "take a spread from",
+        "verdict: cannot be judged: coverage is under 80%" + _covered(5, 8),
     ]
 
 
@@ -277,7 +285,9 @@ def test_a_question_counts_once_however_often_it_was_asked():
         "difference 0.000",
         "  told against plain, same repeat: side differs in 0 of 4 pair(s) (0.0%), mean absolute "
         "exposure difference 0.100",
-        "verdict: cannot be judged: 2 block(s), fewer than the 5 an interval is read with",
+        # Five question-repeats asked; told's fail-closed one is the fifth: exactly 80%.
+        "verdict: cannot be judged: 2 block(s), fewer than the 5 an interval is read with"
+        + _covered(4, 5),
     ]
 
 
@@ -331,7 +341,14 @@ def test_a_mean_of_equal_answers_is_not_a_move():
 
 
 def _verdict(shift: float, low: float, high: float, **changes) -> str:
-    terms = {"spreads": [("told", 0.05), ("plain", 0.02)], "block": 6, "blocks": 5, **changes}
+    terms = {
+        "spreads": [("told", 0.05), ("plain", 0.02)],
+        "block": 6,
+        "blocks": 5,
+        "readable": 60,
+        "asked": 60,
+        **changes,
+    }
     return verdict(shift, low, high, **terms)
 
 
@@ -370,8 +387,14 @@ def test_the_verdict_is_not_judged_without_a_spread_or_off_the_bars_blocks():
     )
     with pytest.raises(ValueError, match="none was given"):
         _verdict(0.2, 0.1, 0.3, spreads=[])
+    # Coverage: 80% of what was asked, in whole numbers (0.8 * 130 is not 104 in floats).
+    assert _verdict(0.2, 0.1, 0.3, readable=103, asked=130) == (
+        "cannot be judged: coverage is under 80%"
+    )
+    assert _verdict(0.2, 0.1, 0.3, readable=104, asked=130).startswith("the extra context")
     # Each comes before the bar: an interval holding 0 is no finding where nothing is judged.
     for unjudged in (
+        {"readable": 47, "asked": 60},
         {"spreads": [("told", None), ("plain", 0.02)]},
         {"block": 1, "blocks": 30},
         {"blocks": 4},
@@ -390,12 +413,12 @@ def test_the_report_ends_on_the_verdict():
     # and a mean of 0.15, which ``told`` at 0.5 clears by 0.35 on every draw.
     plain = _arm("plain", asked(0.1, 0.2), extra=None)
     assert _describe(_arm("told", asked(0.5, 0.5)), plain)[-1] == (
-        "verdict: the extra context moves the decision toward long"
+        "verdict: the extra context moves the decision toward long" + _covered(60, 60)
     )
     # 0.2 against a mean of 0.15 is a shift every draw agrees on, and half plain's own spread.
     assert _describe(_arm("told", asked(0.2, 0.2)), plain)[-1] == (
         "verdict: no measurable effect: the shift is no larger than the spread between two "
-        "repeats of one variant (0.100)"
+        "repeats of one variant (0.100)" + _covered(60, 60)
     )
 
 
@@ -408,16 +431,63 @@ def test_the_spread_is_read_on_the_questions_the_shift_is():
             for repeat, exposure in enumerate(exposures)
         }
 
-    plain = _arm("plain", asked(range(30), 0.1, 0.1), extra=None)
-    steady = asked(range(30), 0.3, 0.3)
-    # Forty more questions only ``told`` was asked, on which its two repeats are 1.0 apart.
-    wild = asked(range(30, 70), 0.0, 1.0)
-    told = _arm("told", {repeat: steady[repeat] + wild[repeat] for repeat in (0, 1)})
-    lines = _describe(told, plain)
-    assert "  two repeats of told: side differs in 0 of 30 pair(s) (0.0%), mean absolute " in (
-        lines[-4]
+    steady, plain = asked(range(30), 0.2, 0.2), asked(range(30), 0.1, 0.1)
+    # Six more questions only one variant was asked, on which its two repeats are 1.0 apart:
+    # over all thirty-six its spread would be 0.167, above the 0.1 shift; over the thirty
+    # the shift is read on, it is 0.
+    wild = asked(range(30, 36), 0.0, 1.0)
+    for told, other in (
+        ({repeat: steady[repeat] + wild[repeat] for repeat in (0, 1)}, plain),
+        (steady, {repeat: plain[repeat] + wild[repeat] for repeat in (0, 1)}),
+    ):
+        lines = _describe(_arm("told", told), _arm("plain", other, extra=None))
+        for line in lines[-4:-2]:
+            assert ": side differs in 0 of 30 pair(s) (0.0%), mean absolute exposure " in line
+        assert lines[-1] == (
+            "verdict: the extra context moves the decision toward long" + _covered(60, 72)
+        )
+
+
+def test_coverage_counts_what_was_asked_of_either_variant():
+    """Fail-closed and refused rounds leave the shift; the coverage is where they show."""
+    one = {0: {"q0": _reading(0, LONG, 0.3)}}
+    # q1 and q2 were put to ``told`` and refused: asked, with no reading.
+    told = Arm(
+        variant(name="told", extra_context="A section."),
+        [ArmRun("run-0", one, refused=2, asked={0: frozenset({"q0", "q1", "q2"})})],
+        MENTION,
     )
-    assert lines[-1] == "verdict: the extra context moves the decision toward long"
+    plain = Arm(variant(name="plain"), [ArmRun("run-0", one)], MENTION)
+    assert coverage(told, plain) == (1, 3)
+    assert coverage(plain, told) == (1, 3)
+    # A repeat only one variant was asked is asked and unpaired.
+    twice = Arm(told.variant, [ArmRun("run-0", {**one, 1: one[0]})], MENTION)
+    assert coverage(twice, plain) == (1, 2)
+
+
+def test_a_variant_that_fails_closed_where_it_is_shown_the_section_is_not_called_no_effect():
+    """Thirty-six questions twice; ``told`` claims nothing on most and agrees on the rest."""
+
+    def asked(broken: range) -> dict[int, list[Reading]]:
+        return {
+            repeat: [
+                _reading(slot, None, None, executed=0.0)
+                if slot in broken
+                else _reading(slot, LONG, 0.3)
+                for slot in range(36)
+            ]
+            for repeat in (0, 1)
+        }
+
+    plain = _arm("plain", asked(range(0)), extra=None)
+    lines = _describe(_arm("told", asked(range(12, 36))), plain)
+    assert "  12 question(s) read by both: " in lines[lines.index("-- per question, repeats averaged --") + 1]
+    assert lines[-1] == "verdict: cannot be judged: coverage is under 80%" + _covered(24, 72)
+    # Six broken questions in thirty-six leave 83% read, on thirty questions (five blocks):
+    # judged, and nothing moved on what was read.
+    assert _describe(_arm("told", asked(range(30, 36))), plain)[-1] == (
+        "verdict: no measurable effect: the interval of the shift holds 0" + _covered(60, 72)
+    )
 
 
 def test_a_run_with_no_question_in_common_shows_as_zero():
@@ -464,6 +534,7 @@ def test_the_same_variant_twice_is_said_to_differ_in_nothing():
     assert lines[3] == "the two differ in nothing that reaches the model"
     assert lines[-1] == (
         "verdict: cannot be judged: the variants differ in nothing that reaches the model"
+        + _covered(1, 1)
     )
 
 
@@ -491,7 +562,7 @@ def test_nothing_read_by_both_says_so():
         "  two repeats of told: fewer than two repeats hold an answer, so there is nothing to compare",
         "  two repeats of plain: fewer than two repeats hold an answer, so there is nothing to compare",
         "  told against plain, same repeat: no pair with a readable claim from both",
-        "verdict: cannot be judged: no question has a readable claim from both",
+        "verdict: cannot be judged: no question has a readable claim from both" + _covered(0, 1),
     ]
 
 
@@ -500,13 +571,22 @@ def test_variants_that_differ_in_more_are_said_to():
     other = _arm("other", {0: [_reading(0, LONG, 0.3)]}, extra=None, model="c/d")
     lines = _describe(told, other)
     assert lines[3] == (
-        "the two differ in: model, extra context; a shift between them is not the extra "
-        "context's alone"
+        "the two differ in: model, extra context; a shift between them cannot be put down to "
+        "the extra context"
     )
     # And the verdict, whose sentence is about the extra context, is not given.
     assert lines[-1] == (
-        "verdict: cannot be judged: the variants differ in more than their extra context "
-        "(model, extra context)"
+        "verdict: cannot be judged: the variants differ in model, extra context, not in their "
+        "extra context alone" + _covered(1, 1)
+    )
+    # Nor for two variants shown the same extra context by different models.
+    lines = _describe(told, _arm("another", {0: [_reading(0, LONG, 0.3)]}, model="c/d"))
+    assert lines[3] == (
+        "the two differ in: model; a shift between them cannot be put down to the extra context"
+    )
+    assert lines[-1] == (
+        "verdict: cannot be judged: the variants differ in model, not in their extra context "
+        "alone" + _covered(1, 1)
     )
 
 
@@ -650,6 +730,8 @@ def test_a_refused_question_is_counted_and_a_fail_closed_one_claims_nothing(stor
     stored = {0: {**responses, "a-holdout-question": "Long."}}
     part = arm_run(RUN_ID, {0: card, 1: nothing}, stored, MENTION, refusals=2)
     assert (part.refused, part.unread, list(part.repeats)) == (1, 2, [0])
+    # What was put to it on repeat 0, answered or not; repeat 1 was put nothing.
+    assert part.asked == {0: frozenset({clamped, withheld, prose})}
     assert part.repeats[0] == readings
     assert refused == 1
     assert set(readings) == {clamped, prose}
@@ -789,7 +871,9 @@ def test_the_command_reads_one_run(asked, capsys):
         "difference 0.000",
         "  told against plain, same repeat: side differs in 2 of 14 pair(s) (14.3%), mean absolute "
         "exposure difference 0.043",
-        "verdict: cannot be judged: the bar is read with blocks of 6 question(s), not 7",
+        # Sixteen question-repeats; the prose (slot 6) claims nothing on either repeat.
+        "verdict: cannot be judged: the bar is read with blocks of 6 question(s), not 7"
+        + _covered(14, 16),
     ]
 
 
@@ -819,16 +903,16 @@ def test_the_command_pools_runs_and_reads_each_variant_against_the_one_control(
     # says the two differ in more than the section.
     assert second[0] == "decision effect: other against plain"
     assert second[3] == (
-        "the two differ in: model, extra context; a shift between them is not the extra "
-        "context's alone"
+        "the two differ in: model, extra context; a shift between them cannot be put down to "
+        "the extra context"
     )
     assert second[11] == (
         "  model reading: toward long 0, toward short 0, unchanged 14 (sign test p 1.000); "
         "mean shift +0.000"
     )
     assert second[-1] == (
-        "verdict: cannot be judged: the variants differ in more than their extra context "
-        "(model, extra context)"
+        "verdict: cannot be judged: the variants differ in model, extra context, not in their "
+        "extra context alone" + _covered(28, 32)
     )
 
 
@@ -1004,4 +1088,7 @@ def test_a_variant_refused_throughout_is_reported_not_called_holdout_only(asked,
         f"by the provider; {SEARCHED}: 0/0; 1 more answer(s) or refusal(s) recorded outside "
         "train and validation, not read"
     )
-    assert out[-1] == "verdict: cannot be judged: no question has a readable claim from both"
+    # ``plain`` was asked sixteen question-repeats; the two refused ones are among them.
+    assert out[-1] == (
+        "verdict: cannot be judged: no question has a readable claim from both" + _covered(0, 16)
+    )

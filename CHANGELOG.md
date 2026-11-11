@@ -17,7 +17,7 @@ Breaking changes within the 0.x line are called out explicitly.
   nothing, a neutral text of the section's shape and length, and the
   section as paper-BTC-7 rendered it saying long or short), to be put to
   the runs whose prompts never carried the section (paper-BTC-3, -4, -5).
-  `python -m contrib.replay effect --run-id ... --variant NAME [--variant
+  `python -m contrib.replay effect --replay-db PATH --run-id ... --variant NAME [--variant
   NAME ...] --against NAME` then compares stored answers question by
   question: how many answers mention the section, which way the model's
   reading and the executed one moved (as signed exposure, with an exact
@@ -29,7 +29,10 @@ Breaking changes within the 0.x line are called out explicitly.
   Its last line is a verdict against a bar fixed before any answer was
   bought: the extra context "moves the decision" only when the interval of
   the per-question shift does not hold 0 and the shift is larger than the
-  spread between two repeats of either variant. The experiment's conclusion
+  spread between two repeats of either variant; it is withheld when under
+  80% of the question-repeats asked carry a readable claim from both, so a
+  section that breaks the answer does not read as one that changed nothing.
+  The experiment's conclusion
   is read off one comparison, long against short, and the neutral arm is
   asked first, against no extra context, before the other two are bought.
   Nothing is asked by this change; the experiment is a separate, paid run.

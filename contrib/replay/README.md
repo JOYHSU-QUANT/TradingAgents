@@ -457,18 +457,22 @@ research 段與 daemon 渲染的差兩處：標題的日期寫成「這份 conte
   兩個條件都成立才印 `the extra context moves the decision toward long｜short`——(a) 位移的 90% 區間不含 0；(b) 位移
   的大小超過**兩個 variant 各自**兩次回答之間的平均絕對差。(b) 管的是大小不是證據：比模型自己問兩次的差還小的位移，
   就算每一題方向都一致，也不值得為它接一段。有一條不過就印 `no measurable effect`，並說是哪一條（兩條都不過時說 (a)）。
-  五種情況不判、印 `cannot be judged` 與原因：兩個 variant 不是只差 extra context（差了模型的話，這句判定會把模型
-  造成的位移算在那一段頭上）；沒有任何一題兩邊都有可讀主張；某個 variant 沒有同一題在兩個 repeat
+  六種情況不判、印 `cannot be judged` 與原因（照這個順序檢查）：兩個 variant 不是只差 extra context（差了模型的話，這句判定會把模型
+  造成的位移算在那一段頭上）；沒有任何一題兩邊都有可讀主張；涵蓋率不到 80%（見下一條）；某個 variant 沒有同一題在兩個 repeat
   都有可讀主張（量不到 (b)）；`--block` 不是預設的 6（一題一塊會把相鄰的題當成獨立樣本）；抽樣不到 5 塊（區間會
   縮成一個點）。後兩條與 `pool` 的門檻同一個規則。
+- **涵蓋率**（判定那一行每次都印）＝「任一邊被問過的（題 × repeat）」裡，兩邊都有可讀主張的有幾個。位移與 spread 只算
+  兩邊都有主張的題，所以某一臂一看到那段文字就 fail-closed、或被供應商拒答時，那些題會整批從數字裡消失，剩下的題看
+  起來「沒有位移」。涵蓋率不到 80% 就不判（2026-11-11 拍板）：把答案弄壞也是一種作用，不能印成 `no measurable
+  effect`。某一邊多問了一個 repeat 時，多出來的沒有配對、也算在分母裡——先把另一邊缺的 repeat 補問。
 - **只讀**：不寫任何 store、不記 ledger；不讀事後價格，所以不需要 `model_cutoff`；holdout 永遠不讀（列走成績單同一道
-  鎖；有 variant 問過 holdout 段時，那些答案不讀、但那一行會寫有幾個）。每個 run 要已經在這個 `replay.sqlite` 釘過 split；題目記錄時 context 已經帶 research 段的 run 照讀，但報表會逐 run
-  印一行 `note:` 說有幾題（那是「多一段」對「一段」，不是這個實驗）；variant 在某個 run 沒有答案（或只問過 holdout 段）、或是 graph variant（每題從自己
+  鎖；有 variant 問過 holdout 段時，那些答案與拒答紀錄不讀、但那一行會寫有幾個）。每個 run 要已經在這個 `replay.sqlite` 釘過 split；題目記錄時 context 已經帶 research 段的 run 照讀，但報表會逐 run
+  印一行 `note:` 說有幾題（那是「多一段」對「一段」，不是這個實驗）；variant 在某個 run 沒有答案也沒有拒答紀錄（或只問過 holdout 段）、或是 graph variant（每題從自己
   的模擬帳戶問，兩個 graph variant 問的不是同一題），具名拒絕。
 - `--out DIR` 每個 variant 寫 `effect-<variant>-against-<against>-decisions.csv`（一對一列）與 `-summary.txt`。
 
 **這個實驗證明不了的事**：這是一次 completion、訊息只有 context 的簡單版。位移只說明模型對這段文字敏感，不說明
-research 段照正式接線（位置、時效、與其他段落衝突時）有效。四臂的 research 段都標成「跟 context 同一根收盤」，是 daemon
+research 段照正式接線（位置、時效、與其他段落衝突時）有效。long、short 兩臂的 research 段都標成「跟 context 同一根收盤」，是 daemon
 那一段最新鮮的情況（實際可以落後兩根 research bar），所以就時效這一項來說，量到的位移是上界。四臂共用的 system prompt 有一句「research
 debate 不在訊息裡」，接著訊息裡卻出現 research 段；結果若是 `no measurable effect`，可能是這句話讓模型把那一段打了折
 （2026-11-11 拍板沿用 `current-sonnet` 用的這一份，不另外維護第二份：那句話講的是多空辯論，而 research 段在

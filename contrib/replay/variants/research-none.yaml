@@ -3,9 +3,11 @@
 # other three research-* variants use; research-long.yaml says why each
 # line is what it is.
 #
-# This arm against research-neutral reads what ANY added section does;
-# research-long and research-short are then read against research-neutral,
-# so that what is left is the section's content.
+# Asked FIRST, with research-neutral (decided 2026-11-11): research-neutral
+# against this arm reads what ANY added section does, and the long and short
+# arms are bought only once `effect` says of it "no measurable effect". A
+# neutral text that moves the decision on its own is rewritten, and asked
+# again, before the other two are.
 #
 #   python -m contrib.replay replay --db paper_trading.db --run-id paper-BTC-3 \
 #       --variant contrib/replay/variants/research-none.yaml --dry-run

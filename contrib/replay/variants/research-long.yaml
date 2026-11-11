@@ -4,17 +4,24 @@
 # ``extra_context`` (none / a neutral text of the same length / long /
 # short), put to the same recorded questions and compared with `effect`.
 #
-# The questions: paper-BTC-3, -4 and -5, the runs whose recorded
+# The questions: paper-BTC-3, -4 and -5, the finished runs whose recorded
 # context_shape has no ``autoresearch`` (103 train and validation questions
-# between them). Runs 6 to 11 carry the section on every question, and a
-# second section beside the recorded one would be a different experiment;
-# the runs before 3 recorded no shape and had no position block.
+# between them, 2026-08-28 to 2026-09-18). Runs 6 to 11 carry the section on
+# every question, and a second section beside the recorded one would be a
+# different experiment; the runs before 3 recorded no shape and had no
+# position block; run 12, opened 2026-11-10 with the section switched off,
+# was a day old when this was written.
 #
 #   python -m contrib.replay replay --db paper_trading.db --run-id paper-BTC-3 \
 #       --variant contrib/replay/variants/research-long.yaml --dry-run
+# The conclusion is read off ONE comparison, named before any answer was
+# bought (2026-11-11): this arm against research-short, two texts one word
+# apart, so whatever the neutral text does cancels. Each against
+# research-neutral is printed beside it and decides nothing.
+#
 #   python -m contrib.replay effect --db paper_trading.db --replay-db replay.sqlite \
 #       --run-id paper-BTC-3 --run-id paper-BTC-4 --run-id paper-BTC-5 \
-#       --variant research-long --variant research-short --against research-neutral
+#       --variant research-long --against research-short
 name: research-long
 # The paper trader's portfolio manager since run 8 (2026-10-07), asked the
 # simple way: one completion, the instructions `current-sonnet` uses.
@@ -33,7 +40,7 @@ model_cutoff: 2026-06-30
 # paper-BTC-7 (rule, bands, windows, note and basis word for word), with two
 # changes: the side is this arm's, and the dateline names the context's own
 # close (the ``As of:`` line at its top) where the daemon printed the radar's
-# timestamp. A fixed timestamp in a file put to six weeks of questions would
+# timestamp. A fixed timestamp in a file put to three weeks of questions would
 # read as a stale signal on all but one of them. It lands after the position
 # block, not before it where the daemon renders it: ``extra_context`` follows
 # the whole recorded context, and the format block follows it.

@@ -25,8 +25,13 @@ Breaking changes within the 0.x line are called out explicitly.
   block-bootstrap interval, and the same yardstick between two repeats of
   one variant as the noise the shift is read against. It names anything
   else the two variants differ in. Reads only, scores no later price (no
-  `model_cutoff` needed), never reads the holdout, refuses graph variants,
-  and prints no verdict: the size of shift that counts is not decided.
+  `model_cutoff` needed), never reads the holdout, refuses graph variants.
+  Its last line is a verdict against a bar fixed before any answer was
+  bought: the extra context "moves the decision" only when the interval of
+  the per-question shift does not hold 0 and the shift is larger than the
+  spread between two repeats of either variant. The experiment's conclusion
+  is read off one comparison, long against short, and the neutral arm is
+  asked first, against no extra context, before the other two are bought.
   Nothing is asked by this change; the experiment is a separate, paid run.
 - **Discovery Lab PR 5: the model arm.** A manifest that names `arms.llm`
   now runs it: `search` runs the Random and Grid arms and then each model

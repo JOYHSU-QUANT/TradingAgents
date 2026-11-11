@@ -39,10 +39,11 @@ from contrib.replay.effect import (
     mentions,
     read_rows,
     shift_interval,
+    verdict,
 )
 from contrib.replay.paper_store import gate_config, load_decisions, run_facts
 from contrib.replay.replay import human_message, prepare, select
-from contrib.replay.score import build_split, score_run
+from contrib.replay.score import ScoreError, build_split, score_run
 from contrib.replay.upstream import Database, SegmentName, TargetSide, payload_dir
 from contrib.replay.variant import load_variant
 
@@ -66,7 +67,9 @@ LONG, SHORT, FLAT = TargetSide.LONG, TargetSide.SHORT, TargetSide.FLAT
 VARIANTS = Path(__file__).resolve().parents[1] / "variants"
 ARMS = ("none", "neutral", "long", "short")
 # How the report names the default phrases an answer is searched for.
-SEARCHED = "mentioning 'research signal' or 'research rule' or 'research radar'"
+SEARCHED = (
+    "mentioning 'research signal' or 'research rule' or 'research radar' or 'btc-4h-maker'"
+)
 
 
 def _reading(
@@ -96,6 +99,7 @@ def _arm(
             ArmRun(f"run-{index}", {r: {x.input_id: x for x in xs} for r, xs in repeats.items()})
             for index, repeats in enumerate(runs)
         ],
+        MENTION,
     )
 
 
@@ -124,7 +128,7 @@ def test_the_differences_name_what_reaches_the_model():
     ) == ["model", "system prompt", "temperature", "max tokens"]
 
 
-def test_equal_runs_of_opposite_shifts_always_draw_their_mean():
+def test_two_constant_runs_always_draw_their_pooled_mean():
     """Each run is redrawn on its own circle and keeps its size, so the pooled mean cannot move."""
     assert shift_interval([[0.0] * 5, [1.0] * 5], block=2, draws=50, seed=3) == (0.5, 0.5)
 
@@ -136,6 +140,9 @@ def test_the_interval_brackets_the_mean_and_repeats_under_one_seed():
     assert found is not None
     low, high = found
     assert low < 0.1 < high  # the mean shift of the ten questions
+    assert high - low < 0.6  # an interval of the mean, not the range of the shifts
+    assert found != shift_interval(runs, block=2, draws=400, seed=8)
+    assert found != shift_interval(runs, block=5, draws=400, seed=7)
     assert shift_interval([[], []], block=2, draws=10, seed=0) is None
     with pytest.raises(ValueError, match="at least one draw"):
         shift_interval(runs, block=2, draws=0, seed=0)
@@ -225,8 +232,9 @@ def test_the_report_counts_the_moves_on_the_questions_both_read():
     assert lines[19:] == [
         "  two repeats of told: one repeat was asked, so there is nothing to compare",
         "  two repeats of plain: one repeat was asked, so there is nothing to compare",
-        "  told against plain, same repeat: side differs in 3/5 (60.0%) pair(s), mean absolute "
+        "  told against plain, same repeat: side differs in 3 of 5 pair(s) (60.0%), mean absolute "
         "exposure difference 0.240",
+        "verdict: cannot be judged: told has no two repeats of one question to take a spread from",
     ]
 
 
@@ -259,12 +267,13 @@ def test_a_question_counts_once_however_often_it_was_asked():
     # Between two repeats: told's q0 of run-0 (0.4 against 0.2) is its one pair both read;
     # plain has that pair (equal) and run-1's q0 (equal).
     assert lines[start + 5 :] == [
-        "  two repeats of told: side differs in 0/1 (0.0%) pair(s), mean absolute exposure "
+        "  two repeats of told: side differs in 0 of 1 pair(s) (0.0%), mean absolute exposure "
         "difference 0.200",
-        "  two repeats of plain: side differs in 0/2 (0.0%) pair(s), mean absolute exposure "
+        "  two repeats of plain: side differs in 0 of 2 pair(s) (0.0%), mean absolute exposure "
         "difference 0.000",
-        "  told against plain, same repeat: side differs in 0/4 (0.0%) pair(s), mean absolute "
+        "  told against plain, same repeat: side differs in 0 of 4 pair(s) (0.0%), mean absolute "
         "exposure difference 0.100",
+        "verdict: cannot be judged: 2 block(s), fewer than the 5 an interval is read with",
     ]
 
 
@@ -293,7 +302,92 @@ def test_a_mean_of_equal_answers_is_not_a_move():
     plain = _arm("plain", {0: same}, extra=None)
     lines = _describe(told, plain)
     start = lines.index("-- per question, repeats averaged --")
+    assert lines[start + 1].endswith(", shift +0.000")
+    assert lines[start + 2].startswith("  90% interval of the shift [+0.000, +0.000]: ")
     assert lines[start + 3] == "  toward long 0, toward short 0, unchanged 1 (sign test p 1.000)"
+
+
+def test_the_verdict_is_the_bar_decided_before_any_answer_was_bought():
+    """The interval clear of 0 AND the shift larger than either variant's own spread."""
+    spreads = {"told": 0.05, "plain": 0.02}
+    moves = "the extra context moves the decision"
+    assert verdict(0.2, 0.1, 0.3, spreads=spreads, blocks=5) == f"{moves} toward long"
+    assert verdict(-0.2, -0.3, -0.1, spreads=spreads, blocks=5) == f"{moves} toward short"
+    holds = "no measurable effect: the interval of the shift holds 0"
+    assert verdict(0.2, -0.01, 0.3, spreads=spreads, blocks=5) == holds
+    assert verdict(0.2, 0.0, 0.3, spreads=spreads, blocks=5) == holds  # touching 0 holds it
+    small = (
+        "no measurable effect: the shift is no larger than the spread between two repeats of "
+        "one variant (0.050)"
+    )
+    assert verdict(0.04, 0.03, 0.05, spreads=spreads, blocks=5) == small
+    assert verdict(-0.05, -0.06, -0.04, spreads=spreads, blocks=5) == small  # equal is not larger
+    assert verdict(0.2, 0.1, 0.3, spreads=spreads, blocks=4) == (
+        "cannot be judged: 4 block(s), fewer than the 5 an interval is read with"
+    )
+    assert verdict(0.2, 0.1, 0.3, spreads={"told": 0.05, "plain": None}, blocks=9) == (
+        "cannot be judged: plain has no two repeats of one question to take a spread from"
+    )
+
+
+def test_the_report_ends_on_the_verdict_read_off_the_per_question_shift():
+    def asked(*exposures: float) -> dict[int, list[Reading]]:
+        return {
+            repeat: [_reading(slot, LONG, exposure) for slot in range(30)]
+            for repeat, exposure in enumerate(exposures)
+        }
+
+    # Thirty questions are five blocks of six. ``plain`` says 0.1 then 0.2: a spread of 0.1
+    # and a mean of 0.15, which ``told`` at 0.5 clears by 0.35 on every draw.
+    plain = _arm("plain", asked(0.1, 0.2), extra=None)
+    assert _describe(_arm("told", asked(0.5, 0.5)), plain)[-1] == (
+        "verdict: the extra context moves the decision toward long"
+    )
+    # 0.2 against a mean of 0.15 is a shift every draw agrees on, and half plain's own spread.
+    assert _describe(_arm("told", asked(0.2, 0.2)), plain)[-1] == (
+        "verdict: no measurable effect: the shift is no larger than the spread between two "
+        "repeats of one variant (0.100)"
+    )
+
+
+def test_arms_that_do_not_line_up_are_refused():
+    """Paired run by run: another order would put one run's questions against another's."""
+    first, second = {0: [_reading(0, LONG, 0.3)]}, {0: [_reading(1, LONG, 0.3)]}
+    told, plain = _arm("told", first, second), _arm("plain", first, second, extra=None)
+    swapped = Arm(plain.variant, list(reversed(plain.runs)), MENTION)
+    with pytest.raises(ScoreError, match="compared run by run, in one order"):
+        _describe(told, swapped)
+    with pytest.raises(ScoreError, match="compared run by run, in one order"):
+        _describe(told, Arm(plain.variant, plain.runs[:1], MENTION))
+    with pytest.raises(ScoreError, match="floor only under the same phrases"):
+        _describe(told, Arm(plain.variant, plain.runs, ["radar"]))
+
+
+@pytest.mark.parametrize("phrases", ["research", [], ["research", " "]])
+def test_an_arm_is_searched_for_phrases_not_for_letters_or_blanks(phrases):
+    with pytest.raises(ScoreError, match="non-blank texts"):
+        Arm(variant(name="told"), [], phrases)
+
+
+def test_a_reading_claims_a_side_at_an_exposure_or_neither():
+    with pytest.raises(ScoreError, match="q0: a reading claims a side at an exposure, or neither"):
+        _reading(0, LONG, None, executed=0.0)
+    with pytest.raises(ScoreError, match="or neither"):
+        _reading(0, None, 0.3)
+
+
+def test_the_same_variant_twice_is_said_to_differ_in_nothing():
+    asked = {0: [_reading(0, LONG, 0.3)]}
+    lines = _describe(_arm("a", asked), _arm("b", asked))
+    assert lines[3] == "the two differ in nothing that reaches the model"
+
+
+def test_the_opening_of_a_long_extra_context_is_cut_at_sixty_characters():
+    told = _arm("told", {0: [_reading(0, LONG, 0.3)]}, extra="x" * 70 + "\nsecond line")
+    plain = _arm("plain", {0: [_reading(0, LONG, 0.3)]}, extra=None)
+    assert _describe(told, plain)[4] == (
+        "extra context of told: 82 character(s) in 2 line(s), opening '" + "x" * 60 + "'"
+    )
 
 
 def test_nothing_read_by_both_says_so():
@@ -311,6 +405,7 @@ def test_nothing_read_by_both_says_so():
         "  two repeats of told: one repeat was asked, so there is nothing to compare",
         "  two repeats of plain: one repeat was asked, so there is nothing to compare",
         "  told against plain, same repeat: no pair with a readable claim from both",
+        "verdict: cannot be judged: no question has a readable claim from both",
     ]
 
 
@@ -457,9 +552,9 @@ def test_a_refused_question_is_counted_and_a_fail_closed_one_claims_nothing(stor
     assert refused == 1
     assert set(readings) == {clamped, prose}
     # Slot 4 asks for short at 80%, which the gate clamps to the 60% cap.
-    flip, said_nothing = readings[clamped], readings[prose]
-    assert (flip.side, flip.exposure, flip.executed_exposure) == (SHORT, -0.8, -0.6)
-    assert (flip.confidence, flip.risk_action, flip.mentioned) == (0.9, "clamped", True)
+    cut, said_nothing = readings[clamped], readings[prose]
+    assert (cut.side, cut.exposure, cut.executed_exposure) == (SHORT, -0.8, -0.6)
+    assert (cut.confidence, cut.risk_action, cut.mentioned) == (0.9, "clamped", True)
     assert (said_nothing.side, said_nothing.exposure) == (None, None)
     assert said_nothing.executed_exposure == 0.0
     assert (said_nothing.confidence, said_nothing.risk_action, said_nothing.mentioned) == (
@@ -486,11 +581,19 @@ def _variant_file(directory: Path, name: str, extra: str | None, model: str = "e
     return write_variant(directory, name, cutoff=None, model=model, extra_context=extra)
 
 
-def _replay(store: Path, variant_file: Path, run_id: str, monkeypatch, model: Echo) -> None:
+def _replay(
+    store: Path,
+    variant_file: Path,
+    run_id: str,
+    monkeypatch,
+    model: Echo,
+    segments: tuple[str, ...] = ("train", "validation"),
+) -> None:
     monkeypatch.setattr(cli, "_build_model", lambda _variant: model)
-    for segment in ("train", "validation"):
+    for segment in segments:
+        look = ("--holdout",) if segment == "holdout" else ()
         argv = replay_argv(
-            store, variant_file, "--repeats", "2", "--segment", segment, run_id=run_id
+            store, variant_file, "--repeats", "2", "--segment", segment, *look, run_id=run_id
         )
         assert cli.main(argv) == 0
 
@@ -577,12 +680,13 @@ def test_the_command_reads_one_run(asked, capsys):
         "  toward long 1, toward short 0, unchanged 6 (sign test p 1.000)",
         "-- how far apart two answers to one question are (readable claims; exposure as a "
         "multiple of equity) --",
-        "  two repeats of told: side differs in 0/7 (0.0%) pair(s), mean absolute exposure "
+        "  two repeats of told: side differs in 0 of 7 pair(s) (0.0%), mean absolute exposure "
         "difference 0.000",
-        "  two repeats of plain: side differs in 0/7 (0.0%) pair(s), mean absolute exposure "
+        "  two repeats of plain: side differs in 0 of 7 pair(s) (0.0%), mean absolute exposure "
         "difference 0.000",
-        "  told against plain, same repeat: side differs in 2/14 (14.3%) pair(s), mean absolute "
+        "  told against plain, same repeat: side differs in 2 of 14 pair(s) (14.3%), mean absolute "
         "exposure difference 0.043",
+        "verdict: cannot be judged: 1 block(s), fewer than the 5 an interval is read with",
     ]
 
 
@@ -628,8 +732,9 @@ def test_a_run_recorded_with_the_section_already_in_its_context_is_noted(asked, 
         with conn:
             conn.execute(
                 "UPDATE ai_inputs SET context_shape = 'price|autoresearch|position' "
-                "WHERE run_id = ? AND input_id IN (?, ?, ?)",
-                (OTHER_RUN, *(f"{OTHER_RUN}-{papers.input_id(slot)}" for slot in (0, 1, 2))),
+                "WHERE run_id = ? AND input_id IN (?, ?, ?, ?)",
+                # Slot 8 is a holdout question: the report does not read it, or count it.
+                (OTHER_RUN, *(f"{OTHER_RUN}-{papers.input_id(slot)}" for slot in (0, 1, 2, 8))),
             )
     finally:
         conn.close()
@@ -639,7 +744,7 @@ def test_a_run_recorded_with_the_section_already_in_its_context_is_noted(asked, 
     out = capsys.readouterr().out.splitlines()
     assert out[6].startswith(f"runs: {RUN_ID} (split pinned ")
     assert out[7] == (
-        f"note: 3 of 10 question(s) of {OTHER_RUN} were recorded with a research section "
+        f"note: 3 of 8 question(s) of {OTHER_RUN} were recorded with a research section "
         "already in the context; an extra context is one more section beside it"
     )
     assert out[8] == "-- answers (train and validation; the holdout is never read) --"
@@ -659,11 +764,6 @@ def test_the_command_writes_nothing_to_either_store(asked):
     before = replay_db.read_bytes(), asked.read_bytes()
     assert cli.main(_effect(asked, "--run-id", RUN_ID, "--draws", "20")) == 0
     assert (replay_db.read_bytes(), asked.read_bytes()) == before
-    conn = sqlite3.connect(replay_db)
-    try:
-        assert conn.execute("SELECT count(*) FROM ledger").fetchone() == (0,)
-    finally:
-        conn.close()
 
 
 def test_out_writes_the_summary_and_one_row_per_pair(asked, tmp_path, capsys):
@@ -694,6 +794,7 @@ def test_out_writes_the_summary_and_one_row_per_pair(asked, tmp_path, capsys):
         (("--run-id", RUN_ID, "--block", "0"), "--block must be at least 1, got 0"),
         (("--run-id", RUN_ID, "--draws", "0"), "--draws must be at least 1, got 0"),
         (("--run-id", RUN_ID, "--mention", ""), "--mention needs a phrase, got ''"),
+        (("--run-id", RUN_ID, "--mention", " "), "--mention needs a phrase, got ' '"),
         (("--run-id", RUN_ID, "--out", ""), "--out needs a directory, got ''"),
         (("--run-id", "paper-NONE"), "run 'paper-NONE' not found"),
         (("--run-id", RUN_ID, "--variant", "plain"), "name plain more than once"),
@@ -737,3 +838,32 @@ def test_a_graph_variant_is_refused(asked, tmp_path, capsys):
     assert "'graph': a graph variant is asked each question from its own simulated book" in (
         capsys.readouterr().err
     )
+
+
+def test_answers_to_holdout_questions_are_counted_as_unread_not_dropped(
+    asked, tmp_path, monkeypatch, capsys
+):
+    told = tmp_path / "told.yaml"
+    _replay(asked, told, RUN_ID, monkeypatch, Echo(text_for=TOLD), segments=("holdout",))
+    capsys.readouterr()
+    assert cli.main(_effect(asked, "--run-id", RUN_ID, "--draws", "20")) == 0
+    out = capsys.readouterr().out.splitlines()
+    # Two holdout questions, two repeats: stored, and behind the lock.
+    assert out[8] == (
+        "  told: 16 answer(s) in 2 repeat(s): long 12, short 2, flat 0, fail-closed 2; 0 refused "
+        f"by the provider; {SEARCHED}: 4/16 (25.0%); 4 more stored for holdout questions, not read"
+    )
+    assert out[9].endswith(f"{SEARCHED}: 0/16 (0.0%)")
+
+
+def test_a_variant_asked_only_the_holdout_is_refused_not_reported_empty(
+    asked, tmp_path, monkeypatch, capsys
+):
+    held = _variant_file(tmp_path, "held", "Research signal: short.")
+    _replay(asked, held, RUN_ID, monkeypatch, Echo(), segments=("holdout",))
+    capsys.readouterr()
+    assert cli.main(_effect(asked, "--run-id", RUN_ID, variants=("held",))) == 1
+    assert (
+        f"variant 'held' was asked only holdout questions of run {RUN_ID!r}, which effect never "
+        "reads"
+    ) in capsys.readouterr().err

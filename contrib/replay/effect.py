@@ -59,17 +59,35 @@ The definitions, once:
   A shift between variants that is no larger than the spread between two
   repeats of one variant is noise.
 
+- **The verdict** (the bar, decided 2026-11-11, before any answer was
+  bought) is read off the per-question mean shift, and says the extra
+  context moves the decision only when both hold: the shift's interval
+  does not hold 0, and the shift is larger in size than the spread between
+  two repeats of EITHER variant (its mean absolute exposure difference).
+  The second is a bar on size, not on evidence: a shift smaller than what
+  one variant does between two askings of one question is not worth
+  wiring a section for, however many questions agree on its sign.
+  Otherwise the verdict is "no measurable effect", with the half that
+  failed. It is not judged at all when a variant has no two repeats of a
+  question to take a spread from, or on fewer blocks than the pool reads
+  an interval with (:data:`~.pool.MIN_BLOCKS`): an interval drawn from a
+  few blocks collapses onto the point.
+
 No later price is read, so a variant's ``model_cutoff`` plays no part. The
 holdout is never read: the rows come through the scorecard's own lock,
-which keeps one set of rows for every report on a run. No verdict is
-printed: what size of shift counts as "the section has an effect" is not
-decided.
+which keeps one set of rows for every report on a run.
 
 What this cannot show: these are one-completion answers to a message that
 is the context alone, with the section after the position block (an extra
 context follows the whole recorded context), not before it where the
-daemon renders it. A shift says the model is sensitive to the text. It
-does not say the section works as wired into the paper trader's prompt.
+daemon renders it. The shipped section is dated to the context's own
+close, the freshest the daemon's could be, so a shift is an upper bound on
+what a section up to two research bars old would do. The shipped system
+prompt tells the model that "the research debate" is not in the message
+before the section is shown to it, so "no measurable effect" may be that
+sentence discounting the section. A shift says the model is sensitive to
+the text. It does not say the section works as wired into the paper
+trader's prompt.
 """
 
 from __future__ import annotations
@@ -83,12 +101,13 @@ from statistics import fmean
 from typing import Final
 
 from .compare import Table
-from .pool import LEVEL, block_count, circular_draw, quantile
+from .pool import LEVEL, MIN_BLOCKS, block_count, circular_draw, quantile
 from .score import (
     FAIL_CLOSED,
     Question,
     Scorecard,
     Scored,
+    ScoreError,
     has_research_section,
     rate,
     sign_test,
@@ -97,8 +116,11 @@ from .upstream import TargetSide, from_epoch_ms
 from .variant import Variant
 
 __all__ = [
+    "EFFECT",
     "MENTION",
+    "NO_EFFECT",
     "TOLERANCE",
+    "UNJUDGED",
     "Arm",
     "ArmRun",
     "Effect",
@@ -110,11 +132,21 @@ __all__ = [
     "mentions",
     "read_rows",
     "shift_interval",
+    "verdict",
 ]
 
+# How a verdict opens (module docstring); what follows says which way, which
+# half of the bar failed, or why nothing is judged.
+EFFECT: Final = "the extra context moves the decision"
+NO_EFFECT: Final = "no measurable effect"
+UNJUDGED: Final = "cannot be judged"
+
 # What an answer is searched for to count as mentioning the research section:
-# the three names the section gives itself and its source.
-MENTION: Final = ("research signal", "research rule", "research radar")
+# the section's own title, the name it gives its source, the phrase an answer
+# is likely to use for the rule it reports, and that rule's family id. An
+# answer that leans on the section under other words is missed, so the count
+# is a floor.
+MENTION: Final = ("research signal", "research rule", "research radar", "btc-4h-maker")
 
 # Exposures closer than this are the same exposure. They are margins in
 # whole percent times a leverage, so real differences are far above it and
@@ -146,7 +178,8 @@ def differences(a: Variant, b: Variant) -> list[str]:
 def already_carried(run_id: str, questions: Sequence[Question]) -> str | None:
     """A note when ``run_id``'s recorded contexts already held a research section, else ``None``.
 
-    An extra context put to such a question is a second section beside the
+    ``questions`` are the ones the report reads (train and validation). An
+    extra context put to such a question is a second section beside the
     recorded one, which is not the experiment the report is written for (one
     section against none): said, not refused, since the report reads any
     extra context.
@@ -177,6 +210,13 @@ class Reading:
     confidence: float | None
     risk_action: str
     mentioned: bool
+
+    def __post_init__(self) -> None:
+        if (self.side is None) != (self.exposure is None):
+            raise ScoreError(
+                f"{self.input_id}: a reading claims a side at an exposure, or neither (got "
+                f"side {self.side!r}, exposure {self.exposure!r})"
+            )
 
 
 def read_rows(
@@ -210,11 +250,17 @@ def read_rows(
 
 @dataclass(frozen=True)
 class ArmRun:
-    """One variant's answers on one run: its readings by repeat, then by question."""
+    """One variant's answers on one run: its readings by repeat, then by question.
+
+    ``refused`` counts the questions the provider refused; ``unread`` the
+    stored answers the report does not read because their questions are not
+    in the run's train or validation segment (asked of the holdout).
+    """
 
     run_id: str
     repeats: Mapping[int, Mapping[str, Reading]]
     refused: int = 0
+    unread: int = 0
 
 
 def arm_run(
@@ -223,13 +269,18 @@ def arm_run(
     responses: Mapping[int, Mapping[str, str]],
     phrases: Sequence[str],
 ) -> ArmRun:
-    """One variant's answers on one run, from its card per repeat and what it said per repeat."""
+    """One variant's answers on one run, from its card per repeat and what it said per repeat.
+
+    ``responses`` holds every stored answer's text; the ones no card has a
+    row for are the answers the lock leaves unread, and are counted.
+    """
     repeats = {}
     refused = 0
     for repeat, card in cards.items():
         repeats[repeat], lost = read_rows(card.rows, responses.get(repeat, {}), phrases)
         refused += lost
-    return ArmRun(run_id, repeats, refused)
+    stored = sum(len(texts) for texts in responses.values())
+    return ArmRun(run_id, repeats, refused, stored - sum(len(read) for read in repeats.values()))
 
 
 @dataclass(frozen=True)
@@ -243,7 +294,17 @@ class Arm:
 
     variant: Variant
     runs: Sequence[ArmRun]
-    phrases: Sequence[str] = MENTION
+    phrases: Sequence[str]
+
+    def __post_init__(self) -> None:
+        # A bare string is a sequence of its characters, and a search for
+        # single letters matches every answer.
+        if isinstance(self.phrases, str) or not self.phrases or not all(
+            isinstance(phrase, str) and phrase.strip() for phrase in self.phrases
+        ):
+            raise ScoreError(
+                f"the phrases an answer is searched for are non-blank texts, got {self.phrases!r}"
+            )
 
     @property
     def name(self) -> str:
@@ -297,6 +358,11 @@ def _moves(shifts: Sequence[float]) -> str:
         f"toward long {up}, toward short {down}, unchanged {len(shifts) - up - down} "
         f"(sign test p {sign_test(up, down):.3f})"
     )
+
+
+def _signed(value: float) -> str:
+    """``value`` to three places with its sign; what rounds to zero prints as ``+0.000``."""
+    return f"{round(value, 3) + 0.0:+.3f}"
 
 
 def shift_interval(
@@ -353,12 +419,14 @@ def _answers_line(arm: Arm) -> str:
     sides = Counter(reading.side for reading in readings)
     said = sum(1 for reading in readings if reading.mentioned)
     searched = " or ".join(repr(phrase) for phrase in arm.phrases)
+    unread = sum(run.unread for run in arm.runs)
     return (
         f"  {arm.name}: {len(readings)} answer(s) in {len(arm.repeats)} repeat(s): "
         + ", ".join(f"{side.value} {sides[side]}" for side in _SIDES)
         + f", fail-closed {sides[None]}; {sum(run.refused for run in arm.runs)} refused by the "
         "provider; "
         f"mentioning {searched}: {rate(said, len(readings))}"
+        + (f"; {unread} more stored for holdout questions, not read" if unread else "")
     )
 
 
@@ -374,7 +442,7 @@ def _repeat_lines(
     ]
     if exposures:
         shifts = [mine - theirs for mine, theirs in exposures]
-        lines.append(f"  model reading: {_moves(shifts)}; mean shift {fmean(shifts):+.3f}")
+        lines.append(f"  model reading: {_moves(shifts)}; mean shift {_signed(fmean(shifts))}")
         table = Counter(
             (theirs.side, mine.side)
             for mine, theirs in pairs
@@ -391,7 +459,9 @@ def _repeat_lines(
         )
     if pairs:
         executed = [mine.executed_exposure - theirs.executed_exposure for mine, theirs in pairs]
-        lines.append(f"  executed reading: {_moves(executed)}; mean shift {fmean(executed):+.3f}")
+        lines.append(
+            f"  executed reading: {_moves(executed)}; mean shift {_signed(fmean(executed))}"
+        )
     stated = [
         (mine.confidence, theirs.confidence)
         for mine, theirs in pairs
@@ -406,61 +476,109 @@ def _repeat_lines(
     return lines
 
 
+@dataclass(frozen=True)
+class _Shift:
+    """The per-question mean shift, its interval, and the blocks it was drawn in."""
+
+    shift: float
+    low: float
+    high: float
+    blocks: int
+
+
 def _question_lines(
     treatment: Arm, control: Arm, *, block: int, draws: int, seed: int
-) -> list[str]:
+) -> tuple[list[str], _Shift | None]:
+    """The per-question block, and the shift the verdict reads (``None`` with no question)."""
     lines = ["-- per question, repeats averaged --"]
     runs: list[list[tuple[float, float]]] = []
     for mine, theirs in zip(treatment.runs, control.runs, strict=True):
         ours, others = _question_means(mine), _question_means(theirs)
         runs.append([(ours[input_id], others[input_id]) for input_id in ours if input_id in others])
     means = [pair for run in runs for pair in run]
-    if not means:
-        return [*lines, "  no question has a readable claim from both"]
     shifts = [[mine - theirs for mine, theirs in run] for run in runs]
+    found = shift_interval(shifts, block=block, draws=draws, seed=seed)
+    if found is None:
+        return [*lines, "  no question has a readable claim from both"], None
     flat = [shift for run in shifts for shift in run]
+    read = _Shift(fmean(flat), *found, block_count(shifts, block))
     lines.append(
         f"  {len(means)} question(s) read by both: mean requested exposure "
-        f"{fmean(mine for mine, _ in means):+.3f} against "
-        f"{fmean(theirs for _, theirs in means):+.3f}, shift {fmean(flat):+.3f}"
+        f"{_signed(fmean(mine for mine, _ in means))} against "
+        f"{_signed(fmean(theirs for _, theirs in means))}, shift {_signed(read.shift)}"
     )
-    found = shift_interval(shifts, block=block, draws=draws, seed=seed)
-    assert found is not None
     lines.append(
-        f"  {LEVEL:.0%} interval of the shift [{found[0]:+.3f}, {found[1]:+.3f}]: "
-        f"{block_count(shifts, block)} circular block(s) of {block} question(s) within each "
-        f"run, {draws} draws, seed {seed}"
+        f"  {LEVEL:.0%} interval of the shift [{_signed(read.low)}, {_signed(read.high)}]: "
+        f"{read.blocks} circular block(s) of {block} question(s) within each run, {draws} "
+        f"draws, seed {seed}"
     )
     lines.append(f"  {_moves(flat)}")
-    return lines
+    return lines, read
+
+
+def _gap(pairs: Sequence[_Pair]) -> float | None:
+    """The mean absolute exposure difference over the pairs both read; ``None`` with none."""
+    exposures = _exposures(pairs)
+    return fmean(abs(mine - theirs) for mine, theirs in exposures) if exposures else None
 
 
 def _apart(label: str, pairs: Sequence[_Pair]) -> str:
     """How far apart the two answers of each pair are, over the pairs both read."""
-    exposures = _exposures(pairs)
-    if not exposures:
+    gap = _gap(pairs)
+    if gap is None:
         return f"  {label}: no pair with a readable claim from both"
+    readable = len(_exposures(pairs))
     differ = sum(
         1 for a, b in pairs if a.side is not None and b.side is not None and a.side is not b.side
     )
-    gap = fmean(abs(mine - theirs) for mine, theirs in exposures)
     return (
-        f"  {label}: side differs in {rate(differ, len(exposures))} pair(s), mean absolute "
-        f"exposure difference {gap:.3f}"
+        f"  {label}: side differs in {differ} of {readable} pair(s) "
+        f"({differ / readable:.1%}), mean absolute exposure difference {gap:.3f}"
     )
+
+
+def _repeat_pairs(arm: Arm) -> list[_Pair]:
+    """Every pair of answers one variant gave one question on two of its repeats."""
+    return [
+        pair
+        for run in arm.runs
+        for first, second in combinations(sorted(run.repeats), 2)
+        for pair in _paired(run.repeats[first], run.repeats[second])
+    ]
 
 
 def _between_repeats(arm: Arm) -> str:
     label = f"two repeats of {arm.name}"
     if len(arm.repeats) < 2:
         return f"  {label}: one repeat was asked, so there is nothing to compare"
-    pairs = [
-        pair
-        for run in arm.runs
-        for first, second in combinations(sorted(run.repeats), 2)
-        for pair in _paired(run.repeats[first], run.repeats[second])
-    ]
-    return _apart(label, pairs)
+    return _apart(label, _repeat_pairs(arm))
+
+
+def verdict(
+    shift: float, low: float, high: float, *, spreads: Mapping[str, float | None], blocks: int
+) -> str:
+    """Whether a per-question mean ``shift`` clears the bar (module docstring), as a sentence.
+
+    ``low`` and ``high`` bound its interval, drawn in ``blocks`` blocks;
+    ``spreads`` is each variant's mean absolute exposure difference between
+    two repeats, by name (``None`` where it has no such pair).
+    """
+    for name, spread in spreads.items():
+        if spread is None:
+            return (
+                f"{UNJUDGED}: {name} has no two repeats of one question to take a spread from"
+            )
+    if blocks < MIN_BLOCKS:
+        return f"{UNJUDGED}: {blocks} block(s), fewer than the {MIN_BLOCKS} an interval is read with"
+    if low <= TOLERANCE and high >= -TOLERANCE:
+        return f"{NO_EFFECT}: the interval of the shift holds 0"
+    widest = max(spread for spread in spreads.values() if spread is not None)
+    if abs(shift) <= widest + TOLERANCE:
+        return (
+            f"{NO_EFFECT}: the shift is no larger than the spread between two repeats of one "
+            f"variant ({widest:.3f})"
+        )
+    return f"{EFFECT} toward {'long' if shift > 0 else 'short'}"
 
 
 # One answer's cells in the CSV: each column's name and how it is read off a
@@ -482,21 +600,40 @@ def _cells(reading: Reading) -> list[object]:
 def describe_effect(treatment: Arm, control: Arm, *, block: int, draws: int, seed: int) -> Effect:
     """``treatment``'s answers against ``control``'s on the same questions (module docstring).
 
-    Both arms hold the same runs in the same order.
+    Both arms hold the same runs in the same order and were searched for
+    the same phrases; anything else is refused, since it would pair one
+    run's questions with another's, or read one arm's mentions against a
+    floor counted another way.
     """
     name, other = treatment.name, control.name
+    covered = [[run.run_id for run in arm.runs] for arm in (treatment, control)]
+    if covered[0] != covered[1]:
+        raise ScoreError(
+            f"{name} holds runs {covered[0]} and {other} holds {covered[1]}: the two are "
+            "compared run by run, in one order"
+        )
+    if list(treatment.phrases) != list(control.phrases):
+        raise ScoreError(
+            f"{name} was searched for {list(treatment.phrases)} and {other} for "
+            f"{list(control.phrases)}: one arm's mentions are the other's floor only under "
+            "the same phrases"
+        )
     differ = differences(treatment.variant, control.variant)
+    # ``differences`` spells the identity's ``extra_context`` key this way.
+    if not differ:
+        differ_line = "the two differ in nothing that reaches the model"
+    elif differ == ["extra context"]:
+        differ_line = "the two differ in: extra context"
+    else:
+        differ_line = (
+            f"the two differ in: {', '.join(differ)}; a shift between them is not the extra "
+            "context's alone"
+        )
     preamble = [
         f"decision effect: {name} against {other}",
         treatment.variant.describe(),
         f"against {control.variant.describe()}",
-        "the two differ in: "
-        + (", ".join(differ) if differ else "nothing that reaches the model")
-        + (
-            ""
-            if differ == ["extra context"]
-            else "; a shift between them is not the extra context's alone"
-        ),
+        differ_line,
         _context_line(treatment.variant),
         _context_line(control.variant),
     ]
@@ -547,7 +684,8 @@ def describe_effect(treatment: Arm, control: Arm, *, block: int, draws: int, see
             )
         lines.extend(_repeat_lines(repeat, pairs, name, other, absent))
         same_repeat.extend(pairs)
-    lines.extend(_question_lines(treatment, control, block=block, draws=draws, seed=seed))
+    per_question, read = _question_lines(treatment, control, block=block, draws=draws, seed=seed)
+    lines.extend(per_question)
     lines.extend(
         [
             "-- how far apart two answers to one question are (readable claims; exposure as a "
@@ -557,4 +695,15 @@ def describe_effect(treatment: Arm, control: Arm, *, block: int, draws: int, see
             _apart(f"{name} against {other}, same repeat", same_repeat),
         ]
     )
+    if read is None:
+        judged = f"{UNJUDGED}: no question has a readable claim from both"
+    else:
+        judged = verdict(
+            read.shift,
+            read.low,
+            read.high,
+            spreads={arm.name: _gap(_repeat_pairs(arm)) for arm in (treatment, control)},
+            blocks=read.blocks,
+        )
+    lines.append(f"verdict: {judged}")
     return Effect(preamble, lines, (header, rows))

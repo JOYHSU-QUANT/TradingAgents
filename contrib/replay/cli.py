@@ -43,8 +43,9 @@ Seven commands:
   moves the decision (discovery plan section 4.7, :mod:`.effect`): each
   variant's stored answers against ``--against``'s on the same questions,
   pooled over the runs: how many answers mention the section, which way the
-  model's reading and the executed one moved, and how that compares with
-  the spread between two repeats of one variant. Reads only; scores no
+  model's reading and the executed one moved, how that compares with the
+  spread between two repeats of one variant, and a verdict against the
+  bar that module states. Reads only; scores no
   price, so no ``model_cutoff`` is needed, and never reads the holdout.
 - ``guardrail --run-id A [--run-id B ...] --research-db PATH`` — the trend
   guardrail's shadow mode (:mod:`.guardrail`): for every finished question
@@ -154,6 +155,7 @@ from .replay_store import (
 )
 from .score import (
     Answer,
+    Question,
     Scorecard,
     ScoreError,
     bars_per_year,
@@ -438,7 +440,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "in the replay store: how many answers mention the section, which way the model's "
             "reading and the executed one moved on each question both answered, the mean shift "
             "per question with a 90 percent interval from a circular block bootstrap within "
-            "each run, and how far apart two repeats of one variant are. The variants are "
+            "each run, how far apart two repeats of one variant are, and a verdict: the extra "
+            "context moves the decision when that interval does not hold 0 and the shift is "
+            "larger than the spread between two repeats of either variant. The variants are "
             "meant to differ in their extra_context alone; the report names whatever else "
             "differs. Simple variants only. Reads only: no later price is scored and the "
             "holdout is never read."
@@ -1533,7 +1537,9 @@ def _arm(
     Each repeat is one of :func:`~.compare.cards_by_repeat`'s cards (the
     questions it answered or had refused), under the run's pinned split and
     without the holdout: the lock every other report on the run reads under.
-    A run the variant was never asked on is refused by name.
+    A run the variant was never asked on is refused by name, and so is one
+    it was asked only the holdout of: every answer there is behind the lock,
+    and a report of nothing would read as a variant that said nothing.
     """
     parts = []
     for run in runs:
@@ -1545,8 +1551,23 @@ def _arm(
                 f"variant {variant.name!r} has no answers for run {run_id!r} in {store.path}"
             )
         cards = cards_by_repeat(_locked_card(run), answers, failed)
-        parts.append(arm_run(run_id, cards, store.responses(variant.sha, run_id), phrases))
+        part = arm_run(run_id, cards, store.responses(variant.sha, run_id), phrases)
+        if not part.refused and not any(part.repeats.values()):
+            raise _Refused(
+                f"variant {variant.name!r} was asked only holdout questions of run {run_id!r}, "
+                "which effect never reads: ask it the train and validation segments"
+            )
+        parts.append(part)
     return Arm(variant, parts, phrases)
+
+
+def _read_questions(run: _Run) -> list[Question]:
+    """The questions of ``run`` the effect report reads: every one outside the holdout."""
+    return [
+        question
+        for question in run.decisions.questions
+        if segment_of(run.split, question.at_ms, run.facts.step_ms) is not SegmentName.HOLDOUT
+    ]
 
 
 def _cmd_effect(args: argparse.Namespace) -> int:
@@ -1569,8 +1590,10 @@ def _cmd_effect(args: argparse.Namespace) -> int:
             "compared with another"
         )
     phrases = list(MENTION) if args.mention is None else args.mention
-    if not all(phrases):
-        return _fail("--mention needs a phrase, got ''")
+    blank = [phrase for phrase in phrases if not phrase.strip()]
+    if blank:
+        # A blank phrase is in every answer: every arm would read 100%.
+        return _fail(f"--mention needs a phrase, got {blank[0]!r}")
     replay_path = Path(args.replay_db)
     if not replay_path.is_file():
         # A reader never creates the store behind a typo.
@@ -1605,7 +1628,7 @@ def _cmd_effect(args: argparse.Namespace) -> int:
             )
     except ReplayStoreError as exc:
         return _fail(str(exc))
-    notes = (already_carried(run.facts.run_id, run.decisions.questions) for run in pinned_runs)
+    notes = (already_carried(run.facts.run_id, _read_questions(run)) for run in pinned_runs)
     read = [
         "runs: "
         + ", ".join(f"{run.facts.run_id} (split pinned {run.pinned_at})" for run in pinned_runs),

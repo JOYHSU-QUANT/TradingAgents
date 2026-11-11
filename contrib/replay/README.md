@@ -390,7 +390,7 @@ down」兩個 Brier skill score，都對「模型自己的先驗」比，各自 
 ```
 python -m contrib.replay effect --db paper_trading.db --replay-db replay.sqlite \
     --run-id paper-BTC-3 --run-id paper-BTC-4 --run-id paper-BTC-5 \
-    --variant research-long --variant research-short --against research-neutral \
+    --variant research-long --against research-short \
     [--mention TEXT ...] [--block 6] [--draws 10000] [--seed 0] [--out DIR]
 ```
 
@@ -409,20 +409,30 @@ paper 做不到的事：**同一批題目**問幾個只差 `extra_context` 的 v
 | `research-short` | 同上，方向是 short（paper 從沒出現過這一邊：那條規則只持有過 long 或空手） |
 
 research 段與 daemon 渲染的差兩處：標題的日期寫成「這份 context 自己的那一根收盤」（context 開頭的 `As of:`），不寫
-時間戳（寫死的時間戳拿去問六週的題目，除了一題以外都會讀成過期訊號）；位置在倉位段之後，不是 daemon 放的倉位段
+時間戳（寫死的時間戳拿去問三週的題目，除了一題以外都會讀成過期訊號）；位置在倉位段之後，不是 daemon 放的倉位段
 之前（`extra_context` 接在整份記錄的 context 之後、format 區塊之前）。
 
-題庫是 paper-BTC-3、-4、-5：`context_shape` 有記錄、而且沒有 `autoresearch` 的 run（train＋validation 共 103 題）。
-run 6 到 11 每一題都已經帶著 research 段，再塞一段是另一個實驗；run 3 之前沒有倉位段，也沒記 shape。
+題庫是 paper-BTC-3、-4、-5：已經跑完、`context_shape` 有記錄、而且沒有 `autoresearch` 的 run（train＋validation 共
+103 題，2026-08-28 到 09-18）。run 6 到 11 每一題都已經帶著 research 段，再塞一段是另一個實驗；run 3 之前沒有
+倉位段，也沒記 shape；run 12（2026-11-10 關掉 research 段後開的）寫這一節時才一天。
 四臂各自用 `replay` 問 train 與 validation 兩段，再跑 `effect`。
+
+**怎麼跑、看哪一個結論**（2026-11-11 拍板，在買任何答案之前寫死）：
+
+1. **先只問 `research-none` 與 `research-neutral`**，跑 `effect --variant research-neutral --against research-none`。
+   verdict 是 `no measurable effect` 才往下；neutral 文字自己就會推動決策的話，重寫 neutral（新名字）、只重問那一臂。
+2. 再問 `research-long` 與 `research-short`。
+3. **結論只讀一個比較**：`effect --variant research-long --against research-short` 的 verdict。兩段文字只差一個字，
+   neutral 文字寫得好不好的影響互相抵消。long、short 各自對 neutral 照樣可以印，只當輔助，不決定任何事。
 
 報表讀三件事，定義寫死在 `effect.py`：
 
 - **Exposure（有沒有那一段）**不用問模型：報表印每個 variant 的 `extra_context` 幾個字元、開頭是什麼，並列出兩個
   variant **還差在哪**（模型、system prompt、temperature、cap）。只差 `extra context` 時，位移才能算在那一段頭上；
   差更多時報表會明說。四臂的訊息長什麼樣由 `tests/test_effect.py` 用渲染出來的文字斷言。
-- **Uptake（有沒有引用）**：答案原文不分大小寫搜尋 `--mention` 的字串（預設 `research signal`、`research rule`、
-  `research radar` 三個：那一段對自己與來源的稱呼），印幾個答案提到。不單搜 `research`：四臂共用的 system prompt 自己
+- **Uptake（有沒有引用）**：答案原文不分大小寫搜尋 `--mention` 的字串（預設四個：`research signal`、`research rule`、
+  `research radar`、`btc-4h-maker`——那一段的標題、它對來源的稱呼、答案最可能用來稱呼那條規則的說法、規則的 family
+  id），印幾個答案提到。換別的說法引用的答案數不到，所以這個數字是下界。不單搜 `research`：四臂共用的 system prompt 自己
   就說「research debate 不在訊息裡」，照抄這句的答案沒有引用任何一段。對照組同一個數字是基準：沒看過那一段的模型
   也提到，就是搜尋字串太鬆。
 - **Decision effect（決策有沒有動）**：兩邊都答了的題，比模型讀法的曝險（成績單同一套讀法：要了目標就是要的方向與
@@ -440,15 +450,22 @@ run 6 到 11 每一題都已經帶著 research 段，再塞一段是另一個實
   block bootstrap（各 run 自己繞一圈、連續 6 題一塊、塊不跨 run），補上 sign test 沒有的相依性。
 - **最後一段是雜訊底**：同一個 variant 兩個 repeat 之間、與兩個 variant 同一個 repeat 之間，用同一把尺（方向不同的
   比例、曝險差的平均絕對值）。variant 之間的差沒有比同一個 variant 自己兩次回答的差大，就是雜訊。
-- **不印判定**。多大的位移算「那一段有作用」還沒拍板，報表只給數字。
+- **最後一行是判定**（`verdict:`；門檻 2026-11-11 拍板、寫死在 `effect.py`）：讀「每題、repeat 取平均」的平均位移，
+  兩個條件都成立才印 `the extra context moves the decision toward long｜short`——(a) 位移的 90% 區間不含 0；(b) 位移
+  的大小超過**兩個 variant 各自**兩次回答之間的平均絕對差。(b) 管的是大小不是證據：比模型自己問兩次的差還小的位移，
+  就算每一題方向都一致，也不值得為它接一段。其中一條不過印 `no measurable effect`，並說是哪一條。某個 variant 沒有
+  同一題的兩個 repeat（量不到 (b)），或抽樣不到 5 塊（區間會縮成一個點，同 `pool` 的規則），印 `cannot be judged`。
 - **只讀**：不寫任何 store、不記 ledger；不讀事後價格，所以不需要 `model_cutoff`；holdout 永遠不讀（列走成績單同一道
-  鎖）。每個 run 要已經在這個 `replay.sqlite` 釘過 split；題目記錄時 context 已經帶 research 段的 run 照讀，但報表會逐 run
-  印一行 `note:` 說有幾題（那是「多一段」對「一段」，不是這個實驗）；variant 在某個 run 沒有答案、或是 graph variant（每題從自己
+  鎖；有 variant 問過 holdout 段時，那些答案不讀、但那一行會寫有幾個）。每個 run 要已經在這個 `replay.sqlite` 釘過 split；題目記錄時 context 已經帶 research 段的 run 照讀，但報表會逐 run
+  印一行 `note:` 說有幾題（那是「多一段」對「一段」，不是這個實驗）；variant 在某個 run 沒有答案（或只問過 holdout 段）、或是 graph variant（每題從自己
   的模擬帳戶問，兩個 graph variant 問的不是同一題），具名拒絕。
 - `--out DIR` 每個 variant 寫 `effect-<variant>-against-<against>-decisions.csv`（一對一列）與 `-summary.txt`。
 
 **這個實驗證明不了的事**：這是一次 completion、訊息只有 context 的簡單版。位移只說明模型對這段文字敏感，不說明
-research 段照正式接線（位置、時效、與其他段落衝突時）有效。
+research 段照正式接線（位置、時效、與其他段落衝突時）有效。四臂的 research 段都標成「跟 context 同一根收盤」，是 daemon
+那一段最新鮮的情況（實際可以落後兩根 research bar），所以量到的位移是上界。四臂共用的 system prompt 有一句「research
+debate 不在訊息裡」，接著訊息裡卻出現 research 段；結果若是 `no measurable effect`，可能是這句話讓模型把那一段打了折
+（2026-11-11 拍板沿用這份 prompt，才能跟 `current-sonnet` 既有的答案對照）。
 
 ## 趨勢護欄的影子報表
 

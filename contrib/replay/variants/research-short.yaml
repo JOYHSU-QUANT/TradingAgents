@@ -1,0 +1,24 @@
+# Experiment B of the discovery plan (section 4.7), arm 4 of 4: the research
+# section, saying SHORT. Everything but the side is research-long.yaml's;
+# the reasons for each line are written there.
+#
+#   python -m contrib.replay replay --db paper_trading.db --run-id paper-BTC-3 \
+#       --variant contrib/replay/variants/research-short.yaml --dry-run
+name: research-short
+model:
+  provider: openrouter
+  id: anthropic/claude-sonnet-5.5
+system_prompt_path: current_system.md
+max_tokens: 16384
+model_cutoff: 2026-06-30
+# The paper trader was never shown this side: the rule behind the recorded
+# section only ever held long or flat. The arm is the mirror the experiment
+# needs, not a section the daemon once printed.
+extra_context: |-
+  Research signal (rule btc-4h-maker#9, decided on the research radar's own 4h bars, as of the close this context is as of):
+    Side the rule holds after its latest bar: short
+    Confidence band, cut from its return-to-volatility ratio over the window it was selected on: medium
+    Drawdown band, cut from its deepest peak-to-trough fall over that same window: shallow
+    Window the two bands were cut from: 159 days. A further 159 days were held back from the search and measured once, which is what the note below reports
+    Notes: held-back window, measured once: net return positive, return-to-volatility below the selection window's; nothing since has been measured
+    Basis: a fixed rule the research radar fitted and scored offline on its own copy of this coin's history — not on the candles above, and not on this account's fills. That rule decides at a bar's close and is priced as filling at the next bar's open, so the side above is the one it carries into its next bar rather than a trade taken at the close named above. The two bands are ordinal labels over that rule's own measurements; the figures behind them are deliberately not printed. Nothing in this section feeds the risk checks, the sizing or any order — it is one more input to weigh.

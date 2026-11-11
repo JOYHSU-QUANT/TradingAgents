@@ -103,6 +103,7 @@ __all__ = [
     "circular_draw",
     "describe_pool",
     "pooled_skill",
+    "quantile",
 ]
 
 # Questions per block: six 4h questions are a day.
@@ -194,7 +195,7 @@ class Interval:
     carried: int  # blocks holding at least one of the line's questions
 
 
-def _quantile(ordered: Sequence[float], q: float) -> float:
+def quantile(ordered: Sequence[float], q: float) -> float:
     """The ``q`` quantile of sorted values, interpolated linearly between order statistics."""
     position = q * (len(ordered) - 1)
     below = math.floor(position)
@@ -258,8 +259,8 @@ def bootstrap_lines(
         lines, found, skills, drawn, dropped, strict=True
     ):
         values.sort()
-        low = _quantile(values, tail) if values else None
-        high = _quantile(values, 1 - tail) if values else None
+        low = quantile(values, tail) if values else None
+        high = quantile(values, 1 - tail) if values else None
         carried = _carried(runs, line, block)
         intervals.append(Interval(len(pairs), blocks, skill, low, high, missed, carried))
     return intervals

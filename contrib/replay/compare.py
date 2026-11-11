@@ -29,7 +29,15 @@ from dataclasses import dataclass
 from .score import HORIZONS, Answer, Question, Scorecard, Summary, csv_table, paired_hits
 from .variant import Variant
 
-__all__ = ["Card", "Comparison", "Scope", "Table", "compare", "cutoff_scope"]
+__all__ = [
+    "Card",
+    "Comparison",
+    "Scope",
+    "Table",
+    "cards_by_repeat",
+    "compare",
+    "cutoff_scope",
+]
 
 # One CSV: its header and its rows.
 Table = tuple[list[str], list[list[object]]]
@@ -98,6 +106,27 @@ def cutoff_scope(
     return Scope(frozenset(eligible), preamble)
 
 
+def cards_by_repeat(
+    card: Card,
+    given: Mapping[int, Sequence[Answer]],
+    refused: Mapping[int, Collection[str]] | None,
+    eligible: Collection[str] | None = None,
+) -> dict[int, Scorecard]:
+    """One card per repeat, over the questions that repeat answered or had refused.
+
+    A question nobody put to the repeat is left out, so it does not read as
+    unanswered; one the provider refused stays in, and does. ``eligible``
+    narrows every repeat to the questions it names (the cutoff scope).
+    """
+    refused = refused or {}
+    cards = {}
+    for repeat in sorted(set(given) | set(refused)):
+        answers = given.get(repeat, ())
+        only = {a.input_id for a in answers} | set(refused.get(repeat, ()))
+        cards[repeat] = card(answers, only if eligible is None else only & set(eligible))
+    return cards
+
+
 def compare(
     *,
     questions: Sequence[Question],
@@ -119,19 +148,7 @@ def compare(
     scope = cutoff_scope(questions, variant, against, include_pre_cutoff=include_pre_cutoff)
     eligible = scope.eligible
 
-    def answered(given: Sequence[Answer], refused: Collection[str]) -> Scorecard:
-        return card(given, ({a.input_id for a in given} | set(refused)) & eligible)
-
-    def by_repeat(
-        given: Mapping[int, Sequence[Answer]], refused: Mapping[int, Collection[str]] | None
-    ) -> dict[int, Scorecard]:
-        refused = refused or {}
-        return {
-            repeat: answered(given.get(repeat, ()), refused.get(repeat, ()))
-            for repeat in sorted(set(given) | set(refused))
-        }
-
-    cards = by_repeat(answers, failed)
+    cards = cards_by_repeat(card, answers, failed, eligible)
     summaries = {repeat: scored.summary() for repeat, scored in cards.items()}
     body: list[str] = []
     header: list[str] = []
@@ -148,7 +165,7 @@ def compare(
         body.extend(_paired(cards, lambda _repeat: paper, variant.name, "paper"))
     else:
         assert against_answers is not None
-        theirs = by_repeat(against_answers, against_failed)
+        theirs = cards_by_repeat(card, against_answers, against_failed, eligible)
         body.extend(_paired(cards, theirs.get, variant.name, against.name))
     return Comparison(scope.preamble, body, (header, rows))
 

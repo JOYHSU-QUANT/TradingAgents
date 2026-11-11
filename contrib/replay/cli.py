@@ -1,6 +1,6 @@
 """``python -m contrib.replay`` — the offline exam's commands.
 
-Six commands:
+Seven commands:
 
 - ``score --db paper_trading.db --run-id paper-BTC-7`` — the scorecard
   (plan PR 1): read the run's decisions, mark each against the price that
@@ -38,6 +38,15 @@ Six commands:
   segments (plan PR 2.2): the headline and up-vs-down skills per horizon,
   against the base rate and against the model's own prior, with 90%
   block-bootstrap intervals, and the plan section 5 bar. Reads only.
+- ``effect --run-id A [--run-id B ...] --replay-db PATH --variant NAME
+  [--variant NAME ...] --against NAME`` — whether one more section of text
+  moves the decision (discovery plan section 4.7, :mod:`.effect`): each
+  variant's stored answers against ``--against``'s on the same questions,
+  pooled over the runs: how many answers mention the section, which way the
+  model's reading and the executed one moved, how that compares with the
+  spread between two repeats of one variant, and a verdict against the
+  bar that module states. Reads only; scores no
+  price, so no ``model_cutoff`` is needed, and never reads the holdout.
 - ``guardrail --run-id A [--run-id B ...] --research-db PATH`` — the trend
   guardrail's shadow mode (:mod:`.guardrail`): for every finished question
   of each run, the side the guardrail rule held at that instant, the side
@@ -91,7 +100,8 @@ from .account import (
     Terms,
     simulate,
 )
-from .compare import Scope, Table, compare, cutoff_scope
+from .compare import Card, Scope, Table, cards_by_repeat, compare, cutoff_scope
+from .effect import MENTION, Arm, already_carried, arm_run, describe_effect
 from .gate import (
     CONTROLS,
     Readings,
@@ -145,6 +155,7 @@ from .replay_store import (
 )
 from .score import (
     Answer,
+    Question,
     Scorecard,
     ScoreError,
     bars_per_year,
@@ -419,6 +430,81 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     pool.add_argument("--seed", type=int, default=0, help="the bootstrap's seed (default: 0)")
     pool.set_defaults(func=_cmd_pool)
+
+    effect = subparsers.add_parser(
+        "effect",
+        help="whether a variant's extra context moved its answers, against another variant's",
+        description=(
+            "Compare the stored answers of one or more variants with those of --against on "
+            "the same questions of one or more paper runs, each cut by the split pinned for it "
+            "in the replay store: how many answers mention the section, which way the model's "
+            "reading and the executed one moved on each question both answered, the mean shift "
+            "per question with a 90 percent interval from a circular block bootstrap within "
+            "each run, how far apart two repeats of one variant are, and a verdict: the extra "
+            "context moves the decision when that interval does not hold 0 and the shift is "
+            "larger than the spread between two repeats of either variant; none is given when "
+            "under 80 percent of the question-repeats asked carry a readable claim from both. "
+            "The variants are "
+            "meant to differ in their extra_context alone; the report names whatever else "
+            "differs, and then gives no verdict. Simple variants only. Reads only: no later price is scored and the "
+            "holdout is never read."
+        ),
+    )
+    effect.add_argument("--db", default="paper_trading.db", help="the paper store (SQLite path)")
+    effect.add_argument(
+        "--run-id",
+        action="append",
+        required=True,
+        help="a run to read; give it once per run",
+    )
+    effect.add_argument("--replay-db", required=True, metavar="PATH", help="the replay store")
+    effect.add_argument(
+        "--variant",
+        action="append",
+        required=True,
+        metavar="NAME",
+        help="a variant to compare with --against; give it once per variant",
+    )
+    effect.add_argument(
+        "--against",
+        required=True,
+        metavar="NAME",
+        help=(
+            "the variant the others are compared with: the one without the section, or the "
+            "one whose section says the opposite"
+        ),
+    )
+    effect.add_argument(
+        "--mention",
+        action="append",
+        metavar="TEXT",
+        help=(
+            "a phrase that counts an answer as mentioning the section, whatever its case; "
+            f"give it once per phrase (default: {', '.join(MENTION)})"
+        ),
+    )
+    effect.add_argument(
+        "--block",
+        type=int,
+        default=BLOCK,
+        help=(
+            f"consecutive questions per bootstrap block, within a run (default: {BLOCK}); the "
+            "verdict is read only at the default"
+        ),
+    )
+    effect.add_argument(
+        "--draws", type=int, default=DRAWS, help=f"bootstrap draws (default: {DRAWS})"
+    )
+    effect.add_argument("--seed", type=int, default=0, help="the bootstrap's seed (default: 0)")
+    effect.add_argument(
+        "--out",
+        metavar="DIR",
+        help=(
+            "write effect-<variant>-against-<against>-decisions.csv (one row per question and "
+            "repeat both answered) and -summary.txt here, per variant"
+        ),
+    )
+    effect.set_defaults(func=_cmd_effect)
 
     register = subparsers.add_parser(
         "register",
@@ -1430,6 +1516,152 @@ def _cmd_pool(args: argparse.Namespace) -> int:
     for line in describe_pool(parts, block=args.block, draws=args.draws, seed=args.seed):
         print(line)
     return 0
+
+
+# -- effect --------------------------------------------------------------------
+
+
+def _locked_card(run: _Run) -> Card:
+    """Scores answers on ``run`` under its split with the holdout locked; no research closes."""
+
+    def card(answers: Sequence[Answer], only: Collection[str]) -> Scorecard:
+        return score_run(
+            run.decisions.questions,
+            answers,
+            step_ms=run.facts.step_ms,
+            costs=run.facts.costs,
+            split=run.split,
+            only=only,
+        )
+
+    return card
+
+
+def _arm(
+    store: ReplayStore, variant: Variant, runs: Sequence[_Run], phrases: Sequence[str]
+) -> Arm:
+    """``variant``'s stored answers on every run, read as the scorecard reads them.
+
+    Each repeat is one of :func:`~.compare.cards_by_repeat`'s cards (the
+    questions it answered or had refused), under the run's pinned split and
+    without the holdout: the lock every other report on the run reads under.
+    A run the variant was never asked on is refused by name, and so is one
+    it was asked only the holdout of: every answer there is behind the lock,
+    and a report of nothing would read as a variant that said nothing.
+    """
+    parts = []
+    for run in runs:
+        run_id = run.facts.run_id
+        answers = store.answers(variant.sha, run_id)
+        failed = store.failed(variant.sha, run_id)
+        if not answers and not failed:
+            raise _Refused(
+                f"variant {variant.name!r} has no answers for run {run_id!r} in {store.path}"
+            )
+        cards = cards_by_repeat(_locked_card(run), answers, failed)
+        part = arm_run(
+            run_id,
+            cards,
+            store.responses(variant.sha, run_id),
+            phrases,
+            refusals=sum(len(refused) for refused in failed.values()),
+        )
+        if not part.refused and not part.repeats:
+            raise _Refused(
+                f"variant {variant.name!r} was asked only holdout questions of run {run_id!r}, "
+                "which effect never reads: ask it the train and validation segments"
+            )
+        parts.append(part)
+    return Arm(variant, parts, phrases)
+
+
+def _read_questions(run: _Run) -> list[Question]:
+    """The questions of ``run`` the effect report reads: every one outside the holdout."""
+    return [
+        question
+        for question in run.decisions.questions
+        if segment_of(run.split, question.at_ms, run.facts.step_ms) is not SegmentName.HOLDOUT
+    ]
+
+
+def _cmd_effect(args: argparse.Namespace) -> int:
+    """Each ``--variant``'s stored answers against ``--against``'s (discovery plan section 4.7)."""
+    db_path = Path(args.db)
+    if not db_path.is_file():
+        return _fail(f"database {args.db!r} does not exist")
+    if args.block < 1:
+        return _fail(f"--block must be at least 1, got {args.block}")
+    if args.draws < 1:
+        return _fail(f"--draws must be at least 1, got {args.draws}")
+    if args.out is not None and not args.out:
+        return _fail("--out needs a directory, got ''")
+    _repeated_run_ids(args.run_id)
+    names = [*args.variant, args.against]
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+        return _fail(
+            f"--variant and --against name {', '.join(repeated)} more than once; a variant is "
+            "compared with another"
+        )
+    phrases = list(MENTION) if args.mention is None else args.mention
+    blank = [phrase for phrase in phrases if not phrase.strip()]
+    if blank:
+        # A blank phrase is in every answer: every arm would read 100%.
+        return _fail(f"--mention needs a phrase, got {blank[0]!r}")
+    replay_path = Path(args.replay_db)
+    if not replay_path.is_file():
+        # A reader never creates the store behind a typo.
+        return _fail(f"--replay-db {args.replay_db!r} does not exist")
+    runs = [
+        _open_run(
+            db_path, args.db, run_id, reports_root=None, count_reports=False, noun="effect report"
+        )
+        for run_id in args.run_id
+    ]
+    try:
+        with ReplayStore(replay_path) as store:
+            variants = [store.variant(name) for name in names]
+            graph = [variant.name for variant in variants if variant.mode == GRAPH_MODE]
+            if graph:
+                raise _Refused(
+                    f"{', '.join(repr(name) for name in graph)}: a graph variant is asked each "
+                    "question from its own simulated book, so two of them do not answer the same "
+                    "question; effect pairs simple variants"
+                )
+            pinned_runs = []
+            for run in runs:
+                pinned = store.pinned_split(run.facts.run_id)
+                if pinned is None:
+                    raise _Refused(
+                        f"run {run.facts.run_id!r} has no split pinned in {replay_path}: replay "
+                        "it through this store first"
+                    )
+                pinned_runs.append(_pinned(run, *pinned))
+            *treatments, control = (
+                _arm(store, variant, pinned_runs, phrases) for variant in variants
+            )
+    except ReplayStoreError as exc:
+        return _fail(str(exc))
+    notes = (already_carried(run.facts.run_id, _read_questions(run)) for run in pinned_runs)
+    read = [
+        "runs: "
+        + ", ".join(f"{run.facts.run_id} (split pinned {run.pinned_at})" for run in pinned_runs),
+        *(note for note in notes if note is not None),
+    ]
+    status = 0
+    for index, treatment in enumerate(treatments):
+        report = describe_effect(
+            treatment, control, block=args.block, draws=args.draws, seed=args.seed
+        )
+        lines = [*report.preamble, *read, *report.body]
+        if index:
+            print()
+        for line in lines:
+            print(line)
+        if args.out is not None:
+            stem = f"effect-{treatment.name}-against-{control.name}"
+            status = max(status, _write_out(Path(args.out), args.out, stem, lines, report.table))
+    return status
 
 
 # -- register ------------------------------------------------------------------

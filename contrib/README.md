@@ -136,7 +136,7 @@ funding 歷史 → 一條規則（z-score 進出場）→ 日線邊界前寫交�
 |---|---|
 | 跑 paper trading | [hyperliquid_perp RUNBOOK](./hyperliquid_perp/docs/RUNBOOK.md)、[uniswap_v3 RUNBOOK](./uniswap_v3/RUNBOOK.md)、[carry RUNBOOK](./carry/RUNBOOK.md) |
 | 研究一條策略規則 | [autoresearch README](./autoresearch/README.md)：`vocab` → `fetch`（4h、1d、funding 三條序列）→ `experiment` → `evaluate`／`research` → `promote` → `signal` |
-| 分析既有的 run | [replay README](./replay/README.md)：`score` 看成績單、`replay` 重問別的模型、`score --replay-db --variant [--against]` 逐題配對比較、`backtest` 走模擬帳戶看整段損益與 §5 門檻 |
+| 分析既有的 run | [replay README](./replay/README.md)：`score` 看成績單、`replay` 重問別的模型、`score --replay-db --variant [--against]` 逐題配對比較、`effect` 看多一段文字有沒有推動決策、`backtest` 走模擬帳戶看整段損益與 §5 門檻 |
 | 看部署狀態與告警 | [dashboard README](./dashboard/README.md) |
 | 加一個現貨策略 | [uniswap_v3 README「加一個策略」](./uniswap_v3/README.md#加一個策略) |
 | 改套件之間的邊 | [tests/test_package_graph.py](./tests/test_package_graph.py) 的 `ALLOWED`、`_PERP_REACH` 與註解 |

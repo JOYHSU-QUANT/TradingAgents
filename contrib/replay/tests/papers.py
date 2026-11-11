@@ -68,14 +68,21 @@ def gate_run_config() -> dict:
     return {**run_config(style="maker"), "risk": RISK, "decision": DECISION}
 
 
-def decision_text(mode: str, side: str | None, margin: int | None, confidence: float) -> str:
+def decision_text(
+    mode: str,
+    side: str | None,
+    margin: int | None,
+    confidence: float,
+    *,
+    rationale: str = "The fixture says so.",
+) -> str:
     """A target block the engine could have emitted, fenced the way it emits it."""
     block = {
         "decision_mode": mode,
         "target_side": side,
         "requested_target_margin_pct": margin,
         "confidence": confidence,
-        "rationale": "The fixture says so.",
+        "rationale": rationale,
         "key_risks": ["It is a fixture."],
     }
     return f"Final decision:\n\n```json\n{json.dumps(block)}\n```\n"
@@ -398,17 +405,28 @@ BEFORE_ANY_QUESTION = "2027-01-14"
 
 
 def write_variant(
-    directory: Path, name: str, *, cutoff: str | None = BEFORE_ANY_QUESTION
+    directory: Path,
+    name: str,
+    *,
+    cutoff: str | None = BEFORE_ANY_QUESTION,
+    model: str | None = None,
+    extra_context: str | None = None,
 ) -> Path:
-    """A variant file named ``name`` (model ``fixture/<name>``) and its prompt, in ``directory``."""
+    """A variant file named ``name`` and its prompt, in ``directory``.
+
+    Its model is ``fixture/<model>``, ``fixture/<name>`` unless told: two
+    files that share a model differ in what else they name.
+    """
     (directory / "system.md").write_text(SYSTEM, encoding="utf-8")
     lines = [
         f"name: {name}",
         "model:",
         "  provider: openrouter",
-        f"  id: fixture/{name}",
+        f"  id: fixture/{name if model is None else model}",
         "system_prompt_path: system.md",
     ]
+    if extra_context is not None:
+        lines.append(f"extra_context: {json.dumps(extra_context)}")
     if cutoff is not None:
         lines.append(f"model_cutoff: {cutoff}")
     path = directory / f"{name}.yaml"
@@ -446,14 +464,16 @@ def write_graph_variant(
     return path
 
 
-def replay_argv(store: Path, variant_file: Path, *extra: str) -> list[str]:
-    """``replay`` on the fixture run, into ``replay.sqlite`` beside the store."""
+def replay_argv(
+    store: Path, variant_file: Path, *extra: str, run_id: str = RUN_ID
+) -> list[str]:
+    """``replay`` on the fixture run (or ``run_id``), into ``replay.sqlite`` beside the store."""
     return [
         "replay",
         "--db",
         str(store),
         "--run-id",
-        RUN_ID,
+        run_id,
         "--variant",
         str(variant_file),
         "--replay-db",

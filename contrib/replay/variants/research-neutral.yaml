@@ -1,0 +1,31 @@
+# Experiment B of the discovery plan (section 4.7), arm 2 of 4: a neutral
+# text. Everything but ``extra_context`` is research-long.yaml's; the
+# reasons for each line are written there.
+#
+# The placebo: asked first, against research-none (research-none.yaml says
+# why). The long and short arms are read against it only as a second
+# reading; their conclusion is long against short. A model that moves when it is
+# shown the research section may be moving because it was shown one more
+# section, whatever it says; this arm adds a section of the same shape (a
+# headed block of six indented lines, each within a few characters of the
+# research section's) that says nothing about the market, names no side and
+# uses none of the phrases the `effect` report searches answers for (nor the
+# word "research" at all).
+#
+#   python -m contrib.replay replay --db paper_trading.db --run-id paper-BTC-3 \
+#       --variant contrib/replay/variants/research-neutral.yaml --dry-run
+name: research-neutral
+model:
+  provider: openrouter
+  id: anthropic/claude-sonnet-5.5
+system_prompt_path: current_system.md
+max_tokens: 16384
+model_cutoff: 2026-06-30
+extra_context: |-
+  Layout note (template perp-context#9, set on the context builder's own line order, as of the close this context is as of):
+    State of the template after its last bar: same
+    Indentation rule, taken from its two-space convention over the sections it was written for: uniform
+    Heading rule, taken from its one-colon ending on each title in that same file: uniform
+    Text the two rules were taken from: 159 lines. A further 159 lines were left out of the count and read over once, which is what the note below reports
+    Notes: left-out lines, read over once: spacing regular, line width under that of the counted lines; nothing since then has been read over again
+    Basis: a fixed template the context builder was given and checked offline on its own copy of this layout — not on the candles above, and not on this account's fills. That template is applied when a message is built and does not change between messages, so the state above is the one it keeps into its next message rather than an event at the close named above. The two rules are conventions of that template's own text; the details behind them are not printed. Nothing in this section describes the market or feeds the risk checks, the sizing or any order — it is a note on layout only.

@@ -374,9 +374,10 @@ def test_the_drift_figures_are_read_off_the_path(example_world, null_twin, offse
     # Conditional-v1: the one-sided effect is a drift of the whole price,
     # towards the planted side — what a long position held throughout earns.
     assert example_world.unconditional_drift == example_world.planted_drift > 0
-    # Conditional-v2: the declared drift takes all but a remainder of that
-    # away, here past it by a little.
-    assert -offset_world.planted_drift < offset_world.unconditional_drift < 0
+    # Conditional-v2: the fixture's round drift is a little more than the
+    # plant gives this seed, so what is left is small and against the plant.
+    assert offset_world.unconditional_drift < 0 < offset_world.planted_drift
+    assert abs(offset_world.unconditional_drift) < offset_world.planted_drift / 10
 
 
 # -- refusals -------------------------------------------------------------------------
@@ -465,7 +466,7 @@ def test_a_drift_the_kind_does_not_admit_is_refused_before_any_draw(monkeypatch)
 def test_a_drift_the_kind_does_not_lay_is_refused_at_generate_and_by_the_type(example_world):
     with pytest.raises(WorldError, match="price drift"):
         generate(example_manifest(drift=-0.0002))
-    # A history assembled by hand does not carry one in either ...
+    # The type refuses a history under such a manifest too ...
     with pytest.raises(WorldError, match="price drift"):
         replace(example_world, manifest=example_manifest(drift=-0.0002))
     # ... and a conditional-v2 one is held to its own rule the same way.

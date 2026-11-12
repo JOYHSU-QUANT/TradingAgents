@@ -13,9 +13,9 @@ Breaking changes within the 0.x line are called out explicitly.
 - **Discovery Lab: a planted world whose price as a whole does not drift
   (`conditional-v2`).** A conditional-v1 world whose rule enters one side
   adds its effect on that side only, so the whole price drifts by `beta`
-  times the share of bars
-  the planted rule holds, and a position held on every bar earns that
-  without reading the rule. Measured on the ten `easy` development worlds
+  times the share of bars the planted rule holds, and a position held on
+  every bar earns that without reading the rule. Measured on the ten
+  `easy` development worlds
   of the model arm's dev batch on 2026-11-11: always-long scored a mean
   validation net Sharpe of 3.58 and cleared the 3.70 promote threshold on
   seven of them. The new kind declares `world.price.drift` against the
@@ -40,7 +40,13 @@ Breaking changes within the 0.x line are called out explicitly.
   world. Existing worlds, records and reports are untouched; v2 worlds
   sit on their own `calibrate`/`report` rows (the kind is a row key).
   Sizing `beta` and the drift for v2 on development seeds is a separate
-  step and is not part of this change.
+  step and is not part of this change. Known limits, recorded rather
+  than fixed here: the residual drift is printed by `generate` and not
+  recorded in any landed file; it is one mean over all decision bars, not
+  per window; the history type holds the manifest's declared drift but
+  does not lay the bars again to show they carry it; and no test in the
+  suite takes a v2 world past `generate` (the full CLI path was run by
+  hand in review).
 - **Discovery Lab PR 6 (experiment B): whether the research section reaches
   the decision, as a replay.** Four variants under
   `contrib/replay/variants/` that differ only in `extra_context`

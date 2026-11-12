@@ -107,7 +107,7 @@ autoresearch funding walk 多問的 20 天）超出 venue 時間戳上限的 man
     那一行＝`WorldHistory.unconditional_drift`，決策 bar 合起來的平均每根 log 漂移（單一窗口的比例各自不同）與它佔一根 bar
     波動的比例，**以多方為正**（一直做多每根賺到的量，一直做空相反）；v1 的世界也印，那就是它的捷徑有多大
     （＝`WorldHistory.planted_drift`）。
-  - **定法**：先讀每個 dev seed 的 **conditional-v1** 世界的 `planted rule: holds …` 比例（還沒宣告漂移的 v2 manifest 會被拒絕，所以用 v1 讀：落在用完即丟的 root，或直接讀 `generate(manifest).planted_exposure`），取平均、乘上 `−beta`；v2 世界自己的比例因為規則改在帶漂移的路徑上判定，可能差幾根；持倉 bar 的淨效果變成
+  - **定法**：先讀每個 dev seed 的 **conditional-v1** 世界的 `planted rule: holds …` 比例（還沒宣告漂移的 v2 manifest 會被拒絕，所以用 v1 讀：落在用完即丟的 root，或在 Python 裡讀 `generate(manifest).planted_drift`，它就是 `beta ×` 比例、以多方為正），對 dev seeds 取平均、乘上 `−beta`（用 `planted_drift` 的話＝取平均後變號）；v2 世界自己的比例因為規則改在帶漂移的路徑上判定，可能差幾根；持倉 bar 的淨效果變成
     `beta + drift`，所以 `beta` 的難度檔要跟著重新校準。規則仍在未加效果的路徑上判定，這裡是「帶著宣告漂移、沒有效果」
     的那一條。
   - **拒絕**：規則兩邊都進場（一個漂移擋不了兩邊；兩邊都埋只能是 v1 世界，它留著兩邊相抵後的淨漂移，`generate` 照樣印出來）、漂移是 0 或與埋入同向（什麼都沒抵銷）、絕對值不小於 `beta`

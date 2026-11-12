@@ -58,12 +58,12 @@ conditional-v1 world is not a martingale once its planted bars are counted
 in: a one-sided plant's effect has one sign, so the price as a whole
 drifts by ``beta`` times the share of bars the rule holds, and a position
 held on every bar on the planted side earns that without reading the rule
-at all. The
-declared drift takes it away. Sized to ``-beta`` times that share for a
-long-side plant (the opposite sign for a short-side one), it leaves the
-price as a whole without a drift: the held bars carry ``beta + drift`` and
-every other bar ``drift``. It is DECLARED, a constant of the manifest, and
-not computed from the path: a constant measured over the whole world would
+at all. The declared drift takes it away. Sized to ``-beta`` times that
+share for a long-side plant (the opposite sign for a short-side one), it
+leaves the price as a whole without a drift: the held bars carry
+``beta + drift`` and every other bar ``drift``. It is DECLARED, a constant
+of the manifest, and not computed from the path: a constant measured over
+the whole world would
 make every bar depend on the bars after it, and the prefix guarantee below
 would be gone. So the offset is exact only for the share it was sized by,
 and what one seed's own share leaves over is reported rather than hidden
@@ -452,7 +452,7 @@ class SyntheticHistory:
 class _Draws:
     """Every random number a world consumes, drawn before any price is built.
 
-    Drawn first and kept, so the null path and the conditional path of one
+    Drawn first and kept, so the pre-effect path and the final path of one
     world are built from the SAME numbers and differ by the effect alone.
     ``ups``/``downs`` are the wick draws: uniforms on ``(0, 1]``.
     """

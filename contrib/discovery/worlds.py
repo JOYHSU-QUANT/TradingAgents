@@ -55,9 +55,10 @@ generator version, never a quiet edit.
 declared number more: ``price.drift``, a per-bar log drift AGAINST the
 planted side, on every bar of the world, the warm-up included. A
 conditional-v1 world is not a martingale once its planted bars are counted
-in: the effect is one-signed, so the price as a whole drifts by ``beta``
-times the share of bars the rule holds, and a position held on every bar
-on the planted side earns that without reading the rule at all. The
+in: a one-sided plant's effect has one sign, so the price as a whole
+drifts by ``beta`` times the share of bars the rule holds, and a position
+held on every bar on the planted side earns that without reading the rule
+at all. The
 declared drift takes it away. Sized to ``-beta`` times that share for a
 long-side plant (the opposite sign for a short-side one), it leaves the
 price as a whole without a drift: the held bars carry ``beta + drift`` and
@@ -230,7 +231,8 @@ def _require_an_offset(world: World) -> None:
             f"{world.id}: a {world.kind.value} world declares one price drift against the side "
             f"its rule enters, and this rule enters "
             f"{' and '.join(side.value for side in entered)}; one drift cannot stand against "
-            f"both — a two-sided plant is a {WorldKind.CONDITIONAL_V1.value} world"
+            f"both. A two-sided plant is a {WorldKind.CONDITIONAL_V1.value} world, which keeps "
+            f"whatever drift its two sides leave between them"
         )
     drift, beta = world.price.drift, planted.beta
     against = -1.0 if entered[0] is Side.LONG else 1.0
@@ -256,9 +258,10 @@ class WorldHistory:
     has not closed and is not a bar). ``funding`` holds one settlement per
     hour from the first bar's open through the one due at the last bar's
     close. ``planted_sides`` is index-aligned with ``bars`` and names, for
-    each bar, the side whose drift the bar carried — ``None`` on every bar
+    each bar, the side whose effect the bar carried — ``None`` on every bar
     of a null world, and on every bar of a conditional one where the rule
-    held nothing.
+    held nothing (a conditional-v2 world's declared drift is on every bar,
+    and is not what this names).
     """
 
     manifest: Manifest
@@ -272,8 +275,9 @@ class WorldHistory:
         # The checks below read the path as this generator lays it (its
         # interval, its settlement grid), so a history of another generator
         # or interval is refused here too, not only at ``generate`` — and
-        # with them a price drift this generator does not lay, which a
-        # history assembled by hand would otherwise carry in unannounced.
+        # with them a MANIFEST whose price drift its kind does not admit.
+        # What is held is the declaration: the bars are not laid again
+        # here to show they carry it, any more than for the seed or beta.
         _require_this_generator(world)
         _require_this_drift(world)
         expected = world.bars.warmup_bars + world.bars.count
@@ -319,8 +323,8 @@ class WorldHistory:
         ):
             # The half of the offset's rule only the path can say. The drift
             # is sized by a share, and on this seed the rule holds another;
-            # one that leaves as much as the plant gave (a drift past twice
-            # the plant's own) is no offset — the shortcut it was to take
+            # one that leaves as much as the plant gave (a drift of twice
+            # the plant's own, or more) is no offset — the shortcut it was to take
             # away is back, on the other side.
             raise WorldError(
                 f"{world.id}: the declared drift of {world.price.drift!r} leaves "
@@ -344,9 +348,9 @@ class WorldHistory:
         """The planted effect as a mean per-bar log drift of the DECISION bars, signed towards long.
 
         ``beta`` times the share of decision bars held long, less the share
-        held short: what the one-signed effect gives the price as a whole
-        on this seed, and so what a conditional-v2 world's declared drift is
-        there to offset.
+        held short: what the effect gives the price as a whole on this seed
+        (the two sides of a two-sided plant net), and so what a
+        conditional-v2 world's declared drift is there to offset.
         """
         world = self.world
         if world.planted is None:
@@ -641,7 +645,7 @@ def _planted_sides(
 
 
 def generate(manifest: Manifest) -> WorldHistory:
-    """The manifest's world from its seed: the null path, and the planted effect on top if it plants one.
+    """The manifest's world from its seed: the pre-effect path, and the planted effect on top if it plants one.
 
     Takes the manifest rather than its ``world`` because one field outside
     that record shapes a conditional world: ``indicator_lookback``, the

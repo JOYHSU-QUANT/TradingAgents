@@ -292,11 +292,13 @@ def test_the_effect_begins_the_bar_after_the_decision_and_never_on_it(example_wo
 
 
 @pytest.fixture(scope="module")
-def offset_world(example_world):
-    """The example world as conditional-v2, its drift sized to the share the v1 plant holds."""
-    return generate(
-        example_manifest(kind=WorldKind.CONDITIONAL_V2, drift=-example_world.planted_drift)
-    )
+def offset_world():
+    """The example world as conditional-v2, under a round drift near what its plant gives the price.
+
+    The v1 plant holds 78 of the 400 decision bars at beta 0.001 — 0.000195
+    a bar — so -0.0002 offsets it and leaves a remainder to read.
+    """
+    return generate(example_manifest(kind=WorldKind.CONDITIONAL_V2, drift=-0.0002))
 
 
 def test_a_conditional_v2_world_is_its_null_twin_plus_the_declared_drift_and_beta_where_held(
@@ -372,11 +374,9 @@ def test_the_drift_figures_are_read_off_the_path(example_world, null_twin, offse
     # Conditional-v1: the one-sided effect is a drift of the whole price,
     # towards the planted side — what a long position held throughout earns.
     assert example_world.unconditional_drift == example_world.planted_drift > 0
-    # Conditional-v2, offset by the v1 share of this seed: what is left is
-    # the difference between that share and the drifting walk's own.
-    assert offset_world.unconditional_drift == pytest.approx(
-        offset_world.planted_drift - example_world.planted_drift, abs=1e-15
-    )
+    # Conditional-v2: the declared drift takes all but a remainder of that
+    # away, here past it by a little.
+    assert -offset_world.planted_drift < offset_world.unconditional_drift < 0
 
 
 # -- refusals -------------------------------------------------------------------------
@@ -425,8 +425,9 @@ def test_a_conditional_v2_drift_that_leaves_no_less_than_the_plant_gave_is_refus
     example_world,
 ):
     # Only the path can say this one, so the type says it. The example plant
-    # gives the price beta times its held share a bar; a drift past twice
-    # that leaves as much on the other side, though it is smaller than beta.
+    # gives the price beta times its held share a bar; a drift of twice
+    # that or more leaves as much on the other side, though it is smaller
+    # than beta.
     beta = example_world.world.planted.beta
     found = example_world.planted_drift
     assert 2 * found < 0.0009 < beta
@@ -438,11 +439,27 @@ def test_a_conditional_v2_drift_that_leaves_no_less_than_the_plant_gave_is_refus
 
     with pytest.raises(WorldError, match="no less than it found"):
         offset_by(-0.0009)
+    # At exactly twice it leaves exactly what the plant gave: refused too.
+    with pytest.raises(WorldError, match="no less than it found"):
+        offset_by(-2 * found)
     # Inside twice the plant's own drift it is a world, if a poorly offset one.
     assert offset_by(-1.9 * found).unconditional_drift == pytest.approx(-0.9 * found, rel=1e-9)
     # And ``generate`` reaches the same refusal once it has laid the path.
     with pytest.raises(WorldError, match="no less than it found"):
         generate(small_manifest(WorldKind.CONDITIONAL_V2, count=300, drift=-0.0009))
+
+
+def test_a_drift_the_kind_does_not_admit_is_refused_before_any_draw(monkeypatch):
+    # ``generate`` says so from the manifest alone: the type would refuse the
+    # same history, but only once the whole path had been laid.
+    def never(world):
+        raise AssertionError("no draw is made for a manifest the drift rule refuses")
+
+    monkeypatch.setattr(generator, "_draw", never)
+    with pytest.raises(WorldError, match="price drift"):
+        generate(small_manifest(drift=0.0005))
+    with pytest.raises(WorldError, match="declares a price drift against"):
+        generate(example_manifest(kind=WorldKind.CONDITIONAL_V2))
 
 
 def test_a_drift_the_kind_does_not_lay_is_refused_at_generate_and_by_the_type(example_world):

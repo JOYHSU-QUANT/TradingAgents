@@ -11,8 +11,9 @@ Breaking changes within the 0.x line are called out explicitly.
 ### Added
 
 - **Discovery Lab: a planted world whose price as a whole does not drift
-  (`conditional-v2`).** A conditional-v1 world adds its effect on one
-  side only, so the whole price drifts by `beta` times the share of bars
+  (`conditional-v2`).** A conditional-v1 world whose rule enters one side
+  adds its effect on that side only, so the whole price drifts by `beta`
+  times the share of bars
   the planted rule holds, and a position held on every bar earns that
   without reading the rule. Measured on the ten `easy` development worlds
   of the model arm's dev batch on 2026-11-11: always-long scored a mean

@@ -107,12 +107,12 @@ autoresearch funding walk 多問的 20 天）超出 venue 時間戳上限的 man
     那一行＝`WorldHistory.unconditional_drift`，決策 bar 合起來的平均每根 log 漂移（單一窗口的比例各自不同）與它佔一根 bar
     波動的比例，**以多方為正**（一直做多每根賺到的量，一直做空相反）；v1 的世界也印，那就是它的捷徑有多大
     （＝`WorldHistory.planted_drift`）。
-  - **定法**：先在 dev seeds 上讀 `planted rule: holds …` 的比例取平均、乘上 `−beta`；持倉 bar 的淨效果變成
+  - **定法**：先讀每個 dev seed 的 **conditional-v1** 世界的 `planted rule: holds …` 比例（還沒宣告漂移的 v2 manifest 會被拒絕，所以用 v1 讀：落在用完即丟的 root，或直接讀 `generate(manifest).planted_exposure`），取平均、乘上 `−beta`；v2 世界自己的比例因為規則改在帶漂移的路徑上判定，可能差幾根；持倉 bar 的淨效果變成
     `beta + drift`，所以 `beta` 的難度檔要跟著重新校準。規則仍在未加效果的路徑上判定，這裡是「帶著宣告漂移、沒有效果」
     的那一條。
-  - **拒絕**：規則兩邊都進場（一個漂移擋不了兩邊）、漂移是 0 或與埋入同向（什麼都沒抵銷）、絕對值不小於 `beta`
+  - **拒絕**：規則兩邊都進場（一個漂移擋不了兩邊；兩邊都埋只能是 v1 世界，它留著兩邊相抵後的淨漂移，`generate` 照樣印出來）、漂移是 0 或與埋入同向（什麼都沒抵銷）、絕對值不小於 `beta`
     （持倉的 bar 不剩效果）；路徑鋪好、知道這個 seed 自己的持倉比例之後，再拒絕「留下的漂移不比埋入效果原本給的少」
-    的宣告（＝漂移超過埋入效果自己那份的兩倍：捷徑換到另一邊）。
+    的宣告（＝漂移達到或超過埋入效果自己那份的兩倍：捷徑換到另一邊）。
   - **它沒有做到的事**：其餘的 bar 不是 martingale，每一根都帶 `drift`。所以「剛好在規則不持倉的 bar 上反向持倉」總共賺到
     的和埋的規則一樣多，只是攤在好幾倍的曝險上。那是埋入規則的鏡像，要讀懂規則才站得上去，不是繞過規則的路；但它
     在世界裡，而且沒有 null 世界照得出它：v2 世界的 null twin 仍是同 seed 的 Null-v1（沒有東西埋而帶漂移＝價格自己
@@ -139,7 +139,7 @@ python -m contrib.discovery generate --manifest dev-seed-0.json --root data/disc
 bytes，`search_space.pool_size` 與 `artifact_sha256` 已回填；digest 把這兩個置空算，所以目錄名與手寫的 manifest 一致）。落地先在同一個 root 下的 staging 目錄做（`.<name>.partial-*`），驗收通過、manifest 寫好才 rename 到定位；任何原因
 中途結束都把 staging 整個移除，最終路徑永遠不會出現半成品。同一份 manifest 已落地就拒絕（exit 1）。stdout 印三條 walk 的
 結果、量到的第一根可量測 bar、三段 split 與各自的 bar 數、conditional 世界還有埋的規則在決策 bar 上持倉的根數與比例
-（規則在決策 bar 上從不持倉的 conditional 世界在生成時就拒絕）、池的大小（去重後／枚舉數）與 manifest 路徑；這些只給操作者看，
+（規則在決策 bar 上從不持倉的 conditional 世界在生成時就拒絕）與 `unconditional drift` 那一行（見上面 Conditional-v2 一段）、池的大小（去重後／枚舉數）與 manifest 路徑；這些只給操作者看，
 不進任何 prompt。
 
 ## 三臂與判定（PR 3）

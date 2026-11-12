@@ -71,6 +71,13 @@ def test_generate_lands_the_world_and_its_null_twin_beside_it_and_refuses_a_repe
     assert (
         f"planted rule: holds a position on {held} of 400 decision bars ({held / 400:.1%})" in out
     )
+    # The one-sided effect read as a drift of the whole price: beta over the
+    # held share, beside a bar's vol of 0.01.
+    drift = example_world.unconditional_drift
+    assert (
+        f"unconditional drift: {drift:+.3g} per decision bar ({drift / 0.01:+.3f} of a bar's vol)"
+        in out
+    )
     assert f"manifest: {target / MANIFEST_FILENAME}" in out
 
     # The same manifest again is refused; the null twin lands beside it,
@@ -79,10 +86,30 @@ def test_generate_lands_the_world_and_its_null_twin_beside_it_and_refuses_a_repe
     assert "already holds this manifest's world" in capsys.readouterr().err
     twin = _manifest_file(tmp_path, "twin.json", kind=WorldKind.NULL_V1)
     assert main(["generate", "--manifest", str(twin), "--root", str(root)]) == 0
-    assert "planted rule" not in capsys.readouterr().out
+    twin_out = capsys.readouterr().out
+    assert "planted rule" not in twin_out and "unconditional drift" not in twin_out
     assert sorted(p.name for p in root.iterdir()) == sorted(
         [target.name, world_dir(root, _landable(example_manifest(kind=WorldKind.NULL_V1))).name]
     )
+
+
+def test_generate_lands_a_conditional_v2_world_and_says_what_its_offset_leaves(
+    tmp_path, capsys, example_world
+):
+    # A drift sized to the share of bars the example plant holds under
+    # conditional-v1: the manifest reads, the world lands, and what the
+    # offset leaves is printed (the line's form is pinned on the v1 world).
+    beta = example_world.world.planted.beta
+    sized = -beta * example_world.planted_exposure / 400
+    root = tmp_path / "bench"
+    offset = _manifest_file(tmp_path, kind=WorldKind.CONDITIONAL_V2, drift=sized)
+    assert main(["generate", "--manifest", str(offset), "--root", str(root)]) == 0
+    assert capsys.readouterr().out.count("unconditional drift: ") == 1
+    # A drift that offsets nothing is refused, and nothing is landed for it.
+    idle = _manifest_file(tmp_path, "idle.json", kind=WorldKind.CONDITIONAL_V2)
+    assert main(["generate", "--manifest", str(idle), "--root", str(root)]) == 1
+    assert "declares a price drift against its long-side plant" in capsys.readouterr().err
+    assert len(list(root.iterdir())) == 1
 
 
 def test_a_manifest_that_cannot_be_read_is_a_named_refusal(tmp_path, capsys):

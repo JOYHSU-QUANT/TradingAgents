@@ -867,7 +867,7 @@ class CalibrationRow:
         return None if self.searches == 0 else self.found / self.searches
 
     def describe(self) -> str:
-        what = "false calls" if self.kind is WorldKind.NULL_V1 else "non-empty verdicts"
+        what = "non-empty verdicts" if self.kind.plants else "false calls"
         rate = "n/a" if self.rate is None else f"{self.rate:.1%}"
         head = row_head(
             (self.kind, self.null_definition_version, self.seed_set, self.conditions, self.arm)

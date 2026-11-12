@@ -125,6 +125,14 @@ class WorldKind(VocabEnum, noun="world kind"):
 
     NULL_V1 = "null-v1"
     CONDITIONAL_V1 = "conditional-v1"
+    # The planted world with a declared price drift against its plant, so
+    # that the price as a whole does not drift (``worlds``' docstring).
+    CONDITIONAL_V2 = "conditional-v2"
+
+    @property
+    def plants(self) -> bool:
+        """Whether a world of this kind carries a planted rule; a null one carries none."""
+        return self is not WorldKind.NULL_V1
 
 
 class Difficulty(VocabEnum, noun="planted difficulty"):
@@ -232,7 +240,12 @@ class Bars:
 
 @dataclass(frozen=True)
 class PriceModel:
-    """The log-price walk: ``vol`` per bar (not annualised) and ``drift`` per bar (plan §4.1)."""
+    """The log-price walk: ``vol`` per bar (not annualised) and ``drift`` per bar (plan §4.1).
+
+    Which drifts make a world is the generator's rule, not this record's:
+    none on either v1 kind, the declared offset of the plant on a
+    conditional-v2 one (``worlds``).
+    """
 
     vol: float
     drift: float
@@ -394,7 +407,7 @@ class World:
         # The one cross-field rule: what the world IS and what it CARRIES
         # agree. A null world with a rule in its manifest, or a conditional
         # one without, would be a report row filed under the wrong kind.
-        conditional = self.kind is WorldKind.CONDITIONAL_V1
+        conditional = self.kind.plants
         if conditional != (self.planted is not None):
             raise ManifestError(
                 f"world.planted: a {self.kind.value} world "

@@ -98,6 +98,10 @@ def _edited(**changes):
         ({"manifest_version": 1}, "manifest_version"),
         ({"world.kind": "null-v1"}, "null-v1 world plants nothing"),
         ({"world.planted": None}, "conditional-v1 world carries a planted rule"),
+        (
+            {"world.kind": "conditional-v2", "world.planted": None},
+            "conditional-v2 world carries a planted rule",
+        ),
         ({"world.id": "SYN-NULL0001"}, "world.id"),
         ({"world.id": "syn-eb3bc030"}, "world.id"),
         # Test seed 7's id on a dev-seed-0 manifest: well-formed, and another

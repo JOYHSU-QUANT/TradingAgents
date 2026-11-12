@@ -921,7 +921,7 @@ class ReportRow:
         strangers = [e.score.experiment_id for e in entries if e.score.arm is not self.arm]
         if strangers:
             raise ScoreError(f"row: {strangers} are not of this row's arm, {self.arm.value}")
-        if entries and (self.kind is WorldKind.NULL_V1) != all(
+        if entries and self.kind.plants == all(
             entry.score.recovery is None for entry in entries
         ):
             raise ScoreError(
@@ -999,7 +999,7 @@ class ReportRow:
         over = f"{self.searches} search(es) over {self.worlds} world(s)"
         first = f"first eligible round median {self._first_eligible()} (a diagnostic)"
         sealed = self.seed_set is SeedSet.TEST and not unseal
-        if self.kind is WorldKind.NULL_V1:
+        if not self.kind.plants:
             calls = [
                 e.score.readable_holdout
                 for e in self.entries

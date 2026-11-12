@@ -29,6 +29,7 @@ from contrib.autoresearch.gaps import scan_bars, scan_stamps
 from contrib.autoresearch.upstream import from_epoch_ms
 from contrib.autoresearch.vocabulary import FeatureRef, parse_feature_name
 from contrib.core.instants import MAX_EPOCH_MS
+from contrib.discovery import worlds as generator
 from contrib.discovery.manifest import Bars, SeedSet, WorldKind
 from contrib.discovery.worlds import (
     SETTLEMENT_LAG_MS,
@@ -37,10 +38,22 @@ from contrib.discovery.worlds import (
     generate,
 )
 
-from .conftest import DAY_MS, PLANTED, START_MS, STEP_MS, example_manifest, small_manifest
+from .conftest import (
+    DAY_MS,
+    PLANTED,
+    START_MS,
+    STEP_MS,
+    example_manifest,
+    small_manifest,
+)
 
 PER_BAR = STEP_MS // FUNDING_INTERVAL_MS
 PER_DAY = DAY_MS // STEP_MS
+
+# The example plant mirrored: the short side alone, and both sides at once.
+SHORT_ENTRY = [{"left": "funding_zscore_14", "op": ">", "right": 1.5}]
+SHORT_PLANT = {**PLANTED, "entry": {"short": SHORT_ENTRY}}
+TWO_SIDED = {**PLANTED, "entry": {**PLANTED["entry"], "short": SHORT_ENTRY}}
 
 
 def null(**changes):
@@ -52,8 +65,26 @@ def _with_world(manifest, **changes):
     return replace(manifest, world=replace(manifest.world, **changes))
 
 
+def _planting(manifest, document):
+    """``manifest`` with ``document`` as the rule its world plants."""
+    planted = replace(manifest.world.planted, spec=parse_spec(document))
+    return _with_world(manifest, planted=planted)
+
+
 def _log_return(bar) -> float:
     return math.log(float(bar.close) / float(bar.open))
+
+
+def _drift_reads_the_path(made):
+    """``made``'s two drift figures are the ones its own path and manifest give."""
+    world = made.world
+    held = made.planted_sides[world.bars.warmup_bars :]
+    net = held.count(Side.LONG) - held.count(Side.SHORT)
+    beta = 0.0 if world.planted is None else world.planted.beta
+    assert made.planted_drift == pytest.approx(beta * net / len(held), rel=1e-12)
+    assert made.unconditional_drift == pytest.approx(
+        world.price.drift + made.planted_drift, abs=1e-15
+    )
 
 
 # -- the seed -------------------------------------------------------------------------
@@ -191,13 +222,14 @@ def null_twin(example_world):
     return generate(example_manifest(kind=WorldKind.NULL_V1))
 
 
-def _effect_is_beta_on_the_held_bars(planted_world, twin, beta):
+def _effect_is_beta_on_the_held_bars(planted_world, twin, beta, drift=0.0):
     assert twin.funding == planted_world.funding
     for bar, bare, side in zip(
         planted_world.bars, twin.bars, planted_world.planted_sides, strict=True
     ):
         assert bar.open_time == bare.open_time
-        expected = 0.0 if side is None else (beta if side is Side.LONG else -beta)
+        effect = 0.0 if side is None else (beta if side is Side.LONG else -beta)
+        expected = drift + effect
         assert _log_return(bar) - _log_return(bare) == pytest.approx(expected, abs=1e-9)
     bars = planted_world.bars
     assert all(later.open == earlier.close for earlier, later in zip(bars, bars[1:], strict=False))
@@ -216,18 +248,9 @@ def test_a_conditional_world_is_its_null_twin_plus_beta_on_the_bars_the_rule_hol
 
 
 def test_a_two_sided_rule_carries_beta_in_the_direction_of_the_side_held(null_twin):
-    manifest = example_manifest()
-    both = parse_spec(
-        {
-            **PLANTED,
-            "entry": {
-                "long": [{"left": "funding_zscore_14", "op": "<", "right": -1.5}],
-                "short": [{"left": "funding_zscore_14", "op": ">", "right": 1.5}],
-            },
-        }
-    )
-    planted = replace(manifest.world.planted, spec=both)
-    two_sided = generate(_with_world(manifest, planted=planted))
+    manifest = _planting(example_manifest(), TWO_SIDED)
+    planted = manifest.world.planted
+    two_sided = generate(manifest)
     assert set(two_sided.planted_sides) == {None, Side.LONG, Side.SHORT}
     # And the rule reverses somewhere: a short held straight after a long.
     sides = two_sided.planted_sides
@@ -236,6 +259,8 @@ def test_a_two_sided_rule_carries_beta_in_the_direction_of_the_side_held(null_tw
         for earlier, later in zip(sides, sides[1:], strict=False)
     )
     _effect_is_beta_on_the_held_bars(two_sided, null_twin, planted.beta)
+    # Read as a drift of the whole price, the two sides net.
+    _drift_reads_the_path(two_sided)
 
 
 def test_the_effect_begins_the_bar_after_the_decision_and_never_on_it(example_world, null_twin):
@@ -263,6 +288,97 @@ def test_the_effect_begins_the_bar_after_the_decision_and_never_on_it(example_wo
     )
 
 
+# -- the offset (conditional-v2) --------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def offset_world(example_world):
+    """The example world as conditional-v2, its drift sized to the share the v1 plant holds."""
+    return generate(
+        example_manifest(kind=WorldKind.CONDITIONAL_V2, drift=-example_world.planted_drift)
+    )
+
+
+def test_a_conditional_v2_world_is_its_null_twin_plus_the_declared_drift_and_beta_where_held(
+    offset_world, null_twin
+):
+    world = offset_world.world
+    assert world.id == null_twin.world.id
+    assert {side for side in offset_world.planted_sides if side is not None} == {Side.LONG}
+    # Every bar carries the drift, the warm-up included; the held ones carry
+    # the effect on top of it.
+    _effect_is_beta_on_the_held_bars(
+        offset_world, null_twin, world.planted.beta, drift=world.price.drift
+    )
+
+
+def test_a_short_side_plant_is_offset_by_a_drift_up():
+    made = generate(
+        _planting(small_manifest(WorldKind.CONDITIONAL_V2, count=300, drift=0.0002), SHORT_PLANT)
+    )
+    assert {side for side in made.planted_sides if side is not None} == {Side.SHORT}
+    _drift_reads_the_path(made)
+    assert made.planted_drift < 0 < made.world.price.drift
+
+
+def test_a_conditional_v2_rule_is_read_on_the_drifting_walk_before_the_effect():
+    # A rule that enters on the price itself, under a drift large enough to
+    # move it: the bars it holds are the generator's reading of the walk WITH
+    # the drift and without the effect, not of the drift-free twin. That
+    # pre-effect walk is no world this generator hands out (a drift with
+    # nothing planted is refused), so it is laid here by the generator's own
+    # steps.
+    dip = {
+        "family": "mean_reversion",
+        "entry": {"long": [{"left": "ret_6", "op": "<", "right": -0.02}]},
+        "exit": {"max_bars": 6},
+        "sizing": PLANTED["sizing"],
+    }
+    manifest = _planting(
+        small_manifest(WorldKind.CONDITIONAL_V2, count=300, beta=0.02, drift=-0.012), dip
+    )
+    made = generate(manifest)
+    world = made.world
+
+    def held(bars, daily):
+        return generator._planted_sides(
+            world.planted, bars, daily, made.funding, indicator_lookback=manifest.indicator_lookback
+        )
+
+    before = generator._path(world, generator._draw(world), (None,) * len(made.bars))
+    assert made.planted_sides == held(before, generator._daily(before))
+    twin = null(count=300)
+    assert twin.world.id == world.id
+    assert made.planted_sides != held(twin.bars, twin.daily)
+
+
+def test_a_shorter_conditional_v2_world_is_a_prefix_of_a_longer_one():
+    # The offset is a constant the manifest declares, not the share of bars
+    # this path's rule turned out to hold, so no bar depends on a later one
+    # here either.
+    short, long = (
+        generate(small_manifest(WorldKind.CONDITIONAL_V2, count=count, drift=-0.0002))
+        for count in (300, 360)
+    )
+    assert short.planted_exposure > 0
+    assert long.bars[:300] == short.bars
+    assert long.planted_sides[:300] == short.planted_sides
+
+
+def test_the_drift_figures_are_read_off_the_path(example_world, null_twin, offset_world):
+    for made in (null_twin, example_world, offset_world):
+        _drift_reads_the_path(made)
+    assert null_twin.planted_drift == null_twin.unconditional_drift == 0.0
+    # Conditional-v1: the one-sided effect is a drift of the whole price,
+    # towards the planted side — what a long position held throughout earns.
+    assert example_world.unconditional_drift == example_world.planted_drift > 0
+    # Conditional-v2, offset by the v1 share of this seed: what is left is
+    # the difference between that share and the drifting walk's own.
+    assert offset_world.unconditional_drift == pytest.approx(
+        offset_world.planted_drift - example_world.planted_drift, abs=1e-15
+    )
+
+
 # -- refusals -------------------------------------------------------------------------
 
 
@@ -286,6 +402,58 @@ def test_the_generator_refuses_what_it_does_not_make():
     # would read as never firing, so it is refused rather than planted.
     with pytest.raises(WorldError, match="cannot be read on this world"):
         generate(small_manifest(WorldKind.CONDITIONAL_V1, count=30))
+
+
+@pytest.mark.parametrize("drift", [0.0, 0.0002, -0.001, -0.002])
+def test_a_conditional_v2_world_refuses_a_drift_that_is_not_its_plant_s_offset(drift):
+    # Nothing offset (zero, or a drift on the plant's own side), or the whole
+    # effect and more: beta is 0.001 here.
+    with pytest.raises(WorldError, match="declares a price drift against its long-side plant"):
+        generate(example_manifest(kind=WorldKind.CONDITIONAL_V2, drift=drift))
+
+
+def test_a_conditional_v2_drift_stands_against_the_one_side_the_rule_enters():
+    v2 = example_manifest(kind=WorldKind.CONDITIONAL_V2, drift=-0.0002)
+    # The same drift under a short-side plant is on the plant's own side.
+    with pytest.raises(WorldError, match="against its short-side plant"):
+        generate(_planting(v2, SHORT_PLANT))
+    with pytest.raises(WorldError, match="enters long and short"):
+        generate(_planting(v2, TWO_SIDED))
+
+
+def test_a_conditional_v2_drift_that_leaves_no_less_than_the_plant_gave_is_refused(
+    example_world,
+):
+    # Only the path can say this one, so the type says it. The example plant
+    # gives the price beta times its held share a bar; a drift past twice
+    # that leaves as much on the other side, though it is smaller than beta.
+    beta = example_world.world.planted.beta
+    found = example_world.planted_drift
+    assert 2 * found < 0.0009 < beta
+
+    def offset_by(drift):
+        return replace(
+            example_world, manifest=example_manifest(kind=WorldKind.CONDITIONAL_V2, drift=drift)
+        )
+
+    with pytest.raises(WorldError, match="no less than it found"):
+        offset_by(-0.0009)
+    # Inside twice the plant's own drift it is a world, if a poorly offset one.
+    assert offset_by(-1.9 * found).unconditional_drift == pytest.approx(-0.9 * found, rel=1e-9)
+    # And ``generate`` reaches the same refusal once it has laid the path.
+    with pytest.raises(WorldError, match="no less than it found"):
+        generate(small_manifest(WorldKind.CONDITIONAL_V2, count=300, drift=-0.0009))
+
+
+def test_a_drift_the_kind_does_not_lay_is_refused_at_generate_and_by_the_type(example_world):
+    with pytest.raises(WorldError, match="price drift"):
+        generate(example_manifest(drift=-0.0002))
+    # A history assembled by hand does not carry one in either ...
+    with pytest.raises(WorldError, match="price drift"):
+        replace(example_world, manifest=example_manifest(drift=-0.0002))
+    # ... and a conditional-v2 one is held to its own rule the same way.
+    with pytest.raises(WorldError, match="declares a price drift against"):
+        replace(example_world, manifest=example_manifest(kind=WorldKind.CONDITIONAL_V2))
 
 
 def test_a_rule_that_holds_nothing_on_the_decision_bars_plants_nothing_and_is_refused(

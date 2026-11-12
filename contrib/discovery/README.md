@@ -80,11 +80,11 @@ SHA-256）、`oracle.json` v2（blockers 改 enum）。**PR 5（LLM 臂，已落
 ## 世界生成器（generator v1）
 
 一個世界由 manifest 決定（`world` 區塊，加上 conditional 世界才讀的 `indicator_lookback`）；`generator_version` 不是 `"1"`、
-`price.drift` 不是 0（有價格漂移的世界是另一種世界，不是這種世界的參數）、`bars.interval` 不是 4h、最後一筆 funding 戳記（加上
+`price.drift` 不合這個 kind 的規定（v1 的兩種世界必須是 0：有價格漂移的世界是另一種世界，不是這種世界的參數；`conditional-v2` 必須宣告一個逆著埋入方向、絕對值小於 `beta` 的漂移，見下）、`bars.interval` 不是 4h、最後一筆 funding 戳記（加上
 autoresearch funding walk 多問的 20 天）超出 venue 時間戳上限的 manifest 直接拒絕；價格路徑衝出 float 範圍也拒絕。
 
 - **亂數流**：三條（`price`／`wicks`／`funding`），都從不透明 id 派生（`random.Random(f"{id}/{name}")`），**kind 不進種子**，
-  所以同 seed 的 Null 與 Conditional 共用同一組抽樣、只差埋入效果。每根 bar 的抽樣按 bar 順序消耗，短世界是長世界的
+  所以同 seed 的 Null 與 Conditional 共用同一組抽樣、只差埋入的東西（效果；`conditional-v2` 再加上宣告的漂移）。每根 bar 的抽樣按 bar 順序消耗，短世界是長世界的
   prefix＝生成器內無前視。
 - **Null-v1**：`log P[t] = log P[t-1] + vol·Z[t] − vol²/2`，`Z` i.i.d. N(0,1)，`vol` 以一根 4h bar 為單位；`−vol²/2`
   讓下一根收盤的條件期望等於現價（martingale）。每根 bar 的 open＝前一根 close（連續路徑、無跳空）；high／low＝bar 內
@@ -96,6 +96,31 @@ autoresearch funding walk 多問的 20 天）超出 venue 時間戳上限的 man
   autoresearch 自己的 `replay_sides` 在**未加效果的路徑**（同 seed 的 null 世界）上判定：收盤決策、下一根開盤成交、
   `max_bars`／exit 規則／反手；效果從成交那根起算，**決策當根不加**。價格衍生的 gate（`realized_vol_*`、`regime`）在最終
   路徑上可能在門檻邊緣差幾根，這是 v1 的定義（單趟、不做 fixed point）；oracle 量的是最終路徑，β 的校準以它為準。
+- **Conditional-v2**：Conditional-v1 再加一個**宣告在 manifest 的常數** `price.drift`：每一根 bar（暖身也算）的 log 報酬都
+  加上它，方向逆著埋的那一側（埋在多方＝負值）。為什麼需要：v1 的效果只有一個方向，整條價格因此帶著
+  `beta ×（規則持倉的 bar 比例）` 的漂移，「每一根都站在埋入那一側」不必讀規則就賺得到。2026-11-11 在 dev seeds 0–9 的
+  easy 世界（`beta` 0.004、模型臂 dev 那一批）上直接量：一直做多的 validation 淨 Sharpe 平均 3.58，10 個世界裡 7 個過了
+  3.70 的晉升門檻；模型臂在那一批沒有找回任何一條埋的規則。把 `price.drift` 定成 `−beta × 持倉比例` 後整體漂移歸零：
+  持倉的 bar 帶 `beta + drift`，其餘的 bar 帶 `drift`。
+  - **宣告而不是由路徑算出**：用整個世界量出來的常數會讓每一根 bar 依賴它之後的 bar，「短世界是長世界的 prefix」就不
+    成立；代價是抵銷只對用來定它的那個比例精確。每個世界自己的比例留下多少由 `generate` 印出來：`unconditional drift`
+    那一行＝`WorldHistory.unconditional_drift`，決策 bar 合起來的平均每根 log 漂移（單一窗口的比例各自不同）與它佔一根 bar
+    波動的比例，**以多方為正**（一直做多每根賺到的量，一直做空相反）；v1 的世界也印，那就是它的捷徑有多大
+    （＝`WorldHistory.planted_drift`）。
+  - **定法**：先在 dev seeds 上讀 `planted rule: holds …` 的比例取平均、乘上 `−beta`；持倉 bar 的淨效果變成
+    `beta + drift`，所以 `beta` 的難度檔要跟著重新校準。規則仍在未加效果的路徑上判定，這裡是「帶著宣告漂移、沒有效果」
+    的那一條。
+  - **拒絕**：規則兩邊都進場（一個漂移擋不了兩邊）、漂移是 0 或與埋入同向（什麼都沒抵銷）、絕對值不小於 `beta`
+    （持倉的 bar 不剩效果）；路徑鋪好、知道這個 seed 自己的持倉比例之後，再拒絕「留下的漂移不比埋入效果原本給的少」
+    的宣告（＝漂移超過埋入效果自己那份的兩倍：捷徑換到另一邊）。
+  - **它沒有做到的事**：其餘的 bar 不是 martingale，每一根都帶 `drift`。所以「剛好在規則不持倉的 bar 上反向持倉」總共賺到
+    的和埋的規則一樣多，只是攤在好幾倍的曝險上。那是埋入規則的鏡像，要讀懂規則才站得上去，不是繞過規則的路；但它
+    在世界裡，而且沒有 null 世界照得出它：v2 世界的 null twin 仍是同 seed 的 Null-v1（沒有東西埋而帶漂移＝價格自己
+    有優勢，是另一種世界）。2026-11-11 本機試算（未進 repo 的腳本；10 個 easy seeds、`beta` 0.004 不變、每個世界用
+    自己的持倉比例定漂移）的 validation 淨 Sharpe 平均：一直做多 0.39、一直做空 −0.17、「波動率低於閘門就做空」0.15、
+    「funding z 為正就做空」−2.71，沒有一個世界過 3.70；埋的那條 5.19、9/10 過。
+  - **版本**：`generator_version` 仍是 `"1"`。多這個 kind 沒有讓任何既有 manifest 產生不同的世界，v1 的兩種世界照舊
+    不准有漂移；分辨有沒有宣告漂移看 kind，不看版本。v2 的世界在 `calibrate`／`report` 自成一列（kind 是分列的鍵）。
 - **價格的寫法**：float 路徑以 `repr` 轉 Decimal（最短可逆串），不貼 tick；同一個 float 同一個 Decimal，所以 open＝前一根
   close 在 store 裡也精確相等。
 - **落地**：`land()` 用 `SyntheticHistory` 當 venue、以世界自己的時鐘切視窗，三條 walk 分別必須以 `reached_since`／
@@ -293,7 +318,7 @@ staging 開不起來時 claim 歸還；搬 store 失敗或中斷時保留 stagin
   "manifest_version": 3,
   "world": {
     "id": "SYN-EB3BC030",
-    "kind": "null-v1 | conditional-v1",
+    "kind": "null-v1 | conditional-v1 | conditional-v2",
     "seed_set": "dev | test", "world_seed": 0, "generator_version": "1",
     "origin_ms": 1682640000000, "initial_price": 30000.0,
     "bars": {"interval": "4h", "count": 400, "warmup_bars": 1200},

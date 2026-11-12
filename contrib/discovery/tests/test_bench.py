@@ -213,6 +213,13 @@ def test_the_calibration_table_tallies_the_searched_worlds_by_kind_and_arm(searc
         "null-v1 (v1) dev [0badf00d] grid: 0 false calls in 0 search(es) = n/a; "
         "1 seam failure(s) not counted"
     )
+    # A conditional-v2 row is a planted world's: verdicts, not false calls.
+    planted = CalibrationRow(
+        WorldKind.CONDITIONAL_V2, "v1", SeedSet.DEV, "0badf00d", Arm.GRID, 1, 1, 0
+    )
+    assert planted.describe().startswith(
+        "conditional-v2 (v1) dev [0badf00d] grid: 1 non-empty"
+    )
 
 
 def test_one_row_is_one_set_of_conditions():

@@ -185,6 +185,12 @@ def _cmd_generate(args: argparse.Namespace) -> int:
             f"planted rule: holds a position on {history.planted_exposure} of {count} decision "
             f"bars ({history.planted_exposure / count:.1%})"
         )
+        drift = history.unconditional_drift
+        print(
+            f"unconditional drift: {drift:+.3g} per decision bar "
+            f"({drift / manifest.world.price.vol:+.3f} of a bar's vol): what a long position "
+            f"held on every bar earns without reading the rule"
+        )
     space = manifest.search_space
     print(f"pool: {len(space.candidates)} candidate(s) ({space.enumerated} enumerated)")
     print(f"manifest: {target / MANIFEST_FILENAME}")

@@ -861,6 +861,15 @@ def test_a_row_with_no_finished_search_says_so_rather_than_dividing():
     )
 
 
+def test_a_conditional_v2_row_is_a_planted_world_s_row():
+    # The kind says which plant, not whether there is one: the row counts
+    # recoveries, never false calls.
+    row = _row(_entry(_score()), kind=WorldKind.CONDITIONAL_V2)
+    assert row.describe()[0].startswith(
+        "conditional-v2 (v1) dev [0badf00d] grid: recovered "
+    )
+
+
 NULL_CALL = {"structural_distance": None, "agreement": None, "bars_compared": 0, "recovery": None}
 
 

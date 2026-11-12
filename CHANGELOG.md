@@ -10,6 +10,36 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **Discovery Lab: a planted world whose price as a whole does not drift
+  (`conditional-v2`).** A conditional-v1 world adds its effect on one
+  side only, so the whole price drifts by `beta` times the share of bars
+  the planted rule holds, and a position held on every bar earns that
+  without reading the rule. Measured on the ten `easy` development worlds
+  of the model arm's dev batch on 2026-11-11: always-long scored a mean
+  validation net Sharpe of 3.58 and cleared the 3.70 promote threshold on
+  seven of them. The new kind declares `world.price.drift` against the
+  planted side, sized to `beta` times the held share, so the held bars
+  carry `beta + drift` and every other bar `drift`. The generator refuses
+  a v2 world whose rule enters both sides, or whose drift is zero, on the
+  plant's own side, or not smaller than `beta`, or which — once the seed's
+  own held share is known — leaves the price drifting no less than the
+  plant alone gave it; a drift on either v1 kind is refused as before, and
+  now by the history type as well as by `generate`. For every planted
+  world, v1 included, `generate` prints an `unconditional drift:` line
+  (`WorldHistory.unconditional_drift`, signed towards long): the mean
+  per-bar drift a long position held throughout earns, which on a v2
+  world is what the declared offset leaves for that seed's own share.
+  What the offset does not remove is the plant's mirror — a position
+  against the plant on exactly the bars it does not hold earns the same
+  total — which takes reading the rule to hold; the README records it and
+  the probes tried against it.
+  The offset is a declared constant rather than the path's own share so
+  that a shorter world stays a prefix of a longer one. `generator_version`
+  stays `"1"`: no manifest an earlier build accepted makes a different
+  world. Existing worlds, records and reports are untouched; v2 worlds
+  sit on their own `calibrate`/`report` rows (the kind is a row key).
+  Sizing `beta` and the drift for v2 on development seeds is a separate
+  step and is not part of this change.
 - **Discovery Lab PR 6 (experiment B): whether the research section reaches
   the decision, as a replay.** Four variants under
   `contrib/replay/variants/` that differ only in `extra_context`

@@ -366,11 +366,12 @@ def example_manifest(
     kind: WorldKind = WorldKind.CONDITIONAL_V1,
     seed_set: SeedSet = SeedSet.DEV,
     world_seed: int = 0,
+    drift: float = 0.0,
 ) -> Manifest:
     """A complete manifest for the suite's world, conditional unless asked otherwise."""
     planted = (
         Planted(spec=parse_spec(PLANTED), beta=0.001, difficulty=Difficulty.EASY)
-        if kind is WorldKind.CONDITIONAL_V1
+        if kind.plants
         else None
     )
     world = World(
@@ -381,7 +382,7 @@ def example_manifest(
         origin_ms=START_MS - WARMUP_DAYS * DAY_MS,
         initial_price=30000.0,
         bars=Bars(interval="4h", count=BARS, warmup_bars=WARMUP_DAYS * 6),
-        price=PriceModel(vol=0.01, drift=0.0),
+        price=PriceModel(vol=0.01, drift=drift),
         funding=FundingModel(sigma=0.0001),
         planted=planted,
     )

@@ -268,7 +268,7 @@ API key 由 provider 從環境變數讀），用同一個 `search()`、同一份
 
 **界線。** 三個查詢都只吃一個 `TrainView`。`TrainView.load(store, coin=, split=, costs=, indicator_lookback=)` 用
 `until_ms = 訓練區間結尾 − 1` 讀 store，所以 validation 與 holdout 的 bar 不是被濾掉，是根本沒有讀進來。view 收的是 experiment 的**整個 split**，
-訓練區間由它自己從 split 取出；呼叫方沒有辦法另外指定一段「比較寬的訓練區間」。`TrainView` 建構時自己再檢查一次：最後一根訓練 bar 之後不能有 4h bar，
+訓練區間由它自己從 split 取出，呼叫方不能另外遞一段區間進來。它認得出「這是不是一個 split」，認不出「這是不是這個 experiment 的 split」，所以要傳的就是 experiment 自己的那一個。`TrainView` 建構時自己再檢查一次：最後一根訓練 bar 之後不能有 4h bar，
 日線不能晚於那一根的收盤，funding 不能晚於那個收盤該付的那一筆，整段歷史要在格線上（跟一次量測對歷史的要求相同）；手動組出來的 view 也過同一關。
 那個收盤該付的那一筆 funding，交易所會晚幾毫秒才貼出來；view 手上有它的時間戳（funding 覆蓋率要數它），但沒有任何查詢讀它的費率。
 `load` 不吃 manifest，模組也不 import `manifest.py`，所以世界類型與埋入的規則沒有路徑進到任何輸出。查詢不寫任何東西：不落 trial，不計入
@@ -285,9 +285,10 @@ API key 由 provider 從環境變數讀），用同一個 `search()`、同一份
 （`ToolRefusal`）。每個參數都必填，多的鍵拒絕。`horizon` 的範圍就是語言對 `exit.max_bars` 的範圍（1–1000）。查詢只會比提案窄、不會比它寬：
 條件的門檻可以是數字、另一個指標或 regime 標籤，不收 `{"param": ...}`（單獨一串條件外面沒有 `params` 區塊）。
 
-**評估器不量的窗口，查詢也不讀（2026-11-13 拍板）。** 查詢用到的指標在訓練區間第一根沒有值時，`feature_stats` 與 `conditional_returns` 丟
-`EvaluationError`，跟評估器拒絕量測這個窗口（`backtest_train` 走的那一條）是同一條規則。不這樣做的話，`feature_stats` 會回「0 根有值」、
-`conditional_returns` 會回「0 根成立」，看起來像沒有訊號，其實是問不到。落地的世界不會遇到（訓練區間從每個指標都有值的地方開始）。
+**第一根讀不到值的指標，三個查詢都不讀（2026-11-13 拍板）。** 查詢用到的指標在訓練區間第一根沒有值時，`feature_stats` 與 `conditional_returns` 丟
+`EvaluationError`，跟評估器不量測讀這個指標的規則（`backtest_train` 走的那一條）是同一條規則。不這樣做的話，查詢會把指標有值的那一段當成整個訓練區間
+來回答（例如 30 根裡只有後 11 根有值）；整段都沒有值時則回「0 根成立」，看起來像沒有訊號，其實是問不到。評估器另外幾個拒絕理由（funding 覆蓋不足、
+窗口只有一根）只跟算損益有關，只有 `backtest_train` 會遇到。落地的世界不會遇到（訓練區間從每個指標都有值的地方開始）。
 中途才讀不到值的 bar（例如 funding 覆蓋不足）不拒絕，計入 `bars_unevaluable`。這類「store 答不出來」的錯誤（`FeatureError`、`EvaluationError`）
 不是模型的錯，不包成 `ToolRefusal`，照樣往外丟；autoresearch 的那幾句錯誤訊息帶日曆時間，之後的伺服器（T2）要自己接住，不能原樣回給模型。
 

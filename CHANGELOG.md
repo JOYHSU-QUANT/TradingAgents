@@ -32,15 +32,16 @@ Breaking changes within the 0.x line are called out explicitly.
   package's own `evaluate_segment`, filed nowhere and counted against no
   budget). `call(view, tool, arguments)` is the JSON layer: every argument
   required, no other accepted, figures rounded to six significant digits;
-  the records the functions return are exact and check their own figures
-  at construction. A rule is read by `parse_spec`, a list of conditions
+  the records `feature_stats` and `conditional_returns` return are exact
+  and check their own figures at construction. A rule is read by `parse_spec`, a list of conditions
   and a feature name by the parser's own readers, and a refusal carries
   the parser's sentence unchanged, so a look-up accepts nothing a
   proposal could not say (it is narrower in one place: a bare list has no
   `params` block, so a `{"param": ...}` threshold is refused). A feature
   with no value at the first training bar is refused by all three with
   the evaluator's error — the evaluator does not measure a rule reading
-  it there — rather than answered as "no value" and "holds nowhere".
+  it there — rather than answered from whatever stretch of the window
+  the feature happens to cover.
   `conditional_returns` computes its mean, deviation and t-statistic on
   NON-OVERLAPPING samples only — the bars the conditions hold at, taken
   in order, each at least N bars after the one before and with its whole

@@ -31,9 +31,11 @@ and a rule's training figures are its ``evaluate_segment`` over the view's
 window. Nothing is re-implemented, so a look-up cannot accept a rule, a
 condition or a feature name the parser would refuse, nor say a condition
 holds where the scored loop says it does not; a refusal carries the
-parser's own sentence (:class:`ToolRefusal`). And a look-up refuses the
-window the evaluator refuses: a feature with no value at the first
-training bar is not read, by any of the three.
+parser's own sentence (:class:`ToolRefusal`). And one of the evaluator's
+refusals of a window is a look-up's too: a feature with no value at the
+first training bar is not read, by any of the three. (Its other refusals
+— a window without funding coverage, a window of one bar — are about
+scoring a position, and only :func:`backtest_train` meets them.)
 
 **Two layers.** The three functions take parsed values and return frozen
 records, exact. :func:`call` is the JSON layer a server stands on: it
@@ -165,6 +167,9 @@ class TrainView:
     ``(open, close]``. And the history is held to the grid as a
     measurement's is (``require_clean_history``), so a look-up never reads
     a feature, or counts a horizon, across a hole a trial would refuse.
+    That check is the research package's own and refuses as it does — an
+    ``EvaluationError``, in a sentence that names an instant — where the
+    others here are a ``ValueError``.
     """
 
     frame: FeatureFrame
@@ -260,8 +265,9 @@ def _require_ready(view: TrainView, refs: Iterable[FeatureRef]) -> None:
 
     A rule reading such a feature is not measured on this window
     (``EvaluationError``, by the evaluator), and a look-up that answered
-    anyway would hand back "no value" and "holds nowhere" for a feature
-    that could not be asked: the answer of a signal that is not there. A
+    anyway would describe the stretch the feature covers as if it were the
+    window — or, with none of it covered, say "holds nowhere" of a signal
+    that could not be asked. A
     fact about the store, so it is the evaluator's error and not a
     refusal; a landed world never meets it, since its training window
     begins where every feature has a value. The sentence names no instant,
@@ -304,12 +310,14 @@ class NumberStats:
                 f"a count of the window's bars"
             )
         figures = (self.minimum, *self.quantiles, self.maximum)
-        if len(self.quantiles) != len(QUANTILES) or any(
-            later < earlier for earlier, later in zip(figures, figures[1:], strict=False)
+        if (
+            len(self.quantiles) != len(QUANTILES)
+            or not all(math.isfinite(figure) for figure in figures)
+            or any(later < earlier for earlier, later in zip(figures, figures[1:], strict=False))
         ):
             raise ValueError(
                 f"{self.feature}: the minimum, the {len(QUANTILES)} cuts and the maximum have "
-                f"to be in ascending order, got {figures!r}"
+                f"to be finite and in ascending order, got {figures!r}"
             )
 
 
@@ -329,9 +337,12 @@ class LabelCounts:
 
     def __post_init__(self) -> None:
         labels = [label for label, _count in self.counts]
-        if len(set(labels)) != len(labels) or any(count < 0 for _label, count in self.counts):
+        if labels != [regime.value for regime in MarketRegime] or any(
+            count < 0 for _label, count in self.counts
+        ):
             raise ValueError(
-                f"{self.feature}: each label once, with a count of bars, got {self.counts!r}"
+                f"{self.feature}: every label of the vocabulary once and in its order, with a "
+                f"count of bars, got {self.counts!r}"
             )
         if self.valued > self.bars:
             raise ValueError(
@@ -440,12 +451,16 @@ class ConditionalReturns:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "side", Side(self.side))
-        if not MIN_HORIZON <= self.horizon <= MAX_HORIZON:
+        if isinstance(self.horizon, bool) or not MIN_HORIZON <= self.horizon <= MAX_HORIZON:
             raise ValueError(f"a horizon of {self.horizon!r} bars is not one a look-up takes")
+        # A bar that could not be asked does not hold, so the two counts
+        # are of different bars; and the baseline takes a sample wherever
+        # one fits, so no signal has more of them.
         if not (
-            0 <= self.samples <= self.holding <= self.bars
-            and 0 <= self.unevaluable <= self.bars
-            and 0 <= self.baseline_samples <= self.bars
+            0 <= self.samples <= self.holding
+            and self.samples <= self.baseline_samples <= self.bars
+            and self.unevaluable >= 0
+            and self.holding + self.unevaluable <= self.bars
         ):
             raise ValueError(
                 f"{self.samples} sample(s) of {self.holding} holding bar(s), {self.unevaluable} "

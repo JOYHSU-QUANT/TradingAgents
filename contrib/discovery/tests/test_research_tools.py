@@ -7,7 +7,7 @@ answer; no answer carries a word that would name the world's kind; the
 arm's store is byte-identical around the calls. And the READING: a
 training backtest is a trial's own training figures, a rule and a list of
 conditions are read by the research package's parser and refused in its
-words, a window the evaluator would not measure is not read, and two of
+words, a feature with no value at the window's start is not read, and two of
 the answers are computed by hand on a history short enough to redo on
 paper — the non-overlapping samples of ``conditional_returns`` above all,
 since a t-statistic over overlapping windows is the number these tools
@@ -106,6 +106,9 @@ CALLS = (
     ),
     ("backtest_train", {"rule": PLANTED}),
     ("backtest_train", {"rule": BUY_12}),
+    # Held on every bar but the first, so whatever the last training bar
+    # pays is in an answer whichever bar training ends on.
+    ("backtest_train", {"rule": BUY}),
 )
 
 
@@ -171,13 +174,16 @@ def _hand_split(bars: int, train_from: int = 0) -> Split:
     )
 
 
-def _hand_view(closes, *, train_from: int = 0, funding_hours: int = 0) -> TrainView:
+def _hand_view(
+    closes, *, train_from: int = 0, funding_hours: int = 0, missed_hours=()
+) -> TrainView:
     """A view over closes written out by hand: 4h bars from ``START_MS``, training from bar ``train_from``.
 
     Each bar opens at the previous close, as a generated world's does. No
     daily bars; ``funding_hours`` hourly settlements from the first hour,
     stamped as the venue stamps them (a few ms after the hour), for the
-    tests that read funding or score a rule.
+    tests that read funding or score a rule — less the ones due at
+    ``missed_hours`` (hours after ``START_MS``), which the venue skipped.
     """
     opens = [closes[0], *closes[:-1]]
     bars = [
@@ -195,6 +201,7 @@ def _hand_view(closes, *, train_from: int = 0, funding_hours: int = 0) -> TrainV
     funding = [
         FundingPoint(time=START_MS + (hour + 1) * MS_PER_HOUR + 57, rate=Decimal("0.0001"))
         for hour in range(funding_hours)
+        if hour + 1 not in missed_hours
     ]
     return TrainView(
         frame=FeatureFrame(SeriesBundle(bars, funding=funding), indicator_lookback=LOOKBACK),
@@ -268,7 +275,8 @@ def test_a_view_refuses_a_frame_that_holds_anything_after_training(opened_arm, v
 
 def test_a_view_takes_its_window_from_the_split_and_not_from_the_caller(opened_arm, view, measured):
     # A window is not handed over: a segment, however it is named, is not a
-    # split, so a caller has no way to say "this wider stretch is training".
+    # split, so a caller cannot hand over a bare stretch and call it training.
+    # (Which split it is handed is the caller's to get right: the experiment's.)
     _path, experiment = opened_arm
     split = experiment.split
     wider = Segment(SegmentName.TRAIN, split.train.start_ms, split.validation.end_ms)
@@ -611,15 +619,15 @@ def test_the_tools_are_the_plan_s_three():
     assert TOOL_NAMES == ("feature_stats", "conditional_returns", "backtest_train")
 
 
-# -- a window the evaluator would not measure is not read -----------------------------------------
+# -- a feature with no value at the window's start is not read ------------------------------------
 
 
 def test_a_feature_with_no_value_at_the_first_training_bar_is_refused_by_all_three():
     # Training from the first bar: a twenty-bar mean has no value on the
     # first nineteen. The evaluator does not measure a rule reading it on
-    # this window, and a look-up answering anyway would say "holds nowhere"
-    # of a signal that could not be asked. One rule, all three look-ups — and
-    # it is the store's fact, so the evaluator's error and not a refusal.
+    # this window, and a look-up answering anyway would describe the last
+    # eleven bars as if they were the thirty. One rule, all three look-ups —
+    # and it is the store's fact, so the evaluator's error and not a refusal.
     closes = [100.0 + i for i in range(30)]
     view = _hand_view(closes, funding_hours=30 * 4)
     reading = [{"left": "close", "op": ">", "right": "sma_20"}]
@@ -646,16 +654,27 @@ def test_a_feature_with_no_value_at_the_first_training_bar_is_refused_by_all_thr
 
 
 def test_bars_further_in_where_a_feature_loses_its_value_are_counted():
-    # Twelve bars, settlements for the first six: the rate is read at the
-    # first training bar, so the window is askable, and goes stale once the
-    # settlements stop. Those bars are counted, as the scored loop counts
-    # them, and not read as "does not hold" — the window's last bar among
-    # them, though a scored window takes no decision on it.
-    view = _hand_view([100.0 + i for i in range(12)], funding_hours=6 * 4)
+    closes = [100.0 + i for i in range(12)]
+    reading = [{"left": "funding_rate", "op": ">", "right": 0}]
+    # The venue skips the three settlements inside bar 5 (hours 21 to 23):
+    # at that bar's close the newest rate is four hours old, which is stale,
+    # and at every other bar it is fresh. The window is still one the
+    # evaluator measures — three settlements short of forty-eight is within
+    # its coverage — and the bar is counted, here as the scored loop counts
+    # it, and not read as "does not hold".
+    view = _hand_view(closes, funding_hours=12 * 4, missed_hours=(21, 22, 23))
     stats = feature_stats(view, FeatureRef(FeatureKind.FUNDING_RATE))
-    assert (stats.bars, stats.valued) == (12, 6)
-    paid = parse_conditions([{"left": "funding_rate", "op": ">", "right": 0}])
-    read = conditional_returns(view, paid, horizon=2, side=Side.LONG)
+    assert (stats.bars, stats.valued) == (12, 11)
+    read = conditional_returns(view, parse_conditions(reading), horizon=2, side=Side.LONG)
+    assert (read.bars, read.holding, read.unevaluable) == (12, 11, 1)
+    scored = backtest_train(view, parse_spec({**BUY, "entry": {"long": reading}}))
+    assert (scored.bars_unevaluable, scored.funding_settlements_missing) == (1, 3)
+
+    # Where the settlements stop altogether the feature is stale to the end,
+    # the window's last bar included — a bar of the window like the others,
+    # though a scored window takes no decision on it.
+    stopped = _hand_view(closes, funding_hours=6 * 4)
+    read = conditional_returns(stopped, parse_conditions(reading), horizon=2, side=Side.LONG)
     assert (read.bars, read.holding, read.unevaluable) == (12, 6, 6)
 
 
@@ -726,14 +745,25 @@ def test_the_stats_records_refuse_figures_that_are_not_one_window_s():
         with pytest.raises(ValueError, match="close: "):
             NumberStats("close", bars, valued, low, high, quantiles)
 
-    labels = LabelCounts("regime", bars=9, counts=(("trending", 4), ("ranging", 3)))
+    with pytest.raises(ValueError, match="finite and in ascending order"):
+        NumberStats("close", 9, 9, 1.0, math.nan, cuts)
+
+    vocabulary = [regime.value for regime in MarketRegime]
+    counted = tuple(zip(vocabulary, (4, 3, 0, 0, 0), strict=False))
+    assert len(counted) == len(vocabulary)
+    labels = LabelCounts("regime", bars=9, counts=counted)
     assert labels.valued == 7  # the counts added up, so it cannot disagree with them
-    with pytest.raises(ValueError, match="each label once"):
-        LabelCounts("regime", bars=9, counts=(("trending", 4), ("trending", 3)))
-    with pytest.raises(ValueError, match="each label once"):
-        LabelCounts("regime", bars=9, counts=(("trending", -1),))
-    with pytest.raises(ValueError, match="count 10 bar"):
-        LabelCounts("regime", bars=9, counts=(("trending", 4), ("ranging", 6)))
+    for wrong in (
+        counted[:-1],  # a label of the vocabulary left out
+        counted[::-1] if len(counted) > 1 else (),  # out of the vocabulary's order
+        (*counted, counted[0]),  # a label twice
+        (("sideways", 1), *counted[1:]),  # a label the vocabulary does not have
+        ((vocabulary[0], -1), *counted[1:]),  # a count below zero
+    ):
+        with pytest.raises(ValueError, match="every label of the vocabulary once"):
+            LabelCounts("regime", bars=9, counts=wrong)
+    with pytest.raises(ValueError, match="count 13 bar"):  # ten and three, of nine
+        LabelCounts("regime", bars=9, counts=((vocabulary[0], 10), *counted[1:]))
 
 
 # -- (h) conditional_returns, by hand -------------------------------------------------------------
@@ -881,6 +911,9 @@ def test_a_returns_record_refuses_figures_that_are_not_one_window_s():
         {"holding": 13},  # more holding bars than bars
         {"unevaluable": 13},
         {"baseline_samples": 13},
+        {"unevaluable": 7},  # six bars holding and seven that could not be asked, of twelve
+        {"baseline_samples": 2},  # fewer baseline samples than the signal has
+        {"horizon": True},
         {"mean": None},  # samples and no mean
         {"samples": 0},  # a mean and no sample
         {"std": None},  # three samples and no deviation

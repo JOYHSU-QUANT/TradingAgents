@@ -84,6 +84,7 @@ _ANY_BAR = [{"left": "close", "op": ">", "right": 0}]
 CALLS = (
     ("feature_stats", {"feature": "close"}),
     ("feature_stats", {"feature": "funding_zscore_14"}),
+    ("feature_stats", {"feature": "funding_cum_6"}),
     ("feature_stats", {"feature": "regime"}),
     ("feature_stats", {"feature": "close_1d"}),
     (
@@ -234,8 +235,8 @@ def test_a_view_is_read_no_further_than_the_last_training_bar(opened_arm, monkey
     assert view.train is train and view.interval == "4h"
     bundle = view.frame.bundle
     last = bundle.bars[-1]
-    # The last bar held is the last training bar, and the two series the
-    # features read beside it stop at its close.
+    # The last bar held is the last training bar; beside it the daily bars
+    # stop at its close, and the settlements at the one due at it.
     assert last.open_time + STEP_MS == train.end_ms
     assert max(day.close_time for day in bundle.daily) <= last.close_time
     assert (
@@ -280,8 +281,10 @@ def test_a_view_takes_its_window_from_the_split_and_not_from_the_caller(opened_a
     _path, experiment = opened_arm
     split = experiment.split
     wider = Segment(SegmentName.TRAIN, split.train.start_ms, split.validation.end_ms)
-    with pytest.raises(ValueError, match="takes the experiment's split, got Segment"):
+    with pytest.raises(ValueError, match="the experiment's split, got FeatureFrame and Segment"):
         TrainView(frame=measured, split=wider, costs=experiment.costs)
+    with pytest.raises(ValueError, match="takes a feature frame"):
+        TrainView(frame=view.frame.bundle, split=split, costs=experiment.costs)
     # And swapping the split under a built view runs the checks again: the
     # frame that ended with the old training window does not cover a wider one.
     stretched = Split(
@@ -500,6 +503,7 @@ def test_a_rule_is_handed_to_the_parser_as_it_was_written(view):
     scored = backtest_train(view, parse_spec(arguments["rule"]))
     assert answer == {
         "bars": scored.bars,
+        "bars_unevaluable": 0,
         "trades": scored.trades,
         "exposure": _rounded(scored.exposure),
         "turnover": _rounded(scored.turnover),
@@ -667,8 +671,12 @@ def test_bars_further_in_where_a_feature_loses_its_value_are_counted():
     assert (stats.bars, stats.valued) == (12, 11)
     read = conditional_returns(view, parse_conditions(reading), horizon=2, side=Side.LONG)
     assert (read.bars, read.holding, read.unevaluable) == (12, 11, 1)
-    scored = backtest_train(view, parse_spec({**BUY, "entry": {"long": reading}}))
+    rule = {**BUY, "entry": {"long": reading}}
+    scored = backtest_train(view, parse_spec(rule))
     assert (scored.bars_unevaluable, scored.funding_settlements_missing) == (1, 3)
+    # And each of the three says so in what a model is shown.
+    assert call(view, "backtest_train", {"rule": rule})["bars_unevaluable"] == 1
+    assert call(view, "feature_stats", {"feature": "funding_rate"})["bars_with_value"] == 11
 
     # Where the settlements stop altogether the feature is stale to the end,
     # the window's last bar included — a bar of the window like the others,
@@ -751,19 +759,25 @@ def test_the_stats_records_refuse_figures_that_are_not_one_window_s():
     vocabulary = [regime.value for regime in MarketRegime]
     counted = tuple(zip(vocabulary, (4, 3, 0, 0, 0), strict=False))
     assert len(counted) == len(vocabulary)
-    labels = LabelCounts("regime", bars=9, counts=counted)
+    labels = LabelCounts("regime", bars=9, counts=list(counted))
     assert labels.valued == 7  # the counts added up, so it cannot disagree with them
+    assert labels.counts == counted  # and held as a tuple, whatever it was handed
+    assert NumberStats("close", 9, 9, 1.0, 7.0, list(cuts)).quantiles == cuts
     for wrong in (
         counted[:-1],  # a label of the vocabulary left out
         counted[::-1] if len(counted) > 1 else (),  # out of the vocabulary's order
         (*counted, counted[0]),  # a label twice
         (("sideways", 1), *counted[1:]),  # a label the vocabulary does not have
         ((vocabulary[0], -1), *counted[1:]),  # a count below zero
+        ((vocabulary[0], 3.5), *counted[1:]),  # a count that is not a whole number
+        ((vocabulary[0], True), *counted[1:]),
     ):
         with pytest.raises(ValueError, match="every label of the vocabulary once"):
             LabelCounts("regime", bars=9, counts=wrong)
     with pytest.raises(ValueError, match="count 13 bar"):  # ten and three, of nine
         LabelCounts("regime", bars=9, counts=((vocabulary[0], 10), *counted[1:]))
+    with pytest.raises(ValueError, match="count 0 bar"):  # a description of no label
+        LabelCounts("regime", bars=9, counts=tuple((label, 0) for label in vocabulary))
 
 
 # -- (h) conditional_returns, by hand -------------------------------------------------------------
@@ -901,33 +915,45 @@ def test_a_returns_record_refuses_figures_that_are_not_one_window_s():
         "samples": 3,
         "mean": 0.01,
         "std": 0.02,
-        "t_stat": 0.9,
+        "t_stat": 0.01 / (0.02 / math.sqrt(3)),
         "baseline_samples": 5,
         "baseline_mean": 0.0,
     }
     assert ConditionalReturns(**good).side is Side.LONG  # the word is read as the member
-    for changed in (
-        {"samples": 7},  # more samples than bars the signal holds at
-        {"holding": 13},  # more holding bars than bars
-        {"unevaluable": 13},
-        {"baseline_samples": 13},
-        {"unevaluable": 7},  # six bars holding and seven that could not be asked, of twelve
-        {"baseline_samples": 2},  # fewer baseline samples than the signal has
-        {"horizon": True},
-        {"mean": None},  # samples and no mean
-        {"samples": 0},  # a mean and no sample
-        {"std": None},  # three samples and no deviation
-        {"samples": 1, "std": 0.02},  # a deviation of one sample
-        {"samples": 1, "std": None},  # a t-statistic with no deviation
-        {"baseline_mean": None},  # baseline samples and no baseline
-        # a baseline mean of no sample (and so, no sample of the signal either)
-        {"samples": 0, "mean": None, "std": None, "t_stat": None, "baseline_samples": 0},
-        {"horizon": 0},
+    # No t-statistic beside a deviation is legal: the samples may differ by
+    # rounding alone, which is read off the samples and not off the record.
+    assert ConditionalReturns(**{**good, "t_stat": None}).t_stat is None
+    counts, figures = "are not counts of one window", "do not go with"
+    for changed, sentence in (
+        ({"samples": 7}, counts),  # more samples than bars the signal holds at
+        ({"holding": 13}, counts),  # more holding bars than bars
+        ({"unevaluable": 13}, counts),
+        ({"unevaluable": 7}, counts),  # six holding and seven that could not be asked, of twelve
+        ({"baseline_samples": 13}, counts),
+        ({"baseline_samples": 4}, counts),  # five two-bar samples fit in twelve bars, not four
+        ({"baseline_samples": 6}, counts),
+        ({"horizon": 0}, "is not one a look-up takes"),
+        ({"horizon": True}, "is not one a look-up takes"),
+        ({"mean": None}, figures),  # samples and no mean
+        ({"samples": 0}, figures),  # a mean and no sample
+        ({"std": None}, figures),  # three samples and no deviation
+        ({"samples": 1, "std": 0.02}, figures),  # a deviation of one sample
+        ({"samples": 1, "std": None}, figures),  # a t-statistic with no deviation
+        ({"baseline_mean": None}, figures),  # baseline samples and no baseline
+        ({"mean": math.inf}, "have to be finite"),
+        ({"std": -0.02}, "have to be finite"),
+        ({"t_stat": -99.0}, "is not the mean"),  # derived, so held to what it derives from
+        ({"std": 0.0}, "is not the mean"),  # a t-statistic over no deviation at all
+        ({"side": "both"}, "unsupported side"),
     ):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=sentence):
             ConditionalReturns(**{**good, **changed})
-    with pytest.raises(ValueError, match="unsupported side"):
-        ConditionalReturns(**{**good, "side": "both"})
+    # A window no longer than the horizon has no baseline sample, and so no baseline.
+    short = {**good, "bars": 2, "holding": 0, "samples": 0, "baseline_samples": 0}
+    short.update(mean=None, std=None, t_stat=None)
+    with pytest.raises(ValueError, match=figures):
+        ConditionalReturns(**short)
+    assert ConditionalReturns(**{**short, "baseline_mean": None}).baseline_samples == 0
 
 
 def test_a_figure_is_shown_to_six_significant_digits():

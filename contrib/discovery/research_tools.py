@@ -33,9 +33,10 @@ condition or a feature name the parser would refuse, nor say a condition
 holds where the scored loop says it does not; a refusal carries the
 parser's own sentence (:class:`ToolRefusal`). And one of the evaluator's
 refusals of a window is a look-up's too: a feature with no value at the
-first training bar is not read, by any of the three. (Its other refusals
-— a window without funding coverage, a window of one bar — are about
-scoring a position, and only :func:`backtest_train` meets them.)
+first training bar is not read, by any of the three. (Its refusals
+about the grid are the view's own, made at construction; the rest — a
+window without funding coverage, a window of one bar — are about scoring
+a position, and only :func:`backtest_train` meets them.)
 
 **Two layers.** The three functions take parsed values and return frozen
 records, exact. :func:`call` is the JSON layer a server stands on: it
@@ -177,9 +178,10 @@ class TrainView:
     costs: CostModel
 
     def __post_init__(self) -> None:
-        if not isinstance(self.split, Split):
+        if not isinstance(self.frame, FeatureFrame) or not isinstance(self.split, Split):
             raise ValueError(
-                f"a train view takes the experiment's split, got {type(self.split).__name__}"
+                f"a train view takes a feature frame and the experiment's split, got "
+                f"{type(self.frame).__name__} and {type(self.split).__name__}"
             )
         train = self.train
         bundle = self.frame.bundle
@@ -304,6 +306,7 @@ class NumberStats:
     quantiles: tuple[float, ...]
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "quantiles", tuple(self.quantiles))
         if not 1 <= self.valued <= self.bars:
             raise ValueError(
                 f"{self.feature}: {self.valued} bar(s) with a value out of {self.bars} is not "
@@ -336,18 +339,21 @@ class LabelCounts:
     counts: tuple[tuple[str, int], ...]
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "counts", tuple((label, count) for label, count in self.counts))
         labels = [label for label, _count in self.counts]
         if labels != [regime.value for regime in MarketRegime] or any(
-            count < 0 for _label, count in self.counts
+            type(count) is not int or count < 0 for _label, count in self.counts
         ):
             raise ValueError(
                 f"{self.feature}: every label of the vocabulary once and in its order, with a "
                 f"count of bars, got {self.counts!r}"
             )
-        if self.valued > self.bars:
+        # At least one, as for a number: the look-up refuses a feature with
+        # no value at the window's first bar.
+        if not 1 <= self.valued <= self.bars:
             raise ValueError(
-                f"{self.feature}: the labels count {self.valued} bar(s) and the window has "
-                f"{self.bars}"
+                f"{self.feature}: the labels count {self.valued} bar(s), which is not between "
+                f"one and the window's {self.bars}"
             )
 
     @property
@@ -408,7 +414,7 @@ class ConditionalReturns:
     decide on and so does not count.
 
     ``samples`` counts the bars the three figures are computed from, which
-    are fewer than ``holding`` on purpose: taken in bar order, each at
+    are at most ``holding`` and usually fewer, on purpose: taken in bar order, each at
     least ``horizon`` bars after the one before it, and only where the
     whole ``horizon`` lies inside the training window. So no two samples
     share a bar of return — forward returns of neighbouring bars overlap
@@ -454,18 +460,20 @@ class ConditionalReturns:
         if isinstance(self.horizon, bool) or not MIN_HORIZON <= self.horizon <= MAX_HORIZON:
             raise ValueError(f"a horizon of {self.horizon!r} bars is not one a look-up takes")
         # A bar that could not be asked does not hold, so the two counts
-        # are of different bars; and the baseline takes a sample wherever
-        # one fits, so no signal has more of them.
+        # are of different bars. The baseline takes a sample wherever one
+        # fits — every ``horizon`` bars while a whole horizon is left — so
+        # its count is a fact of the window's length, and no signal has more.
+        fitting = max(0, (self.bars - 1) // self.horizon)
         if not (
             0 <= self.samples <= self.holding
-            and self.samples <= self.baseline_samples <= self.bars
+            and self.samples <= self.baseline_samples == fitting
             and self.unevaluable >= 0
             and self.holding + self.unevaluable <= self.bars
         ):
             raise ValueError(
                 f"{self.samples} sample(s) of {self.holding} holding bar(s), {self.unevaluable} "
-                f"unevaluable and {self.baseline_samples} baseline sample(s), out of {self.bars} "
-                f"bar(s), are not counts of one window"
+                f"unevaluable and {self.baseline_samples} baseline sample(s) (where {fitting} "
+                f"fit), out of {self.bars} bar(s), are not counts of one window"
             )
         if (
             (self.mean is None) != (self.samples == 0)
@@ -478,6 +486,26 @@ class ConditionalReturns:
                 f"{self.baseline_mean!r}) do not go with {self.samples} sample(s) and "
                 f"{self.baseline_samples} baseline sample(s)"
             )
+        given = [f for f in (self.mean, self.std, self.t_stat, self.baseline_mean) if f is not None]
+        if not all(math.isfinite(figure) for figure in given) or (
+            self.std is not None and self.std < 0
+        ):
+            raise ValueError(
+                f"the figures (mean {self.mean!r}, std {self.std!r}, t {self.t_stat!r}, baseline "
+                f"{self.baseline_mean!r}) have to be finite, and a deviation not below zero"
+            )
+        # The t-statistic is derived, so it is held to what it derives from.
+        # ``None`` stays legal beside a deviation: whether the samples vary
+        # beyond rounding is read off the samples, which a record does not hold.
+        if self.t_stat is not None and self.mean is not None and self.std is not None:
+            implied = self.mean / (self.std / math.sqrt(self.samples)) if self.std > 0 else None
+            if implied is None or not math.isclose(
+                self.t_stat, implied, rel_tol=1e-9, abs_tol=1e-12
+            ):
+                raise ValueError(
+                    f"a t-statistic of {self.t_stat!r} is not the mean {self.mean!r} over the "
+                    f"deviation {self.std!r} of {self.samples} sample(s), which gives {implied!r}"
+                )
 
 
 def conditional_returns(
@@ -635,9 +663,16 @@ def _returns_document(read: ConditionalReturns) -> dict[str, object]:
 
 
 def _backtest_document(metrics: SegmentMetrics) -> dict[str, object]:
-    """The figures a model is shown of a training backtest: those the prompt shows of a validation one, and the window's bars."""
+    """The figures a model is shown of a training backtest.
+
+    Those the prompt shows of a validation one, with the window's bars and
+    how many of them the rule could not be asked at — so each of the three
+    look-ups says when part of the window was unaskable. (This count is the
+    scored loop's: over the bars it decides at, which leaves out the last.)
+    """
     return {
         "bars": metrics.bars,
+        "bars_unevaluable": metrics.bars_unevaluable,
         "trades": metrics.trades,
         "exposure": _shown(metrics.exposure),
         "turnover": _shown(metrics.turnover),

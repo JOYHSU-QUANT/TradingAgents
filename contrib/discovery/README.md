@@ -278,7 +278,7 @@ API key 由 provider 從環境變數讀），用同一個 `search()`、同一份
 |---|---|---|
 | `feature_stats` | `{"feature": "<指標名稱>"}` | `feature`、`bars`（訓練 bar 數）、`bars_with_value`、`min`、`p05`／`p25`／`p50`／`p75`／`p95`、`max`；`regime` 改回 `counts`（每個 label 的根數，沒出現過的 label 是 0） |
 | `conditional_returns` | `{"conditions": [...], "horizon": N, "side": "long"｜"short"}` | `bars`、`bars_holding`（條件成立的根數）、`bars_unevaluable`、`horizon`、`side`、`samples`、`mean_return`、`std_return`、`t_stat`、`baseline_samples`、`baseline_mean_return` |
-| `backtest_train` | `{"rule": {...}}`，跟正式提案是同一個物件 | `bars`、`trades`、`exposure`、`turnover`、`net_sharpe`、`net_return`、`ruined` |
+| `backtest_train` | `{"rule": {...}}`，跟正式提案是同一個物件 | `bars`、`bars_unevaluable`、`trades`、`exposure`、`turnover`、`net_sharpe`、`net_return`、`ruined` |
 
 **同一個解析器。** 規則走 `parse_spec`，條件走 `parse_conditions`，指標名稱走 `parse_feature_name`；條件在哪幾根成立問的是評估器自己的
 `condition_bars`，訓練區間的回測就是 `evaluate_segment`。解析器會拒絕的規則、條件、指標名稱，查詢也拒絕，錯誤文字就是解析器那一句
@@ -287,9 +287,9 @@ API key 由 provider 從環境變數讀），用同一個 `search()`、同一份
 
 **第一根讀不到值的指標，三個查詢都不讀（2026-11-13 拍板）。** 查詢用到的指標在訓練區間第一根沒有值時，`feature_stats` 與 `conditional_returns` 丟
 `EvaluationError`，跟評估器不量測讀這個指標的規則（`backtest_train` 走的那一條）是同一條規則。不這樣做的話，查詢會把指標有值的那一段當成整個訓練區間
-來回答（例如 30 根裡只有後 11 根有值）；整段都沒有值時則回「0 根成立」，看起來像沒有訊號，其實是問不到。評估器另外幾個拒絕理由（funding 覆蓋不足、
-窗口只有一根）只跟算損益有關，只有 `backtest_train` 會遇到。落地的世界不會遇到（訓練區間從每個指標都有值的地方開始）。
-中途才讀不到值的 bar（例如交易所漏了幾筆 funding，那一根的費率過期）不拒絕，計入 `bars_unevaluable`。這類「store 答不出來」的錯誤（`FeatureError`、`EvaluationError`）
+來回答（例如 30 根裡只有後 11 根有值）；整段都沒有值時則回「0 根成立」，看起來像沒有訊號，其實是問不到。評估器其他的拒絕理由裡，跟格線有關的
+（缺 bar、時間戳不在格線上）view 建構時就自己檢查了；剩下的（funding 覆蓋不足、窗口只有一根）只跟算損益有關，只有 `backtest_train` 會遇到。落地的世界不會遇到（訓練區間從每個指標都有值的地方開始）。
+中途才讀不到值的 bar（例如交易所漏了幾筆 funding，那一根的費率過期）不拒絕：`conditional_returns` 與 `backtest_train` 計入 `bars_unevaluable`（`backtest_train` 的那個數是計分迴圈自己的，不含它不做決定的最後一根），`feature_stats` 則是 `bars_with_value` 少於 `bars`。這類「store 答不出來」的錯誤（`FeatureError`、`EvaluationError`）
 不是模型的錯，不包成 `ToolRefusal`，照樣往外丟；autoresearch 的那幾句錯誤訊息帶日曆時間，之後的伺服器（T2）要自己接住，不能原樣回給模型。
 
 **`conditional_returns` 的算法（2026-11-13 拍板）。** 一個樣本的報酬＝`close[t+N] / close[t] − 1`，`side` 是 short 時取負，不含成本。

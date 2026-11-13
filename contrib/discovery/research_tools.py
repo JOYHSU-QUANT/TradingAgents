@@ -414,8 +414,8 @@ class ConditionalReturns:
     decide on and so does not count.
 
     ``samples`` counts the bars the three figures are computed from, which
-    are at most ``holding`` and usually fewer, on purpose: taken in bar order, each at
-    least ``horizon`` bars after the one before it, and only where the
+    are at most ``holding`` and usually fewer, on purpose: taken in bar
+    order, each at least ``horizon`` bars after the one before it, and only where the
     whole ``horizon`` lies inside the training window. So no two samples
     share a bar of return — forward returns of neighbouring bars overlap
     in all but one bar, and a t-statistic over them counts one move many
@@ -498,7 +498,10 @@ class ConditionalReturns:
         # ``None`` stays legal beside a deviation: whether the samples vary
         # beyond rounding is read off the samples, which a record does not hold.
         if self.t_stat is not None and self.mean is not None and self.std is not None:
-            implied = self.mean / (self.std / math.sqrt(self.samples)) if self.std > 0 else None
+            # The error of the mean first: a deviation small enough leaves
+            # none to divide by, which is a refusal and not a ZeroDivisionError.
+            error = self.std / math.sqrt(self.samples)
+            implied = self.mean / error if error > 0 else None
             if implied is None or not math.isclose(
                 self.t_stat, implied, rel_tol=1e-9, abs_tol=1e-12
             ):

@@ -675,6 +675,8 @@ def test_bars_further_in_where_a_feature_loses_its_value_are_counted():
     scored = backtest_train(view, parse_spec(rule))
     assert (scored.bars_unevaluable, scored.funding_settlements_missing) == (1, 3)
     # And each of the three says so in what a model is shown.
+    asked = {"conditions": reading, "horizon": 2, "side": "long"}
+    assert call(view, "conditional_returns", asked)["bars_unevaluable"] == 1
     assert call(view, "backtest_train", {"rule": rule})["bars_unevaluable"] == 1
     assert call(view, "feature_stats", {"feature": "funding_rate"})["bars_with_value"] == 11
 
@@ -932,6 +934,7 @@ def test_a_returns_record_refuses_figures_that_are_not_one_window_s():
         ({"baseline_samples": 13}, counts),
         ({"baseline_samples": 4}, counts),  # five two-bar samples fit in twelve bars, not four
         ({"baseline_samples": 6}, counts),
+        ({"samples": 6}, counts),  # more samples than the baseline, which takes all that fit
         ({"horizon": 0}, "is not one a look-up takes"),
         ({"horizon": True}, "is not one a look-up takes"),
         ({"mean": None}, figures),  # samples and no mean
@@ -943,6 +946,8 @@ def test_a_returns_record_refuses_figures_that_are_not_one_window_s():
         ({"mean": math.inf}, "have to be finite"),
         ({"std": -0.02}, "have to be finite"),
         ({"t_stat": -99.0}, "is not the mean"),  # derived, so held to what it derives from
+        ({"t_stat": 0.866}, "is not the mean"),  # and closely: the figure is 0.8660254…
+        ({"samples": 5, "std": 5e-324}, "is not the mean"),  # no error of the mean to divide by
         ({"std": 0.0}, "is not the mean"),  # a t-statistic over no deviation at all
         ({"side": "both"}, "unsupported side"),
     ):

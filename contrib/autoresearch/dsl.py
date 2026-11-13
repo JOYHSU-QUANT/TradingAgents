@@ -103,6 +103,7 @@ __all__ = [
     "describe_language",
     "describe_spec",
     "load_spec",
+    "parse_conditions",
     "parse_spec",
     "spec_hash",
     "spec_to_document",
@@ -545,6 +546,27 @@ def parse_spec(payload: object) -> StrategySpec:
         max_bars=max_bars,
         params=tuple(params.items()),
     )
+
+
+def parse_conditions(payload: object, *, path: str = "conditions") -> tuple[Condition, ...]:
+    """Validate one decoded LIST of conditions on its own, or raise :class:`SpecError`.
+
+    The list a spec carries under ``entry.long`` or ``filters``, read by the
+    reader :func:`parse_spec` hands each of its own lists to — so a reader
+    that takes conditions without a rule around them (a look-up asking where
+    a signal holds) accepts exactly what a rule would, and refuses with the
+    sentence a rule would be refused with, under ``path``.
+
+    Two things differ from the list inside a spec, both because there is no
+    spec. The list has to BE there: an absent key is "none" in a document,
+    and nothing at all here. And a threshold cannot be a ``{"param": ...}``:
+    there is no ``params`` block for it to name, so it is refused as any
+    undeclared parameter is. An empty list is returned empty, as ``filters:
+    []`` is; whether none is an answer is the caller's to say.
+    """
+    if payload is None:
+        raise SpecError(f"{path}: expected a list of conditions, got NoneType")
+    return _conditions(payload, path, {})
 
 
 def _check_structure(spec: StrategySpec) -> None:

@@ -75,7 +75,7 @@ import math
 import statistics
 from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from typing import Final
 
@@ -106,6 +106,7 @@ __all__ = [
     "MS_PER_YEAR",
     "STARTING_EQUITY",
     "UNLABELLED",
+    "ConditionBars",
     "EvaluationError",
     "ExitReason",
     "RegimeBucket",
@@ -115,6 +116,7 @@ __all__ = [
     "SplitResult",
     "Tally",
     "Trade",
+    "condition_bars",
     "describe_result",
     "evaluate_segment",
     "evaluate_split",
@@ -360,23 +362,27 @@ class _Bar:
     cost: float = 0.0
 
 
-class _Reader:
-    """One spec's conditions over one frame, with its columns resolved once.
+class _Conditions:
+    """Conditions over one frame, with the columns they read resolved once.
 
     Resolved once because the frame's public verb re-runs its empty-column
     guard on every call — 4.8 µs against 0.12 µs for the tuple read behind
     it, measured — and the loop reads several operands per bar for thousands
     of bars, per spec. The guard can only say something new once per column,
     and :func:`_require_measurable` has already given it that chance.
+
+    The half of a reader that needs no spec: what a condition reads and
+    whether a list of them holds. :class:`_Reader` is this over one spec's
+    features, with the spec's filters, entries and sizing read on top;
+    :func:`condition_bars` is this over a bare list, so "does it hold here"
+    has one implementation whoever asks.
     """
 
-    def __init__(self, frame: FeatureFrame, spec: StrategySpec) -> None:
-        self.spec = spec
+    def __init__(self, frame: FeatureFrame, refs: Iterable[FeatureRef]) -> None:
         self.columns: dict[tuple[FeatureKind, int | None], tuple[FeatureValue, ...]] = {
-            (ref.kind, ref.period): frame.series(ref) for ref in spec.features
+            (ref.kind, ref.period): frame.series(ref) for ref in refs
         }
         self.unevaluable = False
-        self.sizing_ref = spec.sizing.refs[0] if spec.sizing.refs else None
 
     def read(self, ref: FeatureRef, index: int) -> FeatureValue:
         """``ref``'s value for the decision at ``bars[index]``'s close — the offset applied here."""
@@ -398,10 +404,6 @@ class _Reader:
         outcomes = [self._holds(condition, index) for condition in conditions]
         return all(outcomes)
 
-    def passes(self, index: int) -> bool:
-        """The filter reading: nothing declared is nothing gating."""
-        return not self.spec.filters or self.holds(self.spec.filters, index)
-
     def _holds(self, condition: Condition, index: int) -> bool:
         left = self.read(condition.left, index)
         right = condition.right
@@ -413,6 +415,19 @@ class _Reader:
         if isinstance(right, MarketRegime):
             return (left is right) if condition.op is Op.EQ else (left is not right)
         return _COMPARE[condition.op](left, right)
+
+
+class _Reader(_Conditions):
+    """One spec's conditions over one frame: its filters, its entries and what it sizes to."""
+
+    def __init__(self, frame: FeatureFrame, spec: StrategySpec) -> None:
+        super().__init__(frame, spec.features)
+        self.spec = spec
+        self.sizing_ref = spec.sizing.refs[0] if spec.sizing.refs else None
+
+    def passes(self, index: int) -> bool:
+        """The filter reading: nothing declared is nothing gating."""
+        return not self.spec.filters or self.holds(self.spec.filters, index)
 
     def notional(self, index: int, equity: float, costs: CostModel) -> float | None:
         """What a firing rule asks for at this bar, in quote currency; ``None`` if it cannot size."""
@@ -1230,6 +1245,55 @@ def replay_position(
         replayed_bars_unevaluable=sum(replayed.unevaluable),
         last_bar_unevaluable=replayed.unevaluable[-1],
     )
+
+
+# -- where a list of conditions holds ---------------------------------------------
+
+
+@dataclass(frozen=True)
+class ConditionBars:
+    """Whether a list of conditions holds at EVERY bar of a frame, as the scored loop reads it.
+
+    One entry per bar, index-aligned with the frame's ``bundle.bars`` as a
+    feature column is: ``holds[i]`` says every condition held for the
+    decision taken at ``bars[i]``'s close, and ``unevaluable[i]`` that one of
+    them read a feature with no value there — so ``holds[i]`` is ``False``
+    for not being askable, not for being false (the reading
+    ``SegmentResult.bars_unevaluable`` counts over a scored window).
+    """
+
+    holds: tuple[bool, ...]
+    unevaluable: tuple[bool, ...]
+
+
+def condition_bars(conditions: Sequence[Condition], frame: FeatureFrame) -> ConditionBars:
+    """Read ``conditions``, ANDed, at every bar of ``frame`` — no spec, no position, no money.
+
+    What this is for: a reader outside the scored loop asking the loop's own
+    question — at which bars does this list hold — and getting the loop's
+    own answer. The comparison, the offset, the ``None`` that does not fire
+    and the every-clause-is-read AND are the ones :func:`_decide` consults,
+    through the same private reader, rather than a second implementation
+    that agrees with it until one of them is edited.
+
+    What it does NOT say: that a rule carrying these conditions would trade
+    at those bars. Filters, the opposite entry, a position already held,
+    ``max_bars`` and sizing all stand between a condition holding and a
+    fill, and :func:`evaluate_segment` is where they are read.
+
+    An empty list holds nowhere, as an empty ``entry.long`` does. A feature
+    the bundle cannot answer at any bar is the frame's own refusal
+    (``FeatureError``), raised here before any bar is read. The whole frame
+    is read, warm-up included; the caller slices the window it cares about.
+    """
+    reader = _Conditions(frame, [ref for condition in conditions for ref in condition.refs])
+    holds: list[bool] = []
+    unevaluable: list[bool] = []
+    for index in range(len(frame.bundle.bars)):
+        reader.unevaluable = False
+        holds.append(reader.holds(conditions, index))
+        unevaluable.append(reader.unevaluable)
+    return ConditionBars(holds=tuple(holds), unevaluable=tuple(unevaluable))
 
 
 # Import-time check, in the style of the sibling modules: every ordering

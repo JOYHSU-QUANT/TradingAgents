@@ -23,13 +23,22 @@ from decimal import Decimal
 import pytest
 
 from contrib.autoresearch.costs import CostModel
-from contrib.autoresearch.dsl import Condition, Op, Side, SpecError, StrategySpec, parse_spec
+from contrib.autoresearch.dsl import (
+    Condition,
+    Op,
+    Side,
+    SpecError,
+    StrategySpec,
+    parse_conditions,
+    parse_spec,
+)
 from contrib.autoresearch.evaluator import (
     MS_PER_YEAR,
     UNLABELLED,
     EvaluationError,
     ExitReason,
     SegmentResult,
+    condition_bars,
     describe_result,
     evaluate_segment,
     evaluate_split,
@@ -1249,3 +1258,77 @@ def test_the_replay_refuses_a_history_that_does_not_reach_its_start():
     # the store now starts would be invisible.
     with pytest.raises(EvaluationError, match="a position opened before that is"):
         _replay(_spec(), _bundle([100, 101, 102]), since=-1)
+
+
+# -- where a list of conditions holds ---------------------------------------
+
+
+def test_condition_bars_reads_a_list_at_every_bar_as_the_scored_loop_reads_it():
+    """Two clauses, one of them a bar back, read at each close — and the scored
+    loop, asked the same list as its only entry, fills the bar after the first
+    bar the list holds at."""
+    #         bar:  0    1    2    3    4    5   6    7
+    closes = [100, 99, 101, 103, 102, 104, 98, 105]
+    spec = _spec(
+        entry={
+            "long": [
+                {"left": "close", "op": ">", "right": 100},
+                {"left": "close", "op": ">", "right": {"feature": "close", "offset": 1}},
+            ]
+        }
+    )
+    bundle = _bundle(closes)
+    read = condition_bars(spec.entry_long, FeatureFrame(bundle))
+    assert read.holds == (False, False, True, True, False, True, False, True)
+    # Bar 0 has no bar before it: the lagged clause is not askable there,
+    # which is flagged rather than read as "does not hold".
+    assert read.unevaluable == (True,) + (False,) * 7
+    assert _run(spec, bundle, first=1).trades[0].entry_index == read.holds.index(True) + 1
+
+
+def test_condition_bars_flags_the_bars_the_scored_loop_counts_as_unevaluable():
+    """The same stale backdrop and the same two clauses as the count test above:
+    every clause is read, so the flags do not depend on the order either."""
+    daily = candles([50.0], start_ms=ANCHOR_MS + _STEP - _DAY, step_ms=_DAY)
+    spec = _spec(
+        entry={
+            "long": [
+                {"left": "close", "op": ">", "right": 100},
+                {"left": "close_1d", "op": ">", "right": 10},
+            ]
+        }
+    )
+    bundle = _bundle([90.0] * 10, daily=daily)
+    read = condition_bars(spec.entry_long, FeatureFrame(bundle))
+    assert read.holds == (False,) * 10
+    assert read.unevaluable == (False,) * 6 + (True,) * 4
+    # The scored loop decides at every bar but the last, and counts the same bars.
+    assert sum(read.unevaluable[:-1]) == _run(spec, bundle).bars_unevaluable == 3
+    flipped = condition_bars(tuple(reversed(spec.entry_long)), FeatureFrame(bundle))
+    assert flipped == read
+
+
+def test_condition_bars_compares_the_regime_by_label():
+    closes = [100 + i for i in range(60)]
+    frame = FeatureFrame(_bundle(closes), indicator_lookback=MIN_INDICATOR_LOOKBACK)
+    regimes = frame.series(FeatureRef(FeatureKind.REGIME))
+    label = next(value for value in regimes if value is not None)
+    conditions = parse_conditions([{"left": "regime", "op": "==", "right": label.value}])
+    read = condition_bars(conditions, frame)
+    assert read.holds == tuple(value is label for value in regimes)
+    assert read.unevaluable == tuple(value is None for value in regimes)
+    assert any(read.holds) and any(read.unevaluable)
+
+
+def test_condition_bars_of_no_conditions_holds_nowhere():
+    # An empty ``entry.long`` fires at no bar, and neither does an empty list
+    # asked on its own; nothing was read, so nothing was unevaluable.
+    read = condition_bars((), FeatureFrame(_bundle([100, 101, 102])))
+    assert read.holds == (False,) * 3
+    assert read.unevaluable == (False,) * 3
+
+
+def test_condition_bars_leaves_a_feature_the_bundle_cannot_answer_to_the_frame():
+    conditions = parse_conditions([{"left": "close", "op": ">", "right": "close_1d"}])
+    with pytest.raises(FeatureError, match="no daily bars"):
+        condition_bars(conditions, FeatureFrame(_bundle([100, 101, 102])))

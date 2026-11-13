@@ -1,16 +1,17 @@
 """The training-window look-ups: the line they read behind, and the arithmetic of each (tools plan §4, T1 a–h).
 
 Two groups. The LINE: a view is read no further than the last training
-bar and refuses a frame that holds anything later; rewriting everything
-after that bar changes no answer; no answer carries a word that would
-name the world's kind; the arm's store is byte-identical around the
-calls. And the READING: a training backtest is a trial's own training
-figures, a rule and a list of conditions are read by the research
-package's parser and refused in its words, and the three answers are
-computed by hand on a history short enough to redo on paper — the
-non-overlapping samples of ``conditional_returns`` above all, since a
-t-statistic over overlapping windows is the number these tools exist not
-to hand a model.
+bar, takes its window from the experiment's split and refuses a frame
+that holds anything later; rewriting everything after that bar changes no
+answer; no answer carries a word that would name the world's kind; the
+arm's store is byte-identical around the calls. And the READING: a
+training backtest is a trial's own training figures, a rule and a list of
+conditions are read by the research package's parser and refused in its
+words, a window the evaluator would not measure is not read, and two of
+the answers are computed by hand on a history short enough to redo on
+paper — the non-overlapping samples of ``conditional_returns`` above all,
+since a t-statistic over overlapping windows is the number these tools
+exist not to hand a model.
 
 The view is built over the suite's hand-written history (``conftest``),
 through an experiment opened on it: its split is what makes a figure here
@@ -33,12 +34,13 @@ import pytest
 from contrib.autoresearch.constants import FUNDING_STAMP_TOLERANCE_MS, bar_span_ms
 from contrib.autoresearch.costs import CostModel
 from contrib.autoresearch.dsl import Side, parse_conditions, parse_spec
+from contrib.autoresearch.evaluator import EvaluationError
 from contrib.autoresearch.features import FeatureFrame, SeriesBundle
 from contrib.autoresearch.ledger import Ledger
 from contrib.autoresearch.metrics import SegmentMetrics
-from contrib.autoresearch.split import Segment, SegmentName
+from contrib.autoresearch.split import Segment, SegmentName, Split
 from contrib.autoresearch.store import ResearchStore
-from contrib.autoresearch.upstream import Candle
+from contrib.autoresearch.upstream import Candle, FundingPoint, MarketRegime
 from contrib.autoresearch.vocabulary import FeatureKind, FeatureRef, parse_feature_name
 from contrib.discovery import research_tools
 from contrib.discovery.landing import artifact_digest
@@ -49,6 +51,7 @@ from contrib.discovery.research_tools import (
     QUANTILES,
     SIGNIFICANT_DIGITS,
     TOOL_NAMES,
+    ConditionalReturns,
     LabelCounts,
     NumberStats,
     ToolRefusal,
@@ -64,6 +67,7 @@ from .conftest import (
     BUY_12,
     COIN,
     LOOKBACK,
+    MS_PER_HOUR,
     PLANTED,
     SHORT,
     START_MS,
@@ -114,14 +118,13 @@ QUICK = tuple(
 )
 
 
-def _load(path: Path, experiment) -> TrainView:
+def _load(path: Path, experiment, split: Split | None = None) -> TrainView:
     """The view as a server would build it: the store opened, read to the line, and closed."""
     with ResearchStore(path) as store:
         return TrainView.load(
             store,
             coin=experiment.coin,
-            interval=experiment.split.interval,
-            train=experiment.split.train,
+            split=experiment.split if split is None else split,
             costs=experiment.costs,
             indicator_lookback=experiment.indicator_lookback,
         )
@@ -153,11 +156,28 @@ def measured(opened_arm) -> FeatureFrame:
         return frame_for(Ledger(store), experiment, holdout=False)
 
 
-def _hand_view(closes, *, train_from: int = 0) -> TrainView:
+def _hand_split(bars: int, train_from: int = 0) -> Split:
+    """A split whose training window is bars ``train_from`` .. ``bars`` of a history from ``START_MS``.
+
+    The two windows after it are a bar each and hold nothing: a view is
+    read off the training window alone.
+    """
+    edges = [START_MS + index * STEP_MS for index in (train_from, bars, bars + 1, bars + 2)]
+    return Split(
+        "4h",
+        Segment(SegmentName.TRAIN, edges[0], edges[1]),
+        Segment(SegmentName.VALIDATION, edges[1], edges[2]),
+        Segment(SegmentName.HOLDOUT, edges[2], edges[3]),
+    )
+
+
+def _hand_view(closes, *, train_from: int = 0, funding_hours: int = 0) -> TrainView:
     """A view over closes written out by hand: 4h bars from ``START_MS``, training from bar ``train_from``.
 
     Each bar opens at the previous close, as a generated world's does. No
-    daily bars and no funding: the tests that use this read the bars alone.
+    daily bars; ``funding_hours`` hourly settlements from the first hour,
+    stamped as the venue stamps them (a few ms after the hour), for the
+    tests that read funding or score a rule.
     """
     opens = [closes[0], *closes[:-1]]
     bars = [
@@ -172,13 +192,14 @@ def _hand_view(closes, *, train_from: int = 0) -> TrainView:
         )
         for index, (opened, close) in enumerate(zip(opens, closes, strict=True))
     ]
+    funding = [
+        FundingPoint(time=START_MS + (hour + 1) * MS_PER_HOUR + 57, rate=Decimal("0.0001"))
+        for hour in range(funding_hours)
+    ]
     return TrainView(
-        frame=FeatureFrame(SeriesBundle(bars), indicator_lookback=LOOKBACK),
-        train=Segment(
-            SegmentName.TRAIN, START_MS + train_from * STEP_MS, START_MS + len(closes) * STEP_MS
-        ),
+        frame=FeatureFrame(SeriesBundle(bars, funding=funding), indicator_lookback=LOOKBACK),
+        split=_hand_split(len(closes), train_from),
         costs=CostModel(),
-        interval="4h",
     )
 
 
@@ -202,6 +223,8 @@ def test_a_view_is_read_no_further_than_the_last_training_bar(opened_arm, monkey
     view = _load(path, experiment)
     train = experiment.split.train
     assert bounds == [train.end_ms - 1]
+    # The window is the split's own, not one the caller named.
+    assert view.train is train and view.interval == "4h"
     bundle = view.frame.bundle
     last = bundle.bars[-1]
     # The last bar held is the last training bar, and the two series the
@@ -221,7 +244,7 @@ def test_a_view_is_read_no_further_than_the_last_training_bar(opened_arm, monkey
 
 def test_a_view_refuses_a_frame_that_holds_anything_after_training(opened_arm, view, measured):
     _path, experiment = opened_arm
-    shape = {"train": experiment.split.train, "costs": experiment.costs, "interval": "4h"}
+    shape = {"split": experiment.split, "costs": experiment.costs}
     # The frame a trial is measured on reaches the validation window's end.
     with pytest.raises(ValueError, match="no bar after the last training bar"):
         TrainView(frame=measured, **shape)
@@ -237,26 +260,63 @@ def test_a_view_refuses_a_frame_that_holds_anything_after_training(opened_arm, v
             TrainView(frame=FeatureFrame(late, indicator_lookback=LOOKBACK), **shape)
 
     # A frame that stops a bar short is a window measured over fewer bars
-    # than it names; and a window that is not the training one is not this
-    # view's to read, wherever the frame ends.
+    # than it names.
     short = SeriesBundle(bundle.bars[:-1], daily=bundle.daily, funding=bundle.funding)
     with pytest.raises(ValueError, match="fewer bars than the window names"):
         TrainView(frame=FeatureFrame(short, indicator_lookback=LOOKBACK), **shape)
-    with pytest.raises(ValueError, match="over the training window, got the validation one"):
-        TrainView(frame=view.frame, **{**shape, "train": experiment.split.validation})
+
+
+def test_a_view_takes_its_window_from_the_split_and_not_from_the_caller(opened_arm, view, measured):
+    # A window is not handed over: a segment, however it is named, is not a
+    # split, so a caller has no way to say "this wider stretch is training".
+    _path, experiment = opened_arm
+    split = experiment.split
+    wider = Segment(SegmentName.TRAIN, split.train.start_ms, split.validation.end_ms)
+    with pytest.raises(ValueError, match="takes the experiment's split, got Segment"):
+        TrainView(frame=measured, split=wider, costs=experiment.costs)
+    # And swapping the split under a built view runs the checks again: the
+    # frame that ended with the old training window does not cover a wider one.
+    stretched = Split(
+        "4h",
+        wider,
+        replace(split.holdout, name=SegmentName.VALIDATION),
+        Segment(SegmentName.HOLDOUT, split.holdout.end_ms, split.holdout.end_ms + STEP_MS),
+    )
+    with pytest.raises(ValueError, match="fewer bars than the window names"):
+        replace(view, split=stretched)
+
+
+def test_a_view_built_in_code_is_held_to_the_grid_a_loaded_one_is(view):
+    # A bar missing from the middle: a horizon counted across it would span
+    # more time than its bars, and a windowed feature more calendar than its
+    # name. The check a measurement makes of its history, made of a view's.
+    bundle = view.frame.bundle
+    holed = SeriesBundle(
+        bundle.bars[:40] + bundle.bars[41:], daily=bundle.daily, funding=bundle.funding
+    )
+    with pytest.raises(EvaluationError, match="are not a grid"):
+        TrainView(
+            frame=FeatureFrame(holed, indicator_lookback=LOOKBACK),
+            split=view.split,
+            costs=view.costs,
+        )
 
 
 def test_the_look_ups_import_the_borrow_and_never_the_manifest():
     # The world's kind and what is planted in it live in the manifest. The
-    # module that answers a model imports no module of this package but the
-    # borrow, so neither has a path into an answer.
+    # module that answers a model reaches this package through the borrow
+    # alone: no other relative import, and no absolute one of the package.
     tree = ast.parse(Path(research_tools.__file__).read_text(encoding="utf-8"))
-    relative = {
-        node.module
+    froms = [node for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
+    plain = [
+        alias.name
         for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom) and node.level > 0
-    }
-    assert relative == {"upstream"}
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    ]
+    assert {node.module for node in froms if node.level > 0} == {"upstream"}
+    absolute = [node.module or "" for node in froms if node.level == 0] + plain
+    assert absolute and not [name for name in absolute if name.startswith("contrib")]
 
 
 # -- (a) nothing after training reaches an answer ---------------------------------------------
@@ -292,18 +352,21 @@ def _rewrite(store: ResearchStore, *, since_ms: int, series=("4h", "1d", "fundin
 def test_rewriting_everything_after_training_changes_no_answer(opened_arm, view, history, tmp_path):
     _path, experiment = opened_arm
     before = _answers(view)
-    last = view.frame.bundle.bars[-1]
+    bundle = view.frame.bundle
+    last = bundle.bars[-1]
 
-    # Every bar that opens at the window's end or later, every daily bar
-    # that closes after the last training bar does, and every settlement
-    # past the one due at that close: the validation and holdout windows,
-    # whole. The cut is the first instant after the settlement tolerance, so
-    # the settlement the last training bar pays is left as it was.
+    # From the first instant after the last training bar's close: every bar
+    # that opens at the window's end or later, every daily bar that closes
+    # after that close, and every settlement posted after it. That takes in
+    # the one settlement the view HOLDS from past the close — the one due at
+    # it, which the venue posts a few ms late — so its rate is rewritten
+    # too, and no answer may move: its stamp is held, its rate is not read.
     path = tmp_path / "rewritten.sqlite"
     with arm_store(history, path) as store:
         held = len(list(store.iter_candles(COIN, "4h")))
-        rewritten = _rewrite(store, since_ms=last.close_time + FUNDING_STAMP_TOLERANCE_MS + 1)
-        assert rewritten > held - len(view.frame.bundle.bars) > 0
+        rewritten = _rewrite(store, since_ms=last.close_time + 1)
+        assert rewritten > held - len(bundle.bars) > 0
+    assert last.close_time < bundle.funding[-1].time <= last.close_time + FUNDING_STAMP_TOLERANCE_MS
     assert _answers(_load(path, experiment)) == before
 
     # The controls, one series at a time: the same rewrite reaching just
@@ -314,13 +377,44 @@ def test_rewriting_everything_after_training_changes_no_answer(opened_arm, view,
     quick = _answers(view, QUICK)
     for series, since_ms in (
         ("4h", last.close_time),
-        ("1d", view.frame.bundle.daily[-1].close_time),
+        ("1d", bundle.daily[-1].close_time),
         ("funding", last.close_time - STEP_MS),
     ):
         control = tmp_path / f"control-{series}.sqlite"
         with arm_store(history, control) as store:
             assert _rewrite(store, since_ms=since_ms, series=(series,)) > 0
         assert _answers(_load(control, experiment), QUICK) != quick, series
+
+
+def test_a_day_that_closes_after_training_is_not_held_though_it_opened_inside(
+    opened_arm, history, tmp_path
+):
+    # The fixture's training window ends on a midnight, where no day
+    # straddles the line. Ended one bar earlier it does not: the day that
+    # holds the last training bar closes four hours after it.
+    path, experiment = opened_arm
+    split = experiment.split
+    cut = split.train.end_ms - STEP_MS
+    earlier = replace(
+        split,
+        train=replace(split.train, end_ms=cut),
+        validation=replace(split.validation, start_ms=cut),
+    )
+    view = _load(path, experiment, earlier)
+    last = view.frame.bundle.bars[-1]
+    with ResearchStore(path) as store:
+        straddling = [
+            day
+            for day in store.iter_candles(COIN, "1d")
+            if day.open_time <= last.open_time and day.close_time > last.close_time
+        ]
+    assert len(straddling) == 1
+    assert max(day.close_time for day in view.frame.bundle.daily) <= last.close_time
+    # And rewriting that day, with every later one, moves no answer.
+    rewritten = tmp_path / "days.sqlite"
+    with arm_store(history, rewritten) as store:
+        assert _rewrite(store, since_ms=last.close_time + 1, series=("1d",)) > 0
+    assert _answers(_load(rewritten, experiment, earlier), QUICK) == _answers(view, QUICK)
 
 
 # -- (b) no answer names the world -------------------------------------------------------------
@@ -517,6 +611,54 @@ def test_the_tools_are_the_plan_s_three():
     assert TOOL_NAMES == ("feature_stats", "conditional_returns", "backtest_train")
 
 
+# -- a window the evaluator would not measure is not read -----------------------------------------
+
+
+def test_a_feature_with_no_value_at_the_first_training_bar_is_refused_by_all_three():
+    # Training from the first bar: a twenty-bar mean has no value on the
+    # first nineteen. The evaluator does not measure a rule reading it on
+    # this window, and a look-up answering anyway would say "holds nowhere"
+    # of a signal that could not be asked. One rule, all three look-ups — and
+    # it is the store's fact, so the evaluator's error and not a refusal.
+    closes = [100.0 + i for i in range(30)]
+    view = _hand_view(closes, funding_hours=30 * 4)
+    reading = [{"left": "close", "op": ">", "right": "sma_20"}]
+    rule = parse_spec({**BUY, "entry": {"long": reading}})
+    unready = "sma_20 has no value at the first training bar"
+    with pytest.raises(EvaluationError, match=unready) as refused:
+        feature_stats(view, FeatureRef(FeatureKind.SMA, 20))
+    # The sentence names no instant, as nothing a model is shown does.
+    assert not any(character.isdigit() for character in str(refused.value).replace("sma_20", ""))
+    with pytest.raises(EvaluationError, match=unready):
+        conditional_returns(view, parse_conditions(reading), horizon=3, side=Side.LONG)
+    with pytest.raises(EvaluationError, match=unready):
+        call(view, "feature_stats", {"feature": "sma_20"})
+    with pytest.raises(EvaluationError, match="sma_20 has no value at the first bar"):
+        backtest_train(view, rule)
+
+    # Training from the bar the mean first has a value at, all three answer.
+    ready = _hand_view(closes, train_from=19, funding_hours=30 * 4)
+    stats = feature_stats(ready, FeatureRef(FeatureKind.SMA, 20))
+    assert (stats.bars, stats.valued, stats.minimum) == (11, 11, pytest.approx(109.5))
+    read = conditional_returns(ready, parse_conditions(reading), horizon=3, side=Side.LONG)
+    assert (read.bars, read.holding, read.unevaluable) == (11, 11, 0)
+    assert backtest_train(ready, rule).trades == 1
+
+
+def test_bars_further_in_where_a_feature_loses_its_value_are_counted():
+    # Twelve bars, settlements for the first six: the rate is read at the
+    # first training bar, so the window is askable, and goes stale once the
+    # settlements stop. Those bars are counted, as the scored loop counts
+    # them, and not read as "does not hold" — the window's last bar among
+    # them, though a scored window takes no decision on it.
+    view = _hand_view([100.0 + i for i in range(12)], funding_hours=6 * 4)
+    stats = feature_stats(view, FeatureRef(FeatureKind.FUNDING_RATE))
+    assert (stats.bars, stats.valued) == (12, 6)
+    paid = parse_conditions([{"left": "funding_rate", "op": ">", "right": 0}])
+    read = conditional_returns(view, paid, horizon=2, side=Side.LONG)
+    assert (read.bars, read.holding, read.unevaluable) == (12, 6, 6)
+
+
 # -- feature_stats, by hand ---------------------------------------------------------------------
 
 
@@ -525,14 +667,10 @@ def test_feature_stats_are_the_ordered_training_values_cut_by_interpolation():
     # ordered, so a cut at q sits at 3 + 8q.
     view = _hand_view([50, 60, 7, 3, 11, 5, 9, 4, 10, 6, 8], train_from=2)
     stats = feature_stats(view, FeatureRef(FeatureKind.CLOSE))
-    assert stats == NumberStats(
-        feature="close",
-        bars=9,
-        valued=9,
-        minimum=3.0,
-        maximum=11.0,
-        quantiles=tuple(pytest.approx(3 + 8 * q) for q in QUANTILES),
-    )
+    assert isinstance(stats, NumberStats)
+    assert (stats.feature, stats.bars, stats.valued) == ("close", 9, 9)
+    assert (stats.minimum, stats.maximum) == (3.0, 11.0)
+    assert list(stats.quantiles) == pytest.approx([3 + 8 * q for q in QUANTILES])
     assert call(view, "feature_stats", {"feature": "close"}) == {
         "feature": "close",
         "bars": 9,
@@ -551,23 +689,7 @@ def test_feature_stats_are_the_ordered_training_values_cut_by_interpolation():
     assert (lagged.feature, lagged.minimum, lagged.maximum) == ("close[1]", 3.0, 60.0)
 
 
-def test_feature_stats_count_the_training_bars_a_feature_has_no_value_at():
-    # Training from the first bar: a twenty-bar mean has no value on the
-    # first nineteen, and they are counted, not hidden.
-    view = _hand_view([100.0 + i for i in range(30)])
-    stats = feature_stats(view, FeatureRef(FeatureKind.SMA, 20))
-    assert isinstance(stats, NumberStats)
-    assert (stats.bars, stats.valued) == (30, 11)
-    assert stats.minimum == pytest.approx(109.5)  # the mean of 100..119
-    # With no value on any training bar the figures are absent — not zero.
-    empty = NumberStats(
-        feature="sma_20", bars=3, valued=0, minimum=None, maximum=None, quantiles=None
-    )
-    shown = research_tools._stats_document(empty)  # the JSON layer's rendering of the record
-    assert [shown[key] for key in ("min", "p05", "p25", "p50", "p75", "p95", "max")] == [None] * 7
-
-
-def test_the_regime_is_counted_by_label(view):
+def test_the_regime_is_counted_by_label_with_every_label_listed(view):
     counts = feature_stats(view, FeatureRef(FeatureKind.REGIME))
     assert isinstance(counts, LabelCounts)
     first, stop = view.window
@@ -575,13 +697,43 @@ def test_the_regime_is_counted_by_label(view):
     labelled = [value.value for value in column if value is not None]
     assert counts.bars == stop - first
     assert counts.valued == len(labelled) > 0
-    assert dict(counts.counts) == {label: labelled.count(label) for label in set(labelled)}
+    # Every label of the vocabulary, in its order: one that never occurred
+    # reads 0, not as a label that does not exist.
+    assert counts.counts == tuple(
+        (regime.value, labelled.count(regime.value)) for regime in MarketRegime
+    )
     assert call(view, "feature_stats", {"feature": "regime"}) == {
         "feature": "regime",
         "bars": counts.bars,
         "bars_with_value": counts.valued,
         "counts": dict(counts.counts),
     }
+
+
+def test_the_stats_records_refuse_figures_that_are_not_one_window_s():
+    # Built by one function today, and by the fakes of the later steps
+    # tomorrow: the gate is on the record.
+    cuts = (2.0, 3.0, 4.0, 5.0, 6.0)
+    assert NumberStats("close", 9, 9, 1.0, 7.0, cuts).valued == 9
+    for bars, valued, low, high, quantiles in (
+        (9, 10, 1.0, 7.0, cuts),  # more bars with a value than bars
+        (9, 0, 1.0, 7.0, cuts),  # a description of no value
+        (9, 9, 3.0, 7.0, cuts),  # a cut under the minimum
+        (9, 9, 1.0, 5.0, cuts),  # a cut over the maximum
+        (9, 9, 1.0, 7.0, cuts[:4]),  # a cut missing
+        (9, 9, 1.0, 7.0, cuts[::-1]),  # the cuts out of order
+    ):
+        with pytest.raises(ValueError, match="close: "):
+            NumberStats("close", bars, valued, low, high, quantiles)
+
+    labels = LabelCounts("regime", bars=9, counts=(("trending", 4), ("ranging", 3)))
+    assert labels.valued == 7  # the counts added up, so it cannot disagree with them
+    with pytest.raises(ValueError, match="each label once"):
+        LabelCounts("regime", bars=9, counts=(("trending", 4), ("trending", 3)))
+    with pytest.raises(ValueError, match="each label once"):
+        LabelCounts("regime", bars=9, counts=(("trending", -1),))
+    with pytest.raises(ValueError, match="count 10 bar"):
+        LabelCounts("regime", bars=9, counts=(("trending", 4), ("ranging", 6)))
 
 
 # -- (h) conditional_returns, by hand -------------------------------------------------------------
@@ -603,11 +755,17 @@ def test_conditional_returns_are_taken_on_samples_that_share_no_bar():
     assert read.t_stat == pytest.approx(
         statistics.fmean(samples) / (statistics.stdev(samples) / math.sqrt(3))
     )
-    # The other side is the same moves, signed for it.
+    # The baseline is the same move with no condition: every second bar
+    # from the first — bars 0, 2, 4, 6 and 8, each to the bar two on.
+    baseline = [121 / 100 - 1, 120 / 121 - 1, 100 / 120 - 1, 150 / 100 - 1, 130 / 150 - 1]
+    assert read.baseline_samples == 5
+    assert read.baseline_mean == pytest.approx(statistics.fmean(baseline))
+    # The other side is the same moves, signed for it — the baseline's too.
     short = conditional_returns(view, _above(105), horizon=2, side=Side.SHORT)
     assert short.mean == pytest.approx(-read.mean)
     assert short.std == pytest.approx(read.std)
     assert short.t_stat == pytest.approx(-read.t_stat)
+    assert short.baseline_mean == pytest.approx(-read.baseline_mean)
 
 
 def test_a_signal_that_holds_at_every_bar_is_sampled_once_a_horizon():
@@ -619,24 +777,28 @@ def test_a_signal_that_holds_at_every_bar_is_sampled_once_a_horizon():
     read = conditional_returns(view, _above(0), horizon=4, side=Side.LONG)
     assert (read.holding, read.samples) == (21, 5)
     assert read.mean == pytest.approx(1.01**4 - 1)
+    # A signal on at every bar IS the baseline: the same samples.
+    assert (read.baseline_samples, read.baseline_mean) == (5, read.mean)
     # Five equal moves, which floats do not make bit-equal: the deviation
     # between them is rounding (1e-16 here), and the mean over it would be
-    # a t-statistic of 1e14 for a signal with no spread to test. None is
-    # given — as when the samples are exactly equal, where it would be a
-    # division by zero.
+    # a t-statistic of about 1e15 for a signal with no spread to test. None
+    # is given — as when the samples are exactly equal, where it would be
+    # a division by zero.
     assert 0 < read.std < 1e-12
     assert read.t_stat is None
     asked = {"conditions": _ANY_BAR, "horizon": 4, "side": "long"}
     assert call(view, "conditional_returns", asked)["t_stat"] is None
-    flat = conditional_returns(_hand_view([100.0] * 21), _above(0), horizon=4, side=Side.LONG)
-    assert (flat.samples, flat.mean, flat.std, flat.t_stat) == (5, 0.0, 0.0, None)
+    flat = _hand_view([100.0] * 21)
+    still = conditional_returns(flat, _above(0), horizon=4, side=Side.LONG)
+    assert (still.samples, still.mean, still.std, still.t_stat) == (5, 0.0, 0.0, None)
 
 
 def test_training_from_a_later_bar_reads_no_signal_of_the_warm_up():
     closes = [200, 200, 200, 100, 110, 100, 121, 100]
     # Training is bars 3..7. The signal holds on the three warm-up bars and
     # on bars 4 and 6; only the last two are counted, and only bar 4 has
-    # its horizon inside the window (bar 6 would need bar 8).
+    # its horizon inside the window (bar 6 would need bar 8). The baseline
+    # is bars 3 and 5, each from a close of 100 to a close of 100.
     view = _hand_view(closes, train_from=3)
     read = conditional_returns(view, _above(105), horizon=2, side=Side.LONG)
     assert (read.bars, read.holding, read.samples) == (5, 2, 1)
@@ -658,6 +820,8 @@ def test_training_from_a_later_bar_reads_no_signal_of_the_warm_up():
         "mean_return": 0.1,
         "std_return": None,
         "t_stat": None,
+        "baseline_samples": 2,
+        "baseline_mean_return": 0.0,
     }
 
 
@@ -671,24 +835,17 @@ def test_a_signal_too_late_for_its_horizon_or_never_on_gives_no_sample():
         None,
         None,
     )
+    # The window still has its own move to report: five one-bar steps.
+    assert (late.baseline_samples, late.baseline_mean) == (5, pytest.approx(0.04))
     never = conditional_returns(view, _above(500), horizon=1, side=Side.LONG)
     assert (never.holding, never.samples, never.mean) == (0, 0, None)
-    # A horizon longer than the window is legal and samples nothing.
-    assert conditional_returns(view, _above(0), horizon=50, side=Side.LONG).samples == 0
-
-
-def test_the_bars_a_condition_cannot_be_read_at_are_counted():
-    # A twenty-bar mean from the first training bar: nineteen bars where
-    # the comparison has nothing to compare, counted as the scored loop
-    # counts them rather than read as "does not hold".
-    view = _hand_view([100.0 + i for i in range(30)])
-    conditions = parse_conditions([{"left": "close", "op": ">", "right": "sma_20"}])
-    read = conditional_returns(view, conditions, horizon=3, side=Side.LONG)
-    assert (read.bars, read.unevaluable, read.holding) == (30, 19, 11)
+    # A horizon longer than the window is legal and samples nothing at all.
+    beyond = conditional_returns(view, _above(0), horizon=50, side=Side.LONG)
+    assert (beyond.samples, beyond.baseline_samples, beyond.baseline_mean) == (0, 0, None)
 
 
 def test_the_function_refuses_what_the_json_layer_refuses():
-    # The control arm (plan T5) calls the functions directly.
+    # The control arm of a later step (plan T5) will call the functions directly.
     view = _hand_view([100, 110, 120])
     with pytest.raises(ToolRefusal, match="at least one condition"):
         conditional_returns(view, (), horizon=1, side=Side.LONG)
@@ -704,9 +861,44 @@ def test_the_function_refuses_what_the_json_layer_refuses():
     )
 
 
+def test_a_returns_record_refuses_figures_that_are_not_one_window_s():
+    good = {
+        "bars": 12,
+        "holding": 6,
+        "unevaluable": 0,
+        "horizon": 2,
+        "side": "long",
+        "samples": 3,
+        "mean": 0.01,
+        "std": 0.02,
+        "t_stat": 0.9,
+        "baseline_samples": 5,
+        "baseline_mean": 0.0,
+    }
+    assert ConditionalReturns(**good).side is Side.LONG  # the word is read as the member
+    for changed in (
+        {"samples": 7},  # more samples than bars the signal holds at
+        {"holding": 13},  # more holding bars than bars
+        {"unevaluable": 13},
+        {"baseline_samples": 13},
+        {"mean": None},  # samples and no mean
+        {"samples": 0},  # a mean and no sample
+        {"std": None},  # three samples and no deviation
+        {"samples": 1, "std": 0.02},  # a deviation of one sample
+        {"samples": 1, "std": None},  # a t-statistic with no deviation
+        {"baseline_mean": None},  # baseline samples and no baseline
+        {"baseline_samples": 0},  # a baseline of no sample
+        {"horizon": 0},
+    ):
+        with pytest.raises(ValueError):
+            ConditionalReturns(**{**good, **changed})
+    with pytest.raises(ValueError, match="unsupported side"):
+        ConditionalReturns(**{**good, "side": "both"})
+
+
 def test_a_figure_is_shown_to_six_significant_digits():
-    # Significant, not decimal: a per-bar return five places down keeps its
-    # digits, and the exact figure stays on the record the function returns.
+    # Significant, not decimal: a mean nine places down keeps its digits,
+    # and the exact figure stays on the record the function returns.
     view = _hand_view([100.0, 100.0012345678, 100.0, 100.0098765432, 100.0])
     exact = conditional_returns(view, _above(0), horizon=1, side=Side.LONG)
     shown = call(

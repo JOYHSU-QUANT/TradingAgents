@@ -35,6 +35,7 @@ from contrib.autoresearch.dsl import (
 from contrib.autoresearch.evaluator import (
     MS_PER_YEAR,
     UNLABELLED,
+    ConditionBars,
     EvaluationError,
     ExitReason,
     SegmentResult,
@@ -1318,6 +1319,14 @@ def test_condition_bars_compares_the_regime_by_label():
     assert read.holds == tuple(value is label for value in regimes)
     assert read.unevaluable == tuple(value is None for value in regimes)
     assert any(read.holds) and any(read.unevaluable)
+
+
+def test_a_condition_reading_is_one_frame_s_bars_and_never_holds_where_it_could_not_be_asked():
+    assert ConditionBars(holds=[True, False], unevaluable=[False, True]).holds == (True, False)
+    with pytest.raises(ValueError, match="are not one frame's bars"):
+        ConditionBars(holds=(True,), unevaluable=(False, False))
+    with pytest.raises(ValueError, match="does not hold there"):
+        ConditionBars(holds=(True,), unevaluable=(True,))
 
 
 def test_condition_bars_of_no_conditions_holds_nowhere():

@@ -39,7 +39,8 @@ PR C1（本次）＝交接文件：`signal` 指令，以及 `hyperliquid_perp` �
 - **宣告式 DSL 與它的 parser**（`dsl.py`）：假說是資料不是程式，沒有 `eval`／`exec`／任何
   自由運算式。未知欄位、未知 feature、未知 op、未來 offset 一律**具名拒絕**，句子裡帶著
   文件內的路徑（`spec.entry.long[0].right`）與該怎麼改。`parse_conditions` 用同一個讀取器
-  單獨讀一串條件（外面沒有規則），接受與拒絕的東西跟規則裡的那一串完全相同。
+  單獨讀一串條件（外面沒有規則），讀法跟規則裡的那一串相同，只有兩處例外：整串不能省略，
+  門檻不能寫 `{"param": ...}`（外面沒有 `params` 區塊）。
 - **逐 bar 的 feature 計算**（`features.py`）：每個值只由「截至該 bar 收盤」的資料算出來，
   而且是**建構上如此**——indicator 引擎拿到的 window 永遠**結束在這根 bar**，起點則往回
   `indicator_lookback` 根（預設 200＝實盤每 cycle fetch 的根數；A3 起是 frame 的參數，

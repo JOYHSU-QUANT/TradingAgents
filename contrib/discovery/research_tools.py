@@ -7,29 +7,33 @@ blind. These are the looks: what a feature's values are
 (:func:`feature_stats`), what the price did after a signal
 (:func:`conditional_returns`), and what a whole rule would have scored
 (:func:`backtest_train`). Nothing here talks to a model or to MCP — the
-server that offers these (plan T2) and the hypothesist that calls it (T3)
-are wrappers over this module, and the control arm that reads the same
-window without a model (T5) calls it directly.
+server that will offer these (plan T2) and the hypothesist that will call
+it (T3) are to be wrappers over this module, and the control arm that will
+read the same window without a model (T5) is to call it directly.
 
 **The line (plan §2.2).** Everything is computed from a :class:`TrainView`,
 and a view holds a frame read no further than the training window's last
 bar: :meth:`TrainView.load` bounds the read there, and the view refuses a
-frame that holds anything later. So the validation and holdout bars are
-not filtered out of an answer — they are not in the process. A look-up
-whose window would pass the end (the forward return of a signal on the
-last training bars) is dropped, never padded. And a view is built from a
-store, a coin, a window, costs and a lookback: no manifest, so the world's
-kind and whatever is planted in it have no path into an output.
+frame that holds a later bar. So the validation and holdout bars are not
+filtered out of an answer — they are not in the view. A look-up whose
+window would pass the end (the forward return of a signal on the last
+training bars) is dropped, never padded. The window is not the caller's
+to name: a view takes the experiment's whole split and reads the training
+window off it. And a view is built from a store, a coin, a split, costs
+and a lookback: no manifest, so the world's kind and whatever is planted
+in it have no path into an output.
 
 **One reading (plan §2.1.1, §3.2).** A rule is read by the research
 package's own ``parse_spec``, a list of conditions by its
 ``parse_conditions``, a feature name by its ``parse_feature_name``;
 whether conditions hold at a bar is its evaluator's ``condition_bars``,
 and a rule's training figures are its ``evaluate_segment`` over the view's
-window. Nothing is re-implemented, so a look-up cannot accept what the
-search loop would refuse, nor say a condition holds where the scored loop
-says it does not. A refusal carries the parser's own sentence
-(:class:`ToolRefusal`).
+window. Nothing is re-implemented, so a look-up cannot accept a rule, a
+condition or a feature name the parser would refuse, nor say a condition
+holds where the scored loop says it does not; a refusal carries the
+parser's own sentence (:class:`ToolRefusal`). And a look-up refuses the
+window the evaluator refuses: a feature with no value at the first
+training bar is not read, by any of the three.
 
 **Two layers.** The three functions take parsed values and return frozen
 records, exact. :func:`call` is the JSON layer a server stands on: it
@@ -47,24 +51,27 @@ from __future__ import annotations
 import math
 import statistics
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
-from typing import Final
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
+from functools import cached_property
+from typing import Final, TypeVar
 
 from .upstream import (
     FUNDING_STAMP_TOLERANCE_MS,
     MAX_HOLD_BARS,
     Condition,
     CostModel,
+    EvaluationError,
     FeatureFrame,
     FeatureRef,
     FeatureUnit,
+    MarketRegime,
     ResearchStore,
     Segment,
     SegmentMetrics,
-    SegmentName,
     Side,
     SpecError,
+    Split,
     StrategySpec,
     condition_bars,
     evaluate_segment,
@@ -75,7 +82,6 @@ from .upstream import (
     parse_feature_name,
     parse_spec,
     require_clean_history,
-    studied_interval,
 )
 
 __all__ = [
@@ -94,6 +100,8 @@ __all__ = [
     "conditional_returns",
     "feature_stats",
 ]
+
+_T = TypeVar("_T")
 
 # The five cuts ``feature_stats`` reports between the minimum and the
 # maximum. Fixed, so two looks at two features are read on one scale.
@@ -121,6 +129,11 @@ class ToolRefusal(ValueError):
     history that cannot answer (``FeatureError``, ``EvaluationError``) is
     not one of these and is left to propagate: it is a fact about the
     store, as it is to the search loop.
+
+    Catch this class, never ``ValueError``: a view refusing the frame it
+    was built on (:class:`TrainView`) and a record refusing its own figures
+    are ``ValueError`` too, and those are defects on this side of the seam,
+    not sentences for a model.
     """
 
 
@@ -131,34 +144,39 @@ class ToolRefusal(ValueError):
 class TrainView:
     """What a look-up may read: a frame that ends where training ends, and what a trial is scored under.
 
-    ``frame`` holds the warm-up and the training bars and nothing after
-    them; ``train`` is the window; ``costs`` and ``interval`` are the
-    experiment's, so :func:`backtest_train` scores a rule as a trial's
-    training window is scored. Checked at construction — a view built in
-    code meets the line :meth:`load` draws — on all three series: no
-    decision bar opening at or after the window's end, no daily bar closing
-    after the last decision bar's close, no settlement past the one due at
-    that close. Those are the bounds ``load_bundle`` reads under, restated,
-    so a frame it bounded at the window's end passes and one bounded any
-    later does not.
+    ``frame`` holds the warm-up and the training bars and no bar after
+    them. ``split`` is the experiment's, whole: the training window is read
+    off it (:attr:`train`) rather than handed over, so a caller cannot
+    name a wider one — passing the experiment's split is all there is to
+    get right. ``costs`` are the experiment's too, so
+    :func:`backtest_train` scores a rule as a trial's training window is
+    scored.
+
+    Checked at construction, so a view built in code meets the line
+    :meth:`load` draws. The three series end where ``load_bundle`` ends
+    them for a bound at the window's last bar: no decision bar opening at
+    or after the window's end, no daily bar closing after the last
+    decision bar's close, no settlement past the one due at that close.
+    That last settlement IS held — the venue posts it a few ms after the
+    close, ``load_bundle`` reads it as a fact about the close just reached,
+    and its presence is what a window's funding coverage is counted on —
+    but no look-up reads its RATE: a feature reads the settlements at or
+    before a close, and a held bar pays the ones inside its own
+    ``(open, close]``. And the history is held to the grid as a
+    measurement's is (``require_clean_history``), so a look-up never reads
+    a feature, or counts a horizon, across a hole a trial would refuse.
     """
 
     frame: FeatureFrame
-    train: Segment
+    split: Split
     costs: CostModel
-    interval: str
-    # ``(first, stop)``: the training bars' indices into the frame's bars.
-    # Derived at construction, as the frame and the window it is read off
-    # are both fixed there.
-    window: tuple[int, int] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "interval", studied_interval(self.interval))
-        train = self.train
-        if train.name is not SegmentName.TRAIN:
+        if not isinstance(self.split, Split):
             raise ValueError(
-                f"a train view is over the training window, got the {train.name.value} one"
+                f"a train view takes the experiment's split, got {type(self.split).__name__}"
             )
+        train = self.train
         bundle = self.frame.bundle
         bars = bundle.bars
         last = bars[-1]
@@ -169,7 +187,7 @@ class TrainView:
                 f"train view holds no bar after the last training bar — what opens later is "
                 f"the validation window's"
             )
-        first, stop = train.bar_range([bar.open_time for bar in bars])
+        first, _stop = self.window
         step = interval_to_ms(self.interval)
         if (
             first == len(bars)
@@ -190,7 +208,7 @@ class TrainView:
                 f"{late_funding} funding settlement(s) posted after the last training bar's "
                 f"close; a train view holds nothing later than that close"
             )
-        object.__setattr__(self, "window", (first, stop))
+        require_clean_history(bundle, self.interval)
 
     @classmethod
     def load(
@@ -198,33 +216,66 @@ class TrainView:
         store: ResearchStore,
         *,
         coin: str,
-        interval: str,
-        train: Segment,
+        split: Split,
         costs: CostModel,
         indicator_lookback: int,
     ) -> TrainView:
-        """Read ``coin``'s history up to ``train``'s last bar and no further, and build the view on it.
+        """Read ``coin``'s history up to the last training bar of ``split`` and no further, and build the view.
 
         The bound is the one ``Split.loadable_until`` hands the store for a
         measurement, moved one window earlier: the last bar read is the one
-        that opens just before the window ends. The history is held to the
-        grid as a measurement's is (``require_clean_history``), so a
-        look-up never reads a feature across a hole a trial would refuse.
-        (The read is ``oracle.frame_for``'s with the bound moved, and is
-        kept in step with it by hand, as that one is with the research
-        package's private one.)
-        The store is read here and not kept: the view is in memory, and the
-        caller may close the store — the arm's search is writing its ledger
-        to the same file.
+        that opens just before the training window ends. (The read is
+        ``oracle.frame_for``'s with the bound moved, and is kept in step
+        with it by hand, as that one is with the research package's private
+        one.) The store is read here and not kept: the view is in memory,
+        and the caller may close the store, which an arm's search writes
+        its ledger to.
         """
-        bundle = load_bundle(store, coin=coin, interval=interval, until_ms=train.end_ms - 1)
-        require_clean_history(bundle, interval)
+        bundle = load_bundle(
+            store, coin=coin, interval=split.interval, until_ms=split.train.end_ms - 1
+        )
         return cls(
             frame=FeatureFrame(bundle, indicator_lookback=indicator_lookback),
-            train=train,
+            split=split,
             costs=costs,
-            interval=interval,
         )
+
+    @property
+    def train(self) -> Segment:
+        """The training window: the split's own, never one a caller names."""
+        return self.split.train
+
+    @property
+    def interval(self) -> str:
+        return self.split.interval
+
+    @cached_property
+    def window(self) -> tuple[int, int]:
+        """``(first, stop)``: the training bars' indices into the frame's bars."""
+        return self.train.bar_range([bar.open_time for bar in self.frame.bundle.bars])
+
+
+def _require_ready(view: TrainView, refs: Iterable[FeatureRef]) -> None:
+    """Refuse a feature with no value at the first training bar — the evaluator's rule for a window.
+
+    A rule reading such a feature is not measured on this window
+    (``EvaluationError``, by the evaluator), and a look-up that answered
+    anyway would hand back "no value" and "holds nowhere" for a feature
+    that could not be asked: the answer of a signal that is not there. A
+    fact about the store, so it is the evaluator's error and not a
+    refusal; a landed world never meets it, since its training window
+    begins where every feature has a value. The sentence names no instant,
+    as nothing a model is shown does. Bars further in where a feature
+    loses its value (a funding window short of coverage) are counted by
+    the look-ups, not refused, as the scored loop counts them.
+    """
+    first, _stop = view.window
+    for ref in refs:
+        if view.frame.value_at(ref, first) is None:
+            raise EvaluationError(
+                f"{ref} has no value at the first training bar, so the training window "
+                f"cannot be read on it; a rule reading it would not be measured there either"
+            )
 
 
 # -- feature_stats -------------------------------------------------------------------------
@@ -235,26 +286,62 @@ class NumberStats:
     """One numeric feature over the training bars: how many have a value, and where the values lie.
 
     ``quantiles`` are at :data:`QUANTILES`, by linear interpolation between
-    the two nearest ordered values. With no value on any training bar
-    (``valued`` 0) the three figures are ``None``.
+    the two nearest ordered values. There is always a value to describe:
+    the look-up refuses a feature with none at the window's first bar.
     """
 
     feature: str
     bars: int
     valued: int
-    minimum: float | None
-    maximum: float | None
-    quantiles: tuple[float, ...] | None
+    minimum: float
+    maximum: float
+    quantiles: tuple[float, ...]
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.valued <= self.bars:
+            raise ValueError(
+                f"{self.feature}: {self.valued} bar(s) with a value out of {self.bars} is not "
+                f"a count of the window's bars"
+            )
+        figures = (self.minimum, *self.quantiles, self.maximum)
+        if len(self.quantiles) != len(QUANTILES) or any(
+            later < earlier for earlier, later in zip(figures, figures[1:], strict=False)
+        ):
+            raise ValueError(
+                f"{self.feature}: the minimum, the {len(QUANTILES)} cuts and the maximum have "
+                f"to be in ascending order, got {figures!r}"
+            )
 
 
 @dataclass(frozen=True)
 class LabelCounts:
-    """The one categorical feature (the regime) over the training bars: bars per label."""
+    """The one categorical feature (the regime) over the training bars: bars per label.
+
+    Every label of the vocabulary is listed, in the vocabulary's order — one
+    that never occurred in training reads ``0``, not as a label that does
+    not exist. ``valued`` is the counts added up, so it cannot disagree
+    with them.
+    """
 
     feature: str
     bars: int
-    valued: int
     counts: tuple[tuple[str, int], ...]
+
+    def __post_init__(self) -> None:
+        labels = [label for label, _count in self.counts]
+        if len(set(labels)) != len(labels) or any(count < 0 for _label, count in self.counts):
+            raise ValueError(
+                f"{self.feature}: each label once, with a count of bars, got {self.counts!r}"
+            )
+        if self.valued > self.bars:
+            raise ValueError(
+                f"{self.feature}: the labels count {self.valued} bar(s) and the window has "
+                f"{self.bars}"
+            )
+
+    @property
+    def valued(self) -> int:
+        return sum(count for _label, count in self.counts)
 
 
 def feature_stats(view: TrainView, ref: FeatureRef) -> NumberStats | LabelCounts:
@@ -262,29 +349,30 @@ def feature_stats(view: TrainView, ref: FeatureRef) -> NumberStats | LabelCounts
 
     Read at each training bar as a condition reads it, the reference's
     offset applied. A feature the store cannot answer at any bar is the
-    frame's refusal, not an empty answer.
+    frame's refusal, and one with no value at the first training bar the
+    evaluator's (:func:`_require_ready`); neither is an empty answer.
     """
+    _require_ready(view, [ref])
     first, stop = view.window
     values = [view.frame.value_at(ref, index) for index in range(first, stop)]
     name = str(ref)
     if ref.unit is FeatureUnit.REGIME:
-        labels = Counter(
+        seen = Counter(
             value.value for value in values if value is not None and not isinstance(value, float)
         )
         return LabelCounts(
             feature=name,
             bars=stop - first,
-            valued=sum(labels.values()),
-            counts=tuple(sorted(labels.items())),
+            counts=tuple((regime.value, seen[regime.value]) for regime in MarketRegime),
         )
     numbers = sorted(float(value) for value in values if isinstance(value, (int, float)))
     return NumberStats(
         feature=name,
         bars=stop - first,
         valued=len(numbers),
-        minimum=numbers[0] if numbers else None,
-        maximum=numbers[-1] if numbers else None,
-        quantiles=tuple(_quantile(numbers, q) for q in QUANTILES) if numbers else None,
+        minimum=numbers[0],
+        maximum=numbers[-1],
+        quantiles=tuple(_quantile(numbers, q) for q in QUANTILES),
     )
 
 
@@ -303,26 +391,39 @@ def _quantile(ordered: Sequence[float], q: float) -> float:
 class ConditionalReturns:
     """What the close did over the ``horizon`` bars after the conditions held, on the training bars.
 
-    ``holding`` counts every training bar the conditions hold at.
-    ``samples`` counts the ones the three figures are computed from, which
-    are fewer on purpose: taken in bar order, each at least ``horizon`` bars
-    after the one before it, and only where the whole ``horizon`` lies
-    inside the training window. So no two samples share a bar of return —
-    forward returns of neighbouring bars overlap in all but one bar, and a
-    t-statistic over them counts one move many times — and none reads past
-    the window. They are NOT a rule's trades: a rule entering on this signal
-    and holding ``horizon`` bars fills at the next open and does not enter
-    again on the bar it leaves, so its entries fall a bar later with every
-    trade. What such a rule scores is :func:`backtest_train`'s to say.
+    ``holding`` counts every training bar the conditions hold at, and
+    ``unevaluable`` every one where a condition read a feature with no
+    value — the window's last bar included, which a scored window does not
+    decide on and so does not count.
+
+    ``samples`` counts the bars the three figures are computed from, which
+    are fewer than ``holding`` on purpose: taken in bar order, each at
+    least ``horizon`` bars after the one before it, and only where the
+    whole ``horizon`` lies inside the training window. So no two samples
+    share a bar of return — forward returns of neighbouring bars overlap
+    in all but one bar, and a t-statistic over them counts one move many
+    times — and none reads past the window. They are NOT a rule's trades:
+    a rule entering on this signal and holding ``horizon`` bars fills at
+    the next open and does not enter again on the bar it leaves, so its
+    entries fall a bar later with every trade. What such a rule scores is
+    :func:`backtest_train`'s to say.
 
     A sample's return is ``close[t + horizon] / close[t] - 1``, negated for
     ``side`` short: the price move in the position's favour, before costs.
     ``mean`` and ``std`` (the sample deviation, ``n - 1``) are over the
-    samples, and ``t_stat`` is ``mean / (std / sqrt(samples))``. ``mean`` is
-    ``None`` with no sample, the other two with fewer than two, and
-    ``t_stat`` when the samples do not vary — a deviation that is float
-    rounding (:data:`_ROUNDING` of the largest sample, or less) is no
-    variation: a t-statistic over it measures the rounding, at any size.
+    samples, and ``t_stat`` is ``mean / (std / sqrt(samples))`` — against
+    zero. ``mean`` is ``None`` with no sample, the other two with fewer
+    than two, and ``t_stat`` when the samples do not vary — a deviation
+    that is float rounding (:data:`_ROUNDING` of the largest sample, or
+    less) is no variation: a t-statistic over it measures the rounding, at
+    any size.
+
+    ``baseline_mean`` is the same return over the same horizon and side
+    with NO condition: one sample every ``horizon`` bars from the window's
+    first (``baseline_samples`` of them). It is what the window did
+    whatever the signal said — a window that drifted lends its drift to
+    every condition asked on it, and a mean is read against this one, not
+    against zero.
     """
 
     bars: int
@@ -334,6 +435,34 @@ class ConditionalReturns:
     mean: float | None
     std: float | None
     t_stat: float | None
+    baseline_samples: int
+    baseline_mean: float | None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "side", Side(self.side))
+        if not MIN_HORIZON <= self.horizon <= MAX_HORIZON:
+            raise ValueError(f"a horizon of {self.horizon!r} bars is not one a look-up takes")
+        if not (
+            0 <= self.samples <= self.holding <= self.bars
+            and 0 <= self.unevaluable <= self.bars
+            and 0 <= self.baseline_samples <= self.bars
+        ):
+            raise ValueError(
+                f"{self.samples} sample(s) of {self.holding} holding bar(s), {self.unevaluable} "
+                f"unevaluable and {self.baseline_samples} baseline sample(s), out of {self.bars} "
+                f"bar(s), are not counts of one window"
+            )
+        if (
+            (self.mean is None) != (self.samples == 0)
+            or (self.std is None) != (self.samples < 2)
+            or (self.t_stat is not None and self.std is None)
+            or (self.baseline_mean is None) != (self.baseline_samples == 0)
+        ):
+            raise ValueError(
+                f"the figures (mean {self.mean!r}, std {self.std!r}, t {self.t_stat!r}, baseline "
+                f"{self.baseline_mean!r}) do not go with {self.samples} sample(s) and "
+                f"{self.baseline_samples} baseline sample(s)"
+            )
 
 
 def conditional_returns(
@@ -342,32 +471,42 @@ def conditional_returns(
     """Whether the close moved ``side``'s way over the ``horizon`` bars after ``conditions`` held.
 
     The conditions are ANDed and read at each training bar by the
-    evaluator's own reader, so "holds" here is "holds" in a scored rule.
-    This is a signal's reading, before costs and without a position: what a
-    rule built on it would score is :func:`backtest_train`'s to say.
+    evaluator's own reader, so "holds" here is "holds" in a scored rule;
+    a feature with no value at the first training bar is refused as the
+    evaluator refuses it (:func:`_require_ready`). This is a signal's
+    reading, before costs and without a position: what a rule built on it
+    would score is :func:`backtest_train`'s to say.
     """
     conditions = tuple(conditions)
     if not conditions:
         raise ToolRefusal("conditions: at least one condition — an empty list holds at no bar")
     horizon = _horizon(horizon)
     side = _side(side)
+    _require_ready(view, [ref for condition in conditions for ref in condition.refs])
     first, stop = view.window
     read = condition_bars(conditions, view.frame)
     closes = [float(bar.close) for bar in view.frame.bundle.bars]
     sign = 1.0 if side is Side.LONG else -1.0
-    returns: list[float] = []
-    index = first
-    while index < stop - horizon:
-        # ``stop - horizon``: past the last bar whose whole horizon closes
-        # inside the window. A signal later than that is counted in
-        # ``holding`` and is no sample — its return would need a bar the
-        # view does not hold. A sample steps over its own horizon, so the
-        # next one shares no bar with it.
-        if read.holds[index]:
-            returns.append(sign * (closes[index + horizon] / closes[index] - 1))
-            index += horizon
-        else:
-            index += 1
+
+    def sampled(holds: Sequence[bool] | None) -> list[float]:
+        """The moves from the bars ``holds`` marks (every bar, for ``None``), no two sharing a bar."""
+        moves: list[float] = []
+        index = first
+        while index < stop - horizon:
+            # ``stop - horizon``: past the last bar whose whole horizon
+            # closes inside the window. A signal later than that is counted
+            # in ``holding`` and is no sample — its return would need a bar
+            # the view does not hold. A sample steps over its own horizon,
+            # so the next one shares no bar with it.
+            if holds is None or holds[index]:
+                moves.append(sign * (closes[index + horizon] / closes[index] - 1))
+                index += horizon
+            else:
+                index += 1
+        return moves
+
+    returns = sampled(read.holds)
+    baseline = sampled(None)
     mean = statistics.fmean(returns) if returns else None
     std = statistics.stdev(returns) if len(returns) > 1 else None
     t_stat = None
@@ -383,16 +522,18 @@ def conditional_returns(
         mean=mean,
         std=std,
         t_stat=t_stat,
+        baseline_samples=len(baseline),
+        baseline_mean=statistics.fmean(baseline) if baseline else None,
     )
 
 
 # The share of the largest sample at or under which a deviation between the
 # samples is float rounding. Equal moves do not come out bit-equal — five
 # samples of one compounding step deviate by about 1e-16 — and dividing a
-# mean by that is a t-statistic of 1e14 for a signal with no spread to test.
-# (The rounding is absolute, about 1e-16 on a ratio near one; measured
-# against the samples it is caught for any move larger than about 1e-7,
-# which every priced move is.)
+# mean by that is a t-statistic of about 1e15 for a signal with no spread
+# to test. (The rounding is absolute, about 1e-16 on a ratio near one;
+# measured against the samples it is caught for any move larger than about
+# 1e-7, which every priced move is.)
 _ROUNDING: Final = 1e-9
 
 
@@ -436,19 +577,6 @@ def backtest_train(view: TrainView, spec: StrategySpec) -> SegmentMetrics:
     return SegmentMetrics.from_result(result)
 
 
-def _backtest_document(metrics: SegmentMetrics) -> dict[str, object]:
-    """The figures a model is shown of a training backtest: the ones the prompt shows of a validation one."""
-    return {
-        "bars": metrics.bars,
-        "trades": metrics.trades,
-        "exposure": _shown(metrics.exposure),
-        "turnover": _shown(metrics.turnover),
-        "net_sharpe": _shown(metrics.net.sharpe),
-        "net_return": _shown(metrics.net.total_return),
-        "ruined": metrics.ruined,
-    }
-
-
 # -- the JSON layer ----------------------------------------------------------------------------
 
 
@@ -464,11 +592,13 @@ def _stats_document(stats: NumberStats | LabelCounts) -> dict[str, object]:
     }
     if isinstance(stats, LabelCounts):
         return {**head, "counts": dict(stats.counts)}
-    cuts = stats.quantiles if stats.quantiles is not None else (None,) * len(QUANTILES)
     return {
         **head,
         "min": _shown(stats.minimum),
-        **{f"p{round(q * 100):02d}": _shown(cut) for q, cut in zip(QUANTILES, cuts, strict=True)},
+        **{
+            f"p{round(q * 100):02d}": _shown(cut)
+            for q, cut in zip(QUANTILES, stats.quantiles, strict=True)
+        },
         "max": _shown(stats.maximum),
     }
 
@@ -484,6 +614,21 @@ def _returns_document(read: ConditionalReturns) -> dict[str, object]:
         "mean_return": _shown(read.mean),
         "std_return": _shown(read.std),
         "t_stat": _shown(read.t_stat),
+        "baseline_samples": read.baseline_samples,
+        "baseline_mean_return": _shown(read.baseline_mean),
+    }
+
+
+def _backtest_document(metrics: SegmentMetrics) -> dict[str, object]:
+    """The figures a model is shown of a training backtest: those the prompt shows of a validation one, and the window's bars."""
+    return {
+        "bars": metrics.bars,
+        "trades": metrics.trades,
+        "exposure": _shown(metrics.exposure),
+        "turnover": _shown(metrics.turnover),
+        "net_sharpe": _shown(metrics.net.sharpe),
+        "net_return": _shown(metrics.net.total_return),
+        "ruined": metrics.ruined,
     }
 
 
@@ -507,13 +652,26 @@ def _arguments(tool: str, arguments: object, keys: tuple[str, ...]) -> Mapping[s
     return arguments
 
 
+def _parsed(parse: Callable[..., _T], payload: object, **where: str) -> _T:
+    """``payload`` through one of the parser's readers; its refusal as this layer's, the sentence unchanged.
+
+    Around the PARSE alone: what is computed from the parsed value is not
+    in here, so an error from the evaluator is never relabelled as the
+    caller's mistake.
+    """
+    try:
+        return parse(payload, **where)
+    except SpecError as exc:
+        raise ToolRefusal(str(exc)) from exc
+
+
 def _feature_stats(view: TrainView, body: Mapping[str, object]) -> dict[str, object]:
-    kind, period = parse_feature_name(body["feature"], path="feature")
+    kind, period = _parsed(parse_feature_name, body["feature"], path="feature")
     return _stats_document(feature_stats(view, FeatureRef(kind, period)))
 
 
 def _conditional_returns(view: TrainView, body: Mapping[str, object]) -> dict[str, object]:
-    conditions = parse_conditions(body["conditions"], path="conditions")
+    conditions = _parsed(parse_conditions, body["conditions"], path="conditions")
     return _returns_document(
         conditional_returns(
             view, conditions, horizon=_horizon(body["horizon"]), side=_side(body["side"])
@@ -522,7 +680,7 @@ def _conditional_returns(view: TrainView, body: Mapping[str, object]) -> dict[st
 
 
 def _backtest_train(view: TrainView, body: Mapping[str, object]) -> dict[str, object]:
-    return _backtest_document(backtest_train(view, parse_spec(body["rule"])))
+    return _backtest_document(backtest_train(view, _parsed(parse_spec, body["rule"])))
 
 
 # Each look-up: the keys its arguments carry, and what reads them.
@@ -558,16 +716,13 @@ def call(view: TrainView, tool: str, arguments: object) -> dict[str, object]:
 
     A history that cannot answer is NOT turned into a refusal here: a
     ``FeatureError`` or an ``EvaluationError`` passes through as itself. It
-    is not the caller's mistake, and its sentence names calendar instants,
-    which nothing a model is shown carries — so whoever stands between
-    this function and a model (the server, plan T2) has to catch it and
-    must not hand the sentence on.
+    is not the caller's mistake, and the research package's sentences name
+    calendar instants, which nothing a model is shown carries — so whoever
+    stands between this function and a model (the server, plan T2) has to
+    catch it and must not hand the sentence on.
     """
     known = _TOOLS.get(tool) if isinstance(tool, str) else None
     if known is None:
         raise ToolRefusal(f"{tool!r} is not a tool; the tools are {list(TOOL_NAMES)}")
     keys, reader = known
-    try:
-        return reader(view, _arguments(tool, arguments, keys))
-    except SpecError as exc:
-        raise ToolRefusal(str(exc)) from exc
+    return reader(view, _arguments(tool, arguments, keys))

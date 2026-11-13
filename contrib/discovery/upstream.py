@@ -77,7 +77,9 @@ What is borrowed and why:
   measurement of ONE window (``evaluate_segment``, over a ``Segment``),
   which scores a rule on training alone and files nothing; and the
   settlement posting tolerance (``FUNDING_STAMP_TOLERANCE_MS``), by which
-  a view restates the bound ``load_bundle`` reads funding under;
+  a view restates the bound ``load_bundle`` reads funding under; and the
+  regime's labels (``MarketRegime``, the perp package's, reached as the
+  research package re-exports it), so a count by label lists every label;
 - the vocabulary the manifest validates its search space against
   (``parse_feature_name``), the declarations behind it (``FeatureKind``,
   ``FeatureUnit``, ``SeriesSource``, ``spec_of``: which series a
@@ -188,7 +190,7 @@ from contrib.autoresearch.split import (
     studied_interval,
 )
 from contrib.autoresearch.store import ResearchStore, StoreError, default_db_path
-from contrib.autoresearch.upstream import Candle, FundingPoint, interval_to_ms
+from contrib.autoresearch.upstream import Candle, FundingPoint, MarketRegime, interval_to_ms
 from contrib.autoresearch.vocabulary import (
     FeatureKind,
     FeatureRef,
@@ -232,6 +234,7 @@ __all__ = [
     "FundingPoint",
     "HypothesistError",
     "Ledger",
+    "MarketRegime",
     "Op",
     "Penalty",
     "ResearchStore",
@@ -363,6 +366,7 @@ BORROWED: tuple[tuple[str, str], ...] = (
     # research package re-exports them for its own port.
     ("contrib.autoresearch.upstream", "Candle"),
     ("contrib.autoresearch.upstream", "FundingPoint"),
+    ("contrib.autoresearch.upstream", "MarketRegime"),
     ("contrib.autoresearch.upstream", "interval_to_ms"),
     ("contrib.autoresearch.vocabulary", "FeatureKind"),
     ("contrib.autoresearch.vocabulary", "FeatureRef"),

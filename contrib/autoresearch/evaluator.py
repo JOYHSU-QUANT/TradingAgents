@@ -369,7 +369,8 @@ class _Conditions:
     guard on every call — 4.8 µs against 0.12 µs for the tuple read behind
     it, measured — and the loop reads several operands per bar for thousands
     of bars, per spec. The guard can only say something new once per column,
-    and :func:`_require_measurable` has already given it that chance.
+    and building the reader has given it that chance (as, for a spec,
+    :func:`_require_measurable` has before it).
 
     The half of a reader that needs no spec: what a condition reads and
     whether a list of them holds. :class:`_Reader` is this over one spec's
@@ -1259,11 +1260,26 @@ class ConditionBars:
     decision taken at ``bars[i]``'s close, and ``unevaluable[i]`` that one of
     them read a feature with no value there — so ``holds[i]`` is ``False``
     for not being askable, not for being false (the reading
-    ``SegmentResult.bars_unevaluable`` counts over a scored window).
+    ``SegmentResult.bars_unevaluable`` counts over the bars a scored window
+    decides at, which leaves out its last).
     """
 
     holds: tuple[bool, ...]
     unevaluable: tuple[bool, ...]
+
+    def __post_init__(self) -> None:
+        # The record crosses a package edge, and a reader of it slices one
+        # tuple and indexes the other: two lengths would be an answer about
+        # two different sets of bars.
+        object.__setattr__(self, "holds", tuple(self.holds))
+        object.__setattr__(self, "unevaluable", tuple(self.unevaluable))
+        if len(self.holds) != len(self.unevaluable):
+            raise ValueError(
+                f"{len(self.holds)} bar(s) of holds and {len(self.unevaluable)} of unevaluable "
+                f"are not one frame's bars"
+            )
+        if any(held and silent for held, silent in zip(self.holds, self.unevaluable, strict=True)):
+            raise ValueError("a list that could not be asked at a bar does not hold there")
 
 
 def condition_bars(conditions: Sequence[Condition], frame: FeatureFrame) -> ConditionBars:

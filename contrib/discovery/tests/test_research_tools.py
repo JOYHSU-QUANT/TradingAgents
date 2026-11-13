@@ -656,7 +656,7 @@ def test_a_feature_with_no_value_at_the_first_training_bar_is_refused_by_all_thr
 def test_bars_further_in_where_a_feature_loses_its_value_are_counted():
     closes = [100.0 + i for i in range(12)]
     reading = [{"left": "funding_rate", "op": ">", "right": 0}]
-    # The venue skips the three settlements inside bar 5 (hours 21 to 23):
+    # The venue skips three of the settlements inside bar 5 (hours 21 to 23):
     # at that bar's close the newest rate is four hours old, which is stale,
     # and at every other bar it is fresh. The window is still one the
     # evaluator measures — three settlements short of forty-eight is within
@@ -920,7 +920,8 @@ def test_a_returns_record_refuses_figures_that_are_not_one_window_s():
         {"samples": 1, "std": 0.02},  # a deviation of one sample
         {"samples": 1, "std": None},  # a t-statistic with no deviation
         {"baseline_mean": None},  # baseline samples and no baseline
-        {"baseline_samples": 0},  # a baseline of no sample
+        # a baseline mean of no sample (and so, no sample of the signal either)
+        {"samples": 0, "mean": None, "std": None, "t_stat": None, "baseline_samples": 0},
         {"horizon": 0},
     ):
         with pytest.raises(ValueError):

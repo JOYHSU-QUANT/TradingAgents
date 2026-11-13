@@ -33,7 +33,8 @@ Breaking changes within the 0.x line are called out explicitly.
   budget). `call(view, tool, arguments)` is the JSON layer: every argument
   required, no other accepted, figures rounded to six significant digits;
   the records `feature_stats` and `conditional_returns` return are exact
-  and check their own figures at construction. A rule is read by `parse_spec`, a list of conditions
+  and check their own figures at construction. A rule is read by
+  `parse_spec`, a list of conditions
   and a feature name by the parser's own readers, and a refusal carries
   the parser's sentence unchanged, so a look-up accepts nothing a
   proposal could not say (it is narrower in one place: a bare list has no

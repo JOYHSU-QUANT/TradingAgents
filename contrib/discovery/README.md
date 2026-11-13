@@ -289,7 +289,7 @@ API key 由 provider 從環境變數讀），用同一個 `search()`、同一份
 `EvaluationError`，跟評估器不量測讀這個指標的規則（`backtest_train` 走的那一條）是同一條規則。不這樣做的話，查詢會把指標有值的那一段當成整個訓練區間
 來回答（例如 30 根裡只有後 11 根有值）；整段都沒有值時則回「0 根成立」，看起來像沒有訊號，其實是問不到。評估器另外幾個拒絕理由（funding 覆蓋不足、
 窗口只有一根）只跟算損益有關，只有 `backtest_train` 會遇到。落地的世界不會遇到（訓練區間從每個指標都有值的地方開始）。
-中途才讀不到值的 bar（例如 funding 覆蓋不足）不拒絕，計入 `bars_unevaluable`。這類「store 答不出來」的錯誤（`FeatureError`、`EvaluationError`）
+中途才讀不到值的 bar（例如交易所漏了幾筆 funding，那一根的費率過期）不拒絕，計入 `bars_unevaluable`。這類「store 答不出來」的錯誤（`FeatureError`、`EvaluationError`）
 不是模型的錯，不包成 `ToolRefusal`，照樣往外丟；autoresearch 的那幾句錯誤訊息帶日曆時間，之後的伺服器（T2）要自己接住，不能原樣回給模型。
 
 **`conditional_returns` 的算法（2026-11-13 拍板）。** 一個樣本的報酬＝`close[t+N] / close[t] − 1`，`side` 是 short 時取負，不含成本。

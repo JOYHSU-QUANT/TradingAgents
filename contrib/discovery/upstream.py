@@ -70,6 +70,16 @@ What is borrowed and why:
   §1 #5), and checks the holdout's tail as ``promote`` does; the scorer
   reads a rule's positions off the same result's ``Trade`` records and its
   structure off the language's ``Condition`` and ``FeatureRef``;
+- what the training-window look-ups stand on (tools plan §3.1, §3.2): the
+  reader of a bare list of conditions (``parse_conditions``) and the
+  evaluator's own answer to where such a list holds (``condition_bars``),
+  so a look-up reads a signal exactly as a scored rule does; the
+  measurement of ONE window (``evaluate_segment``, over a ``Segment``),
+  which scores a rule on training alone and files nothing; and the
+  settlement posting tolerance (``FUNDING_STAMP_TOLERANCE_MS``), by which
+  a view restates the bound ``load_bundle`` reads funding under; and the
+  regime's labels (``MarketRegime``, the perp package's, reached as the
+  research package re-exports it), so a count by label lists every label;
 - the vocabulary the manifest validates its search space against
   (``parse_feature_name``), the declarations behind it (``FeatureKind``,
   ``FeatureUnit``, ``SeriesSource``, ``spec_of``: which series a
@@ -105,6 +115,7 @@ from __future__ import annotations
 from contrib.autoresearch.constants import (
     DAILY_INTERVAL,
     FUNDING_INTERVAL_MS,
+    FUNDING_STAMP_TOLERANCE_MS,
     MS_PER_DAY,
     bar_span_ms,
 )
@@ -116,6 +127,7 @@ from contrib.autoresearch.dsl import (
     Op,
     Side,
     StrategySpec,
+    parse_conditions,
     parse_spec,
     spec_hash,
     spec_to_document,
@@ -124,6 +136,8 @@ from contrib.autoresearch.evaluator import (
     EvaluationError,
     SplitResult,
     Trade,
+    condition_bars,
+    evaluate_segment,
     evaluate_split,
     load_bundle,
     replay_sides,
@@ -169,13 +183,14 @@ from contrib.autoresearch.research import (
 from contrib.autoresearch.split import (
     DEFAULT_TRAIN_SHARE,
     DEFAULT_VALIDATION_SHARE,
+    Segment,
     SegmentName,
     Split,
     SplitError,
     studied_interval,
 )
 from contrib.autoresearch.store import ResearchStore, StoreError, default_db_path
-from contrib.autoresearch.upstream import Candle, FundingPoint, interval_to_ms
+from contrib.autoresearch.upstream import Candle, FundingPoint, MarketRegime, interval_to_ms
 from contrib.autoresearch.vocabulary import (
     FeatureKind,
     FeatureRef,
@@ -197,6 +212,7 @@ __all__ = [
     "DEFAULT_VALIDATION_SHARE",
     "FUNDING_INTERVAL_MS",
     "FUNDING_PAGE_DAYS",
+    "FUNDING_STAMP_TOLERANCE_MS",
     "INTERRUPTED",
     "MAX_EPOCH_MS",
     "MAX_HOLD_BARS",
@@ -218,10 +234,12 @@ __all__ = [
     "FundingPoint",
     "HypothesistError",
     "Ledger",
+    "MarketRegime",
     "Op",
     "Penalty",
     "ResearchStore",
     "SearchReport",
+    "Segment",
     "SegmentMetrics",
     "SegmentName",
     "SeriesBundle",
@@ -244,14 +262,17 @@ __all__ = [
     "backfill_candles",
     "backfill_funding",
     "bar_span_ms",
+    "condition_bars",
     "default_db_path",
     "describe_stop",
     "epoch_ms",
+    "evaluate_segment",
     "evaluate_split",
     "first_measurable_index",
     "from_epoch_ms",
     "interval_to_ms",
     "load_bundle",
+    "parse_conditions",
     "parse_feature_name",
     "parse_spec",
     "promote",
@@ -279,6 +300,7 @@ UPSTREAM_PACKAGES = ("contrib.autoresearch", "contrib.core")
 BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.constants", "DAILY_INTERVAL"),
     ("contrib.autoresearch.constants", "FUNDING_INTERVAL_MS"),
+    ("contrib.autoresearch.constants", "FUNDING_STAMP_TOLERANCE_MS"),
     ("contrib.autoresearch.constants", "MS_PER_DAY"),
     ("contrib.autoresearch.constants", "bar_span_ms"),
     ("contrib.autoresearch.costs", "CostModel"),
@@ -289,12 +311,15 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.dsl", "Op"),
     ("contrib.autoresearch.dsl", "Side"),
     ("contrib.autoresearch.dsl", "StrategySpec"),
+    ("contrib.autoresearch.dsl", "parse_conditions"),
     ("contrib.autoresearch.dsl", "parse_spec"),
     ("contrib.autoresearch.dsl", "spec_hash"),
     ("contrib.autoresearch.dsl", "spec_to_document"),
     ("contrib.autoresearch.evaluator", "EvaluationError"),
     ("contrib.autoresearch.evaluator", "SplitResult"),
     ("contrib.autoresearch.evaluator", "Trade"),
+    ("contrib.autoresearch.evaluator", "condition_bars"),
+    ("contrib.autoresearch.evaluator", "evaluate_segment"),
     ("contrib.autoresearch.evaluator", "evaluate_split"),
     ("contrib.autoresearch.evaluator", "load_bundle"),
     ("contrib.autoresearch.evaluator", "replay_sides"),
@@ -328,6 +353,7 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.research", "require_measurable_tail"),
     ("contrib.autoresearch.split", "DEFAULT_TRAIN_SHARE"),
     ("contrib.autoresearch.split", "DEFAULT_VALIDATION_SHARE"),
+    ("contrib.autoresearch.split", "Segment"),
     ("contrib.autoresearch.split", "SegmentName"),
     ("contrib.autoresearch.split", "Split"),
     ("contrib.autoresearch.split", "SplitError"),
@@ -340,6 +366,7 @@ BORROWED: tuple[tuple[str, str], ...] = (
     # research package re-exports them for its own port.
     ("contrib.autoresearch.upstream", "Candle"),
     ("contrib.autoresearch.upstream", "FundingPoint"),
+    ("contrib.autoresearch.upstream", "MarketRegime"),
     ("contrib.autoresearch.upstream", "interval_to_ms"),
     ("contrib.autoresearch.vocabulary", "FeatureKind"),
     ("contrib.autoresearch.vocabulary", "FeatureRef"),

@@ -34,6 +34,7 @@ from contrib.autoresearch.dsl import (
     StrategySpec,
     describe_spec,
     load_spec,
+    parse_conditions,
     parse_spec,
 )
 from contrib.autoresearch.vocabulary import MAX_OFFSET_BARS, FeatureKind, FeatureRef
@@ -295,6 +296,67 @@ def test_an_unknown_family_or_operator_lists_the_ones_there_are():
     assert "unsupported comparison operator '=~'" in _message(
         _base(entry={"long": [{"left": "close", "op": "=~", "right": 1}]})
     )
+
+
+def test_a_bare_list_of_conditions_is_read_as_a_spec_reads_its_own():
+    written = [
+        {"left": "rsi_14", "op": "<", "right": 30},
+        {"left": {"feature": "close", "offset": 1}, "op": ">", "right": "sma_50"},
+        {"left": "regime", "op": "!=", "right": "volatile"},
+    ]
+    assert parse_conditions(written) == parse_spec(_base(entry={"long": written})).entry_long
+    # None is an answer the parser gives — ``filters: []`` is legal — and
+    # whether none is one is the caller's to say.
+    assert parse_conditions([]) == ()
+
+
+@pytest.mark.parametrize(
+    "written",
+    [
+        [{"left": "momentum", "op": ">", "right": 0}],
+        [{"left": "close", "op": ">", "right": "rsi_14"}],
+        [{"left": "rsi_14", "op": "==", "right": 30}],
+        [{"left": "rsi_14", "op": "<", "right": 150}],
+        [{"left": {"feature": "close", "offset": -1}, "op": ">", "right": 0}],
+        [{"left": "close", "op": ">", "right": 0, "stop_loss": 0.02}],
+        [{"left": "close", "op": ">", "right": 0}, "close > 0"],
+        {"left": "close", "op": ">", "right": 0},
+        "close > 0",
+    ],
+    ids=[
+        "unknown-feature",
+        "cross-unit",
+        "equality-on-a-number",
+        "impossible-threshold",
+        "future-offset",
+        "unknown-key",
+        "second-item-not-an-object",
+        "an-object-not-a-list",
+        "text-not-a-list",
+    ],
+)
+def test_a_bare_list_is_refused_in_the_sentence_a_spec_would_be(written):
+    in_a_spec = _message(_base(entry={"long": written}))
+    with pytest.raises(SpecError) as caught:
+        parse_conditions(written)
+    assert in_a_spec.startswith("spec.entry.long")
+    assert str(caught.value) == in_a_spec.replace("spec.entry.long", "conditions", 1)
+    # And under the name the caller knows the list by.
+    with pytest.raises(SpecError) as caught:
+        parse_conditions(written, path="signal")
+    assert str(caught.value) == in_a_spec.replace("spec.entry.long", "signal", 1)
+
+
+def test_a_bare_list_has_to_be_there_and_has_no_params_block_to_name():
+    # An absent key is "none" inside a spec; on its own it is not a list,
+    # and is refused in the sentence anything else that is not a list is.
+    not_a_list = _message(_base(entry={"long": "close > 0"}))
+    assert not_a_list == "spec.entry.long: expected a list of conditions, got str"
+    with pytest.raises(SpecError) as caught:
+        parse_conditions(None)
+    assert str(caught.value) == "conditions: expected a list of conditions, got NoneType"
+    with pytest.raises(SpecError, match=r"conditions\[0\].right: no parameter named 'floor'"):
+        parse_conditions([{"left": "rsi_14", "op": "<", "right": {"param": "floor"}}])
 
 
 def test_a_condition_list_that_is_not_a_list_is_refused():

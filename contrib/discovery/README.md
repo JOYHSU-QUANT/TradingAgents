@@ -37,6 +37,8 @@ backfill 落地＋驗收）、`generate` 指令。
 SHA-256）、`oracle.json` v2（blockers 改 enum）。**PR 5（LLM 臂，已落地）**：`bench.py` 在 Random／Grid 之後跑 manifest 指名的模型；定義見「LLM 臂（PR 5）」一節。**PR 6（實驗 B：research 段有沒有進決策，已落地）**不在這個套件：它是
 `contrib/replay` 的四個 `research-*` variant 與 `effect` 指令（[replay README](../replay/README.md) 的「多一段文字有沒有推動決策」一節），
 兩個實驗只共用結論、不共用 import。
+**工具組 T1（訓練區間查詢的純函式，已落地）**：`research_tools.py`＝會用工具的模型臂在提案前可以做的三種查詢。這一步只有純函式與它們的
+JSON 層；MCP 伺服器、會用工具的 hypothesist、接進 `bench.py` 是之後的 T2–T4，還沒做。定義見「訓練區間查詢（工具組 T1）」一節。
 
 已經有的東西：
 
@@ -74,6 +76,9 @@ SHA-256）、`oracle.json` v2（blockers 改 enum）。**PR 5（LLM 臂，已落
   `Experiment`；`world_dir()`／`land_world()`＝run 目錄的配置與分段落地（見「檔案配置」）。
 - [`scoring.py`](./scoring.py)：評分（計畫 §4.6）。`positions`／`direction_agreement`／`structural_distance` 是三個純函式，
   `score_world(run_dir)` 寫 `scores.json`，`report_table(run_dirs)` 是跨世界的表；定義見「評分（PR 4）」一節。
+- [`research_tools.py`](./research_tools.py)：`TrainView`（只讀到訓練區間最後一根 bar 的 frame，加上 experiment 的 split 與成本）、三個查詢
+  `feature_stats`／`conditional_returns`／`backtest_train`、JSON 層 `call(view, tool, arguments)`。不寫任何東西，不 import
+  `manifest.py`。定義見「訓練區間查詢（工具組 T1）」一節。
 - [`cli.py`](./cli.py)：`python -m contrib.discovery generate --manifest <path> [--root <dir>]`、`oracle --run <dir>`、
   `search --run <dir>`、`calibrate [--root <dir>]`、`score --run <dir>`、`report [--root <dir>] [--unseal]`。
 
@@ -255,6 +260,53 @@ API key 由 provider 從環境變數讀），用同一個 `search()`、同一份
 
 呼叫次數＝子集世界數 × `replicates` × `max_trials`。
 
+## 訓練區間查詢（工具組 T1）
+
+2026-11-10 的模型臂跟著 validation 分數爬坡，連純雜訊世界都爬得上去。工具組要問的是：讓模型在提案前先查**訓練區間**的資料，找回率會不會上升、
+雜訊世界的誤判會不會下降。T1 只做查詢本身，三個純函式。之後的 MCP 伺服器（T2）會包住它們、會用工具的 hypothesist（T3）會呼叫它們；不用 LLM 的
+對照組（T5）會直接呼叫同一組函式。這三步都還沒做。
+
+**界線。** 三個查詢都只吃一個 `TrainView`。`TrainView.load(store, coin=, split=, costs=, indicator_lookback=)` 用
+`until_ms = 訓練區間結尾 − 1` 讀 store，所以 validation 與 holdout 的 bar 不是被濾掉，是根本沒有讀進來。view 收的是 experiment 的**整個 split**，
+訓練區間由它自己從 split 取出，呼叫方不能另外遞一段區間進來。它認得出「這是不是一個 split」，認不出「這是不是這個 experiment 的 split」，所以要傳的就是 experiment 自己的那一個。`TrainView` 建構時自己再檢查一次：最後一根訓練 bar 之後不能有 4h bar，
+日線不能晚於那一根的收盤，funding 不能晚於那個收盤該付的那一筆，整段歷史要在格線上（跟一次量測對歷史的要求相同）；手動組出來的 view 也過同一關。
+那個收盤該付的那一筆 funding，交易所會晚幾毫秒才貼出來；view 手上有它的時間戳（funding 覆蓋率要數它），但沒有任何查詢讀它的費率。
+`load` 不吃 manifest，模組也不 import `manifest.py`，所以世界類型與埋入的規則沒有路徑進到任何輸出。查詢不寫任何東西：不落 trial，不計入
+`rules_tried`。
+
+| 查詢 | 輸入 | 輸出 |
+|---|---|---|
+| `feature_stats` | `{"feature": "<指標名稱>"}` | `feature`、`bars`（訓練 bar 數）、`bars_with_value`、`min`、`p05`／`p25`／`p50`／`p75`／`p95`、`max`；`regime` 改回 `counts`（每個 label 的根數，沒出現過的 label 是 0） |
+| `conditional_returns` | `{"conditions": [...], "horizon": N, "side": "long"｜"short"}` | `bars`、`bars_holding`（條件成立的根數）、`bars_unevaluable`、`horizon`、`side`、`samples`、`mean_return`、`std_return`、`t_stat`、`baseline_samples`、`baseline_mean_return` |
+| `backtest_train` | `{"rule": {...}}`，跟正式提案是同一個物件 | `bars`、`bars_unevaluable`、`trades`、`exposure`、`turnover`、`net_sharpe`、`net_return`、`ruined` |
+
+**同一個解析器。** 規則走 `parse_spec`，條件走 `parse_conditions`，指標名稱走 `parse_feature_name`；條件在哪幾根成立問的是評估器自己的
+`condition_bars`，訓練區間的回測就是 `evaluate_segment`。解析器會拒絕的規則、條件、指標名稱，查詢也拒絕，錯誤文字就是解析器那一句
+（`ToolRefusal`）。每個參數都必填，多的鍵拒絕。`horizon` 的範圍就是語言對 `exit.max_bars` 的範圍（1–1000）。查詢只會比提案窄、不會比它寬：
+條件的門檻可以是數字、另一個指標或 regime 標籤，不收 `{"param": ...}`（單獨一串條件外面沒有 `params` 區塊）。
+
+**第一根讀不到值的指標，三個查詢都不讀（2026-11-13 拍板）。** 查詢用到的指標在訓練區間第一根沒有值時，`feature_stats` 與 `conditional_returns` 丟
+`EvaluationError`，跟評估器不量測讀這個指標的規則（`backtest_train` 走的那一條）是同一條規則。不這樣做的話，查詢會把指標有值的那一段當成整個訓練區間
+來回答（例如 30 根裡只有後 11 根有值）；整段都沒有值時則回「0 根成立」，看起來像沒有訊號，其實是問不到。評估器其他的拒絕理由裡，跟格線有關的
+（缺 bar、時間戳不在格線上）view 建構時就自己檢查了；剩下的（funding 覆蓋不足、窗口只有一根）只跟算損益有關，只有 `backtest_train` 會遇到。落地的世界不會遇到（訓練區間從每個指標都有值的地方開始）。
+中途才讀不到值的 bar（例如交易所漏了幾筆 funding，那一根的費率過期）不拒絕：`conditional_returns` 與 `backtest_train` 計入 `bars_unevaluable`（`backtest_train` 的那個數是計分迴圈自己的，不含它不做決定的最後一根），`feature_stats` 則是 `bars_with_value` 少於 `bars`。這類「store 答不出來」的錯誤（`FeatureError`、`EvaluationError`）
+不是模型的錯，不包成 `ToolRefusal`，照樣往外丟；autoresearch 的那幾句錯誤訊息帶日曆時間，之後的伺服器（T2）要自己接住，不能原樣回給模型。
+
+**`conditional_returns` 的算法（2026-11-13 拍板）。** 一個樣本的報酬＝`close[t+N] / close[t] − 1`，`side` 是 short 時取負，不含成本。
+樣本只取不重疊的：條件成立的 bar 由前往後取，彼此至少隔 N 根，而且往後 N 根都還在訓練區間內；碰到結尾的直接丟掉，不補。
+`mean_return`、`std_return`（樣本標準差）、`t_stat`＝`mean / (std / √samples)`（對 0）都只用這一組樣本。原因：相鄰 bar 往後看 N 根的報酬幾乎整段重疊，
+拿全部成立的 bar 直接算，t 值會偏高，模型信了就等於又在爬雜訊。樣本不到 2 個時 `std_return` 與 `t_stat` 是 `null`；樣本彼此相同（或只差在浮點捨入）時 `t_stat`
+是 `null`。
+
+`baseline_mean_return` 是同一個 horizon、同一個方向、**不看條件**的平均報酬：訓練區間從第一根起每 N 根取一個樣本，共 `baseline_samples` 個。
+訓練區間如果整段偏漲或偏跌，任何條件都會沾到那個漂移，所以條件的平均要跟這個數字比，不是跟 0 比。
+
+這組樣本不等於規則實際會做的交易：評估器在下一根開盤成交、出場那一根不再進場，所以「訊號出現就進場、抱 N 根」的規則每筆交易會再晚一根；
+整條規則的成績要問 `backtest_train`。
+
+`backtest_train` 的數字等於同一條規則當成 trial 量測時 train 段的數字（測試逐欄比對）。JSON 層把數字取 6 位有效數字；純函式回的紀錄不取整。
+三個紀錄型別（`NumberStats`、`LabelCounts`、`ConditionalReturns`）在建構時檢查自己的數字對不對得上（例如樣本數不能多於成立根數），手動造的也過同一關。
+
 ## 評分（PR 4）
 
 `score --run <dir>`（`scoring.score_world`，計畫 §4.6）回答「選到的規則是不是埋的那條」，三項分開報、不合成一個數：
@@ -308,6 +360,7 @@ null 雙胞胎 digest 拒絕、紀錄對 manifest 的條件／預算／池／ora
 staging 開不起來時 claim 歸還；搬 store 失敗或中斷時保留 staging 並點名；紀錄閘門（verdict 對不上快照、selected 非首位、holdout 段位、`eligible`／`margin`／`passed`／段名／`clearing`、`best`／`size`、版本、grid replicate、trials ≤ pool_size、row 的計數）；holdout 旗標可關；dev-only／null 的 oracle 預覽拒絕；中斷＝目錄回到落地狀態；seam 失敗記錄後下一臂照跑 | `tests/test_bench.py` |
 | 三項指標各自的金標（出場原因對持倉 bar、只算有倉的 bar、未定義、結構距離的算式）；`recovered` 的判定；紀錄的閘門；一次真的評分（讀回相等、重跑同 bytes、store 不動、store 對不上紀錄就拒絕）；表（失敗留在分母、seam 另計、不開 store、沒評分拒絕、紀錄對不上拒絕） | `tests/test_scoring.py` |
 | artifact 的 SHA-256 對不上 manifest（雙胞胎的 `world.sqlite` 複製錯目錄）在複製前拒絕 | `tests/test_bench.py` |
+| 訓練區間查詢：`load` 的讀取上限＝訓練區間結尾 − 1；訓練區間由 split 取出，傳一個「標成 train 的區間」會被拒絕；view 拒絕帶著之後任何一根 bar／日線／funding 的 frame，也拒絕中間有洞的歷史；把最後一根訓練 bar 收盤之後的 bar、日線、funding（含 view 手上那一筆邊界上的 funding 的費率）全部改掉，每個查詢的輸出逐位元不變（對照組：4h／日線／funding 各自改到訓練區間內一點點就會變）；訓練區間不落在午夜時，跨過界線的那一天不被讀入；輸出的鍵與字串不含世界類型／planted／validation／holdout 字樣；模組只 import `upstream`；查詢前後 arm 的 sqlite 位元組相同、ledger 沒有 trial；`backtest_train`＝`evaluate_unfiled` 的 train 段；解析器拒絕的輸入回解析器原句；指標在訓練區間第一根沒有值時三個查詢都拒絕；`feature_stats` 與 `conditional_returns` 的手算金標（分位數、不重疊樣本、t 值、基準報酬）；三個紀錄型別拒絕對不上的數字 | `tests/test_research_tools.py` |
 
 ## Manifest 格式（v3）
 
@@ -390,7 +443,8 @@ prompt，store 裡的 coin 名仍是 id。與計畫 §2 寫的 `<world-id>/` 不
 
 ## 不做清單
 
-- 不改 autoresearch 的 DSL、評估器、ledger、penalty 公式。
+- 不改 autoresearch 的 DSL（語言本身）、評估器的行為、ledger、penalty 公式。工具組 T1 在 autoresearch 加了兩個公開的讀取函式
+  （`dsl.parse_conditions`、`evaluator.condition_bars`），都只是包住原本就有的私有實作，沒有改任何既有行為。
 - 不 import `contrib.replay`、`contrib.hyperliquid_perp`，不碰 paper／live 的任何 store。
 - 不做 Null-v2／regime shift／價格衍生特徵的 planted 規則（第二階段）。
 - 不做「首次成功就停止」協議。

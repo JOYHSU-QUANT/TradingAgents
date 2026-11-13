@@ -10,6 +10,55 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **Discovery Lab: three look-ups over the training window, as pure
+  functions (tools plan T1).** The model arm of 2026-11-10 climbed the
+  validation score, in pure-noise worlds too; the next experiment asks
+  whether a model that can look at the TRAINING window before it proposes
+  does better. This is the looking, and nothing else yet — no MCP server,
+  no tool-using hypothesist, nothing wired into `search` (T2–T4).
+  `contrib/discovery/research_tools.py` holds a `TrainView` — a frame read
+  no further than the last training bar (`until_ms` = the window's end
+  minus one), built from the experiment's whole split so that the
+  training window is read off it rather than named by the caller; at
+  construction the view refuses a frame holding any later bar or daily
+  bar, or a funding settlement past the one due at the last close, and
+  holds the history to the grid a measurement requires — and three
+  functions over it: `feature_stats` (how many training bars a feature
+  has a value at, its minimum, maximum and five quantiles, or the bars
+  per regime label, every label listed), `conditional_returns` (what the
+  close did over the N bars after a list of conditions held, beside what
+  it did over every N bars whatever the conditions said) and
+  `backtest_train` (a whole rule's training figures: the research
+  package's own `evaluate_segment`, filed nowhere and counted against no
+  budget). `call(view, tool, arguments)` is the JSON layer: every argument
+  required, no other accepted, figures rounded to six significant digits;
+  the records `feature_stats` and `conditional_returns` return are exact
+  and check their own figures at construction. A rule is read by
+  `parse_spec`, a list of conditions
+  and a feature name by the parser's own readers, and a refusal carries
+  the parser's sentence unchanged, so a look-up accepts nothing a
+  proposal could not say (it is narrower in one place: a bare list has no
+  `params` block, so a `{"param": ...}` threshold is refused). A feature
+  with no value at the first training bar is refused by all three with
+  the evaluator's error — the evaluator does not measure a rule reading
+  it there — rather than answered from whatever stretch of the window
+  the feature happens to cover.
+  `conditional_returns` computes its mean, deviation and t-statistic on
+  NON-OVERLAPPING samples only — the bars the conditions hold at, taken
+  in order, each at least N bars after the one before and with its whole
+  horizon inside the training window — because forward returns of
+  neighbouring bars share all but one bar, and a t-statistic over them is
+  the inflated number a model would climb. Samples that differ by float
+  rounding alone are given no t-statistic.
+  The module imports nothing of the manifest, so the world's kind and what is
+  planted have no path into an answer. Two public readers were added to
+  `contrib/autoresearch` for this, each a wrapper over code that was
+  already there and neither changing what any existing caller gets:
+  `dsl.parse_conditions` (a bare list of conditions, read by the reader
+  `parse_spec` uses for its own lists) and `evaluator.condition_bars`
+  (whether a list holds at each bar of a frame, through the scored loop's
+  own reader — the private `_Reader` is now a spec-reading subclass of the
+  condition-reading half it shares with this).
 - **Discovery Lab: a planted world whose price as a whole does not drift
   (`conditional-v2`).** A conditional-v1 world whose rule enters one side
   adds its effect on that side only, so the whole price drifts by `beta`

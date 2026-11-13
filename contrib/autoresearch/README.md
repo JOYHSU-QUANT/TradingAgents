@@ -38,7 +38,9 @@ PR C1（本次）＝交接文件：`signal` 指令，以及 `hyperliquid_perp` �
   不是手抄的——B1 要餵給 LLM 的詞彙表也走這一個函式。
 - **宣告式 DSL 與它的 parser**（`dsl.py`）：假說是資料不是程式，沒有 `eval`／`exec`／任何
   自由運算式。未知欄位、未知 feature、未知 op、未來 offset 一律**具名拒絕**，句子裡帶著
-  文件內的路徑（`spec.entry.long[0].right`）與該怎麼改。
+  文件內的路徑（`spec.entry.long[0].right`）與該怎麼改。`parse_conditions` 用同一個讀取器
+  單獨讀一串條件（外面沒有規則），讀法跟規則裡的那一串相同，只有兩處例外：整串不能省略，
+  門檻不能寫 `{"param": ...}`（外面沒有 `params` 區塊）。
 - **逐 bar 的 feature 計算**（`features.py`）：每個值只由「截至該 bar 收盤」的資料算出來，
   而且是**建構上如此**——indicator 引擎拿到的 window 永遠**結束在這根 bar**，起點則往回
   `indicator_lookback` 根（預設 200＝實盤每 cycle fetch 的根數；A3 起是 frame 的參數，
@@ -51,6 +53,8 @@ PR C1（本次）＝交接文件：`signal` 指令，以及 `hyperliquid_perp` �
   沒有明說 `holdout=True` 就拿不到那段，連 rows 都不從 store 讀。
 - **bar 級評估器**（`evaluator.py`）：t 收盤決策、t+1 開盤成交、gross／net 兩組指標、
   regime 分桶；空的 `exit`、反向 entry、filter、`None` 四題的語意在這裡定（見下面）。
+  `condition_bars` 回答「這串條件在每一根 bar 成不成立」，用的是迴圈自己的那個讀取器，
+  不模擬倉位也不算錢；`contrib.discovery` 的訓練區間查詢靠它跟計分迴圈讀出同一個答案。
 
 - **實驗 ledger**（`ledger.py`、`research.py`）：一個 experiment 寫死一次成本、切分、
   indicator window 與 penalty；每條**不同的規則**是一個 trial；promote 門檻隨 trial 數的

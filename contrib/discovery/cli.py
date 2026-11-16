@@ -1,6 +1,6 @@
 """``python -m contrib.discovery`` — the benchmark's commands.
 
-Six so far, in the order a world goes through them (plan §3):
+Six in the order a world goes through them (plan §3):
 
 - ``generate --manifest world.json [--root DIR]`` — read a manifest, build
   its world from the seed, land it in ``<root>/<world id>-<manifest
@@ -41,6 +41,17 @@ Six so far, in the order a world goes through them (plan §3):
   (plan §3's last step). Reads no store. A test seed's rows keep everything
   read from the holdout sealed unless ``--unseal`` is given (plan §4.2).
 
+And one beside that order, for a person (tools plan §3.3):
+
+- ``tools --run DIR`` — the training-window look-ups of a landed world
+  served over MCP on this process's stdin and stdout, to try the tools by
+  hand from an MCP client. The manifest is read here for the coin, the
+  split, the costs and the indicator window; the server is a child
+  started on those and a throw-away copy of the artifact
+  (:mod:`.tools_server`), so the process that answers was never handed
+  the manifest. Development seeds only. Its stdout is the protocol's:
+  what this command says, it says on stderr.
+
 What the commands print is for the operator: the world's kind and rule
 are in the manifest, which a model never sees (plan §1 #7). Nothing
 printed here reaches a prompt.
@@ -60,7 +71,14 @@ from __future__ import annotations
 
 import argparse
 import logging
+import shutil
+import signal
+import subprocess
 import sys
+import tempfile
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -72,11 +90,13 @@ from .bench import (
     model_hypothesist,
     preview_oracle,
     run_world,
+    tools_experiment,
 )
 from .landing import ARTIFACT_FILENAME, MANIFEST_FILENAME, default_root, land_world
 from .manifest import Manifest, ManifestError
 from .records import RecordError
 from .scoring import SCORES_FILENAME, report_table, require_this_scorer, score_world
+from .tools_server import IMPORT_ROOT, LaunchError, ServerParams, require_sdk
 from .upstream import EvaluationError, FeatureError, SplitError, StoreError, render_fetch
 from .worlds import WorldError, generate
 
@@ -149,6 +169,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "--unseal",
         action="store_true",
         help="print a test seed's recovery and holdout figures, which are sealed by default",
+    )
+
+    tools_cmd = subparsers.add_parser(
+        "tools",
+        help=(
+            "serve a landed world's training-window look-ups over MCP on stdin and stdout "
+            "(development seeds)"
+        ),
+    )
+    tools_cmd.add_argument(
+        "--run", required=True, help="a landed run directory (manifest.json and world.sqlite)"
     )
     return parser
 
@@ -251,6 +282,68 @@ def _cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_tools(args: argparse.Namespace) -> int:
+    run_dir = Path(args.run)
+    experiment = tools_experiment(run_dir)
+    # Asked here as the child will ask it, so a missing SDK is said before
+    # the artifact is copied for a server that cannot be built.
+    require_sdk()
+    # A copy, not the artifact: opening a store migrates one an older build
+    # wrote, and the artifact's digest is what the directory is held to.
+    # Cleanup errors are let go: an interrupted child may still hold the
+    # file for a moment on Windows, and the copy is in the system's temp.
+    # (A parent KILLED while it serves cleans nothing up: the copy stays in
+    # the temp directory, and the child serves on until its stdin closes.)
+    # Ctrl-Break is read as an interrupt from before the copy is made, so
+    # that it, too, takes the copy with it.
+    with (
+        _break_as_interrupt(),
+        tempfile.TemporaryDirectory(prefix="discovery-tools-", ignore_cleanup_errors=True) as scratch,
+    ):
+        store = Path(scratch) / ARTIFACT_FILENAME
+        shutil.copyfile(run_dir / ARTIFACT_FILENAME, store)
+        params = ServerParams.for_experiment(store, experiment)
+        # "Starting", not "serving": the child has yet to read the store and
+        # warm its frame, and says so itself if it cannot.
+        print(
+            f"starting a server for {experiment.coin}'s training window on stdin and stdout; "
+            f"close stdin or interrupt to stop",
+            file=sys.stderr,
+        )
+        return _serve_child(params)
+
+
+def _serve_child(params: ServerParams) -> int:
+    """Run the server as a child on this process's own stdin and stdout; its exit code is this command's.
+
+    A child ended by a signal reports minus the signal's number (POSIX);
+    as an exit code that is 128 plus it, which is how a shell would say it.
+    """
+    code = subprocess.run(params.command(), cwd=IMPORT_ROOT, check=False).returncode
+    return 128 - code if code < 0 else code
+
+
+@contextmanager
+def _break_as_interrupt() -> Iterator[None]:
+    """Read Windows' Ctrl-Break as the interrupt Ctrl-C is, while the ``tools`` command holds its copy.
+
+    Left alone it ends this process without unwinding, and the copy of the
+    artifact the child reads stays in the temp directory. As an interrupt
+    it ends the command the way Ctrl-C does: the copy is removed and the
+    exit code is 130. The child handles its own.
+    """
+    if not hasattr(signal, "SIGBREAK") or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.signal(signal.SIGBREAK, signal.default_int_handler)
+    try:
+        yield
+    finally:
+        # ``None`` is a handler that was not installed from Python, which
+        # cannot be put back from here: the default is.
+        signal.signal(signal.SIGBREAK, signal.SIG_DFL if previous is None else previous)
+
+
 _COMMANDS = {
     "generate": _cmd_generate,
     "oracle": _cmd_oracle,
@@ -258,6 +351,7 @@ _COMMANDS = {
     "calibrate": _cmd_calibrate,
     "score": _cmd_score,
     "report": _cmd_report,
+    "tools": _cmd_tools,
 }
 
 
@@ -279,8 +373,11 @@ def main(argv: list[str] | None = None) -> int:
         EvaluationError,
         FeatureError,
         RecordError,
+        LaunchError,
         OSError,
     ) as exc:
+        # ``LaunchError``: the ``tools`` command's server cannot be started
+        # (the SDK it is built on is not installed).
         # The families a well-formed invocation can still meet, each
         # carrying a sentence written for an operator: the manifest's, the
         # generator's and the split's refusals (listed by class, not as

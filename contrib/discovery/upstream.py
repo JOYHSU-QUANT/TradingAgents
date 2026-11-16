@@ -80,6 +80,10 @@ What is borrowed and why:
   a view restates the bound ``load_bundle`` reads funding under; and the
   regime's labels (``MarketRegime``, the perp package's, reached as the
   research package re-exports it), so a count by label lists every label;
+- what the look-ups' server advertises (tools plan §2.1.1, T2): every legal
+  feature spelling (``feature_names``) and how far back an offset may reach
+  (``MAX_OFFSET_BARS``), so the schemas a model is shown are generated from
+  the vocabulary's own table and not written out beside it;
 - the vocabulary the manifest validates its search space against
   (``parse_feature_name``), the declarations behind it (``FeatureKind``,
   ``FeatureUnit``, ``SeriesSource``, ``spec_of``: which series a
@@ -192,11 +196,13 @@ from contrib.autoresearch.split import (
 from contrib.autoresearch.store import ResearchStore, StoreError, default_db_path
 from contrib.autoresearch.upstream import Candle, FundingPoint, MarketRegime, interval_to_ms
 from contrib.autoresearch.vocabulary import (
+    MAX_OFFSET_BARS,
     FeatureKind,
     FeatureRef,
     FeatureUnit,
     SeriesSource,
     SpecError,
+    feature_names,
     parse_feature_name,
     require_number,
     spec_of,
@@ -216,6 +222,7 @@ __all__ = [
     "INTERRUPTED",
     "MAX_EPOCH_MS",
     "MAX_HOLD_BARS",
+    "MAX_OFFSET_BARS",
     "MIN_INDICATOR_LOOKBACK",
     "MS_PER_DAY",
     "UPSTREAM_PACKAGES",
@@ -268,6 +275,7 @@ __all__ = [
     "epoch_ms",
     "evaluate_segment",
     "evaluate_split",
+    "feature_names",
     "first_measurable_index",
     "from_epoch_ms",
     "interval_to_ms",
@@ -368,11 +376,13 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.upstream", "FundingPoint"),
     ("contrib.autoresearch.upstream", "MarketRegime"),
     ("contrib.autoresearch.upstream", "interval_to_ms"),
+    ("contrib.autoresearch.vocabulary", "MAX_OFFSET_BARS"),
     ("contrib.autoresearch.vocabulary", "FeatureKind"),
     ("contrib.autoresearch.vocabulary", "FeatureRef"),
     ("contrib.autoresearch.vocabulary", "FeatureUnit"),
     ("contrib.autoresearch.vocabulary", "SeriesSource"),
     ("contrib.autoresearch.vocabulary", "SpecError"),
+    ("contrib.autoresearch.vocabulary", "feature_names"),
     ("contrib.autoresearch.vocabulary", "parse_feature_name"),
     ("contrib.autoresearch.vocabulary", "require_number"),
     ("contrib.autoresearch.vocabulary", "spec_of"),

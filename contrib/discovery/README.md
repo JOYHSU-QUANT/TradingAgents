@@ -38,7 +38,9 @@ SHA-256）、`oracle.json` v2（blockers 改 enum）。**PR 5（LLM 臂，已落
 `contrib/replay` 的四個 `research-*` variant 與 `effect` 指令（[replay README](../replay/README.md) 的「多一段文字有沒有推動決策」一節），
 兩個實驗只共用結論、不共用 import。
 **工具組 T1（訓練區間查詢的純函式，已落地）**：`research_tools.py`＝會用工具的模型臂在提案前可以做的三種查詢。這一步只有純函式與它們的
-JSON 層；MCP 伺服器、會用工具的 hypothesist、接進 `bench.py` 是之後的 T2–T4，還沒做。定義見「訓練區間查詢（工具組 T1）」一節。
+JSON 層。定義見「訓練區間查詢（工具組 T1）」一節。
+**工具組 T2（MCP 伺服器，已落地）**：`tools_server.py`＝把那三個查詢包成一個走 MCP 的 stdio 伺服器，另加 `tools` 指令讓人手動試玩。
+會用工具的 hypothesist、接進 `bench.py` 是之後的 T3–T4，還沒做。定義見「MCP 伺服器（工具組 T2）」一節。
 
 已經有的東西：
 
@@ -79,8 +81,11 @@ JSON 層；MCP 伺服器、會用工具的 hypothesist、接進 `bench.py` 是�
 - [`research_tools.py`](./research_tools.py)：`TrainView`（只讀到訓練區間最後一根 bar 的 frame，加上 experiment 的 split 與成本）、三個查詢
   `feature_stats`／`conditional_returns`／`backtest_train`、JSON 層 `call(view, tool, arguments)`。不寫任何東西，不 import
   `manifest.py`。定義見「訓練區間查詢（工具組 T1）」一節。
+- [`tools_server.py`](./tools_server.py)：那三個查詢的 MCP 伺服器。`ServerParams`（啟動時收的五樣東西與它們的命令列寫法）、
+  `load_view`／`warm`（讀到訓練區間結尾、先把每個指標算一次）、`tool_specs()`（模型看到的說明與 schema）、`build_server`／`serve`／`main`。
+  只 import `research_tools` 與 `upstream`；MCP SDK 是選用安裝，只在建伺服器時才 import。定義見「MCP 伺服器（工具組 T2）」一節。
 - [`cli.py`](./cli.py)：`python -m contrib.discovery generate --manifest <path> [--root <dir>]`、`oracle --run <dir>`、
-  `search --run <dir>`、`calibrate [--root <dir>]`、`score --run <dir>`、`report [--root <dir>] [--unseal]`。
+  `search --run <dir>`、`calibrate [--root <dir>]`、`score --run <dir>`、`report [--root <dir>] [--unseal]`、`tools --run <dir>`。
 
 ## 世界生成器（generator v1）
 
@@ -263,8 +268,8 @@ API key 由 provider 從環境變數讀），用同一個 `search()`、同一份
 ## 訓練區間查詢（工具組 T1）
 
 2026-11-10 的模型臂跟著 validation 分數爬坡，連純雜訊世界都爬得上去。工具組要問的是：讓模型在提案前先查**訓練區間**的資料，找回率會不會上升、
-雜訊世界的誤判會不會下降。T1 只做查詢本身，三個純函式。之後的 MCP 伺服器（T2）會包住它們、會用工具的 hypothesist（T3）會呼叫它們；不用 LLM 的
-對照組（T5）會直接呼叫同一組函式。這三步都還沒做。
+雜訊世界的誤判會不會下降。T1 只做查詢本身，三個純函式。MCP 伺服器（T2，見下一節）包住它們；會用工具的 hypothesist（T3）會經由伺服器呼叫它們，
+不用 LLM 的對照組（T5）會直接呼叫同一組函式，這兩步還沒做。
 
 **界線。** 三個查詢都只吃一個 `TrainView`。`TrainView.load(store, coin=, split=, costs=, indicator_lookback=)` 用
 `until_ms = 訓練區間結尾 − 1` 讀 store，所以 validation 與 holdout 的 bar 不是被濾掉，是根本沒有讀進來。view 收的是 experiment 的**整個 split**，
@@ -290,7 +295,7 @@ API key 由 provider 從環境變數讀），用同一個 `search()`、同一份
 來回答（例如 30 根裡只有後 11 根有值）；整段都沒有值時則回「0 根成立」，看起來像沒有訊號，其實是問不到。評估器其他的拒絕理由裡，跟格線有關的
 （缺 bar、時間戳不在格線上）view 建構時就自己檢查了；剩下的（funding 覆蓋不足、窗口只有一根）只跟算損益有關，只有 `backtest_train` 會遇到。落地的世界不會遇到（訓練區間從每個指標都有值的地方開始）。
 中途才讀不到值的 bar（例如交易所漏了幾筆 funding，那一根的費率過期）不拒絕：`conditional_returns` 與 `backtest_train` 計入 `bars_unevaluable`（`backtest_train` 的那個數是計分迴圈自己的，不含它不做決定的最後一根），`feature_stats` 則是 `bars_with_value` 少於 `bars`。這類「store 答不出來」的錯誤（`FeatureError`、`EvaluationError`）
-不是模型的錯，不包成 `ToolRefusal`，照樣往外丟；autoresearch 的那幾句錯誤訊息帶日曆時間，之後的伺服器（T2）要自己接住，不能原樣回給模型。
+不是模型的錯，不包成 `ToolRefusal`，照樣往外丟；autoresearch 的那幾句錯誤訊息帶日曆時間，所以伺服器（T2）自己接住，不原樣回給模型（見下一節「一次呼叫怎麼結束」）。
 
 **`conditional_returns` 的算法（2026-11-13 拍板）。** 一個樣本的報酬＝`close[t+N] / close[t] − 1`，`side` 是 short 時取負，不含成本。
 樣本只取不重疊的：條件成立的 bar 由前往後取，彼此至少隔 N 根，而且往後 N 根都還在訓練區間內；碰到結尾的直接丟掉，不補。
@@ -306,6 +311,91 @@ API key 由 provider 從環境變數讀），用同一個 `search()`、同一份
 
 `backtest_train` 的數字等於同一條規則當成 trial 量測時 train 段的數字（測試逐欄比對）。JSON 層把數字取 6 位有效數字；純函式回的紀錄不取整。
 三個紀錄型別（`NumberStats`、`LabelCounts`、`ConditionalReturns`）在建構時檢查自己的數字對不對得上（例如樣本數不能多於成立根數），手動造的也過同一關。
+
+## MCP 伺服器（工具組 T2）
+
+T1 的三個查詢，包成一個走 MCP 的伺服器（`tools_server.py`）。會用工具的模型臂（T3，還沒做）不直接呼叫函式，而是問這個伺服器。
+伺服器是另一個程序，用自己的 stdin／stdout 講 MCP。
+
+**為什麼是另一個程序。** 跑搜尋的那個程序手上有讀到 validation 結尾的資料。伺服器程序啟動時只收五樣東西（`ServerParams`）：資料檔路徑、
+coin、experiment 的整個 split、成本、indicator lookback。它不讀 manifest，也不 import 會讀 manifest 的模組，所以世界類型與埋入的規則不在
+那個程序裡；它用 `TrainView.load` 讀到訓練區間最後一根就停，所以 validation 與 holdout 的 bar 也不在那個程序裡。split 是整個傳的，所以伺服器知道
+後兩段的時間點，但沒有那兩段的資料。經 SDK 的 stdio 客戶端啟動時（benchmark 會這樣啟動），子程序拿到的環境變數只有 SDK 放行的一小份清單
+（`PATH` 之類），API 金鑰不會被帶進去；`tools` 指令啟動的子程序則沿用下指令那個人的環境。
+
+**怎麼啟動。**
+
+- benchmark（T4，還沒接）：`ServerParams.for_experiment(資料檔, experiment).command()` 給出整條指令
+  （`python -m contrib.discovery.tools_server --db=… --coin=… --split=<JSON> --costs=<JSON> --indicator-lookback=N`，每個參數都是一個
+  `--旗標=值`，值以 `-` 開頭也不會被看成另一個旗標），要在 `IMPORT_ROOT`（repo 根目錄）底下啟動。coin、split、成本、lookback 從同一個
+  experiment 取，不會拿到別組的。
+- 手動試玩：`python -m contrib.discovery tools --run <run 目錄>`。這個指令讀 manifest 只為了取那五樣，然後把 `world.sqlite` 複製到
+  暫存資料夾，對著複本啟動上面那個子程序，自己的 stdin／stdout 原樣交給它；它自己要說的話寫在 stderr。**只接受開發用 seed。**
+  用複本的原因：打開 store 會把舊版程式寫的檔升級，而 run 目錄是靠 artifact 的 SHA-256 認檔的。
+- 資料檔必須已經存在，而且不是空檔。路徑打錯時伺服器拒絕啟動，不會在那裡建一顆空的 store。
+- 直接下 `python -m contrib.discovery.tools_server` 時，`--db` 要指向某一組自己的複本，不要指向 run 目錄裡的 `world.sqlite`（理由同上：
+  打開會升級舊檔）。
+- MCP SDK import 不進來（沒裝，或裝的是缺了伺服器要用的名字的舊版）時，伺服器與 `tools` 指令都在讀資料、複製檔案之前就報錯，附上原因與安裝方式，
+  不會先花二十秒暖機。
+- **怎麼停。** 關掉它的 stdin，或送中斷（Ctrl-C；Windows 上 Ctrl-Break 也行），exit code 130。SDK 用另一條執行緒讀 stdin，卡在讀取時
+  中斷不了，所以伺服器程序自己接中斷並立刻結束（暖機中也一樣；只有剛啟動、還在 import 的那一兩秒例外，那時被中斷是 Python 自己的結束方式）；沒有東西要收尾，因為它不寫任何東西。這個處理只裝在
+  「當成程序執行」的入口，別的程式在自己的程序裡呼叫 `main()`／`serve()` 時不會被裝上。`tools` 指令被中斷時同樣回 130，並清掉暫存的那份複本；
+  它的行程如果被強制結束（不是中斷），複本不會被清掉，子程序會繼續跑到 stdin 關閉。
+
+**啟動時先暖機。** 伺服器回應第一個請求之前，先把詞彙表每個指標算一次。不這樣做的話，第一次 `backtest_train` 要付整趟 indicator walk
+（5000 根的世界約 12 秒），事後看耗時會以為是工具慢。代價是連線要等（本機 Windows、2026-11-16 各量一次）：5000 根的 dev 世界經 `tools` 指令
+從啟動到連上 23 秒（其中 indicator walk 約 12 秒，其餘是 import、複製與讀檔），之後每個查詢 17–140 毫秒；測試用的 400 根歷史直接啟動伺服器，
+到連上約 6 秒（多半是 import）。接伺服器的一方要把連線逾時設得比這個寬。
+
+暖機只跳過一種情況（2026-11-16 拍板）：這顆 store **整條序列都沒有**（沒有日線，或沒有 funding）。用到那條序列的指標跳過、名字寫進 log，
+伺服器照常啟動；之後需要那條序列的查詢回協定層錯誤，其他查詢不受影響（沒有 funding 時，所有 `backtest_train` 也都答不出來，因為持倉要結算 funding）。
+判斷的依據是 store 裡有沒有資料，不是接住計算時丟出來的錯誤：序列明明在、卻還是算不出來，丟的是同一種錯誤，那不是缺資料，伺服器會拒絕啟動，
+並說明是暖機算不出哪個指標。這包括指標引擎回空的，也包括序列在、但整段沒有任何一根有值（例如 funding 費率從頭到尾不變，z-score 算不出來）。
+落地的世界三條序列都有、每個指標都算得出來。
+
+**模型看到什麼（`tool_specs()`）。** 三個工具各有一段說明、輸入 schema、輸出 schema。
+
+- 指標名稱是 enum，取自 autoresearch 的 `feature_names()`；運算子、方向、regime 標籤、offset 與 horizon 的上下界也都取自 autoresearch
+  的表，不手抄。詞彙表加了指標，下一次列工具就看得到。
+- `conditional_returns` 的條件有完整 schema，而且整段展開、不用 `$ref`：有些模型供應商的工具層不解析 `$ref`，模型就看不到條件長什麼樣，
+  而我們這邊無從得知。代價是指標名稱清單在一份 schema 裡出現四次，每次呼叫模型多送約 570 token。`backtest_train` 的規則只宣告
+  「是一個 JSON 物件」（2026-11-16 拍板）：把整個語法寫成 schema 等於手抄第二份語法，會跟解析器走偏；規則對不對由 `parse_spec` 判。
+- 每段說明都有一個呼叫範例，以及每個輸出欄位的意思。
+- **說明只講「這是什麼」「什麼時候用哪一個」，不講「該怎麼下結論」（2026-11-16 拍板）。** 第一版有兩句建議（「訓練分數不等於驗證分數」
+  「平均報酬要跟 baseline 比、不是跟 0 比」），已拿掉：這些字只有工具組讀得到，留著的話，工具組在雜訊世界少誤判時，分不出是因為查得到資料，
+  還是因為被提醒過。baseline 欄位只留定義。「查詢不計分、也不佔提案次數」這一句是事實陳述；每輪能查幾次由提問器（T3）自己說。
+- **範例刻意避開 benchmark 會埋的東西。** 埋入的規則用 funding 指標進場、用 regime 或 realized vol 當門檻、用 `max_bars` 出場；範例只讀
+  RSI、用 RSI 出場。autoresearch 的 prompt 本身沒有任何範例規則，所以範例是只有工具組看得到的字：往答案的反方向寫，最壞是讓工具組少找回一點，
+  不會白送它答案。測試釘住這一條。
+- t 值那一句（2026-11-16 拍板）：只說它是對 0 的單樣本 t 值、沒有針對查了幾個條件做校正、要連同 `samples` 與 `baseline_mean_return`
+  一起看。不給 p 值，也不給「多大才算數」的門檻。
+- 說明與 schema 有版本號 `TOOLS_VERSION`（目前 1），伺服器把它當成自己的版本回報。測試釘住整份內容的 SHA-256：改了字或詞彙表變了而沒有升
+  版本號，測試就紅。真模型試跑後凍結（計畫 §5）。這個版本號只管伺服器說的話；提問器（T3）接在 prompt 後面的文字與每輪上限，由它自己記版本。
+- `tool_specs()` 每次都重新建一份：呼叫方改了手上的 schema 或範例，不會影響下一次列出來的內容。
+
+**schema 是告示，不擋輸入（2026-11-16 拍板）。** 用的是 SDK 的低階 `Server`：它把 schema 列給客戶端看，但不替我們驗參數。參數原樣交給 T1 的
+`call()`，所以錯誤訊息就是解析器那一句，多的鍵會被拒絕。高階的 `MCPServer` 實測（mcp 2.3.0）會回 pydantic 的句子、把多的鍵靜靜丟掉，
+而且程式例外會變成模型看得到的工具錯誤，跟模型自己打錯分不開。
+
+**一次呼叫怎麼結束。**
+
+| 情況 | 客戶端收到什麼 |
+|---|---|
+| 查得到 | 工具結果：同一個 dict 給兩份，一份是文字（JSON），一份是 structured content |
+| 模型的錯（`ToolRefusal`：指標名稱打錯、規則不合語法、多了鍵、工具名稱不存在） | 工具結果，標成錯誤，內容是解析器那一句 |
+| store 答不出來（`EvaluationError`／`FeatureError`） | 協定層錯誤，固定一句 `the store cannot answer this look-up`；原句帶日期，只寫到伺服器的 stderr |
+| 程式缺陷（其他任何例外） | 協定層錯誤，固定一句 `the look-up failed`；例外的原文與 traceback 只寫到伺服器的 stderr |
+
+第四列由伺服器自己接，不交給 SDK：實測 mcp 2.3.0，客戶端如果用舊的握手方式（`initialize`）連線，SDK 會把例外的原文直接回給它，而原文可能帶日期。
+測試用新舊兩種握手各跑一次。
+
+之後的提問器（T3）要把協定層錯誤當成接縫失敗，不能當成工具結果交給模型。伺服器啟動失敗時（資料檔不存在、split 對不上這顆 store），原因印在子程序的
+stderr，客戶端收到的是「連線已關閉」的錯誤，不會卡住。開始服務之後才出的錯（例如客戶端不再讀取）不是「拒絕啟動」，照原樣丟出、不包裝成 exit 1 的句子。
+接伺服器的一方要持續讀走子程序的 stderr，否則子程序寫滿管線後會卡住。
+
+**安裝。** `pip install -e ".[discovery-tools]"`（`mcp>=2.3,<3`）。沒裝的環境照樣能跑這個套件的其他指令（`tools_server.py` 只在建伺服器時才
+import SDK）；paper 伺服器與 dashboard 的環境都不裝。CI 另開一個 job（`discovery tests`）裝這個選用安裝並跑這個套件的整套測試：SDK 需要的
+sse-starlette 要求比 dashboard 釘的版本更新的 starlette，兩者放不進同一個環境。測試在檔頭直接 import SDK，沒裝就是紅的，不會靜靜跳過。
 
 ## 評分（PR 4）
 
@@ -361,6 +451,7 @@ staging 開不起來時 claim 歸還；搬 store 失敗或中斷時保留 stagin
 | 三項指標各自的金標（出場原因對持倉 bar、只算有倉的 bar、未定義、結構距離的算式）；`recovered` 的判定；紀錄的閘門；一次真的評分（讀回相等、重跑同 bytes、store 不動、store 對不上紀錄就拒絕）；表（失敗留在分母、seam 另計、不開 store、沒評分拒絕、紀錄對不上拒絕） | `tests/test_scoring.py` |
 | artifact 的 SHA-256 對不上 manifest（雙胞胎的 `world.sqlite` 複製錯目錄）在複製前拒絕 | `tests/test_bench.py` |
 | 訓練區間查詢：`load` 的讀取上限＝訓練區間結尾 − 1；訓練區間由 split 取出，傳一個「標成 train 的區間」會被拒絕；view 拒絕帶著之後任何一根 bar／日線／funding 的 frame，也拒絕中間有洞的歷史；把最後一根訓練 bar 收盤之後的 bar、日線、funding（含 view 手上那一筆邊界上的 funding 的費率）全部改掉，每個查詢的輸出逐位元不變（對照組：4h／日線／funding 各自改到訓練區間內一點點就會變）；訓練區間不落在午夜時，跨過界線的那一天不被讀入；輸出的鍵與字串不含世界類型／planted／validation／holdout 字樣；模組只 import `upstream`；查詢前後 arm 的 sqlite 位元組相同、ledger 沒有 trial；`backtest_train`＝`evaluate_unfiled` 的 train 段；解析器拒絕的輸入回解析器原句；指標在訓練區間第一根沒有值時三個查詢都拒絕；`feature_stats` 與 `conditional_returns` 的手算金標（分位數、不重疊樣本、t 值、基準報酬）；三個紀錄型別拒絕對不上的數字 | `tests/test_research_tools.py` |
+| MCP 伺服器：記憶體內客戶端列得出三個工具、每個呼叫的結果等於純函式的 dict；模型的錯回解析器原句並標成錯誤；store 答不出來＝協定層錯誤、不帶原句；指標 enum／運算子／regime／上下界等於 autoresearch 的表；schema 裡沒有 `$ref`；每個 schema 對測試裡的呼叫不比解析器窄、對形狀錯誤不比它寬；每個回答（含數字是 null 的）符合輸出 schema；暖機只跳過 store 沒有的序列、之後只有那些指標的查詢回錯，序列在卻算不出來則拒絕啟動；沒裝 SDK 在讀資料與複製前就拒絕；空檔與不是 store 的檔拒絕；只有 view 自己的拒絕被說成參數的錯；程式缺陷在新舊兩種握手下都只回固定一句；說明裡沒有「該怎麼下結論」的句子；`tool_specs()` 每次重建、互不共用；送中斷能停掉正在服務的子程序（exit 130）；`tools` 指令的 exit code 等於子程序的；每段說明有跑得動的範例與每個輸出欄位；範例不讀 funding／regime／realized vol、不用 `max_bars`；說明與 schema 的雜湊釘在版本號上；啟動參數只有五樣且過得了命令列；資料檔不存在時拒絕且不建檔；`tools` 指令拒絕測試用 seed、對著複本啟動、命令列不含埋入規則的字、artifact 位元組不變；真的 stdio 子程序（直接啟動與經 `tools` 指令各一次）回答與 view 相同、store 位元組不變；啟動失敗＝連線關閉而非卡住；伺服器模組在全新直譯器裡只載入 `research_tools`／`tools_server`／`upstream`，CLI 不需要 SDK 就能 import；同 seed 的 conditional 世界與 null 雙胞胎，回答的鍵、型別、拒絕句完全相同 | `tests/test_tools_server.py` |
 
 ## Manifest 格式（v3）
 

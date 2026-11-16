@@ -72,9 +72,13 @@ from __future__ import annotations
 import argparse
 import logging
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -312,8 +316,28 @@ def _serve_child(params: ServerParams) -> int:
     A child ended by a signal reports minus the signal's number (POSIX);
     as an exit code that is 128 plus it, which is how a shell would say it.
     """
-    code = subprocess.run(params.command(), cwd=IMPORT_ROOT, check=False).returncode
+    with _break_as_interrupt():
+        code = subprocess.run(params.command(), cwd=IMPORT_ROOT, check=False).returncode
     return 128 - code if code < 0 else code
+
+
+@contextmanager
+def _break_as_interrupt() -> Iterator[None]:
+    """Read Windows' Ctrl-Break as the interrupt Ctrl-C is, while the child runs.
+
+    Left alone it ends this process without unwinding, and the copy of the
+    artifact the child reads stays in the temp directory. As an interrupt
+    it ends the command the way Ctrl-C does: the copy is removed and the
+    exit code is 130. The child handles its own.
+    """
+    if not hasattr(signal, "SIGBREAK") or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.signal(signal.SIGBREAK, signal.default_int_handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGBREAK, previous)
 
 
 _COMMANDS = {

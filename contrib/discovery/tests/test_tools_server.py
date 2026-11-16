@@ -23,13 +23,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import signal
 import subprocess
 import sys
 from dataclasses import fields, replace
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import anyio
 import jsonschema
@@ -405,6 +406,15 @@ def test_a_spec_checks_itself_and_shares_nothing_with_the_next():
     assert again[0].input_schema["properties"]["feature"]["enum"] == list(feature_names())
     assert again[1].output_schema["properties"]["mean_return"]["type"] == ["number", "null"]
     assert again[1].output_schema["properties"]["t_stat"]["type"] == ["number", "null"]
+    # Nor is one object in two places of ONE schema: a layer that rewrites a
+    # schema in place rewrites the place it meant to.
+    condition = again[1].input_schema["properties"]["conditions"]["items"]["properties"]
+    by_name, with_offset = condition["left"]["anyOf"]
+    assert by_name is not with_offset["properties"]["feature"]
+    assert by_name["enum"] is not with_offset["properties"]["feature"]["enum"]
+    assert condition["left"] is not condition["right"]["anyOf"][0]
+    sides = again[1].input_schema["properties"]["side"]["enum"]
+    assert sides is not again[1].output_schema["properties"]["side"]["enum"]
     # And a field's schema can only be replaced under a name the table has.
     with pytest.raises(ValueError, match="no field named"):
         tools_server._object_schema(tools_server._BACKTEST_FIELDS, sdie={"type": "string"})
@@ -705,7 +715,11 @@ def test_main_stops_at_a_warm_up_that_fails_and_leaves_an_error_while_serving_as
     monkeypatch.setattr(tools_server, "warm", engine_down)
     monkeypatch.setattr(tools_server, "serve", lambda view: served.append("serve"))
     assert tools_server.main(params.argv()) == 1
-    assert "engine returned nothing" in capsys.readouterr().err and served == []
+    said = capsys.readouterr().err
+    # Said as the warm-up's refusal, with the research package's sentence
+    # inside it: nothing else was wrong with the launch.
+    assert said.startswith("error: the warm-up could not compute a feature")
+    assert "engine returned nothing" in said and served == []
 
     # Once serving has begun an error is no refusal to start: it is not
     # dressed as one, and is raised as it is.
@@ -724,11 +738,15 @@ def test_main_says_how_to_install_the_sdk_before_it_reads_anything(params, monke
 
     # ``None`` in ``sys.modules`` is how an import is made to fail: the SDK
     # is asked for by the names the server uses.
-    monkeypatch.setitem(sys.modules, "mcp", None)
     monkeypatch.setattr(tools_server, "load_view", unread)
-    assert tools_server.main(params.argv()) == 1
-    said = capsys.readouterr()
-    assert 'pip install -e ".[discovery-tools]"' in said.err and said.out == ""
+    # Absent altogether, and present under the name without what the server
+    # uses of it (an older SDK): both are refused before the store is read.
+    for standing_in in (None, ModuleType("mcp")):
+        monkeypatch.setitem(sys.modules, "mcp", standing_in)
+        assert tools_server.main(params.argv()) == 1
+        said = capsys.readouterr()
+        assert "cannot be imported" in said.err
+        assert 'pip install -e ".[discovery-tools]"' in said.err and said.out == ""
 
 
 def test_main_ends_an_interrupt_before_serving_as_130(params, monkeypatch, capsys):
@@ -918,45 +936,69 @@ def test_a_child_that_cannot_start_is_a_closed_connection_and_not_a_hang(params,
     assert closed and closed[0].code == types.CONNECTION_CLOSED
 
 
-def test_an_interrupt_stops_a_server_that_is_serving(params):
-    # The SDK reads stdin on a worker thread, and a blocked read cannot be
-    # interrupted: left to ``KeyboardInterrupt``, a serving process did not
-    # stop until its stdin closed. Here the handshake is done, stdin is held
-    # open, and the interrupt has to end the process by itself.
-    # (On Windows a child cannot be sent Ctrl-C alone; Ctrl-Break goes
-    # through the same handler.)
-    windows = sys.platform == "win32"
+_HELLO = {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+        "protocolVersion": "2025-06-18",
+        "capabilities": {},
+        "clientInfo": {"name": "suite", "version": "0"},
+    },
+}
+_WINDOWS = sys.platform == "win32"
+
+
+def _interrupted_while_serving(command: list[str], **popen) -> tuple[int, str]:
+    """Start ``command``, finish the handshake with stdin held open, interrupt it: its exit code and stderr.
+
+    On Windows a child cannot be sent Ctrl-C alone, so it is given a
+    process group of its own and sent Ctrl-Break, which the server and the
+    ``tools`` command both read as the interrupt Ctrl-C is.
+    """
     child = subprocess.Popen(
-        params.command(),
+        command,
         cwd=IMPORT_ROOT,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if windows else 0,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if _WINDOWS else 0,
+        **popen,
     )
     try:
-        hello = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-06-18",
-                "capabilities": {},
-                "clientInfo": {"name": "suite", "version": "0"},
-            },
-        }
-        child.stdin.write(json.dumps(hello) + "\n")
+        child.stdin.write(json.dumps(_HELLO) + "\n")
         child.stdin.flush()
         assert json.loads(child.stdout.readline())["id"] == 1
-        child.send_signal(signal.CTRL_BREAK_EVENT if windows else signal.SIGINT)
-        assert child.wait(timeout=30) == 130
-        assert child.stderr.read().endswith("interrupted\n")
+        child.send_signal(signal.CTRL_BREAK_EVENT if _WINDOWS else signal.SIGINT)
+        return child.wait(timeout=60), child.stderr.read()
     finally:
         if child.poll() is None:
             child.kill()
         for pipe in (child.stdin, child.stdout, child.stderr):
             pipe.close()
+
+
+def test_an_interrupt_stops_a_server_that_is_serving(params):
+    # The SDK reads stdin on a worker thread, and a blocked read cannot be
+    # interrupted: left to ``KeyboardInterrupt``, a serving process did not
+    # stop until its stdin closed. Here the handshake is done, stdin is held
+    # open, and the interrupt has to end the process by itself.
+    code, said = _interrupted_while_serving(params.command())
+    assert code == 130 and said.endswith("interrupted\n")
+
+
+def test_an_interrupt_ends_the_tools_command_and_takes_its_copy_with_it(landed_run, tmp_path):
+    # The command's own way out: 130, and the copy of the artifact its child
+    # was reading is gone. The temp directory is pointed at one the test can
+    # look into.
+    scratch = tmp_path / "temp"
+    scratch.mkdir()
+    env = {**os.environ, "TMPDIR": str(scratch), "TEMP": str(scratch), "TMP": str(scratch)}
+    command = [sys.executable, "-m", "contrib.discovery", "tools", "--run", str(landed_run)]
+    code, said = _interrupted_while_serving(command, env=env)
+    assert code == 130 and "interrupted" in said
+    assert list(scratch.iterdir()) == []
 
 
 def test_the_serving_module_reaches_no_manifest_and_the_package_needs_no_sdk_to_import():

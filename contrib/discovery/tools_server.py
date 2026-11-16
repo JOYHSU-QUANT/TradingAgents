@@ -53,11 +53,12 @@ first look-up costs what the hundredth does and a caller's timing of a call
 is the call's. The price is paid before ``initialize`` is answered: about
 fourteen seconds on a 5,000-bar world, twelve of them the indicator walk.
 
-**Stopped by an interrupt, at once** (:func:`serve`). The SDK reads stdin
-on a worker thread, and a blocked read cannot be interrupted, so a serving
-process left to ``KeyboardInterrupt`` does not stop until its stdin closes.
-The server handles the interrupt itself and leaves; it has nothing to
-flush, since no look-up writes.
+**Stopped by an interrupt, at once.** The SDK reads stdin on a worker
+thread, and a blocked read cannot be interrupted, so a serving process left
+to ``KeyboardInterrupt`` does not stop until its stdin closes. Run as a
+process, the module handles the interrupt itself and leaves
+(:func:`_leave_on_interrupt`); it has nothing to flush, since it writes
+nothing.
 
 **No ``$ref`` in a schema.** A condition's schema is written out whole
 (:func:`_feature_schema`): a provider's tool-calling layer that does not
@@ -358,14 +359,18 @@ def warm(view: TrainView) -> None:
 
     A feature whose series this store does not hold at all — no daily bars,
     no settlements — is passed over, and the log says which: there is
-    nothing to compute, and the look-up that names it will end as
-    :data:`STORE_CANNOT_ANSWER` while every other is answered. That is
-    decided by looking at what the store holds, not by catching whatever a
-    computation raises (decided 2026-11-16). A feature whose series IS held
-    and still cannot be computed — the indicator engine returning nothing,
-    above all — is no missing series: the error is left to stop the launch,
-    where an operator reads it, rather than be met one slow look-up at a
-    time. A landed world holds all three series and computes every feature.
+    nothing to compute, and a look-up that needs that series will end as
+    :data:`STORE_CANNOT_ANSWER` while the rest are answered. (With no
+    settlements that is every backtest too, whatever its rule reads: a
+    position is charged funding.) That is decided by looking at what the
+    store holds, not by catching whatever a computation raises (decided
+    2026-11-16). A feature whose series IS held and still cannot be
+    computed is no missing series — the indicator engine returning nothing
+    above all, but also a series that yields no value at any bar, as a
+    funding rate that never moves has no z-score: the error is left to stop
+    the launch, where an operator reads it, rather than be met one slow
+    look-up at a time. A landed world holds all three series and computes
+    every feature.
     """
     bundle = view.frame.bundle
     held = {
@@ -857,7 +862,12 @@ def build_server(view: TrainView) -> Server[Any]:
 
 
 def serve(view: TrainView) -> None:
-    """Answer requests on this process's stdin and stdout until stdin closes, or an interrupt ends it."""
+    """Answer requests on this process's stdin and stdout until stdin closes.
+
+    An interrupt does NOT end this by itself (see :func:`_leave_on_interrupt`):
+    the process that runs the module installs that; a program that calls
+    this inside itself stops its server its own way.
+    """
     import anyio
     from mcp.server.stdio import stdio_server
 
@@ -867,7 +877,6 @@ def serve(view: TrainView) -> None:
         async with stdio_server() as (read, write):
             await server.run(read, write, server.create_initialization_options())
 
-    _leave_on_interrupt()
     anyio.run(run)
 
 
@@ -877,20 +886,26 @@ def _leave_on_interrupt() -> None:
     The SDK reads stdin on a worker thread and a blocked read cannot be
     interrupted, so a serving process left to ``KeyboardInterrupt`` does
     not stop until its stdin closes: a person's Ctrl-C did nothing
-    (measured on Windows, 2026-11-16). Leaving at once loses nothing — no
-    look-up writes, and the store was closed before serving began.
+    (measured on Windows, 2026-11-16). Leaving at once loses nothing at any
+    point of the process's life — it writes nothing, to the store or
+    anywhere else. Installed for the whole of that life by the module's
+    entry point and by nothing else: it is the process's to decide, not a
+    caller's of :func:`main` or :func:`serve` inside another program. And
+    for Windows' Ctrl-Break as for Ctrl-C, which otherwise ends the process
+    without a word.
     """
     if threading.current_thread() is not threading.main_thread():
-        # Signals are the main thread's: a server run inside another
-        # program is that program's to stop.
-        return
+        return  # signals are the main thread's
 
     def leave(_signum: int, _frame: object) -> None:
-        # ``os.write``: the handler may have interrupted a write to stderr.
-        os.write(2, b"interrupted\n")
-        os._exit(130)
+        try:
+            # ``os.write``: the handler may have interrupted a write to stderr.
+            os.write(2, b"interrupted\n")
+        finally:
+            # Whatever became of the message (a reader that went away): leave.
+            os._exit(130)
 
-    for name in ("SIGINT", "SIGBREAK"):  # the second is Windows' Ctrl-Break
+    for name in ("SIGINT", "SIGBREAK"):
         if hasattr(signal, name):
             signal.signal(getattr(signal, name), leave)
 
@@ -909,8 +924,9 @@ def require_sdk() -> None:
         from mcp.server.stdio import stdio_server  # noqa: F401
     except ImportError as exc:
         raise LaunchError(
-            f"the MCP SDK this server is written against is not installed ({exc}); it is this "
-            f'package\'s optional install: pip install -e ".[discovery-tools]"'
+            f"the MCP SDK this server is written against cannot be imported ({exc}); if it is "
+            f"not installed, it is this package's optional install: pip install -e "
+            f'".[discovery-tools]"'
         ) from exc
 
 
@@ -934,17 +950,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             params = ServerParams.from_argv(sys.argv[1:] if argv is None else argv)
             require_sdk()
             view = load_view(params)
-            warm(view)
+            try:
+                warm(view)
+            except FeatureError as exc:
+                # Said as what it is: nothing was wrong with the launch
+                # until a feature could not be computed, and the server
+                # starts with every feature it holds a series for, or not.
+                raise LaunchError(
+                    f"the warm-up could not compute a feature of a series this store holds, "
+                    f"and the server does not start without it: {exc}"
+                ) from exc
         except (LaunchError, StoreError, EvaluationError, FeatureError, OSError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
         serve(view)
     except KeyboardInterrupt:
-        # Before serving begins; once it has, :func:`serve` leaves by itself.
+        # A caller of this function inside another program, or an interrupt
+        # before serving; the module run as a process leaves by its own
+        # handler at any point (:func:`_leave_on_interrupt`).
         print("interrupted", file=sys.stderr)
         return 130
     return 0
 
 
 if __name__ == "__main__":
+    _leave_on_interrupt()
     raise SystemExit(main())

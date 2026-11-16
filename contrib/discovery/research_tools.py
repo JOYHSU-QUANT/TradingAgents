@@ -7,9 +7,10 @@ blind. These are the looks: what a feature's values are
 (:func:`feature_stats`), what the price did after a signal
 (:func:`conditional_returns`), and what a whole rule would have scored
 (:func:`backtest_train`). Nothing here talks to a model or to MCP — the
-server that will offer these (plan T2) and the hypothesist that will call
-it (T3) are to be wrappers over this module, and the control arm that will
-read the same window without a model (T5) is to call it directly.
+server that offers these (:mod:`.tools_server`, plan T2) is a wrapper over
+this module, the hypothesist that will call it (T3) is to reach them
+through that server, and the control arm that will read the same window
+without a model (T5) is to call this module directly.
 
 **The line (plan §2.2).** Everything is computed from a :class:`TrainView`,
 and a view holds a frame read no further than the training window's last

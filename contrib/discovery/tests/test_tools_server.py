@@ -24,9 +24,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import signal
 import subprocess
 import sys
 from dataclasses import fields, replace
+from pathlib import Path
+from types import SimpleNamespace
 
 import anyio
 import jsonschema
@@ -35,7 +38,7 @@ from mcp import Client, MCPError, StdioServerParameters, types
 
 from contrib.autoresearch.dsl import MAX_HOLD_BARS, Op, Side, parse_conditions, parse_spec
 from contrib.autoresearch.evaluator import EvaluationError
-from contrib.autoresearch.features import FeatureError, FeatureFrame
+from contrib.autoresearch.features import FeatureError, FeatureFrame, SeriesBundle
 from contrib.autoresearch.ledger import Ledger
 from contrib.autoresearch.store import ResearchStore, StoreError
 from contrib.autoresearch.upstream import MarketRegime
@@ -55,6 +58,7 @@ from contrib.discovery.manifest import SeedSet, WorldKind
 from contrib.discovery.research_tools import TOOL_NAMES, ToolRefusal, TrainView, call
 from contrib.discovery.tools_server import (
     IMPORT_ROOT,
+    LOOKUP_FAILED,
     SERVER_NAME,
     STORE_CANNOT_ANSWER,
     TOOLS_VERSION,
@@ -69,6 +73,7 @@ from contrib.discovery.worlds import generate
 
 from .conftest import (
     COIN,
+    LOOKBACK,
     PLANTED,
     STEP_MS,
     arm_store,
@@ -83,7 +88,7 @@ from .test_research_tools import CALLS, _hand_view
 # is shown under. Changing a description, a schema or the vocabulary moves
 # the digest: bump ``TOOLS_VERSION`` with it (after the wording is frozen,
 # plan §5, that is a new set of runs) and pin both here.
-PINNED = (1, "f413f11fb7df396d80ae1b63909274d6a439c4c2296877d11e20f4e12950c41d")
+PINNED = (1, "3d1a3e08db6ef0e1e52ff71ae82771115f2ae567200d9486e14691f02476669e")
 
 _EXAMPLES = {spec.name: spec.example for spec in tool_specs()}
 
@@ -143,12 +148,17 @@ MISTAKEN = (
 )
 
 
-def _ask(target, calls=()):
-    """One session with ``target``: who answered, what it lists, and each call's result or protocol error."""
+def _ask(target, calls=(), *, mode="auto"):
+    """One session with ``target``: who answered, what it lists, and each call's result or protocol error.
+
+    ``mode`` is the handshake the client opens with: the SDK's current one,
+    or ``"legacy"`` for the older ``initialize``, which a client is free to
+    choose and under which the SDK treats a handler's exception differently.
+    """
 
     async def session():
         with anyio.fail_after(120):
-            async with Client(target) as client:
+            async with Client(target, mode=mode) as client:
                 listed = await client.list_tools()
                 answers: list[types.CallToolResult | MCPError] = []
                 for tool, arguments in calls:
@@ -159,6 +169,17 @@ def _ask(target, calls=()):
                 return client.server_info, listed.tools, answers
 
     return anyio.run(session)
+
+
+# A signal that holds at no bar: every figure computed from samples is null.
+NEVER = (
+    "conditional_returns",
+    {
+        "conditions": [{"left": "close", "op": ">", "right": 1e12}],
+        "horizon": 6,
+        "side": "long",
+    },
+)
 
 
 def _refusal(view, tool, arguments) -> str:
@@ -237,9 +258,10 @@ def test_no_arguments_at_all_is_refused_by_the_keys_that_are_missing(view):
     assert "missing required key(s) ['conditions', 'horizon', 'side']" in answer.content[0].text
 
 
+@pytest.mark.parametrize("mode", ["auto", "legacy"])
 @pytest.mark.parametrize("error", [EvaluationError, FeatureError])
 def test_a_history_that_cannot_answer_is_a_protocol_error_that_carries_no_sentence(
-    view, monkeypatch, caplog, error
+    view, monkeypatch, caplog, error, mode
 ):
     sentence = "the window that ends 2026-03-01T00:00:00+00:00 has no funding coverage"
 
@@ -249,7 +271,7 @@ def test_a_history_that_cannot_answer_is_a_protocol_error_that_carries_no_senten
     monkeypatch.setattr(tools_server, "call", unanswerable)
     with caplog.at_level("ERROR", logger=tools_server.__name__):
         _info, _tools, (answer,) = _ask(
-            build_server(view), [("feature_stats", {"feature": "close"})]
+            build_server(view), [("feature_stats", {"feature": "close"})], mode=mode
         )
     # Not a tool result: a model is never handed it. And the wire carries a
     # fixed sentence — the instant is in the operator's log alone.
@@ -257,6 +279,30 @@ def test_a_history_that_cannot_answer_is_a_protocol_error_that_carries_no_senten
     assert (answer.code, answer.message) == (types.INTERNAL_ERROR, STORE_CANNOT_ANSWER)
     assert "2026" not in str(answer.error)
     assert sentence in caplog.text
+
+
+@pytest.mark.parametrize("mode", ["auto", "legacy"])
+def test_a_defect_is_a_fixed_sentence_too_whichever_handshake_the_client_opened_with(
+    view, monkeypatch, caplog, mode
+):
+    # Left to the SDK, an unexpected exception is answered with its own text
+    # to a client that opened with the older handshake (mcp 2.3.0): so the
+    # server answers it itself, and the text stays in the log.
+    sentence = "a record refused its own figures at 2026-03-01T00:00:00+00:00"
+
+    def broken(_view, _tool, _arguments):
+        raise ValueError(sentence)
+
+    monkeypatch.setattr(tools_server, "call", broken)
+    with caplog.at_level("ERROR", logger=tools_server.__name__):
+        _info, _tools, (answer,) = _ask(
+            build_server(view), [("feature_stats", {"feature": "close"})], mode=mode
+        )
+    assert isinstance(answer, MCPError)
+    assert (answer.code, answer.message) == (types.INTERNAL_ERROR, LOOKUP_FAILED)
+    assert "2026" not in str(answer.error)
+    # With its traceback, for whoever reads the server's stderr.
+    assert sentence in caplog.text and "Traceback" in caplog.text
 
 
 def test_a_feature_with_no_value_at_the_window_s_start_ends_as_a_protocol_error():
@@ -270,16 +316,6 @@ def test_a_feature_with_no_value_at_the_window_s_start_ends_as_a_protocol_error(
     assert isinstance(answer, MCPError) and answer.message == STORE_CANNOT_ANSWER
     # The session outlives it: the next look-up is answered.
     assert not ready.is_error and ready.structured_content["bars"] == 30
-
-
-def test_a_defect_is_the_sdk_s_own_protocol_error_and_shows_nothing(view, monkeypatch):
-    def broken(_view, _tool, _arguments):
-        raise ValueError("a record refused its own figures at 2026-03-01")
-
-    monkeypatch.setattr(tools_server, "call", broken)
-    _info, _tools, (answer,) = _ask(build_server(view), [("feature_stats", {"feature": "close"})])
-    assert isinstance(answer, MCPError) and answer.code == types.INTERNAL_ERROR
-    assert "2026" not in str(answer.error) and answer.message != STORE_CANNOT_ANSWER
 
 
 # -- (e) what is advertised is read off the research package's tables ------------------------------
@@ -329,22 +365,49 @@ def test_no_schema_refers_to_a_definition_elsewhere(listed):
 
 
 def test_each_schema_accepts_what_the_look_up_reads_and_refuses_what_it_refuses(view, listed):
-    validators = {}
+    reads, answers = {}, {}
     for name, tool in listed.items():
         for schema in (tool.input_schema, tool.output_schema):
             jsonschema.Draft202012Validator.check_schema(schema)
-        validators[name] = jsonschema.Draft202012Validator(tool.input_schema)
+        reads[name] = jsonschema.Draft202012Validator(tool.input_schema)
+        answers[name] = jsonschema.Draft202012Validator(tool.output_schema)
 
     # Not narrower than the parser: every call the suite makes, and every
-    # call a description shows, is one the schema lets through.
-    for tool, arguments in (*CALLS, *_EXAMPLES.items()):
-        assert validators[tool].is_valid(arguments), (tool, arguments)
-        call(view, tool, arguments)
+    # call a description shows, is one the input schema lets through — and
+    # what comes back is what the output schema says, null figures included.
+    for tool, arguments in (*CALLS, *_EXAMPLES.items(), NEVER):
+        assert reads[tool].is_valid(arguments), (tool, arguments)
+        answers[tool].validate(call(view, tool, arguments))
+    empty = call(view, *NEVER)
+    assert empty["samples"] == 0
+    assert (empty["mean_return"], empty["std_return"], empty["t_stat"]) == (None, None, None)
     # Not wider where a schema can speak: a mistake of shape is refused by
     # both. (What only the parser can refuse is ``MISTAKEN``'s, above.)
     for tool, arguments in MISSHAPEN:
-        assert not validators[tool].is_valid(arguments), (tool, arguments)
+        assert not reads[tool].is_valid(arguments), (tool, arguments)
         _refusal(view, tool, arguments)
+
+
+def test_a_spec_checks_itself_and_shares_nothing_with_the_next():
+    stats = tool_specs()[0]
+    with pytest.raises(ValueError, match="is not a look-up"):
+        replace(stats, name="feature_statistics")
+    with pytest.raises(ValueError, match="does not show its example"):
+        replace(stats, example={"feature": "close"})
+    # A caller that changes what it was handed changes no later listing:
+    # the examples and the schemas are built afresh each time.
+    stats.example["feature"] = "close"
+    stats.input_schema["properties"]["feature"]["enum"].clear()
+    returns = tool_specs()[1]
+    returns.output_schema["properties"]["t_stat"]["type"].append("string")
+    again = tool_specs()
+    assert again[0].example == {"feature": "rsi_14"}
+    assert again[0].input_schema["properties"]["feature"]["enum"] == list(feature_names())
+    assert again[1].output_schema["properties"]["mean_return"]["type"] == ["number", "null"]
+    assert again[1].output_schema["properties"]["t_stat"]["type"] == ["number", "null"]
+    # And a field's schema can only be replaced under a name the table has.
+    with pytest.raises(ValueError, match="no field named"):
+        tools_server._object_schema(tools_server._BACKTEST_FIELDS, sdie={"type": "string"})
 
 
 # -- (f) a description shows a call and names every field ------------------------------------------
@@ -360,9 +423,12 @@ def test_each_description_shows_a_call_that_runs_and_names_every_field_of_the_an
         if spec.name == "feature_stats":
             # The second shape: the one categorical feature.
             answers.append(call(view, "feature_stats", {"feature": "regime"}))
+        # Under "Returns", where the answer's fields are listed — an
+        # argument of the same name higher up does not stand in for one.
+        returned = described[described.index("Returns") :]
         for answer in answers:
             for key in answer:
-                assert f"- {key}: " in described, (spec.name, key)
+                assert f"- {key}: " in returned, (spec.name, key)
 
 
 def test_the_sentences_the_plan_settled_are_in_the_descriptions(listed):
@@ -377,7 +443,7 @@ def test_the_sentences_the_plan_settled_are_in_the_descriptions(listed):
     assert "p-value" not in returns and "significant at" not in returns
     for needed in (
         '{"param": name} is refused',
-        "Compare mean_return with this, not with zero",
+        "with NO condition: what the window did whatever the signal said",
         "Not on the scale of backtest_train's net_return",
         "for two reasons",
         "exact negatives of each other",
@@ -386,6 +452,13 @@ def test_the_sentences_the_plan_settled_are_in_the_descriptions(listed):
         assert needed in returns, needed
     assert "A rule tried here can be proposed as it stands" in listed["backtest_train"].description
     assert "For regime" in listed["feature_stats"].description
+    # What a field IS, and not what to conclude from it (decided
+    # 2026-11-16): advice here is read by the tool arm alone, and a result
+    # could not then be told from the advice.
+    shown = " ".join(tool.description for tool in listed.values())
+    assert "is not scored and does not use up a proposal" in shown
+    for advice in ("not a validation score", "Compare mean_return", "fail the next"):
+        assert advice not in shown, advice
 
 
 def test_the_examples_point_away_from_what_a_world_plants():
@@ -440,7 +513,13 @@ def test_a_server_is_started_on_five_things_that_survive_the_command_line(params
         "indicator_lookback",
     ]
     assert ServerParams.from_argv(params.argv()) == params
-    assert params.db.is_absolute()
+    # Each parameter is one ``--flag=value`` argument, so a value that
+    # begins with a dash is still its flag's.
+    dashed = replace(params, coin="-SYN")
+    assert ServerParams.from_argv(dashed.argv()) == dashed
+    # A path is made absolute: the child is started in another directory.
+    relative = replace(params, db="arm.sqlite")
+    assert relative.db.is_absolute() and relative.db == Path("arm.sqlite").resolve()
     assert params.command() == [
         sys.executable,
         "-m",
@@ -455,9 +534,8 @@ def test_parameters_that_cannot_be_read_are_a_launch_refusal(params):
     argv = params.argv()
 
     def swapped(flag: str, value: str) -> list[str]:
-        changed = list(argv)
-        changed[changed.index(flag) + 1] = value
-        return changed
+        assert sum(arg.startswith(f"{flag}=") for arg in argv) == 1
+        return [f"{flag}={value}" if arg.startswith(f"{flag}=") else arg for arg in argv]
 
     split = params.split.to_dict()
     for flag, value, sentence in (
@@ -522,20 +600,52 @@ def test_a_store_that_does_not_hold_the_window_is_a_launch_refusal(params, monke
     assert not isinstance(raised.value, LaunchError)
 
 
-def test_a_feature_the_store_cannot_compute_is_passed_over_by_the_warm_up(caplog):
-    # No daily bars: the two daily features cannot be computed at all. The
-    # warm-up says so in the log and goes on; how a call ends stays the
-    # call's — that feature's look-up is a protocol error, the rest answer.
-    bare = _hand_view([100.0 + index for index in range(30)], funding_hours=30 * 4)
+def test_the_warm_up_passes_over_a_series_the_store_does_not_hold_and_nothing_else(
+    params, view, monkeypatch, caplog
+):
+    # No daily bars at all: there is nothing to compute the daily features
+    # from. The warm-up says which it passed over and goes on; how a call
+    # ends stays the call's — that feature's look-up is a protocol error,
+    # the rest answer.
+    bundle = view.frame.bundle
+    bare = replace(
+        view,
+        frame=FeatureFrame(
+            SeriesBundle(bundle.bars, daily=[], funding=bundle.funding),
+            indicator_lookback=LOOKBACK,
+        ),
+    )
     with caplog.at_level("WARNING", logger=tools_server.__name__):
         warm(bare)
-    assert "not warmed: " in caplog.text and "daily" in caplog.text
-    _info, _tools, (daily, close) = _ask(
+    skipped = [record.getMessage() for record in caplog.records]
+    assert skipped and all("holds no daily series" in line for line in skipped)
+    assert {line.split()[2] for line in skipped} == {
+        name for name in feature_names() if "_1d" in name
+    }
+    _info, _tools, (daily, close, backtest) = _ask(
         build_server(bare),
-        [("feature_stats", {"feature": "close_1d"}), ("feature_stats", {"feature": "close"})],
+        [
+            ("feature_stats", {"feature": "close_1d"}),
+            ("feature_stats", {"feature": "close"}),
+            ("backtest_train", _EXAMPLES["backtest_train"]),
+        ],
     )
     assert isinstance(daily, MCPError) and daily.message == STORE_CANNOT_ANSWER
-    assert not close.is_error
+    assert not close.is_error and not backtest.is_error
+
+    # A feature whose series IS held and still cannot be computed is no
+    # missing series (the indicator engine returning nothing raises the
+    # same class): it is not passed over, and stops the launch.
+    real = FeatureFrame.series
+
+    def engine_down(self, ref):
+        if ref.name == "rsi_14":
+            raise FeatureError("the indicator engine returned nothing past its warm-up")
+        return real(self, ref)
+
+    monkeypatch.setattr(FeatureFrame, "series", engine_down)
+    with pytest.raises(FeatureError, match="engine returned nothing"):
+        warm(load_view(params))
 
 
 def test_the_frame_is_warmed_on_every_feature_of_the_vocabulary(params, monkeypatch):
@@ -565,37 +675,67 @@ def test_main_warms_before_it_serves_and_names_its_refusals(params, monkeypatch,
     assert tools_server.main(params.argv()) == 0
     assert steps == ["warm", "serve"]
 
+    # Each family a launch can be refused in, through ``main``: this
+    # module's own, the store's, and the research package's two.
+    other = tmp_path / "notes.txt"
+    other.write_text("not a database, and longer than a header\n" * 8, encoding="utf-8")
     for changed, sentence in (
         (replace(params, db=tmp_path / "missing.sqlite"), "is not a file"),
+        (replace(params, db=other), "notes.txt"),
         (replace(params, coin="SYN-ELSEWHERE"), "holds no 4h bars"),
+        (replace(params, indicator_lookback=1), "indicator"),
     ):
         capsys.readouterr()
-        assert tools_server.main(changed.argv()) == 1
+        assert tools_server.main(changed.argv()) == 1, sentence
         said = capsys.readouterr()
         # stdout is the protocol's: a refusal is said on stderr alone.
         assert said.out == ""
         assert said.err.startswith("error: ") and sentence in said.err
-    # Neither refusal got as far as serving.
+    # No refusal got as far as serving.
     assert steps == ["warm", "serve"]
+
+
+def test_main_stops_at_a_warm_up_that_fails_and_leaves_an_error_while_serving_as_raised(
+    params, monkeypatch, capsys
+):
+    def engine_down(_view):
+        raise FeatureError("the indicator engine returned nothing past its warm-up")
+
+    served: list[str] = []
+    monkeypatch.setattr(tools_server, "warm", engine_down)
+    monkeypatch.setattr(tools_server, "serve", lambda view: served.append("serve"))
+    assert tools_server.main(params.argv()) == 1
+    assert "engine returned nothing" in capsys.readouterr().err and served == []
+
+    # Once serving has begun an error is no refusal to start: it is not
+    # dressed as one, and is raised as it is.
+    def client_gone(_view):
+        raise BrokenPipeError("the client stopped reading")
+
+    monkeypatch.setattr(tools_server, "warm", lambda view: None)
+    monkeypatch.setattr(tools_server, "serve", client_gone)
+    with pytest.raises(BrokenPipeError):
+        tools_server.main(params.argv())
 
 
 def test_main_says_how_to_install_the_sdk_before_it_reads_anything(params, monkeypatch, capsys):
     def unread(_params):
         raise AssertionError("the store was read for a server that cannot be built")
 
-    monkeypatch.setattr(tools_server.importlib.util, "find_spec", lambda name: None)
+    # ``None`` in ``sys.modules`` is how an import is made to fail: the SDK
+    # is asked for by the names the server uses.
+    monkeypatch.setitem(sys.modules, "mcp", None)
     monkeypatch.setattr(tools_server, "load_view", unread)
     assert tools_server.main(params.argv()) == 1
     said = capsys.readouterr()
     assert 'pip install -e ".[discovery-tools]"' in said.err and said.out == ""
 
 
-def test_main_ends_an_interrupt_as_130(params, monkeypatch, capsys):
+def test_main_ends_an_interrupt_before_serving_as_130(params, monkeypatch, capsys):
     def interrupted(_view):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(tools_server, "warm", lambda view: None)
-    monkeypatch.setattr(tools_server, "serve", interrupted)
+    monkeypatch.setattr(tools_server, "warm", interrupted)
     assert tools_server.main(params.argv()) == 130
     said = capsys.readouterr()
     assert said.err == "interrupted\n" and said.out == ""
@@ -623,7 +763,7 @@ def test_the_tools_command_starts_a_child_on_five_things_and_a_copy(
     monkeypatch.setattr(cli, "_serve_child", child)
     assert discovery_main(["tools", "--run", str(landed_run)]) == 0
     said = capsys.readouterr()
-    assert said.out == "" and f"serving {COIN}'s training window" in said.err
+    assert said.out == "" and f"starting a server for {COIN}'s training window" in said.err
 
     (server_params,) = started
     manifest = read_manifest(landed_run)
@@ -636,18 +776,22 @@ def test_the_tools_command_starts_a_child_on_five_things_and_a_copy(
     # own path or digest, is among the child's arguments.
     assert manifest.world.planted is not None
     line = " ".join(server_params.command()).lower()
+    entry, gate = PLANTED["entry"]["long"][0], PLANTED["filters"][0]
     for word in (
         "planted",
         "manifest",
-        "funding_zscore_14",
-        "realized_vol_20",
-        "funding_filter",
-        "-1.5",
-        "0.0095",
+        PLANTED["family"],
+        entry["left"],
+        gate["left"],
+        str(entry["right"]),
+        str(gate["right"]),
         landed_run.name.lower(),
         *(kind.value for kind in WorldKind),
     ):
         assert word not in line, word
+    # The control: those words are what the manifest holds.
+    written = (landed_run / "manifest.json").read_text(encoding="utf-8")
+    assert entry["left"] in written and str(gate["right"]) in written
     # And nothing is left: the copy is gone, the directory is as it was.
     assert not server_params.db.exists()
     assert sorted(path.name for path in landed_run.iterdir()) == held
@@ -676,6 +820,34 @@ def test_the_tools_command_refuses_a_test_seed_and_starts_nothing(
     # same conditions.
     null = land_run(tmp_path, artifact, bench_manifest(kind=WorldKind.NULL_V1))
     assert tools_experiment(null) == experiment_for(bench_manifest(), "tools")
+
+
+def test_the_tools_command_asks_for_the_sdk_before_it_copies_and_ends_as_its_child_does(
+    landed_run, monkeypatch, capsys
+):
+    def child(server_params: ServerParams) -> int:
+        raise AssertionError("a copy was made and a child started without the SDK")
+
+    with monkeypatch.context() as patched:
+        patched.setitem(sys.modules, "mcp", None)
+        patched.setattr(cli, "_serve_child", child)
+        assert discovery_main(["tools", "--run", str(landed_run)]) == 1
+        assert 'pip install -e ".[discovery-tools]"' in capsys.readouterr().err
+
+    # The child's exit code is the command's; one a signal ended is said as
+    # a shell says it, 128 plus the signal.
+    ran: list[tuple[list[str], object]] = []
+    for code, expected in ((0, 0), (1, 1), (130, 130), (-15, 143)):
+
+        def run(command, *, cwd, check, code=code):
+            ran.append((command, cwd))
+            return SimpleNamespace(returncode=code)
+
+        monkeypatch.setattr(cli.subprocess, "run", run)
+        assert discovery_main(["tools", "--run", str(landed_run)]) == expected
+    command, cwd = ran[-1]
+    assert command[:3] == [sys.executable, "-m", "contrib.discovery.tools_server"]
+    assert cwd == IMPORT_ROOT
 
 
 # -- (b) as a process -----------------------------------------------------------------------------
@@ -716,6 +888,9 @@ def test_the_tools_command_serves_a_landed_world_through_its_child(landed_run):
     ]
     _info, tools, answers = _ask(_child(command), asked)
     assert tuple(tool.name for tool in tools) == TOOL_NAMES
+    # The artifact itself is read here, which the server never is pointed
+    # at: this build wrote it, so opening it migrates nothing, and the
+    # digest below holds that.
     here = load_view(
         ServerParams.for_experiment(artifact, experiment_for(read_manifest(landed_run), "tools"))
     )
@@ -735,10 +910,53 @@ def test_a_child_that_cannot_start_is_a_closed_connection_and_not_a_hang(params,
     # refusal is on the child's stderr, and the client's side is a closed
     # connection, raised — which a hypothesist is to read as a failed seam.
     missing = replace(params, db=tmp_path / "missing.sqlite")
-    with pytest.raises(BaseException) as raised:  # noqa: PT011 - an ExceptionGroup on 3.11+
+    # ``BaseException``: the client's task groups raise an exception group
+    # on 3.11+, and the closed connection is a leaf of it.
+    with pytest.raises(BaseException) as raised:
         _ask(_child(missing.command()))
     closed = [leaf for leaf in _leaves(raised.value) if isinstance(leaf, MCPError)]
     assert closed and closed[0].code == types.CONNECTION_CLOSED
+
+
+def test_an_interrupt_stops_a_server_that_is_serving(params):
+    # The SDK reads stdin on a worker thread, and a blocked read cannot be
+    # interrupted: left to ``KeyboardInterrupt``, a serving process did not
+    # stop until its stdin closed. Here the handshake is done, stdin is held
+    # open, and the interrupt has to end the process by itself.
+    # (On Windows a child cannot be sent Ctrl-C alone; Ctrl-Break goes
+    # through the same handler.)
+    windows = sys.platform == "win32"
+    child = subprocess.Popen(
+        params.command(),
+        cwd=IMPORT_ROOT,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if windows else 0,
+    )
+    try:
+        hello = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "suite", "version": "0"},
+            },
+        }
+        child.stdin.write(json.dumps(hello) + "\n")
+        child.stdin.flush()
+        assert json.loads(child.stdout.readline())["id"] == 1
+        child.send_signal(signal.CTRL_BREAK_EVENT if windows else signal.SIGINT)
+        assert child.wait(timeout=30) == 130
+        assert child.stderr.read().endswith("interrupted\n")
+    finally:
+        if child.poll() is None:
+            child.kill()
+        for pipe in (child.stdin, child.stdout, child.stderr):
+            pipe.close()
 
 
 def test_the_serving_module_reaches_no_manifest_and_the_package_needs_no_sdk_to_import():
@@ -789,6 +1007,7 @@ def test_a_world_and_its_null_twin_are_answered_in_one_shape(landed_world, tmp_p
     # the same calls. The figures differ; the keys, the types and every
     # refusal's sentence do not, so nothing about HOW the server answers
     # says which of the two it is reading.
+    # (The landed artifact is read in place, as in the test above.)
     artifact, _landing = landed_world
     planted, null = example_manifest(), example_manifest(kind=WorldKind.NULL_V1)
     twin = tmp_path / "twin.sqlite"

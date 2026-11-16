@@ -92,7 +92,7 @@ from .landing import ARTIFACT_FILENAME, MANIFEST_FILENAME, default_root, land_wo
 from .manifest import Manifest, ManifestError
 from .records import RecordError
 from .scoring import SCORES_FILENAME, report_table, require_this_scorer, score_world
-from .tools_server import IMPORT_ROOT, ServerParams
+from .tools_server import IMPORT_ROOT, LaunchError, ServerParams, require_sdk
 from .upstream import EvaluationError, FeatureError, SplitError, StoreError, render_fetch
 from .worlds import WorldError, generate
 
@@ -281,27 +281,39 @@ def _cmd_report(args: argparse.Namespace) -> int:
 def _cmd_tools(args: argparse.Namespace) -> int:
     run_dir = Path(args.run)
     experiment = tools_experiment(run_dir)
+    # Asked here as the child will ask it, so a missing SDK is said before
+    # the artifact is copied for a server that cannot be built.
+    require_sdk()
     # A copy, not the artifact: opening a store migrates one an older build
     # wrote, and the artifact's digest is what the directory is held to.
     # Cleanup errors are let go: an interrupted child may still hold the
     # file for a moment on Windows, and the copy is in the system's temp.
+    # (A parent KILLED while it serves cleans nothing up: the copy stays in
+    # the temp directory, and the child serves on until its stdin closes.)
     with tempfile.TemporaryDirectory(
         prefix="discovery-tools-", ignore_cleanup_errors=True
     ) as scratch:
         store = Path(scratch) / ARTIFACT_FILENAME
         shutil.copyfile(run_dir / ARTIFACT_FILENAME, store)
         params = ServerParams.for_experiment(store, experiment)
+        # "Starting", not "serving": the child has yet to read the store and
+        # warm its frame, and says so itself if it cannot.
         print(
-            f"serving {experiment.coin}'s training window over MCP on stdin and stdout; close "
-            f"stdin to stop",
+            f"starting a server for {experiment.coin}'s training window on stdin and stdout; "
+            f"close stdin or interrupt to stop",
             file=sys.stderr,
         )
         return _serve_child(params)
 
 
 def _serve_child(params: ServerParams) -> int:
-    """Run the server as a child on this process's own stdin and stdout; its exit code is this command's."""
-    return subprocess.run(params.command(), cwd=IMPORT_ROOT, check=False).returncode
+    """Run the server as a child on this process's own stdin and stdout; its exit code is this command's.
+
+    A child ended by a signal reports minus the signal's number (POSIX);
+    as an exit code that is 128 plus it, which is how a shell would say it.
+    """
+    code = subprocess.run(params.command(), cwd=IMPORT_ROOT, check=False).returncode
+    return 128 - code if code < 0 else code
 
 
 _COMMANDS = {
@@ -333,8 +345,11 @@ def main(argv: list[str] | None = None) -> int:
         EvaluationError,
         FeatureError,
         RecordError,
+        LaunchError,
         OSError,
     ) as exc:
+        # ``LaunchError``: the ``tools`` command's server cannot be started
+        # (the SDK it is built on is not installed).
         # The families a well-formed invocation can still meet, each
         # carrying a sentence written for an operator: the manifest's, the
         # generator's and the split's refusals (listed by class, not as

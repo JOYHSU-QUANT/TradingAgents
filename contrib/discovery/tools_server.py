@@ -42,13 +42,22 @@ meant to read. And a history that cannot answer (``EvaluationError``,
 calendar instants, which nothing a model is shown carries, so it goes to
 this process's stderr and not over the wire; the caller is to treat a
 protocol error as a failed seam, not as a tool result. Any other exception
-is a defect, and the SDK answers it with its own sanitised protocol error.
+is a defect on this side: it is logged with its traceback and answered with
+a second fixed sentence (:data:`LOOKUP_FAILED`). It is not left to the SDK,
+whose answer to an unexpected exception depends on the handshake the client
+opened with — under the older one it is the exception's own text.
 
-**Started warm** (:func:`warm`). Every feature of the vocabulary the store
-can compute is computed before the first request is read, so the first
-look-up costs what the hundredth does and a caller's timing of a call is
-the call's. The price is paid before ``initialize`` is answered: about
-fourteen seconds on a 5,000-bar world.
+**Started warm** (:func:`warm`). Every feature of the vocabulary whose
+series the store holds is computed before the first request is read, so the
+first look-up costs what the hundredth does and a caller's timing of a call
+is the call's. The price is paid before ``initialize`` is answered: about
+fourteen seconds on a 5,000-bar world, twelve of them the indicator walk.
+
+**Stopped by an interrupt, at once** (:func:`serve`). The SDK reads stdin
+on a worker thread, and a blocked read cannot be interrupted, so a serving
+process left to ``KeyboardInterrupt`` does not stop until its stdin closes.
+The server handles the interrupt itself and leaves; it has nothing to
+flush, since no look-up writes.
 
 **No ``$ref`` in a schema.** A condition's schema is written out whole
 (:func:`_feature_schema`): a provider's tool-calling layer that does not
@@ -69,14 +78,17 @@ at a landed artifact, whose bytes its run directory is held to — the
 from __future__ import annotations
 
 import argparse
-import importlib.util
+import copy
 import json
 import logging
+import os
+import signal
 import sys
+import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, TypeVar
+from typing import TYPE_CHECKING, Any, Final, NamedTuple, TypeVar
 
 from .research_tools import (
     MAX_HORIZON,
@@ -100,6 +112,7 @@ from .upstream import (
     MarketRegime,
     Op,
     ResearchStore,
+    SeriesSource,
     Side,
     Split,
     StoreError,
@@ -112,6 +125,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "IMPORT_ROOT",
+    "LOOKUP_FAILED",
     "SERVER_NAME",
     "STORE_CANNOT_ANSWER",
     "TOOLS_VERSION",
@@ -121,6 +135,7 @@ __all__ = [
     "build_server",
     "load_view",
     "main",
+    "require_sdk",
     "serve",
     "tool_specs",
     "warm",
@@ -131,17 +146,24 @@ _R = TypeVar("_R")
 
 SERVER_NAME: Final = "discovery-research-tools"
 
-# What a model is shown of the tools: their names, descriptions and schemas.
-# Bumped whenever any of that changes, and reported as the server's version,
-# so a run's records can say which wording its model read. The wording is
-# frozen after the first trial with a real model (plan §5); the suite pins
-# a digest of it beside this number, so an edit without a bump is red.
+# The wording this server advertises: the tools' names, descriptions and
+# schemas. Bumped whenever any of that changes, and reported as the server's
+# version. It covers what the SERVER says and no more: the text a tool-using
+# arm adds to its prompt, and its call limits, are that arm's to version
+# (plan T3). The wording is frozen after the first trial with a real model
+# (plan §5); the suite pins a digest of it beside this number, so an edit
+# without a bump is red.
 TOOLS_VERSION: Final = 1
 
 # The whole of what a caller is told when the history cannot answer a
 # look-up. Fixed, and naming no instant: the research package's sentence
 # goes to stderr.
 STORE_CANNOT_ANSWER: Final = "the store cannot answer this look-up"
+
+# The whole of what a caller is told when a look-up fails in a way this
+# module did not foresee — a defect on this side. Fixed for the reason the
+# sentence above is: an exception's own text may name an instant.
+LOOKUP_FAILED: Final = "the look-up failed"
 
 # Where ``contrib`` is importable from: the directory a child serving these
 # tools is started in, since ``python -m`` reads the package off its cwd.
@@ -210,18 +232,17 @@ class ServerParams:
         )
 
     def argv(self) -> list[str]:
-        """The parameters as the server's command line; :meth:`from_argv` reads them back."""
+        """The parameters as the server's command line; :meth:`from_argv` reads them back.
+
+        Each as one ``--flag=value`` argument, so a value that begins with
+        a dash is still its flag's value.
+        """
         return [
-            "--db",
-            str(self.db),
-            "--coin",
-            self.coin,
-            "--split",
-            json.dumps(self.split.to_dict(), sort_keys=True),
-            "--costs",
-            json.dumps(self.costs.to_dict(), sort_keys=True),
-            "--indicator-lookback",
-            str(self.indicator_lookback),
+            f"--db={self.db}",
+            f"--coin={self.coin}",
+            f"--split={json.dumps(self.split.to_dict(), sort_keys=True)}",
+            f"--costs={json.dumps(self.costs.to_dict(), sort_keys=True)}",
+            f"--indicator-lookback={self.indicator_lookback}",
         ]
 
     def command(self) -> list[str]:
@@ -232,7 +253,7 @@ class ServerParams:
     def from_argv(cls, argv: Sequence[str]) -> ServerParams:
         args = _parser().parse_args(list(argv))
         return cls(
-            db=args.db,
+            db=Path(args.db),
             coin=args.coin,
             split=_read_record("--split", args.split, Split.from_dict),
             costs=_read_record("--costs", args.costs, CostModel.from_dict),
@@ -278,7 +299,9 @@ def _read_record(flag: str, text: str, read: Callable[[dict[str, object]], _R]) 
         raise LaunchError(f"{flag}: expected a JSON object, got {type(record).__name__}")
     try:
         return read(record)
-    except (ValueError, TypeError) as exc:
+    except ValueError as exc:
+        # The two records refuse with a ``ValueError`` of their own; anything
+        # else out of them is a defect, and stays a traceback.
         raise LaunchError(f"{flag}: {exc}") from exc
 
 
@@ -289,6 +312,13 @@ def load_view(params: ServerParams) -> TrainView:
     a store there, and an empty file is made into one, and a server that
     did either would report a history with no bars instead of a path that
     was wrong.
+
+    Each part refuses as itself: a path with no store in it and a store
+    that does not hold the split's window are a :class:`LaunchError`; a
+    file that is no research store is the store's ``StoreError``; a coin
+    the store holds nothing of, or a history off its grid, is the research
+    package's ``EvaluationError``, and an indicator window it will not
+    compute over its ``FeatureError``. :func:`main` ends all four as exit 1.
     """
     if not params.db.is_file() or params.db.stat().st_size == 0:
         raise LaunchError(
@@ -326,17 +356,29 @@ def warm(view: TrainView) -> None:
     call (plan §9, T1's timing), read by whoever times the call as a slow
     tool.
 
-    A feature this store cannot compute at all (no daily bars, say) is
-    passed over, with the research package's sentence in the log: warming
-    is a courtesy, and how a call ends is the call's to say — the look-up
-    that names that feature ends as :data:`STORE_CANNOT_ANSWER`, and every
-    other look-up is answered. A landed world computes them all.
+    A feature whose series this store does not hold at all — no daily bars,
+    no settlements — is passed over, and the log says which: there is
+    nothing to compute, and the look-up that names it will end as
+    :data:`STORE_CANNOT_ANSWER` while every other is answered. That is
+    decided by looking at what the store holds, not by catching whatever a
+    computation raises (decided 2026-11-16). A feature whose series IS held
+    and still cannot be computed — the indicator engine returning nothing,
+    above all — is no missing series: the error is left to stop the launch,
+    where an operator reads it, rather than be met one slow look-up at a
+    time. A landed world holds all three series and computes every feature.
     """
+    bundle = view.frame.bundle
+    held = {
+        SeriesSource.BARS: bool(bundle.bars),
+        SeriesSource.DAILY: bool(bundle.daily),
+        SeriesSource.FUNDING: bool(bundle.funding),
+    }
     for name in feature_names():
-        try:
-            view.frame.series(FeatureRef(*parse_feature_name(name)))
-        except FeatureError as exc:
-            logger.warning("not warmed: %s", exc)
+        ref = FeatureRef(*parse_feature_name(name))
+        if not held[ref.source]:
+            logger.warning("not warmed: %s (the store holds no %s series)", name, ref.source.value)
+            continue
+        view.frame.series(ref)
 
 
 # -- what is advertised ------------------------------------------------------------------------
@@ -347,7 +389,9 @@ class ToolSpec:
     """One look-up as a model is shown it: a name, a description, the two schemas, and an example.
 
     ``example`` is the arguments of the call the description shows, held
-    as data so the suite can make that call.
+    as data so the suite can make that call; a spec whose description does
+    not show it is refused. The schemas and the example are built afresh
+    for each spec (:func:`tool_specs`), so changing one changes no other.
     """
 
     name: str
@@ -356,49 +400,67 @@ class ToolSpec:
     output_schema: dict[str, Any]
     example: dict[str, Any]
 
+    def __post_init__(self) -> None:
+        if self.name not in TOOL_NAMES:
+            raise ValueError(f"{self.name!r} is not a look-up; the look-ups are {list(TOOL_NAMES)}")
+        shown = f"Call: {json.dumps(self.example)}"
+        if shown not in self.description:
+            raise ValueError(f"{self.name}: the description does not show its example ({shown})")
 
-# One output field: its name, its JSON type(s), and what it means. The
-# meaning is written once and read twice — into the description a model
-# reads and into the output schema.
-_Field = tuple[str, "str | list[str]", str]
+
+class _Field(NamedTuple):
+    """One output field: its name, its JSON type (or types), and what it means.
+
+    The meaning is written once and read twice — into the description a
+    model reads and into the output schema.
+    """
+
+    name: str
+    kind: str | tuple[str, ...]
+    meaning: str
+
+
+def _fields(*rows: tuple[str, str | tuple[str, ...], str]) -> tuple[_Field, ...]:
+    return tuple(_Field(*row) for row in rows)
+
 
 _WINDOW: Final = (
-    "Reads the training bars only: no tool can see the validation window. Nothing asked "
-    "here is scored or counted as a proposal."
+    "Reads the training bars only: no tool can see the validation window. A look-up is not "
+    "scored and does not use up a proposal."
 )
 _ROUNDING: Final = f"Figures are rounded to {SIGNIFICANT_DIGITS} significant digits."
 
-_NUMBER_OR_NULL: Final = ["number", "null"]
+_NUMBER_OR_NULL: Final = ("number", "null")
 
 
-def _stats_fields() -> tuple[list[_Field], list[_Field]]:
+def _stats_fields() -> tuple[tuple[_Field, ...], tuple[_Field, ...]]:
     """The fields of a numeric feature's answer, and of the regime's."""
-    head: list[_Field] = [
+    head = _fields(
         ("feature", "string", "the feature asked about"),
         ("bars", "integer", "training bars in the window"),
         ("bars_with_value", "integer", "training bars at which the feature has a value"),
-    ]
-    numeric: list[_Field] = [
+    )
+    numeric = (
         *head,
-        ("min", "number", "the smallest value"),
+        _Field("min", "number", "the smallest value"),
         *(
-            (percentile_key(q), "number", f"the {round(q * 100)}th percentile of the values")
+            _Field(percentile_key(q), "number", f"the {round(q * 100)}th percentile of the values")
             for q in QUANTILES
         ),
-        ("max", "number", "the largest value"),
-    ]
-    labelled: list[_Field] = [
+        _Field("max", "number", "the largest value"),
+    )
+    labelled = (
         *head,
-        (
+        _Field(
             "counts",
             "object",
             "bars per regime label; every label is listed, with 0 for one that never occurred",
         ),
-    ]
+    )
     return numeric, labelled
 
 
-_RETURNS_FIELDS: Final[list[_Field]] = [
+_RETURNS_FIELDS: Final = _fields(
     ("bars", "integer", "training bars in the window"),
     ("bars_holding", "integer", "bars at which every condition holds"),
     (
@@ -447,12 +509,11 @@ _RETURNS_FIELDS: Final[list[_Field]] = [
         "baseline_mean_return",
         _NUMBER_OR_NULL,
         "the same return over the same horizon and side with NO condition: what the window did "
-        "whatever the signal said. Compare mean_return with this, not with zero. null when the "
-        "window is shorter than the horizon",
+        "whatever the signal said. null when the window is shorter than the horizon",
     ),
-]
+)
 
-_BACKTEST_FIELDS: Final[list[_Field]] = [
+_BACKTEST_FIELDS: Final = _fields(
     ("bars", "integer", "training bars in the window"),
     (
         "bars_unevaluable",
@@ -475,22 +536,30 @@ _BACKTEST_FIELDS: Final[list[_Field]] = [
         "rule's sizing and the experiment's leverage, as a fraction (0.05 is +5%)",
     ),
     ("ruined", "boolean", "true if the account was emptied; read no other figure of such a run"),
-]
+)
 
 
 def _listed(fields: Sequence[_Field]) -> list[str]:
-    return [f"- {name}: {meaning}." for name, _kind, meaning in fields]
+    return [f"- {field.name}: {field.meaning}." for field in fields]
 
 
 def _object_schema(fields: Sequence[_Field], **overrides: dict[str, Any]) -> dict[str, Any]:
-    """A closed object carrying exactly ``fields``; ``overrides`` replaces a field's schema."""
+    """A closed object carrying exactly ``fields``; ``overrides`` replaces a named field's schema."""
+    names = [field.name for field in fields]
+    unknown = sorted(set(overrides) - set(names))
+    if unknown:
+        raise ValueError(f"no field named {unknown} to override among {names}")
+
+    def schema(field: _Field) -> dict[str, Any]:
+        if field.name in overrides:
+            return overrides[field.name]
+        kind = field.kind if isinstance(field.kind, str) else list(field.kind)
+        return {"type": kind, "description": field.meaning}
+
     return {
         "type": "object",
-        "properties": {
-            name: overrides.get(name, {"type": kind, "description": meaning})
-            for name, kind, meaning in fields
-        },
-        "required": [name for name, _kind, _meaning in fields],
+        "properties": {field.name: schema(field) for field in fields},
+        "required": names,
         "additionalProperties": False,
     }
 
@@ -529,15 +598,18 @@ def _feature_schema() -> dict[str, Any]:
     condition with no shape. The price is the vocabulary's names four
     times over in one schema.
     """
-    name = {"type": "string", "enum": list(feature_names())}
+
+    def name() -> dict[str, Any]:
+        return {"type": "string", "enum": list(feature_names())}
+
     return {
         "description": "A feature by name, or read `offset` bars back.",
         "anyOf": [
-            name,
+            name(),
             {
                 "type": "object",
                 "properties": {
-                    "feature": name,
+                    "feature": name(),
                     "offset": {"type": "integer", "minimum": 0, "maximum": MAX_OFFSET_BARS},
                 },
                 "required": ["feature"],
@@ -553,7 +625,7 @@ def _feature_stats_spec() -> ToolSpec:
     numeric, labelled = _stats_fields()
     counts = {
         "type": "object",
-        "description": labelled[-1][2],
+        "description": labelled[-1].meaning,
         "properties": {label: {"type": "integer"} for label in regimes},
         "required": regimes,
         "additionalProperties": False,
@@ -567,8 +639,8 @@ def _feature_stats_spec() -> ToolSpec:
             f"Call: {json.dumps(_STATS_EXAMPLE)}",
             "Returns, for a numeric feature:",
             *_listed(numeric),
-            f"For regime, which is a label and not a number, the "
-            f"{len(numeric) - len(labelled) + 1} figures are replaced by:",
+            f"For regime, which is a label and not a number, the {len(QUANTILES) + 2} figures "
+            f"are replaced by:",
             *_listed(labelled[-1:]),
             _ROUNDING,
         ]
@@ -592,7 +664,7 @@ def _feature_stats_spec() -> ToolSpec:
             "type": "object",
             "oneOf": [_object_schema(numeric), _object_schema(labelled, counts=counts)],
         },
-        example=_STATS_EXAMPLE,
+        example=copy.deepcopy(_STATS_EXAMPLE),
     )
 
 
@@ -663,9 +735,10 @@ def _conditional_returns_spec() -> ToolSpec:
             "additionalProperties": False,
         },
         output_schema=_object_schema(
-            _RETURNS_FIELDS, side={"type": "string", "enum": sides, "description": "as asked"}
+            _RETURNS_FIELDS,
+            side={"type": "string", "enum": list(sides), "description": "as asked"},
         ),
-        example=_RETURNS_EXAMPLE,
+        example=copy.deepcopy(_RETURNS_EXAMPLE),
     )
 
 
@@ -675,8 +748,7 @@ def _backtest_train_spec() -> ToolSpec:
             "One complete rule scored on the training bars, after costs: the backtest that "
             "scores a proposal, run on the training window alone. Use it to see what a whole "
             "rule (entries, exits, filters, sizing) would have made in training before you "
-            "propose it. A training score is not a validation score: a rule can fit one window "
-            "and fail the next.",
+            "propose it.",
             _WINDOW,
             "Arguments:",
             "- rule: the rule as one JSON object, exactly the object you would give as your "
@@ -704,7 +776,7 @@ def _backtest_train_spec() -> ToolSpec:
             "additionalProperties": False,
         },
         output_schema=_object_schema(_BACKTEST_FIELDS),
-        example=_BACKTEST_EXAMPLE,
+        example=copy.deepcopy(_BACKTEST_EXAMPLE),
     )
 
 
@@ -758,16 +830,22 @@ def build_server(view: TrainView) -> Server[Any]:
         arguments = {} if params.arguments is None else params.arguments
         try:
             document = call(view, params.name, arguments)
+            # ``allow_nan=False``: a figure that is not a number is a defect
+            # on this side, and is not to reach the wire as a token JSON lacks.
+            text = json.dumps(document, allow_nan=False)
         except ToolRefusal as exc:
             return types.CallToolResult(content=[types.TextContent(text=str(exc))], is_error=True)
         except (EvaluationError, FeatureError) as exc:
             logger.error("%s: %s: %s", params.name, STORE_CANNOT_ANSWER, exc)
             raise MCPError(types.INTERNAL_ERROR, STORE_CANNOT_ANSWER) from exc
-        # ``allow_nan=False``: a figure that is not a number is a defect on
-        # this side, and is not to reach the wire as a token JSON lacks.
+        except Exception as exc:
+            # A defect. Not left to the SDK: to a client that opened with the
+            # older handshake it answers with the exception's own text
+            # (measured on mcp 2.3.0), and that text may name an instant.
+            logger.exception("%s: %s", params.name, LOOKUP_FAILED)
+            raise MCPError(types.INTERNAL_ERROR, LOOKUP_FAILED) from exc
         return types.CallToolResult(
-            content=[types.TextContent(text=json.dumps(document, allow_nan=False))],
-            structured_content=document,
+            content=[types.TextContent(text=text)], structured_content=document
         )
 
     return Server(
@@ -779,7 +857,7 @@ def build_server(view: TrainView) -> Server[Any]:
 
 
 def serve(view: TrainView) -> None:
-    """Answer requests on this process's stdin and stdout until stdin closes."""
+    """Answer requests on this process's stdin and stdout until stdin closes, or an interrupt ends it."""
     import anyio
     from mcp.server.stdio import stdio_server
 
@@ -789,43 +867,82 @@ def serve(view: TrainView) -> None:
         async with stdio_server() as (read, write):
             await server.run(read, write, server.create_initialization_options())
 
+    _leave_on_interrupt()
     anyio.run(run)
 
 
-def _require_sdk() -> None:
-    """Refuse a launch without the MCP SDK before the store is read and the frame warmed for nothing."""
-    if importlib.util.find_spec("mcp") is None:
+def _leave_on_interrupt() -> None:
+    """End this process at once on an interrupt, with the code the package's commands use.
+
+    The SDK reads stdin on a worker thread and a blocked read cannot be
+    interrupted, so a serving process left to ``KeyboardInterrupt`` does
+    not stop until its stdin closes: a person's Ctrl-C did nothing
+    (measured on Windows, 2026-11-16). Leaving at once loses nothing — no
+    look-up writes, and the store was closed before serving began.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        # Signals are the main thread's: a server run inside another
+        # program is that program's to stop.
+        return
+
+    def leave(_signum: int, _frame: object) -> None:
+        # ``os.write``: the handler may have interrupted a write to stderr.
+        os.write(2, b"interrupted\n")
+        os._exit(130)
+
+    for name in ("SIGINT", "SIGBREAK"):  # the second is Windows' Ctrl-Break
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), leave)
+
+
+def require_sdk() -> None:
+    """Refuse without the MCP SDK this module is written against, before anything is read.
+
+    Asked for by the names the server uses, so an older SDK under the same
+    package name is refused here too, and not after the store has been
+    read and the frame warmed for nothing.
+    """
+    try:
+        import anyio  # noqa: F401
+        from mcp import MCPError, types  # noqa: F401
+        from mcp.server import Server, ServerRequestContext  # noqa: F401
+        from mcp.server.stdio import stdio_server  # noqa: F401
+    except ImportError as exc:
         raise LaunchError(
-            "the MCP SDK is not installed; it is this package's optional install: "
-            'pip install -e ".[discovery-tools]"'
-        )
+            f"the MCP SDK this server is written against is not installed ({exc}); it is this "
+            f'package\'s optional install: pip install -e ".[discovery-tools]"'
+        ) from exc
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """``python -m contrib.discovery.tools_server``: read the store, warm the frame, serve.
 
     Exit codes as the package's commands have them: ``0`` when the client
-    closed stdin; ``1`` a named refusal, with the sentence on stderr — the
-    parameters, a store that cannot be opened or does not hold the window,
-    a history the research package will not measure on, the SDK missing;
-    ``2`` argparse's usage errors; ``130`` interrupted. Nothing but the
-    protocol is written to stdout.
+    closed stdin; ``1`` a named refusal to START, with the sentence on
+    stderr — the parameters, a store that cannot be opened or does not hold
+    the window, a history the research package will not measure on, the
+    SDK missing; ``2`` argparse's usage errors; ``130`` interrupted. An
+    error once serving has begun is no refusal and is left as it is raised
+    (a client that stopped reading, say). Nothing but the protocol is
+    written to stdout.
     """
     logging.basicConfig(
         level=logging.WARNING, stream=sys.stderr, format="%(levelname)s %(name)s: %(message)s"
     )
     try:
-        params = ServerParams.from_argv(sys.argv[1:] if argv is None else argv)
-        _require_sdk()
-        view = load_view(params)
-        warm(view)
+        try:
+            params = ServerParams.from_argv(sys.argv[1:] if argv is None else argv)
+            require_sdk()
+            view = load_view(params)
+            warm(view)
+        except (LaunchError, StoreError, EvaluationError, FeatureError, OSError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
         serve(view)
     except KeyboardInterrupt:
+        # Before serving begins; once it has, :func:`serve` leaves by itself.
         print("interrupted", file=sys.stderr)
         return 130
-    except (LaunchError, StoreError, EvaluationError, FeatureError, OSError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
     return 0
 
 

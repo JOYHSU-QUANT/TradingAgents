@@ -93,7 +93,7 @@ jobs:
         # contrib/replay and contrib/carry borrow from both packages and share
         # this install. contrib/core (the shared floor) and contrib/tests (the
         # graph between the packages) need nothing beyond the dev install and
-        # ride along: this is the job that already runs every borrower.
+        # ride along: this is the job that already runs every borrower but one.
         # contrib/discovery borrows from autoresearch and core too, but its
         # suite runs in the job below: its tool server needs the MCP SDK, and
         # the SDK's own requirements do not sit in one venv with the

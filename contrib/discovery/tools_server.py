@@ -33,7 +33,7 @@ the parser's own sentence, and a key the tool does not read is refused
 rather than dropped. The high-level server would have answered in its
 validator's words and dropped the key.
 
-**Three ways a call ends.** An answer: the look-up's ``dict``, as text and
+**Four ways a call ends.** An answer: the look-up's ``dict``, as text and
 as structured content. A refusal (:class:`~.research_tools.ToolRefusal`):
 a tool result marked as an error, carrying the sentence, which the model is
 meant to read. And a history that cannot answer (``EvaluationError``,
@@ -57,8 +57,8 @@ fourteen seconds on a 5,000-bar world, twelve of them the indicator walk.
 thread, and a blocked read cannot be interrupted, so a serving process left
 to ``KeyboardInterrupt`` does not stop until its stdin closes. Run as a
 process, the module handles the interrupt itself and leaves
-(:func:`_leave_on_interrupt`); it has nothing to flush, since it writes
-nothing.
+(:func:`_leave_on_interrupt`); it has nothing to finish, since it writes
+nothing to the store and each answer is flushed as it is sent.
 
 **No ``$ref`` in a schema.** A condition's schema is written out whole
 (:func:`_feature_schema`): a provider's tool-calling layer that does not
@@ -265,6 +265,8 @@ class ServerParams:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=f"python -m {_MODULE}",
+        # A flag is spelled whole: this command line is written by a program.
+        allow_abbrev=False,
         description=(
             "Serve the training-window look-ups of one experiment over MCP on stdin and "
             "stdout. Started by the benchmark, or by `python -m contrib.discovery tools`."
@@ -805,7 +807,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
 
 
 def build_server(view: TrainView) -> Server[Any]:
-    """An MCP server answering the three look-ups from ``view`` (the module docstring's three endings)."""
+    """An MCP server answering the three look-ups from ``view`` (the module docstring's four endings)."""
     from mcp import MCPError, types
     from mcp.server import Server, ServerRequestContext
 
@@ -887,8 +889,8 @@ def _leave_on_interrupt() -> None:
     interrupted, so a serving process left to ``KeyboardInterrupt`` does
     not stop until its stdin closes: a person's Ctrl-C did nothing
     (measured on Windows, 2026-11-16). Leaving at once loses nothing at any
-    point of the process's life — it writes nothing, to the store or
-    anywhere else. Installed for the whole of that life by the module's
+    point of the process's life — it writes nothing to the store, and what
+    it tells a client is flushed message by message. Installed for the whole of that life by the module's
     entry point and by nothing else: it is the process's to decide, not a
     caller's of :func:`main` or :func:`serve` inside another program. And
     for Windows' Ctrl-Break as for Ctrl-C, which otherwise ends the process

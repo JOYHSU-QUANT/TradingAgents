@@ -294,9 +294,12 @@ def _cmd_tools(args: argparse.Namespace) -> int:
     # file for a moment on Windows, and the copy is in the system's temp.
     # (A parent KILLED while it serves cleans nothing up: the copy stays in
     # the temp directory, and the child serves on until its stdin closes.)
-    with tempfile.TemporaryDirectory(
-        prefix="discovery-tools-", ignore_cleanup_errors=True
-    ) as scratch:
+    # Ctrl-Break is read as an interrupt from before the copy is made, so
+    # that it, too, takes the copy with it.
+    with (
+        _break_as_interrupt(),
+        tempfile.TemporaryDirectory(prefix="discovery-tools-", ignore_cleanup_errors=True) as scratch,
+    ):
         store = Path(scratch) / ARTIFACT_FILENAME
         shutil.copyfile(run_dir / ARTIFACT_FILENAME, store)
         params = ServerParams.for_experiment(store, experiment)
@@ -316,14 +319,13 @@ def _serve_child(params: ServerParams) -> int:
     A child ended by a signal reports minus the signal's number (POSIX);
     as an exit code that is 128 plus it, which is how a shell would say it.
     """
-    with _break_as_interrupt():
-        code = subprocess.run(params.command(), cwd=IMPORT_ROOT, check=False).returncode
+    code = subprocess.run(params.command(), cwd=IMPORT_ROOT, check=False).returncode
     return 128 - code if code < 0 else code
 
 
 @contextmanager
 def _break_as_interrupt() -> Iterator[None]:
-    """Read Windows' Ctrl-Break as the interrupt Ctrl-C is, while the child runs.
+    """Read Windows' Ctrl-Break as the interrupt Ctrl-C is, while the ``tools`` command holds its copy.
 
     Left alone it ends this process without unwinding, and the copy of the
     artifact the child reads stays in the temp directory. As an interrupt
@@ -337,7 +339,9 @@ def _break_as_interrupt() -> Iterator[None]:
     try:
         yield
     finally:
-        signal.signal(signal.SIGBREAK, previous)
+        # ``None`` is a handler that was not installed from Python, which
+        # cannot be put back from here: the default is.
+        signal.signal(signal.SIGBREAK, signal.SIG_DFL if previous is None else previous)
 
 
 _COMMANDS = {

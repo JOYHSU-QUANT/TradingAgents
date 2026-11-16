@@ -28,6 +28,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 from dataclasses import fields, replace
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -558,6 +559,12 @@ def test_parameters_that_cannot_be_read_are_a_launch_refusal(params):
     ):
         with pytest.raises(LaunchError, match=re.escape(sentence)):
             ServerParams.from_argv(swapped(flag, value))
+    # A flag is spelled whole: an abbreviation is a usage error, not a guess.
+    with pytest.raises(SystemExit) as usage:
+        ServerParams.from_argv(
+            [arg.replace("--indicator-lookback=", "--indicator=") for arg in argv]
+        )
+    assert usage.value.code == 2
     # And built in code: the split and the costs are the experiment's records.
     with pytest.raises(LaunchError, match="the experiment's split and costs"):
         replace(params, split=params.split.train)
@@ -642,6 +649,36 @@ def test_the_warm_up_passes_over_a_series_the_store_does_not_hold_and_nothing_el
     )
     assert isinstance(daily, MCPError) and daily.message == STORE_CANNOT_ANSWER
     assert not close.is_error and not backtest.is_error
+
+    # No settlements at all: the funding features are passed over the same
+    # way — and with them every backtest, whatever its rule reads, since a
+    # position is charged funding.
+    caplog.clear()
+    unfunded = replace(
+        view,
+        frame=FeatureFrame(
+            SeriesBundle(bundle.bars, daily=bundle.daily, funding=[]),
+            indicator_lookback=LOOKBACK,
+        ),
+    )
+    with caplog.at_level("WARNING", logger=tools_server.__name__):
+        warm(unfunded)
+    skipped = [record.getMessage() for record in caplog.records]
+    assert skipped and all("holds no funding series" in line for line in skipped)
+    assert {line.split()[2] for line in skipped} == {
+        name for name in feature_names() if name.startswith("funding_")
+    }
+    _info, _tools, (rate, close, backtest) = _ask(
+        build_server(unfunded),
+        [
+            ("feature_stats", {"feature": "funding_rate"}),
+            ("feature_stats", {"feature": "close"}),
+            ("backtest_train", _EXAMPLES["backtest_train"]),
+        ],
+    )
+    assert isinstance(rate, MCPError) and rate.message == STORE_CANNOT_ANSWER
+    assert isinstance(backtest, MCPError) and backtest.message == STORE_CANNOT_ANSWER
+    assert not close.is_error
 
     # A feature whose series IS held and still cannot be computed is no
     # missing series (the indicator engine returning nothing raises the
@@ -844,11 +881,15 @@ def test_the_tools_command_asks_for_the_sdk_before_it_copies_and_ends_as_its_chi
     landed_run, monkeypatch, capsys
 ):
     def child(server_params: ServerParams) -> int:
-        raise AssertionError("a copy was made and a child started without the SDK")
+        raise AssertionError("a child was started without the SDK")
+
+    def copied(*_args, **_kwargs):
+        raise AssertionError("the artifact was copied for a server that cannot be built")
 
     with monkeypatch.context() as patched:
         patched.setitem(sys.modules, "mcp", None)
         patched.setattr(cli, "_serve_child", child)
+        patched.setattr(cli.shutil, "copyfile", copied)
         assert discovery_main(["tools", "--run", str(landed_run)]) == 1
         assert 'pip install -e ".[discovery-tools]"' in capsys.readouterr().err
 
@@ -966,6 +1007,10 @@ def _interrupted_while_serving(command: list[str], **popen) -> tuple[int, str]:
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if _WINDOWS else 0,
         **popen,
     )
+    # A child that started and never answers would hold ``readline`` for
+    # good: it is killed after two minutes, and the assertions then fail.
+    watchdog = threading.Timer(120, child.kill)
+    watchdog.start()
     try:
         child.stdin.write(json.dumps(_HELLO) + "\n")
         child.stdin.flush()
@@ -973,6 +1018,7 @@ def _interrupted_while_serving(command: list[str], **popen) -> tuple[int, str]:
         child.send_signal(signal.CTRL_BREAK_EVENT if _WINDOWS else signal.SIGINT)
         return child.wait(timeout=60), child.stderr.read()
     finally:
+        watchdog.cancel()
         if child.poll() is None:
             child.kill()
         for pipe in (child.stdin, child.stdout, child.stderr):

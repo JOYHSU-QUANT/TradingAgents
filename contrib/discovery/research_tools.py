@@ -98,10 +98,12 @@ __all__ = [
     "NumberStats",
     "ToolRefusal",
     "TrainView",
+    "ViewError",
     "backtest_train",
     "call",
     "conditional_returns",
     "feature_stats",
+    "percentile_key",
 ]
 
 _T = TypeVar("_T")
@@ -140,6 +142,19 @@ class ToolRefusal(ValueError):
     """
 
 
+class ViewError(ValueError):
+    """A frame and a split do not make a train view, and the sentence says why.
+
+    The view's own refusals at construction: something that is not a frame
+    or not a split, a frame holding anything after the last training bar,
+    bars that do not run over the window the split names. A class of its
+    own so that whoever builds a view from a store (the server, plan T2)
+    can tell "this store is not the one this split describes" from any
+    other ``ValueError`` under the read. The grid check a view also makes
+    is the research package's and refuses as it does (``EvaluationError``).
+    """
+
+
 # -- the view -----------------------------------------------------------------------------
 
 
@@ -170,7 +185,7 @@ class TrainView:
     a feature, or counts a horizon, across a hole a trial would refuse.
     That check is the research package's own and refuses as it does — an
     ``EvaluationError``, in a sentence that names an instant — where the
-    others here are a ``ValueError``.
+    others here are a :class:`ViewError`.
     """
 
     frame: FeatureFrame
@@ -179,7 +194,7 @@ class TrainView:
 
     def __post_init__(self) -> None:
         if not isinstance(self.frame, FeatureFrame) or not isinstance(self.split, Split):
-            raise ValueError(
+            raise ViewError(
                 f"a train view takes a feature frame and the experiment's split, got "
                 f"{type(self.frame).__name__} and {type(self.split).__name__}"
             )
@@ -188,7 +203,7 @@ class TrainView:
         bars = bundle.bars
         last = bars[-1]
         if last.open_time >= train.end_ms:
-            raise ValueError(
+            raise ViewError(
                 f"{train}: the frame holds bars up to the one opening at "
                 f"{from_epoch_ms(last.open_time).isoformat()}, at or after the window's end; a "
                 f"train view holds no bar after the last training bar — what opens later is "
@@ -201,7 +216,7 @@ class TrainView:
             or bars[first].open_time != train.start_ms
             or last.open_time + step != train.end_ms
         ):
-            raise ValueError(
+            raise ViewError(
                 f"{train}: the frame's bars do not run from the window's first bar to its "
                 f"last, so a look-up would read fewer bars than the window names"
             )
@@ -210,7 +225,7 @@ class TrainView:
             point.time > last.close_time + FUNDING_STAMP_TOLERANCE_MS for point in bundle.funding
         )
         if late_daily or late_funding:
-            raise ValueError(
+            raise ViewError(
                 f"{train}: the frame holds {late_daily} daily bar(s) closing and "
                 f"{late_funding} funding settlement(s) posted after the last training bar's "
                 f"close; a train view holds nothing later than that close"
@@ -630,6 +645,15 @@ def _shown(value: float | None) -> float | None:
     return None if value is None else float(f"{value:.{SIGNIFICANT_DIGITS}g}")
 
 
+def percentile_key(q: float) -> str:
+    """The key a cut of :data:`QUANTILES` is answered under: ``p05`` for 0.05.
+
+    Public because the server that describes an answer's fields (plan T2)
+    has to spell them as the answer does.
+    """
+    return f"p{round(q * 100):02d}"
+
+
 def _stats_document(stats: NumberStats | LabelCounts) -> dict[str, object]:
     head: dict[str, object] = {
         "feature": stats.feature,
@@ -642,7 +666,7 @@ def _stats_document(stats: NumberStats | LabelCounts) -> dict[str, object]:
         **head,
         "min": _shown(stats.minimum),
         **{
-            f"p{round(q * 100):02d}": _shown(cut)
+            percentile_key(q): _shown(cut)
             for q, cut in zip(QUANTILES, stats.quantiles, strict=True)
         },
         "max": _shown(stats.maximum),

@@ -1,6 +1,6 @@
 """``python -m contrib.discovery`` — the benchmark's commands.
 
-Six so far, in the order a world goes through them (plan §3):
+Six in the order a world goes through them (plan §3):
 
 - ``generate --manifest world.json [--root DIR]`` — read a manifest, build
   its world from the seed, land it in ``<root>/<world id>-<manifest
@@ -41,6 +41,17 @@ Six so far, in the order a world goes through them (plan §3):
   (plan §3's last step). Reads no store. A test seed's rows keep everything
   read from the holdout sealed unless ``--unseal`` is given (plan §4.2).
 
+And one beside that order, for a person (tools plan §3.3):
+
+- ``tools --run DIR`` — the training-window look-ups of a landed world
+  served over MCP on this process's stdin and stdout, to try the tools by
+  hand from an MCP client. The manifest is read here for the coin, the
+  split, the costs and the indicator window; the server is a child
+  started on those and a throw-away copy of the artifact
+  (:mod:`.tools_server`), so the process that answers was never handed
+  the manifest. Development seeds only. Its stdout is the protocol's:
+  what this command says, it says on stderr.
+
 What the commands print is for the operator: the world's kind and rule
 are in the manifest, which a model never sees (plan §1 #7). Nothing
 printed here reaches a prompt.
@@ -60,7 +71,10 @@ from __future__ import annotations
 
 import argparse
 import logging
+import shutil
+import subprocess
 import sys
+import tempfile
 from dataclasses import replace
 from pathlib import Path
 
@@ -72,11 +86,13 @@ from .bench import (
     model_hypothesist,
     preview_oracle,
     run_world,
+    tools_experiment,
 )
 from .landing import ARTIFACT_FILENAME, MANIFEST_FILENAME, default_root, land_world
 from .manifest import Manifest, ManifestError
 from .records import RecordError
 from .scoring import SCORES_FILENAME, report_table, require_this_scorer, score_world
+from .tools_server import IMPORT_ROOT, ServerParams
 from .upstream import EvaluationError, FeatureError, SplitError, StoreError, render_fetch
 from .worlds import WorldError, generate
 
@@ -149,6 +165,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "--unseal",
         action="store_true",
         help="print a test seed's recovery and holdout figures, which are sealed by default",
+    )
+
+    tools_cmd = subparsers.add_parser(
+        "tools",
+        help=(
+            "serve a landed world's training-window look-ups over MCP on stdin and stdout "
+            "(development seeds)"
+        ),
+    )
+    tools_cmd.add_argument(
+        "--run", required=True, help="a landed run directory (manifest.json and world.sqlite)"
     )
     return parser
 
@@ -251,6 +278,32 @@ def _cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_tools(args: argparse.Namespace) -> int:
+    run_dir = Path(args.run)
+    experiment = tools_experiment(run_dir)
+    # A copy, not the artifact: opening a store migrates one an older build
+    # wrote, and the artifact's digest is what the directory is held to.
+    # Cleanup errors are let go: an interrupted child may still hold the
+    # file for a moment on Windows, and the copy is in the system's temp.
+    with tempfile.TemporaryDirectory(
+        prefix="discovery-tools-", ignore_cleanup_errors=True
+    ) as scratch:
+        store = Path(scratch) / ARTIFACT_FILENAME
+        shutil.copyfile(run_dir / ARTIFACT_FILENAME, store)
+        params = ServerParams.for_experiment(store, experiment)
+        print(
+            f"serving {experiment.coin}'s training window over MCP on stdin and stdout; close "
+            f"stdin to stop",
+            file=sys.stderr,
+        )
+        return _serve_child(params)
+
+
+def _serve_child(params: ServerParams) -> int:
+    """Run the server as a child on this process's own stdin and stdout; its exit code is this command's."""
+    return subprocess.run(params.command(), cwd=IMPORT_ROOT, check=False).returncode
+
+
 _COMMANDS = {
     "generate": _cmd_generate,
     "oracle": _cmd_oracle,
@@ -258,6 +311,7 @@ _COMMANDS = {
     "calibrate": _cmd_calibrate,
     "score": _cmd_score,
     "report": _cmd_report,
+    "tools": _cmd_tools,
 }
 
 

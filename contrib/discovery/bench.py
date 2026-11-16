@@ -48,6 +48,10 @@ searched, which the protocol allows on development seeds only (plan §4.2,
 §4.4): on a test seed the world is run, and the oracle's figures come out
 of ``search`` with everyone else's.
 
+The ``tools`` command's conditions (:func:`tools_experiment`) are held to
+development seeds for the same reason: it puts a world's training window
+in front of a person (tools plan §3.3).
+
 :func:`calibration_table` is the null calibration's reading (plan §4.3,
 PR 3's acceptance): over a root of run directories, how often each arm's
 final verdict was non-empty, by the kind of world, its null definition,
@@ -128,6 +132,7 @@ __all__ = [
     "run_world",
     "seam_note",
     "store_path",
+    "tools_experiment",
 ]
 
 # What a searched run directory holds beside the landing (plan §2's layout).
@@ -582,6 +587,32 @@ def preview_oracle(run_dir: Path) -> PlantedFigures:
             return planted_figures(
                 ledger, experiment, world.planted, manifest.budget, holdout=False
             )
+
+
+# -- the look-ups, by hand -------------------------------------------------------------------------
+
+
+def tools_experiment(run_dir: Path) -> Experiment:
+    """The conditions a landed world's training-window look-ups are served under, for a person at the keyboard.
+
+    The experiment an arm of this world would open
+    (:func:`~contrib.discovery.landing.experiment_for`), as a value:
+    nothing is stored. The ``tools`` command reads the coin, the split, the
+    costs and the indicator window off it and starts the server on those
+    and nothing else of the manifest (tools plan §2.2, §3.3). Development
+    seeds only: nothing is tuned on a test seed (plan §4.2), and a person
+    reading a test world's training window is in a position to tune the
+    tools' wording on it.
+    """
+    manifest = landed_manifest(run_dir)
+    world = manifest.world
+    if world.seed_set is not SeedSet.DEV:
+        raise BenchError(
+            f"{world.id} is a {world.seed_set.value} seed: a world's training window is looked "
+            f"at by hand on development seeds only, since nothing is tuned on a test seed and "
+            f"the tools' wording is tuned by looking"
+        )
+    return experiment_for(manifest, "tools")
 
 
 # -- the run -----------------------------------------------------------------------------------

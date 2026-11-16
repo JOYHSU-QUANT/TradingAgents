@@ -49,6 +49,21 @@ dev = [
 bedrock = [
     "langchain-aws>=1.5.0",
 ]
+# The MCP SDK, for contrib/discovery's tool server (tools plan T2): the
+# training-window look-ups served over stdio. Optional because nothing else
+# imports it: the trader's and the dashboard's venvs never install it, and
+# contrib/discovery/tools_server.py imports it only where a server is built.
+# Floored at the version the suite was written against: 2.x rebuilt the
+# low-level server, which is the layer the tool server stands on.
+discovery-tools = [
+    "mcp>=2.3,<3",
+    # Imported by name beside the SDK, so declared and not left to what the
+    # SDK happens to require: anyio runs the server and drives the client in
+    # the suite, and jsonschema is the suite's own reading of the schemas the
+    # server advertises.
+    "anyio>=4.9",
+    "jsonschema>=4.20",
+]
 
 [project.scripts]
 tradingagents = "cli.main:app"
@@ -167,6 +182,15 @@ ignore_missing_imports = true
 # installed (a dev machine) their own types are checked.
 [[tool.mypy.overrides]]
 module = ["fastapi", "fastapi.*", "starlette", "starlette.*", "jinja2", "jinja2.*", "uvicorn", "uvicorn.*"]
+ignore_missing_imports = true
+
+# contrib/discovery's tool server (``tools_server.py``, tools plan T2) is
+# built on the MCP SDK and runs it on anyio, both from the optional
+# ``discovery-tools`` install. The CI job installs mypy alone, so they are
+# read as ``Any`` there; with them installed (a dev machine) their own types
+# are checked, as the dashboard page's are.
+[[tool.mypy.overrides]]
+module = ["mcp", "mcp.*", "anyio", "anyio.*"]
 ignore_missing_imports = true
 
 # The dataflows fetch with requests, read Farside's HTML with parsel and CME

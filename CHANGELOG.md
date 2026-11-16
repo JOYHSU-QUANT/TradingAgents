@@ -10,6 +10,43 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **Discovery Lab: the training-window look-ups served over MCP (tools
+  plan T2).** `contrib/discovery/tools_server.py` is a stdio MCP server
+  around the three look-ups of T1, so that a tool-using arm (T3, not yet
+  written) asks a process of its own instead of calling functions in the
+  one that runs the search. The server is started with five things and no
+  sixth — a store's path, a coin, the experiment's whole split, its costs
+  and its indicator window (`ServerParams`, which writes and reads its own
+  command line) — reads the store no further than the last training bar,
+  and is handed no manifest and imports no module that reads one. It
+  computes every feature of the vocabulary before it answers its first
+  request, so the first look-up costs what the hundredth does (measured on
+  a 5,000-bar development world: 23 s from start to connected through the
+  `tools` command, then 17–140 ms a call). What it advertises
+  (`tool_specs()`) is generated from the research package's tables: the
+  feature names, operators, sides, regime labels and bounds of the schemas
+  are the vocabulary's and the parser's own; a rule is advertised as an
+  object and no more. Each description shows one call and says what every
+  field of the answer means; the examples read the RSI alone, away from
+  what a world plants. The descriptions and schemas carry a version
+  (`TOOLS_VERSION`, reported as the server's), and the suite pins a digest
+  of them beside it. The SDK's low-level `Server` is used because it
+  advertises a schema and applies none: arguments reach the look-ups as
+  sent, so a mistake is refused in the parser's own sentence and an
+  unknown key is refused, not dropped. A call ends one of three ways: an
+  answer (the look-up's `dict`, as text and as structured content); a
+  refusal, as a tool result marked as an error; or, when the stored
+  history cannot answer, a protocol error with a fixed sentence — the
+  research package's own names calendar instants and goes to the server's
+  stderr only. `python -m contrib.discovery tools --run DIR` serves a
+  landed world by hand: it reads the manifest for those five things,
+  copies the artifact to a temp directory and runs the server as a child
+  on the copy; development seeds only. The MCP SDK is a new optional
+  install, `pip install -e ".[discovery-tools]"` (`mcp>=2.3,<3`), imported
+  only where a server is built. CI runs the discovery suite in a job of
+  its own (`discovery tests (py3.12)`): the SDK's requirements do not
+  resolve beside the dashboard's starlette pin, and the suite, which
+  starts the server as a real stdio child, imports the SDK without a skip.
 - **Discovery Lab: three look-ups over the training window, as pure
   functions (tools plan T1).** The model arm of 2026-11-10 climbed the
   validation score, in pure-noise worlds too; the next experiment asks

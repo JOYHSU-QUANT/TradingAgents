@@ -1,0 +1,954 @@
+"""The tool-using hypothesist (tools plan §2, §3.4; T3): a model that may look things up before it answers.
+
+``search()`` asks a hypothesist for one rule a round and is not changed to
+know about tools (plan §1 #1): everything here happens INSIDE one
+``propose()``. The model is shown the three training-window look-ups, calls
+them through the look-ups' server (:mod:`.tools_server`, a process of its
+own, over MCP), and what ``propose()`` returns is the text of its last
+message — a rule, which the loop parses, measures and files as it does any
+answer.
+
+**Where the model comes from.** The research package's own
+:class:`~contrib.autoresearch.hypothesis.ChatHypothesist`, as for the model
+arm: its client is bound with the tools (``bind_tools``, which every chat
+client of the repo has) and asked with the same two messages. This module
+imports no model library: a reply is read by the four attributes a chat
+client's reply carries, and a tool's result goes back as a message written
+as a plain ``dict`` (:func:`tool_message`) — ``contrib/tests`` holds that
+shape against the library the clients are built on.
+
+**What the model is told beyond the two prompts** is a :class:`Pack`: the
+tools as the server lists them (name, description, input schema), the
+paragraph appended to the system prompt (:func:`addendum`), and the handful
+of sentences this module can say into a conversation. The paragraph states
+facts and gives no advice (decided 2026-11-19): what a tool can read, that
+the validation bars stay hidden, the limits, that a line is to be written
+before each call. :data:`PACK_VERSION` versions the whole of it (decided
+2026-11-19) — the server's wording included, though that has a version of
+its own — and the suite pins a digest beside the number. The server is
+checked to be the one this build is written against before a model is
+asked anything.
+
+**Limits are counted here, not by the server** (plan §2.3,
+:class:`Limits`). Every call a model makes in a round counts, a refused one
+included; every result ends with a line saying what is left (decided
+2026-11-19: what is measured is research, not counting). A call past the
+limit is not run and is answered with a sentence saying so; a call after
+THAT ends the conversation, and the rule is asked for once more with no
+tools — in a fresh conversation, the round's look-ups written out as text,
+since a provider may refuse a history of tool calls that comes with no
+tools, and how a client spells "call nothing" differs by provider.
+
+**A failed seam is not an answer** (plan §2.3). The model not answering, a
+reply this module cannot read, the server gone, a look-up that timed out or
+that the stored history cannot answer: each is a ``HypothesistError``, so
+``search()`` stops without spending a round. A mistake of the MODEL's — a
+feature that does not exist, a rule the parser refuses — is not: it comes
+back from the server as a result marked as an error, is shown to the model,
+and counts as a call.
+
+**Nothing is kept between rounds** (plan §2.4): each ``propose()`` starts
+from the two prompts it is handed.
+
+**The trace** (plan §2.5): one JSON object a line, in the order things
+happened. The pack once, then per round every model call (its text between
+calls, its token counts), every tool call (arguments, result, whether it
+was refused, whether it met a limit) and the answer. Neither prompt is
+written: the user prompt carries validation figures, and this module is to
+write nothing of the validation window — what it writes of the history is
+what the server answered, which read the training bars alone. A model's own
+words are kept as it wrote them, and a model may repeat a figure its prompt
+showed it. Nor is the text of a failure written, which is a provider's and
+may quote what it was sent.
+
+The MCP SDK and anyio are the optional install the server needs
+(``pip install -e ".[discovery-tools]"``) and are imported inside the
+functions that use them.
+"""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+import logging
+import time
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import ExitStack, contextmanager
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import IO, Any, Final, TextIO
+
+from .research_tools import TOOL_NAMES
+from .tools_server import IMPORT_ROOT, SERVER_NAME, TOOLS_VERSION, ServerParams
+from .upstream import ChatHypothesist, HypothesistError
+
+__all__ = [
+    "BACKTESTS_SPENT",
+    "BACKTEST_TOOL",
+    "CALL_TIMEOUT_S",
+    "CONNECT_TIMEOUT_S",
+    "DEFAULT_LIMITS",
+    "FORCED_ASK",
+    "FORCED_HEADER",
+    "FORCED_LOOKUP",
+    "FORCED_NOTE",
+    "FORCED_NOTE_CAP",
+    "NOTE_CAP",
+    "NOT_AN_OBJECT",
+    "PACK_VERSION",
+    "REMAINING",
+    "RESULT_CAP",
+    "SENTENCES",
+    "SPENT",
+    "TRACE_KEYS",
+    "TRACE_VERSION",
+    "Limits",
+    "Pack",
+    "Reply",
+    "ToolArmError",
+    "ToolCall",
+    "ToolHypothesist",
+    "ToolServerError",
+    "addendum",
+    "read_reply",
+    "require_client_sdk",
+    "tool_message",
+]
+
+logger = logging.getLogger(__name__)
+
+# The version of everything a model of this arm reads beyond the research
+# package's two prompts: the tools as listed, the paragraph appended to the
+# system prompt, and the sentences below. One number for the whole of it
+# (decided 2026-11-19), so two runs are comparable when it and the limits
+# agree. Frozen after the first trial with a real model (plan §5); the
+# suite pins a digest beside it, so an edit without a bump is red — an edit
+# of the server's wording too, which moves ``TOOLS_VERSION`` as well.
+PACK_VERSION: Final = 1
+
+# The one tool with a limit of its own: a whole backtest is the costly
+# look-up, and the one a model can climb a training score with.
+BACKTEST_TOOL: Final = "backtest_train"
+if BACKTEST_TOOL not in TOOL_NAMES:  # pragma: no cover - a rename upstream of this line
+    raise RuntimeError(f"{BACKTEST_TOOL!r} is not one of the look-ups {list(TOOL_NAMES)}")
+
+# How long the server has to answer the handshake, and one look-up. The
+# first is long because the server computes every feature before it answers
+# at all (twenty-three seconds on a 5,000-bar world, plan §9); a warm
+# look-up takes milliseconds, so a minute is a server that has stopped.
+CONNECT_TIMEOUT_S: Final = 180.0
+CALL_TIMEOUT_S: Final = 60.0
+
+# How much of a model's text, and of a tool's result, one trace line keeps.
+# The length before the cut is written beside it. What a trace keeps is not
+# what a model reads: neither is in the pack.
+NOTE_CAP: Final = 2000
+RESULT_CAP: Final = 4000
+
+# The trace's own version, written on its opening line: the kinds of line
+# there are and the keys each carries (:data:`TRACE_KEYS`). Bumped when
+# either changes, so a reader of stored traces can tell them apart.
+TRACE_VERSION: Final = 1
+_STAMPED: Final = ("kind", "round", "seq")
+TRACE_KEYS: Final[Mapping[str, tuple[str, ...]]] = {
+    "pack": (
+        "kind",
+        "trace_version",
+        "pack_version",
+        "pack_digest",
+        "server",
+        "model",
+        "tools_version",
+        "limits",
+        "addendum",
+        "sentences",
+        "forced_note_chars",
+        "tools",
+    ),
+    "model": (
+        *_STAMPED,
+        "bound",
+        "text",
+        "text_chars",
+        "tool_calls",
+        "input_tokens",
+        "output_tokens",
+        "elapsed_ms",
+    ),
+    "tool": (
+        *_STAMPED,
+        "tool",
+        "arguments",
+        "sent",
+        "tool_error",
+        "limit",
+        "result",
+        "result_chars",
+        "elapsed_ms",
+    ),
+    "answer": (
+        *_STAMPED,
+        "forced",
+        "lookups",
+        "backtests",
+        "tool_errors",
+        "text",
+        "text_chars",
+    ),
+    "failed": (*_STAMPED, "side", "error"),
+}
+
+# -- what this module says into a conversation ---------------------------------------------------
+
+REMAINING: Final = "[left this round: {lookups} tool call(s), of which backtest_train: {backtests}]"
+SPENT: Final = (
+    "No tool call is left this round, so this one was not run. Answer now: ONE new rule as a "
+    "single JSON object, and nothing else."
+)
+BACKTESTS_SPENT: Final = "No backtest_train call is left this round, so this one was not run."
+NOT_AN_OBJECT: Final = "The arguments of this call were not a JSON object, so it was not run."
+FORCED_HEADER: Final = (
+    "WHAT YOU LOOKED UP THIS ROUND on the training bars (no tool read the validation bars), in "
+    "order:"
+)
+# How the round is written out under that header: a line the model wrote
+# before a call, and a look-up with what it returned.
+FORCED_NOTE: Final = "note: {text}"
+FORCED_LOOKUP: Final = "{tool} {arguments}\n-> {result}"
+FORCED_ASK: Final = (
+    "Your tool calls for this round are spent and no tool is at hand now. Propose ONE new rule "
+    "as a single JSON object, and nothing else."
+)
+# How much of a line the model wrote is shown back to it when it is asked
+# without tools. A model reads this cut, so it is the pack's.
+FORCED_NOTE_CAP: Final = 2000
+
+# Every sentence above, by the name a trace's opening line lists it under.
+# The pack's digest is taken over this table, so a sentence a model can be
+# told has to be in it; the suite holds each constant above to be.
+SENTENCES: Final[Mapping[str, str]] = {
+    "remaining": REMAINING,
+    "spent": SPENT,
+    "backtests_spent": BACKTESTS_SPENT,
+    "not_an_object": NOT_AN_OBJECT,
+    "forced_header": FORCED_HEADER,
+    "forced_note": FORCED_NOTE,
+    "forced_lookup": FORCED_LOOKUP,
+    "forced_ask": FORCED_ASK,
+}
+
+_ADDENDUM: Final = "\n".join(
+    [
+        "TOOLS you may use before you answer:",
+        "The prompt above says a rule is scored on history you cannot see. With the tools you "
+        "are given, part of that history can be looked at: the training bars. A tool reads the "
+        "training bars and nothing after them. The validation bars stay hidden from you and "
+        "from every tool, and the validation figures a scored rule is listed with are measured "
+        "on them.",
+        "- Using a tool is optional. A look-up is not a proposal: it is not scored and does not "
+        "spend a round.",
+        "- In one round, that is before one answer, you may make at most {lookups} tool "
+        "call(s), of which at most {backtests} may be backtest_train. Every call counts, one "
+        "refused for a mistake in its arguments included. Each result ends with a line saying "
+        "how many are left.",
+        "- When none is left, a further call is not run and returns a sentence saying so; "
+        "after one more, you are asked for your rule with no tool at hand.",
+        "- Nothing you look up is kept for the next round: each round starts from the prompt "
+        "alone.",
+        "- Before each tool call, write one line saying what you are about to check and why.",
+        "- Your answer is still what the prompt asks for: ONE new rule as a single JSON object, "
+        "and nothing else, in a message that calls no tool.",
+    ]
+)
+
+
+class ToolArmError(ValueError):
+    """The arm cannot be started as asked, and the sentence says why.
+
+    A refusal to START: the SDK missing, limits that are not limits, a
+    client that takes no tools, a trace that exists, a server that is not
+    the one this build is written against. Not a failed seam: nothing was
+    asked of a model yet, and it is the caller's to put right.
+    """
+
+
+class ToolServerError(HypothesistError):
+    """The look-ups' server did not answer: the seam failed on the tools' side.
+
+    A ``HypothesistError`` (plan §2.3), so ``search()`` stops without
+    spending a round; a class of its own so a caller can tell the server
+    from the model. It carries no sentence of the research package's: the
+    server keeps those on its stderr.
+    """
+
+
+@dataclass(frozen=True)
+class Limits:
+    """How many calls a model may make before one answer (plan §2.3).
+
+    ``lookups`` bounds every call, of any tool; ``backtests`` bounds the
+    ``backtest_train`` calls among them. The plan's starting point; settled
+    after the first trial with a real model and not moved after.
+    """
+
+    lookups: int = 5
+    backtests: int = 2
+
+    def __post_init__(self) -> None:
+        for name in ("lookups", "backtests"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ToolArmError(
+                    f"limits.{name}: expected a whole number of calls, got {value!r}"
+                )
+        if self.lookups < 1:
+            raise ToolArmError(
+                f"limits.lookups: an arm that may make no call is the model arm, got {self.lookups}"
+            )
+        if not 0 <= self.backtests <= self.lookups:
+            raise ToolArmError(
+                f"limits.backtests: expected 0 to {self.lookups} (the calls there are), got "
+                f"{self.backtests}"
+            )
+
+
+DEFAULT_LIMITS: Final = Limits()
+
+
+def addendum(limits: Limits) -> str:
+    """The paragraph appended to the research package's system prompt, under ``limits``.
+
+    Facts, and no advice (decided 2026-11-19): a sentence on how to read a
+    figure would be read by this arm alone, and a result could not then be
+    told from the sentence. It does answer the one line of the system
+    prompt the tools make untrue as written — "history you cannot see" —
+    by saying which part can now be looked at and which cannot.
+    """
+    return _ADDENDUM.format(lookups=limits.lookups, backtests=limits.backtests)
+
+
+def _remaining(limits: Limits, lookups: int, backtests: int) -> str:
+    left = limits.lookups - lookups
+    return REMAINING.format(lookups=left, backtests=min(limits.backtests - backtests, left))
+
+
+@dataclass(frozen=True)
+class Pack:
+    """Everything a model of this arm reads beyond the research package's two prompts.
+
+    ``tools`` are the look-ups as a chat client is bound with them: the
+    function form every client of the repo takes, carrying the name, the
+    description and the input schema the server listed. The output schema
+    is not among them — a client sends a model none.
+    """
+
+    tools: tuple[dict[str, Any], ...]
+    limits: Limits
+
+    @classmethod
+    def of(cls, listed: Iterable[Any], limits: Limits) -> Pack:
+        """The pack over the tools as listed: by a server, or by ``tool_specs()``."""
+        return cls(
+            tools=tuple(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": copy.deepcopy(tool.input_schema),
+                    },
+                }
+                for tool in listed
+            ),
+            limits=limits,
+        )
+
+    def document(self) -> dict[str, Any]:
+        """The pack as the trace opens with it, and as its digest is taken."""
+        return {
+            "tools_version": TOOLS_VERSION,
+            "limits": asdict(self.limits),
+            "addendum": addendum(self.limits),
+            "sentences": dict(SENTENCES),
+            "forced_note_chars": FORCED_NOTE_CAP,
+            "tools": copy.deepcopy(list(self.tools)),
+        }
+
+    def digest(self) -> str:
+        written = json.dumps(self.document(), sort_keys=True)
+        return hashlib.sha256(written.encode("utf-8")).hexdigest()
+
+
+# -- a reply, read without the library that made it ----------------------------------------------
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    """One call a model asked for. ``arguments`` is ``None`` when they were not a JSON object."""
+
+    id: str
+    name: str
+    arguments: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class Reply:
+    """A chat client's reply as this arm reads it: its text, the calls it asks for, what it cost."""
+
+    message: object
+    text: str
+    calls: tuple[ToolCall, ...]
+    input_tokens: int | None
+    output_tokens: int | None
+
+
+def read_reply(message: object, label: str) -> Reply:
+    """``message`` as a :class:`Reply`, or a failed seam if it is not a reply this arm can read.
+
+    Read by attribute, so no model library is imported: ``content`` (text —
+    the repo's clients flatten typed blocks before they hand a reply over),
+    ``tool_calls`` (each a mapping with ``name``, ``args`` and ``id``),
+    ``invalid_tool_calls`` (calls whose arguments the client could not
+    parse) and ``usage_metadata``. A call with no id cannot be answered, so
+    it is the seam's failure and not the model's mistake.
+    """
+    content = getattr(message, "content", None)
+    if not isinstance(content, str):
+        raise HypothesistError(f"{label} answered with {type(content).__name__}, not text")
+    calls = [
+        *(_read_call(item, label, parsed=True) for item in _listed(message, "tool_calls", label)),
+        *(
+            _read_call(item, label, parsed=False)
+            for item in _listed(message, "invalid_tool_calls", label)
+        ),
+    ]
+    usage = getattr(message, "usage_metadata", None)
+    return Reply(
+        message=message,
+        text=content,
+        calls=tuple(calls),
+        input_tokens=_tokens(usage, "input_tokens"),
+        output_tokens=_tokens(usage, "output_tokens"),
+    )
+
+
+def _listed(message: object, name: str, label: str) -> list[Any]:
+    value = getattr(message, name, None)
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)):
+        raise HypothesistError(
+            f"{label} answered with {name} as {type(value).__name__}, not a list"
+        )
+    return list(value)
+
+
+def _read_call(item: object, label: str, *, parsed: bool) -> ToolCall:
+    if not isinstance(item, Mapping):
+        raise HypothesistError(f"{label} asked for a tool call as {type(item).__name__}")
+    call_id, name = item.get("id"), item.get("name")
+    if not isinstance(call_id, str) or not call_id:
+        raise HypothesistError(
+            f"{label} asked for a tool call with no id, which cannot be answered"
+        )
+    if not isinstance(name, str):
+        if parsed:
+            raise HypothesistError(f"{label} asked for a tool call with no tool named")
+        name = ""
+    arguments = item.get("args") if parsed else None
+    if not isinstance(arguments, dict) or not _is_json(arguments):
+        arguments = None
+    return ToolCall(id=call_id, name=name, arguments=arguments)
+
+
+def _is_json(value: object) -> bool:
+    """Whether ``value`` can go over the wire as JSON: a parsed ``NaN`` cannot."""
+    try:
+        json.dumps(value, allow_nan=False)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _tokens(usage: object, key: str) -> int | None:
+    value = usage.get(key) if isinstance(usage, Mapping) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def tool_message(call_id: str, text: str, *, error: bool) -> dict[str, str]:
+    """A tool's result as the next message of the conversation, written as a plain ``dict``.
+
+    The role-keyed form a chat client reads as its own tool message, so
+    this module builds one without the library; ``status`` is what a
+    provider that marks a failed call is told.
+    """
+    return {
+        "role": "tool",
+        "content": text,
+        "tool_call_id": call_id,
+        "status": "error" if error else "success",
+    }
+
+
+# -- the server, asked from this thread ----------------------------------------------------------
+
+
+def require_client_sdk() -> None:
+    """Refuse without the MCP SDK and anyio, before anything is opened or started."""
+    try:
+        from anyio.from_thread import start_blocking_portal  # noqa: F401
+        from mcp import Client, StdioServerParameters  # noqa: F401
+        from mcp.client.stdio import stdio_client  # noqa: F401
+    except ImportError as exc:
+        raise ToolArmError(
+            f"the MCP SDK the tool arm is written against cannot be imported ({exc}); if it is "
+            f"not installed, it is this package's optional install: pip install -e "
+            f'".[discovery-tools]"'
+        ) from exc
+
+
+def _leaves(exc: BaseException) -> list[BaseException]:
+    grouped = getattr(exc, "exceptions", None)
+    return [exc] if grouped is None else [leaf for inner in grouped for leaf in _leaves(inner)]
+
+
+def _described(exc: BaseException) -> str:
+    """What went wrong on the server's side, the client's task groups unwrapped.
+
+    The SDK raises a closed connection or a timeout inside an exception
+    group; the leaves are what a person can read. Nothing of the research
+    package's is in them: the server answers a failure of its own with a
+    fixed sentence.
+    """
+    said = dict.fromkeys(f"{type(leaf).__name__}: {leaf}" for leaf in _leaves(exc))
+    return "; ".join(said)[:300]
+
+
+def _transport(server: object, log: TextIO | None) -> Any:
+    """What the client connects through: a child started on ``server``, or ``server`` itself.
+
+    A :class:`~.tools_server.ServerParams` is the way a benchmark starts
+    one: its own command, run where ``contrib`` imports from, its stderr
+    written to ``log``. Anything else is handed to the client as it is — a
+    server object for a connection in memory, which is how the suite
+    drives this module without a process.
+    """
+    if not isinstance(server, ServerParams):
+        return server
+    from mcp import StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    command = server.command()
+    child = StdioServerParameters(command=command[0], args=command[1:], cwd=str(IMPORT_ROOT))
+    return stdio_client(child) if log is None else stdio_client(child, errlog=log)
+
+
+@contextmanager
+def _connected(portal: Any, transport: Any, timeout: float) -> Iterator[Any]:
+    """An open client on the portal's loop. A server that does not start is a failed seam.
+
+    ``timeout`` bounds the handshake's ``initialize``, and through it the
+    start: the server warms before it answers. Before that request the SDK
+    probes for its newer handshake under a bound of its own (ten seconds on
+    mcp 2.3, which ``timeout`` does not move) and falls back when the probe
+    is not answered — so a server that warms for longer than the probe, as
+    one over a few thousand bars does, is connected to by ``initialize``,
+    and a silent one is given up on that much after ``timeout``. Closing is
+    quiet — by then the search is over, and a server that died is already
+    what the search ended on.
+    """
+    from mcp import Client
+
+    manager = portal.wrap_async_context_manager(Client(transport, read_timeout_seconds=timeout))
+    try:
+        client = manager.__enter__()
+    except Exception as exc:
+        raise ToolServerError(f"the look-ups' server did not start: {_described(exc)}") from exc
+    try:
+        yield client
+    finally:
+        try:
+            manager.__exit__(None, None, None)
+        except Exception as exc:  # noqa: BLE001 - whatever a dead connection raises on the way out
+            logger.warning("closing the look-ups' server: %s", _described(exc))
+
+
+class _Session:
+    """The open connection, asked from the thread the search runs on."""
+
+    def __init__(self, portal: Any, client: Any, call_timeout: float) -> None:
+        self._portal = portal
+        self._client = client
+        self._call_timeout = call_timeout
+
+    def listing(self) -> list[Any]:
+        try:
+            return list(self._portal.call(self._client.list_tools).tools)
+        except Exception as exc:
+            raise ToolServerError(
+                f"the look-ups' server did not list its tools: {_described(exc)}"
+            ) from exc
+
+    def call(self, name: str, arguments: dict[str, Any]) -> tuple[str, bool]:
+        """One look-up: the text a model reads, and whether the server refused the call.
+
+        Anything else the server does — a protocol error, a closed
+        connection, a timeout — is the seam's failure.
+        """
+        try:
+            result = self._portal.call(self._client.call_tool, name, arguments, self._call_timeout)
+        except Exception as exc:
+            raise ToolServerError(
+                f"the look-ups' server did not answer {name!r}: {_described(exc)}"
+            ) from exc
+        texts = [block.text for block in result.content if getattr(block, "type", None) == "text"]
+        if not texts:
+            raise ToolServerError(f"the look-ups' server answered {name!r} with no text")
+        return "\n".join(texts), bool(result.is_error)
+
+
+# -- the trace -----------------------------------------------------------------------------------
+
+
+@dataclass
+class _Round:
+    """One ``propose()`` as it goes: what has been spent, said and written down."""
+
+    number: int
+    seq: int = 0
+    lookups: int = 0
+    backtests: int = 0
+    tool_errors: int = 0
+    # Set once the model has been told no call is left: its next call ends
+    # the conversation.
+    told_spent: bool = False
+    # The round as text, for a model that has to be asked without tools.
+    looked: list[str] = field(default_factory=list)
+
+
+class _Trace:
+    """One JSON object a line, flushed as written: a run that dies leaves what it did.
+
+    A line of a round is stamped here, as it is written, with the round and
+    its place in it: so the numbers run 1, 2, 3 with no gap, whatever
+    failed on the way. Each kind carries exactly its keys of
+    :data:`TRACE_KEYS`; a line that does not is a defect of this module.
+    """
+
+    def __init__(self, file: IO[str]) -> None:
+        self._file = file
+
+    def write(self, kind: str, state: _Round | None = None, **payload: object) -> None:
+        line: dict[str, object] = {"kind": kind}
+        if state is not None:
+            state.seq += 1
+            line.update(round=state.number, seq=state.seq)
+        line.update(payload)
+        if set(line) != set(TRACE_KEYS[kind]):
+            raise RuntimeError(
+                f"a {kind!r} trace line carries {sorted(line)}, not {sorted(TRACE_KEYS[kind])}"
+            )
+        self._file.write(json.dumps(line, allow_nan=False) + "\n")
+        self._file.flush()
+
+
+def _elapsed_ms(started: float) -> int:
+    return round((time.monotonic() - started) * 1000)
+
+
+# -- the hypothesist -----------------------------------------------------------------------------
+
+
+class ToolHypothesist:
+    """A :class:`~contrib.autoresearch.ports.Hypothesist` that may look things up before it answers.
+
+    Made by :meth:`open`, which holds the server, the trace and the loop
+    the client runs on for as long as its ``with`` block lasts — one arm's
+    search. ``label`` is the model's, as the research package labels it.
+    """
+
+    def __init__(
+        self, *, chat: ChatHypothesist, bound: Any, session: _Session, trace: _Trace, pack: Pack
+    ) -> None:
+        self.label = chat.label
+        self.pack = pack
+        self._chat = chat
+        self._bound = bound
+        self._session = session
+        self._trace = trace
+        self._rounds = 0
+        self._tools_failed: str | None = None
+        self._closed = False
+
+    @classmethod
+    @contextmanager
+    def open(
+        cls,
+        chat: ChatHypothesist,
+        server: object,
+        *,
+        trace: Path,
+        limits: Limits = DEFAULT_LIMITS,
+        server_log: Path | None = None,
+        connect_timeout: float = CONNECT_TIMEOUT_S,
+        call_timeout: float = CALL_TIMEOUT_S,
+    ) -> Iterator[ToolHypothesist]:
+        """The hypothesist over ``chat`` and the look-ups' server, for one search.
+
+        ``server`` is a :class:`~.tools_server.ServerParams` — the server
+        is then started as a child on them, its stderr written to
+        ``server_log`` — or a server object, connected to in memory.
+        ``trace`` is the file this search's trace is written to. Neither
+        file may exist: each is one search's.
+
+        A :class:`ToolArmError` is a refusal to start; a
+        :class:`ToolServerError` is a server that did not come up. Either
+        way no model was asked anything.
+        """
+        require_client_sdk()
+        if not isinstance(limits, Limits):
+            raise ToolArmError(f"limits: expected Limits, got {type(limits).__name__}")
+        if server_log is not None and not isinstance(server, ServerParams):
+            raise ToolArmError("server_log is a child's stderr, and this server is no child")
+        bind = getattr(chat.model, "bind_tools", None)
+        if not callable(bind):
+            raise ToolArmError(f"{chat.label} takes no tools: its client has no bind_tools")
+        trace, server_log = Path(trace), None if server_log is None else Path(server_log)
+        _require_fresh(trace, server_log)
+        from anyio.from_thread import start_blocking_portal
+
+        with ExitStack() as stack:
+            log = (
+                None
+                if server_log is None
+                else stack.enter_context(server_log.open("x", encoding="utf-8"))
+            )
+            portal = stack.enter_context(start_blocking_portal())
+            client = stack.enter_context(
+                _connected(portal, _transport(server, log), connect_timeout)
+            )
+            _require_this_server(client.server_info)
+            session = _Session(portal, client, call_timeout)
+            pack = Pack.of(session.listing(), limits)
+            try:
+                bound = bind(copy.deepcopy(list(pack.tools)))
+            except Exception as exc:
+                raise ToolArmError(f"{chat.label} could not be given the tools: {exc}") from exc
+            # Opened last, so a server that did not come up leaves no empty
+            # trace behind; "x", so one made since the check is not written over.
+            written = _Trace(stack.enter_context(trace.open("x", encoding="utf-8", newline="\n")))
+            written.write(
+                "pack",
+                trace_version=TRACE_VERSION,
+                pack_version=PACK_VERSION,
+                pack_digest=pack.digest(),
+                server=SERVER_NAME,
+                model=chat.label,
+                **pack.document(),
+            )
+            hypothesist = cls(chat=chat, bound=bound, session=session, trace=written, pack=pack)
+            try:
+                yield hypothesist
+            finally:
+                hypothesist._closed = True
+
+    def propose(self, system: str, user: str) -> str:
+        """One answer, after whatever the model looked up for it (the module docstring)."""
+        if self._closed:
+            raise RuntimeError(
+                "this hypothesist's server and trace were closed with its `with` block"
+            )
+        if self._tools_failed is not None:
+            # A failed tools seam ends this arm, whichever way it failed — a
+            # server that died, or one alive and unable to answer: the search
+            # is over (plan §2.3), and a second round would cost a model call
+            # to be told the same.
+            raise ToolServerError(self._tools_failed)
+        self._rounds += 1
+        state = _Round(number=self._rounds)
+        try:
+            return self._propose(system, user, state)
+        except HypothesistError as exc:
+            on_server = isinstance(exc, ToolServerError)
+            if on_server:
+                self._tools_failed = str(exc)
+            cause = exc.__cause__
+            self._trace.write(
+                "failed",
+                state,
+                side="server" if on_server else "model",
+                # The class and no sentence: a provider's may quote the
+                # request, and the report already says how the search ended.
+                # With nothing underneath it — a reply this arm could not
+                # read — the class is the seam's own.
+                error=type(exc if cause is None else cause).__name__,
+            )
+            raise
+
+    def _propose(self, system: str, user: str, state: _Round) -> str:
+        messages: list[object] = [
+            ("system", f"{system}\n\n{addendum(self.pack.limits)}"),
+            ("human", user),
+        ]
+        while True:
+            reply = self._ask(messages, state, bound=True)
+            if not reply.calls:
+                return self._answer(reply, state, forced=False)
+            if state.told_spent:
+                return self._forced(system, user, state)
+            messages.append(reply.message)
+            note = reply.text.strip()
+            if note:
+                state.looked.append(FORCED_NOTE.format(text=note[:FORCED_NOTE_CAP]))
+            for call in reply.calls:
+                messages.append(self._run(call, state))
+
+    def _ask(self, messages: list[object], state: _Round, *, bound: bool) -> Reply:
+        """One call of the model, with the tools bound or on the client as it was built."""
+        client: Any = self._bound if bound else self._chat.model
+        started = time.monotonic()
+        try:
+            raw = client.invoke(list(messages))
+        except Exception as exc:
+            # The whole family, as the research package's own adapter
+            # catches it and for its reason: the provider SDKs share no base
+            # class, and each of these means no answer came back. An
+            # interrupt is not an ``Exception`` and passes.
+            raise HypothesistError(f"{self.label} did not answer: {exc}") from exc
+        reply = read_reply(raw, self.label)
+        self._trace.write(
+            "model",
+            state,
+            bound=bound,
+            text=reply.text[:NOTE_CAP],
+            text_chars=len(reply.text),
+            tool_calls=len(reply.calls),
+            input_tokens=reply.input_tokens,
+            output_tokens=reply.output_tokens,
+            elapsed_ms=_elapsed_ms(started),
+        )
+        return reply
+
+    def _run(self, call: ToolCall, state: _Round) -> dict[str, str]:
+        """One call of the model's, answered: run if the round allows it, written down either way.
+
+        Three things keep a call from being run, asked in this order: no
+        call is left in the round (which is not counted — the count is
+        full), its arguments are no JSON object, no backtest is left. The
+        last two count as calls.
+        """
+        limits = self.pack.limits
+        started = time.monotonic()
+        if state.lookups >= limits.lookups:
+            state.told_spent = True
+            return self._ran(call, state, started, SPENT, limit="lookups")
+        state.lookups += 1
+        ended: dict[str, Any]
+        if call.arguments is None:
+            body, ended = NOT_AN_OBJECT, {"tool_error": True}
+        elif call.name == BACKTEST_TOOL and state.backtests >= limits.backtests:
+            body, ended = BACKTESTS_SPENT, {"limit": "backtests"}
+        else:
+            state.backtests += call.name == BACKTEST_TOOL
+            try:
+                body, refused = self._session.call(call.name, call.arguments)
+            except ToolServerError:
+                # The call the search ended on is written down too, with no
+                # result: which look-up it was is otherwise only on the
+                # server's stderr.
+                self._ran(call, state, started, None, sent=True)
+                raise
+            state.looked.append(
+                FORCED_LOOKUP.format(
+                    tool=call.name, arguments=json.dumps(call.arguments), result=body
+                )
+            )
+            ended = {"sent": True, "tool_error": refused}
+        text = f"{body}\n{_remaining(limits, state.lookups, state.backtests)}"
+        return self._ran(call, state, started, text, **ended)
+
+    def _ran(
+        self,
+        call: ToolCall,
+        state: _Round,
+        started: float,
+        result: str | None,
+        *,
+        sent: bool = False,
+        tool_error: bool = False,
+        limit: str | None = None,
+    ) -> dict[str, str]:
+        """Write one call down as it ended, and hand back the message that answers it."""
+        state.tool_errors += tool_error
+        self._trace.write(
+            "tool",
+            state,
+            tool=call.name,
+            arguments=call.arguments,
+            sent=sent,
+            tool_error=tool_error,
+            limit=limit,
+            result=None if result is None else result[:RESULT_CAP],
+            result_chars=0 if result is None else len(result),
+            elapsed_ms=_elapsed_ms(started),
+        )
+        return tool_message(call.id, result or "", error=tool_error or limit is not None)
+
+    def _forced(self, system: str, user: str, state: _Round) -> str:
+        """The rule asked for once more with no tools, the round's look-ups written out as text.
+
+        A fresh conversation on the client as the research package built
+        it, under its own system prompt: there is no tool to describe.
+        """
+        asked = [user, ""]
+        if state.looked:
+            asked += [FORCED_HEADER, *state.looked, ""]
+        asked.append(FORCED_ASK)
+        reply = self._ask([("system", system), ("human", "\n".join(asked))], state, bound=False)
+        return self._answer(reply, state, forced=True)
+
+    def _answer(self, reply: Reply, state: _Round, *, forced: bool) -> str:
+        self._trace.write(
+            "answer",
+            state,
+            forced=forced,
+            lookups=state.lookups,
+            backtests=state.backtests,
+            tool_errors=state.tool_errors,
+            text=reply.text[:NOTE_CAP],
+            text_chars=len(reply.text),
+        )
+        return reply.text
+
+
+def _require_fresh(trace: Path, server_log: Path | None) -> None:
+    """Refuse a trace or a log that cannot be begun, before a server is started for it.
+
+    Each is one search's: a file that exists is not written over — the log
+    of an earlier search is the one place its server said why — and the two
+    are two files. A directory that is not there is refused here too, and
+    not after the server has warmed for nothing.
+    """
+    named = (
+        [("trace", trace)] if server_log is None else [("trace", trace), ("server_log", server_log)]
+    )
+    for what, path in named:
+        if path.exists():
+            raise ToolArmError(
+                f"{what}: {path} exists: it is one search's, and is not written over"
+            )
+        if not path.parent.is_dir():
+            raise ToolArmError(f"{what}: {path.parent} is not a directory to write {path.name} in")
+    if server_log is not None and trace.resolve() == server_log.resolve():
+        raise ToolArmError(f"trace and server_log name one file, {trace}")
+
+
+def _require_this_server(info: object) -> None:
+    """Refuse a server that is not the look-ups' server at the version this build pins."""
+    answered = (getattr(info, "name", None), getattr(info, "version", None))
+    if answered != (SERVER_NAME, str(TOOLS_VERSION)):
+        raise ToolArmError(
+            f"the server answered as {answered[0]!r} version {answered[1]!r}; this arm's wording "
+            f"is pinned against {SERVER_NAME!r} version {TOOLS_VERSION}"
+        )

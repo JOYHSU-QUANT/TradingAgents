@@ -10,6 +10,43 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **Discovery Lab: a hypothesist that may look things up before it answers
+  (tools plan T3).** `contrib/discovery/toolarm.py` is `ToolHypothesist`:
+  inside one `propose()` the model is bound with the three training-window
+  look-ups, calls them through the look-ups' server (T2, a process of its
+  own, over MCP stdio), and the text of its last message is the round's
+  answer — so `search()` is unchanged and files the answer as it files any
+  other. Not yet wired into `bench.py` (T4): no command runs it, and it has
+  only ever been driven by a scripted model. The model is the research
+  package's own `ChatHypothesist`, bound through its client's `bind_tools`;
+  the module imports no model library — a reply is read by attribute and a
+  tool's result goes back as a plain role-keyed `dict` — and
+  `contrib/tests/test_toolarm_wire.py` holds those shapes against
+  langchain itself. What a model reads beyond the two prompts is one
+  versioned pack (`Pack`, `PACK_VERSION`, a digest pinned by the suite):
+  the tools as the server lists them, a paragraph appended to the system
+  prompt, and the few sentences the arm can say. The paragraph states
+  facts and gives no advice: the tools read the training bars, the
+  validation bars stay hidden from the model and from every tool, the
+  limits, that a line is to be written before each call. The server is
+  checked to be the one this build's wording is pinned against before a
+  model is asked anything. Limits are counted by the arm (`Limits`, five
+  calls a round of which two backtests, the plan's starting point): every
+  call counts, a refused one included; every result ends with a line
+  saying what is left; a call past the limit, and a third backtest, are
+  not run and say so; a model that calls again after being told is asked
+  once more with no tools, in a fresh conversation that lists the round's
+  look-ups as text. A mistake of the model's comes back as the parser's
+  own sentence, marked as an error. The server not starting, dying, timing
+  out or answering with a protocol error is a `ToolServerError` — a
+  `HypothesistError`, so the search stops and no round is spent — and the
+  arm asks nothing more of that server. The model not answering is a
+  `HypothesistError` too. Each search writes a
+  `trace.jsonl`: the pack once, then every model call (its text between
+  calls, its token counts), every tool call (arguments, result, whether it
+  was refused, whether it met a limit) and each answer. Neither prompt is
+  written to it, nor any instant, nor the sentence of a failure. The
+  child's stderr is written to a file the caller names.
 - **Discovery Lab: the training-window look-ups served over MCP (tools
   plan T2).** `contrib/discovery/tools_server.py` is a stdio MCP server
   around the three look-ups of T1, so that a tool-using arm (T3, not yet

@@ -28,8 +28,9 @@ _CONTRIB = _PACKAGE.parent
 
 # What this package must never reach, from a source OR a test: every other
 # contrib package, the engine and the message types it speaks, and the
-# venue SDK (plan §2: only the LLM arm talks to a model, and it does so
-# through the research package's own hypothesist).
+# venue SDK (plan §2: only the model arms talk to a model, and they do so
+# through the research package's own hypothesist — the tool arm binds that
+# client's tools and reads its replies by attribute, importing nothing).
 _FORBIDDEN = (
     "contrib.carry",
     "contrib.dashboard",

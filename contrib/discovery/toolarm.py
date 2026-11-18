@@ -29,16 +29,19 @@ hidden, the limits, that a line is to be written before each call.
 server's wording included, though that has a version of its own — and the
 suite pins a digest beside the number. Before a model is asked anything,
 the server is checked to be the one this build is written against and to
-list exactly this build's tools, so the pack a model reads is the pinned
-one. Two things a model reads are not in the pack: the sentence the
-research package's parser refuses a mistake in, which is that package's,
-and how the pieces are laid out (the newlines between them, a failed
-call's ``status``), which the suite holds by exact text.
+list exactly this build's tools, so the pack a model reads is this
+build's — the one the suite pins. Two things a model reads are not in the
+pack: the sentence the research package's parser refuses a mistake in,
+which is that package's, and how the pieces are laid out (the newlines
+between them, how a call's arguments are spelled where a round is written
+out as text, a failed call's ``status``), which the suite holds by exact
+text.
 
 **Limits are counted here, not by the server** (plan §2.3,
-:class:`Limits`). Every call a model makes in a round counts, a refused one
-included; every result ends with a line saying what is left (decided
-2026-11-19: what is measured is research, not counting). A backtest the
+:class:`Limits`). Every call a model makes in a round counts until none is
+left, a refused one included; the result of each call that counted ends
+with a line saying what is left (decided 2026-11-19: what is measured is
+research, not counting). A backtest the
 parser refused counts as a call and not as a backtest (decided 2026-11-19):
 that limit is on training scores seen, and a slip of grammar shows none. A
 call past the limit is not run and is answered with a sentence saying so; a
@@ -85,7 +88,7 @@ import logging
 import os
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from concurrent.futures import TimeoutError as FutureTimeout
+from concurrent.futures import wait
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -154,9 +157,10 @@ if BACKTEST_TOOL not in TOOL_NAMES:  # pragma: no cover - a rename upstream of t
 
 # How long the server has to answer the handshake, and one look-up. The
 # first is long because the server computes every feature before it answers
-# at all (about fourteen seconds on a 5,000-bar world, twenty-three from
-# start to connected: the server module's own figures); a warm look-up
-# takes milliseconds, so a minute is a server that has stopped.
+# at all (about fourteen seconds on a 5,000-bar world by the server
+# module's figure, twenty-three from start to connected through the
+# ``tools`` command by the README's); a warm look-up takes milliseconds, so
+# a minute is a server that has stopped.
 CONNECT_TIMEOUT_S: Final = 180.0
 CALL_TIMEOUT_S: Final = 60.0
 
@@ -314,7 +318,8 @@ _ADDENDUM: Final = "\n".join(
         "call(s), of which at most {backtests} may be backtest_train call(s) that return a "
         "score. Every call counts toward the {lookups}, one refused for a mistake in its "
         "arguments included; a backtest_train call refused that way does not count toward the "
-        "{backtests}. Each result ends with a line saying how many are left.",
+        "{backtests}. The result of each call that counts ends with a line saying how many "
+        "are left.",
         "- When none is left, a further call is not run and returns a sentence saying so; "
         "after one more, you are asked for your rule with no tool at hand.",
         "- Nothing you look up is kept for the next round: each round starts from the prompt "
@@ -570,8 +575,12 @@ def _read_call(item: object, label: str, *, parsed: bool) -> ToolCall:
     client could not parse, arguments that are no JSON object or that JSON
     cannot carry (a ``NaN``, half a surrogate pair), ones nested or long
     past any call a model means, and a tool's name that is no text a wire
-    carries. Sent on, each of those fails inside the client and would end
-    the search as a server that went away.
+    carries or is longer than any tool's. What JSON cannot carry fails
+    inside the MCP client when it is sent on (measured for half a
+    surrogate pair, 2026-11-19: the connection closes), and the search
+    would end as a server that went away; the bounds on depth and length
+    are there so that neither the wire nor a trace line is handed whatever
+    a model writes.
     """
     if not isinstance(item, Mapping):
         raise HypothesistError(f"{label} asked for a tool call as {type(item).__name__}")
@@ -675,17 +684,16 @@ def _waited(portal: Any, function: Callable[..., Any], *arguments: object) -> An
     on every platform (measured on Windows: a Ctrl-C during a look-up was
     heard only when the look-up's own timeout ran out), so the wait looks
     up every :data:`_POLL_S`. Leaving for any reason takes the task along.
+
+    The slices are waited with ``wait``, which says nothing when one ends:
+    the task's result — a timeout of its own among them — is read once,
+    when the task is done, and cannot be mistaken for a slice running out.
     """
     future = portal.start_task_soon(function, *arguments)
     try:
-        while True:
-            try:
-                return future.result(timeout=_POLL_S)
-            except FutureTimeout:
-                # Ours, or the task's own timeout raised as its result: the
-                # two are one class on newer interpreters.
-                if future.done():
-                    raise
+        while not future.done():
+            wait([future], timeout=_POLL_S)
+        return future.result()
     except BaseException:
         future.cancel()
         raise
@@ -1102,10 +1110,12 @@ class ToolHypothesist:
 
         A fresh conversation on the client as the research package built
         it, under its own system prompt: there is no tool to describe. What
-        is written out is what the server answered, with the lines the
-        model wrote before those calls; a call that was not run is not. A
-        reply that asks for a tool all the same came from a client that
-        still has them, and is no answer.
+        is written out is each call the server answered, with its result in
+        full, and each line the model wrote in a message that made calls
+        (cut to :data:`FORCED_NOTE_CAP`); a call the arm did not run is not
+        listed, and the message that ended the conversation is left out
+        whole. A reply that asks for a tool all the same came from a client
+        that still has them, and is no answer.
         """
         asked = [user, ""]
         if state.looked:

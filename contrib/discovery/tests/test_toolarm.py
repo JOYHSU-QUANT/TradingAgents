@@ -26,6 +26,7 @@ import re
 import subprocess
 import sys
 import time
+from concurrent.futures import Future, wait as real_wait
 from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
@@ -94,7 +95,7 @@ from .test_tools_server import _refusal
 # the paragraph appended to the system prompt, the sentences the arm says.
 # Changing any of it moves the digest: bump ``PACK_VERSION`` with it (after
 # the wording is frozen, plan §5, that is a new set of runs) and pin both.
-PINNED = (1, "8ccac92289e51072cc19013584ae872ff5ffd28c28334e15a634105c6b6d5640")
+PINNED = (1, "f9c6b7e46c55d3fae2fd7953f98fdad4163b9af17cf172b504dadb2deb3382f9")
 
 SYSTEM = "THE-SYSTEM-PROMPT as the research package wrote it."
 USER = "THE-USER-PROMPT with what was tried. Propose ONE new rule."
@@ -240,6 +241,9 @@ def test_a_model_looks_three_things_up_and_its_last_message_is_the_answer(view, 
         assert hypothesist.label == LABEL
         assert hypothesist.propose(SYSTEM, USER) == ANSWER
         pack = hypothesist.pack
+        # Flushed as written: the round is on disk while the search is still
+        # open, which is all a run that dies leaves behind.
+        assert [line["kind"] for line in traced(tmp_path)][-2:] == ["model", "answer"]
 
     # Bound with the tools as the server lists them, which are this build's.
     assert pack == Pack.of(tool_specs(), DEFAULT_LIMITS)
@@ -1003,7 +1007,7 @@ def test_what_a_model_is_told_is_pinned_to_the_pack_s_version():
     # A pack shares nothing with what it was listed from, or handed out.
     document["tools"][0]["function"]["parameters"]["properties"].clear()
     assert pack.document()["tools"][0]["function"]["parameters"]["properties"]
-    assert Limits(lookups=5, backtests=2) == DEFAULT_LIMITS
+    assert (DEFAULT_LIMITS.lookups, DEFAULT_LIMITS.backtests) == (5, 2)
 
 
 def test_the_paragraph_states_facts_and_gives_no_advice():
@@ -1017,7 +1021,7 @@ def test_the_paragraph_states_facts_and_gives_no_advice():
         "at most 5 tool call(s), of which at most 2 may be backtest_train call(s) that return a score",
         "a backtest_train call refused that way does not count toward the 2",
         "Every call counts toward the 5, one refused for a mistake in its arguments included",
-        "Each result ends with a line saying how many are left",
+        "The result of each call that counts ends with a line saying how many are left",
         "Nothing you look up is kept for the next round",
         "Before each tool call, write one line saying what you are about to check and why",
         "ONE new rule as a single JSON object, and nothing else, in a message that calls no tool",
@@ -1302,8 +1306,6 @@ def test_what_keeps_a_call_from_being_run_is_asked_in_one_order(view, tmp_path, 
         hypothesist.propose(SYSTEM, USER)
     assert results(model)[0]["content"] == f"{NOT_AN_OBJECT}\n{left(1, 0)}"
     assert reached == []
-    # And every backtest the round has may be all its calls.
-    assert Limits(lookups=2, backtests=2) == Limits(2, 2)
 
 
 # -- the forced ask, further ------------------------------------------------------------------------
@@ -1365,21 +1367,32 @@ def test_a_reply_that_asks_for_a_tool_when_none_is_bound_is_no_answer(view, tmp_
 
 
 def _nested(depth: int) -> dict:
+    """``{"feature": "close"}`` inside ``depth`` more objects: ``depth + 1`` levels in all."""
     arguments: dict = {"feature": "close"}
     for _ in range(depth):
         arguments = {"x": arguments}
     return arguments
 
 
+def _listed_deep(depth: int) -> list:
+    """``"close"`` inside ``depth`` lists."""
+    value: list = ["close"]
+    for _ in range(depth - 1):
+        value = [value]
+    return value
+
+
 @pytest.mark.parametrize(
     "arguments",
     [
         {"feature": "clo\ud83dse"},
-        _nested(MAX_ARGUMENT_DEPTH + 1),
-        {"feature": "c" * (MAX_ARGUMENT_CHARS + 1)},
+        # One level past the bound, in objects and in lists; one character past it.
+        _nested(MAX_ARGUMENT_DEPTH),
+        {"feature": _listed_deep(MAX_ARGUMENT_DEPTH)},
+        {"feature": "c" * (MAX_ARGUMENT_CHARS - len('{"feature": ""}') + 1)},
         ["feature", "close"],
     ],
-    ids=["half a surrogate pair", "nested too deep", "too long", "a list"],
+    ids=["half a surrogate pair", "nested too deep", "lists too deep", "too long", "a list"],
 )
 def test_arguments_that_cannot_be_sent_are_the_model_s_mistake_and_end_no_search(
     view, tmp_path, monkeypatch, arguments
@@ -1403,15 +1416,23 @@ def test_arguments_that_cannot_be_sent_are_the_model_s_mistake_and_end_no_search
 
 def test_arguments_at_the_bounds_are_sent(view, tmp_path, monkeypatch):
     reached = _counted(monkeypatch)
-    deep = _nested(MAX_ARGUMENT_DEPTH - 1)
-    with arm(build_server(view), [says("", ("feature_stats", deep)), says(ANSWER)], tmp_path) as (
+    # As deep, as long and as long-named as a call may be: each one level
+    # or one character short of what the test above sees refused.
+    deep = ("feature_stats", _nested(MAX_ARGUMENT_DEPTH - 1))
+    lists = ("feature_stats", {"feature": _listed_deep(MAX_ARGUMENT_DEPTH - 1)})
+    long = ("feature_stats", {"feature": "c" * (MAX_ARGUMENT_CHARS - len('{"feature": ""}'))})
+    named = ("n" * MAX_NAME_CHARS, {"feature": "close"})
+    calls = [deep, lists, long, named]
+    with arm(build_server(view), [says("", *calls), says(ANSWER)], tmp_path) as (
         hypothesist,
         model,
     ):
         hypothesist.propose(SYSTEM, USER)
     # The server's to refuse, in the look-up's own sentence: not the arm's.
-    assert reached == [("feature_stats", deep)]
-    assert results(model)[0]["content"].startswith(_refusal(view, "feature_stats", deep))
+    assert reached == calls
+    assert [message["content"].splitlines()[0] for message in results(model)] == [
+        _refusal(view, *made) for made in calls
+    ]
 
 
 def test_a_tool_name_no_wire_carries_is_not_sent_and_is_cut_where_it_is_written(
@@ -1469,10 +1490,38 @@ def test_a_server_under_another_name_or_listing_other_tools_is_refused(view, tmp
 def test_a_server_that_is_a_path_or_a_child_with_no_log_is_refused(view, params, tmp_path):
     _refused(view, tmp_path, "server: expected the parameters", server="not-a-server")
     _refused(view, tmp_path, "server: expected the parameters", server=tmp_path / "arm.sqlite")
+    _refused(view, tmp_path, "server: expected the parameters", server=b"arm.sqlite")
     # A child's stderr is the one place it says why: it is not left to
     # whatever this process's stderr happens to be.
     _refused(view, tmp_path, "a server started as a child has to be given one", server=params)
     assert list(tmp_path.iterdir()) == []
+
+
+def _with_function(tool: dict, **changes) -> dict:
+    """``tool`` with keys of its function set, or — given ``None`` — taken away."""
+    function = {**tool["function"], **changes}
+    return {**tool, "function": {k: v for k, v in function.items() if v is not None}}
+
+
+def test_a_trace_and_a_log_are_opened_so_as_never_to_write_over_one(
+    view, params, tmp_path, monkeypatch
+):
+    # The check before a server is started is a courtesy; what holds the
+    # rule is how the files are opened. With the check out of the way, a
+    # file made in between is still not written over.
+    monkeypatch.setattr(toolarm, "_require_fresh", lambda trace, server_log: None)
+    chat = ChatHypothesist(model=Scripted([]), label=LABEL)
+    kept = tmp_path / "kept.txt"
+    kept.write_text("an earlier search's\n", encoding="utf-8")
+    with pytest.raises(FileExistsError), ToolHypothesist.open(chat, build_server(view), trace=kept):
+        raise AssertionError("opened over a trace that exists")
+    with (
+        pytest.raises(FileExistsError),
+        ToolHypothesist.open(chat, params, trace=tmp_path / "trace.jsonl", server_log=kept),
+    ):
+        raise AssertionError("opened over a log that exists")
+    assert kept.read_text(encoding="utf-8") == "an earlier search's\n"
+    assert not (tmp_path / "trace.jsonl").exists()
 
 
 def test_a_pack_built_by_hand_is_held_to_what_one_listed_is():
@@ -1488,6 +1537,10 @@ def test_a_pack_built_by_hand_is_held_to_what_one_listed_is():
         (json.dumps([*tools[:2], {**tools[2], "strict": True}], sort_keys=True), "a tool is"),
         (json.dumps([*tools[:2], {"type": "tool", "function": tools[2]["function"]}]), "a tool is"),
         (json.dumps([*tools[:2], "backtest_train"]), "a tool is"),
+        (json.dumps([*tools[:2], {"type": "function", "function": None}]), "a tool is"),
+        (json.dumps([*tools[:2], _with_function(tools[2], strict=True)]), "a tool is"),
+        (json.dumps([*tools[:2], _with_function(tools[2], description=None)]), "a tool is"),
+        (json.dumps(tools[::-1], sort_keys=True), "not the look-ups"),
         (json.dumps(tools, sort_keys=True, indent=1), "not the canonical spelling"),
     ):
         with pytest.raises(ToolArmError, match=re.escape(sentence)):
@@ -1548,8 +1601,9 @@ def test_a_reply_is_read_field_by_field(reply, expected):
     assert read.message is reply
 
 
-def test_a_call_with_an_empty_id_cannot_be_answered():
-    reply = SimpleNamespace(content="", tool_calls=[{"name": "t", "args": {}, "id": ""}])
+@pytest.mark.parametrize("call_id", ["", 5, None])
+def test_a_call_whose_id_is_no_text_cannot_be_answered(call_id):
+    reply = SimpleNamespace(content="", tool_calls=[{"name": "t", "args": {}, "id": call_id}])
     with pytest.raises(HypothesistError, match="a tool call with no id"):
         read_reply(reply, LABEL)
 
@@ -1597,21 +1651,62 @@ def test_a_server_that_does_not_list_its_tools_is_a_failed_seam():
         assert session.call("feature_stats", {}) == ('{"bars": 3}', True)
 
 
-def test_a_wait_on_the_server_is_taken_in_slices_and_ends_as_the_task_does():
+def test_a_wait_on_the_server_is_taken_in_slices_and_ends_as_the_task_does(monkeypatch):
+    # A stand-in portal handing out futures the test settles itself, and a
+    # ``wait`` that keeps the bound each slice was waited under.
+    futures: list[Future] = []
+
+    def start_task_soon(_function, *_arguments):
+        futures.append(Future())
+        return futures[-1]
+
+    portal = SimpleNamespace(start_task_soon=start_task_soon)
+    slices: list[float] = []
+
+    def settling_after(count: int, settle):
+        def waited(waiting, timeout):
+            slices.append(timeout)
+            if len(slices) > 50:
+                raise AssertionError("the wait spun")
+            if len(slices) == count:
+                settle(futures[-1])
+            return real_wait(waiting, timeout=0)
+
+        return waited
+
+    # Three slices, none longer than the bound, then the task's result.
+    monkeypatch.setattr(toolarm, "wait", settling_after(3, lambda f: f.set_result("done")))
+    assert toolarm._waited(portal, object) == "done"
+    assert slices == [toolarm._POLL_S] * 3
+
+    # A timeout that IS the task's result is raised as that, once the task
+    # is done: not taken for a slice running out, and not waited through.
+    slices.clear()
+    own = TimeoutError("the look-up's own")
+    monkeypatch.setattr(toolarm, "wait", settling_after(2, lambda f: f.set_exception(own)))
+    with pytest.raises(TimeoutError, match="the look-up's own"):
+        toolarm._waited(portal, object)
+    assert len(slices) == 2
+
+    # An interrupt between slices is heard, and takes the task with it.
+    def interrupted(_waiting, timeout):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(toolarm, "wait", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        toolarm._waited(portal, object)
+    assert futures[-1].cancelled()
+
+    # And on a real loop: a task longer than a slice is waited for.
+    monkeypatch.undo()
+    monkeypatch.setattr(toolarm, "_POLL_S", 0.02)
+
     async def slow():
-        await anyio.sleep(toolarm._POLL_S * 2.5)
+        await anyio.sleep(0.1)
         return "done"
 
-    async def timed_out():
-        raise TimeoutError("the look-up's own")
-
-    with start_blocking_portal() as portal:
-        # Longer than a slice: waited for, not given up on.
-        assert toolarm._waited(portal, slow) == "done"
-        # A timeout that is the task's result is raised, not waited through
-        # (the two timeouts are one class on newer interpreters).
-        with pytest.raises(TimeoutError, match="the look-up's own"):
-            toolarm._waited(portal, timed_out)
+    with start_blocking_portal() as real:
+        assert toolarm._waited(real, slow) == "done"
 
 
 def test_what_went_wrong_is_read_out_of_the_groups_it_is_raised_in():
@@ -1633,6 +1728,8 @@ def test_what_went_wrong_is_read_out_of_the_groups_it_is_raised_in():
     odd.exceptions = 7
     assert toolarm._described(odd) == "RuntimeError: odd"
     assert toolarm._described(Group(RuntimeError("x"))) == "RuntimeError: x"
+    # A group with nothing in it still says what it is.
+    assert toolarm._described(Group()) == "Group: unhandled errors in a TaskGroup"
 
 
 def test_closing_a_connection_that_is_already_gone_is_quiet_and_said(caplog):
@@ -1658,6 +1755,10 @@ def test_a_trace_line_that_is_not_its_kind_s_shape_is_a_defect_and_takes_no_numb
     with pytest.raises(RuntimeError, match="a 'answer' trace line carries"):
         trace.write(TraceKind.ANSWER, state, forced=False)
     assert out.getvalue() == "" and state.seq == 0
+    # A key too many is refused as a key too few is.
+    with pytest.raises(RuntimeError, match="a 'failed' trace line carries"):
+        trace.write(TraceKind.FAILED, state, side="model", error="RuntimeError", sentence="x")
+    assert out.getvalue() == "" and state.seq == 0
     trace.write(TraceKind.FAILED, state, side="model", error="RuntimeError")
     assert json.loads(out.getvalue()) == {
         "kind": "failed",
@@ -1670,3 +1771,13 @@ def test_a_trace_line_that_is_not_its_kind_s_shape_is_a_defect_and_takes_no_numb
     assert [kind.value for kind in TraceKind] == ["pack", "model", "tool", "answer", "failed"]
     assert [limit.value for limit in toolarm.Limit] == ["lookups", "backtests"]
     assert [seam.value for seam in toolarm.Seam] == ["model", "server"]
+
+
+def test_a_long_answer_is_returned_whole_and_cut_where_it_is_written(view, tmp_path):
+    # The loop is handed the answer as the model gave it (what to make of
+    # an essay is the loop's rule) and the trace keeps its head and length.
+    essay = "not a rule. " * 400
+    with arm(build_server(view), [says(essay)], tmp_path) as (hypothesist, _model):
+        assert hypothesist.propose(SYSTEM, USER) == essay
+    answer = traced(tmp_path, "answer")[0]
+    assert answer["text"] == essay[:NOTE_CAP] and answer["text_chars"] == len(essay)

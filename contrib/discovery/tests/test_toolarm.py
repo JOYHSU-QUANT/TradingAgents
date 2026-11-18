@@ -101,7 +101,7 @@ from .test_tools_server import _refusal
 # the paragraph appended to the system prompt, the sentences the arm says.
 # Changing any of it moves the digest: bump ``PACK_VERSION`` with it (after
 # the wording is frozen, plan §5, that is a new set of runs) and pin both.
-PINNED = (1, "a57bff1d58575acbb8d10fe5776337f6af100e76689d744a024ef5fef30dca8d")
+PINNED = (1, "35bce47e9f2450191f616f5d05410c3a43da1a19108740320276ceb2f2f06719")
 
 SYSTEM = "THE-SYSTEM-PROMPT as the research package wrote it."
 USER = "THE-USER-PROMPT with what was tried. Propose ONE new rule."
@@ -1558,6 +1558,11 @@ def test_a_tool_name_longer_than_any_tool_s_is_not_sent_and_is_cut_where_it_is_w
     read = read_reply(garbled, LABEL)
     assert read.calls == (ToolCall(id="call_g", name="feature_stats?", arguments=None),)
     assert read.replayable is False
+    # An id is sent back too, twice: with the reply and with its result.
+    sound = {"name": "feature_stats", "args": {"feature": "close"}}
+    for call_id, replayable in (("call_ok", True), ("call_" + chr(0xD83D), False)):
+        reply = SimpleNamespace(content="", tool_calls=[{**sound, "id": call_id}])
+        assert read_reply(reply, LABEL).replayable is replayable
 
 
 def test_a_call_built_by_hand_is_held_to_what_one_read_is():

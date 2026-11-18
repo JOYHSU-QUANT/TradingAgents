@@ -43,11 +43,14 @@ Breaking changes within the 0.x line are called out explicitly.
   round as text, and a reply to THAT which still asks for a tool is no
   answer. A mistake of the model's comes back marked as an error: the
   parser's own sentence when the server refused it, a fixed sentence when
-  the call could not be sent at all (arguments that are no JSON object,
-  nested past 32 levels or longer than 8,000 characters as written — the
-  loop's own bound on an answer — or a tool name past 64 characters);
-  those bounds are in the pack. A message that cannot be sent BACK — half
-  a surrogate pair anywhere in it, or a `NaN` in a call — ends the
+  the call could not be sent at all (arguments the client could not
+  parse, that are no JSON object or do not survive a round trip through
+  JSON, nested past 32 levels or longer than 8,000 characters as written
+  — the loop's own bound on an answer — or a tool name past 64
+  characters);
+  those bounds are in the pack. A message with calls in it that cannot be
+  sent BACK — half a surrogate pair anywhere in it, or a `NaN` in a call
+  — ends the
   round's tool use at once and the rule is asked for without tools: put
   back into the conversation, the provider's client cannot encode the
   next request (measured with the repo's client), and a slip of the

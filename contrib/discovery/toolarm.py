@@ -49,9 +49,11 @@ a tool ends the conversation, and the rule is asked for once more with no
 tools — in a fresh conversation, the round's look-ups written out as text,
 since a provider may refuse a history of tool calls that comes with no
 tools, and how a client spells "call nothing" differs by provider. A
-message that cannot be sent back as the model wrote it — half a surrogate
-pair in a call, which no client can encode a request from — ends the
-conversation the same way, and at once.
+message with calls in it that cannot be sent back as the model wrote it —
+half a surrogate pair anywhere in it, or a ``NaN`` in a call, which not
+every client can encode a request from — ends the conversation the same
+way, and at once. (A message with no call is the answer, whatever is in
+it.)
 
 **A failed seam is not an answer** (plan §2.3). The model not answering, a
 reply this module cannot read, the server gone, a look-up that timed out or
@@ -182,8 +184,11 @@ _POLL_S: Final = 0.5
 # rule nests half a dozen deep and a tool's name is a word. Past any of the
 # three a call is answered as one that cannot be sent, so neither the wire,
 # nor a trace line, nor the round written out as text is handed whatever a
-# model writes. A model is answered differently past them, so they are in
-# the pack.
+# model writes. The length is measured on the spelling a trace line writes
+# (ASCII, the rest escaped), where the loop counts the characters of an
+# answer: one number, two measures that agree on anything a rule is made
+# of. A model is answered differently past the bounds, so they are in the
+# pack.
 MAX_ARGUMENT_CHARS: Final = 8000
 MAX_ARGUMENT_DEPTH: Final = 32
 MAX_NAME_CHARS: Final = 64
@@ -296,11 +301,13 @@ FORCED_HEADER: Final = (
 # before a call, and a look-up with what it returned.
 FORCED_NOTE: Final = "note: {text}"
 FORCED_LOOKUP: Final = "{tool} {arguments}\n-> {result}"
-# True of both ways a round's tool use ends early: the calls spent and
-# another made, and a message that could not be sent back as it was written.
+# True of both ways a round's tool use ends early — the calls spent and
+# another made, and a message that could not be sent back, which may be
+# the round's first — so it says what is so from here on and not how many
+# calls were made.
 FORCED_ASK: Final = (
-    "Your tool calls for this round are over and no tool is at hand now. Propose ONE new rule "
-    "as a single JSON object, and nothing else."
+    "No tool is at hand for the rest of this round. Propose ONE new rule as a single JSON "
+    "object, and nothing else."
 )
 # How much of a line the model wrote is shown back to it when it is asked
 # without tools. A model reads this cut, so it is the pack's.
@@ -568,9 +575,11 @@ class Reply:
     """A chat client's reply as this arm reads it: its text, the calls it asks for, what it cost.
 
     ``replayable`` says the reply can be put back into the conversation:
-    everything in it — its text, each call's name and arguments as the
-    model wrote them — is text a request can be encoded from. A reply
-    with half a surrogate pair in it is not: sent back, the provider's
+    everything in it — its text, each call's id, name and arguments as
+    they came — is something every client can encode a request from. A
+    reply holding a ``NaN`` is not, for a client that refuses to write
+    one; a reply with half a surrogate pair in it is not: sent back, the
+    provider's
     client fails to encode the request (measured 2026-11-19), and a
     mistake of the model's would end the search as a model that did not
     answer.
@@ -611,15 +620,19 @@ def read_reply(message: object, label: str) -> Reply:
         input_tokens=_tokens(usage, "input_tokens"),
         output_tokens=_tokens(usage, "output_tokens"),
         replayable=_encodes(content)
-        and all(_encodes([item.get("name"), item.get("args")]) for item in (*parsed, *unparsed)),
+        and all(
+            _encodes([item.get("id"), item.get("name"), item.get("args")])
+            for item in (*parsed, *unparsed)
+        ),
     )
 
 
 def _encodes(value: object) -> bool:
     """Whether ``value`` is something every client can encode a request from.
 
-    Text all the way down, and no ``NaN``: one client writes that out and
-    another refuses to, so a reply holding one is not sent back to either.
+    Text all the way down, and no ``NaN`` or infinity: one client writes
+    those out and another refuses to, so a reply holding one is not sent
+    back to either.
     """
     try:
         json.dumps(value, allow_nan=False, ensure_ascii=False, default=str).encode("utf-8")
@@ -652,7 +665,8 @@ def _read_call(item: object, label: str, *, parsed: bool) -> ToolCall:
     ``null``, so the server would refuse a value the model did not write
     (both measured on mcp 2.3, 2026-11-19). The bounds on depth and length
     are there so that neither the wire nor a trace line is handed whatever
-    a model writes. (Not sending such a call is half of it: a reply with
+    a model writes. (Not sending a call is half of it, and for two of
+    these not the half a model meets: a reply with a ``NaN`` or with
     half a surrogate pair in it cannot be sent back to the model either,
     which is :attr:`Reply.replayable`'s to say.)
     """
@@ -688,8 +702,9 @@ def _sendable(arguments: object) -> bool:
     """Whether ``arguments`` can go over the wire, and into a trace line, as JSON.
 
     They can when JSON says exactly what they are — written out and read
-    back they are the same value, which a ``NaN``, a key that is no text
-    and a tuple are not — when that text can be encoded, and when it is
+    back they are the same value, which a ``NaN``, a key that is a number
+    and a tuple among the values are not — when that text can be encoded,
+    and when it is
     within the bounds. The length is the length of the spelling a trace
     line and a round written out as text use, so the bound is on what is
     written and not on how many characters a model typed.
@@ -1132,7 +1147,7 @@ class ToolHypothesist:
 
         Three things keep a call from being run, asked in this order: no
         call is left in the round (which is not counted — the count is
-        full), its arguments cannot be sent, no backtest is left. The last
+        full), the call cannot be sent, no backtest is left. The last
         two count as calls.
         """
         limits = self._pack.limits

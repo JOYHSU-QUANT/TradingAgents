@@ -575,10 +575,11 @@ def _read_call(item: object, label: str, *, parsed: bool) -> ToolCall:
     client could not parse, arguments that are no JSON object or that JSON
     cannot carry (a ``NaN``, half a surrogate pair), ones nested or long
     past any call a model means, and a tool's name that is no text a wire
-    carries or is longer than any tool's. What JSON cannot carry fails
-    inside the MCP client when it is sent on (measured for half a
-    surrogate pair, 2026-11-19: the connection closes), and the search
-    would end as a server that went away; the bounds on depth and length
+    carries or is longer than any tool's. Sent on, half a surrogate pair
+    fails inside the MCP client and the connection closes, so the search
+    would end as a server that went away; a ``NaN`` goes over the wire as
+    ``null``, so the server would refuse a value the model did not write
+    (both measured on mcp 2.3, 2026-11-19). The bounds on depth and length
     are there so that neither the wire nor a trace line is handed whatever
     a model writes.
     """

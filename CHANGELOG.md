@@ -31,10 +31,10 @@ Breaking changes within the 0.x line are called out explicitly.
   limits, that a line is to be written before each call. Before a model
   is asked anything, the server is checked to be the one this build's
   wording is pinned against and to list exactly this build's tools, so
-  the pack a model reads is the pinned one. Limits are counted by the arm
+  the pack a model reads is this build's, which the suite pins. Limits are counted by the arm
   (`Limits`, five calls a round of which two backtests that return a
-  score, the plan's starting point): every call counts, a refused one
-  included; a backtest the parser refuses counts as a call and not as a
+  score, the plan's starting point): every call counts until none is
+  left, a refused one included; a backtest the parser refuses counts as a call and not as a
   backtest; the result of each call that counts ends with a line saying
   what is left; a call
   past the limit, and a backtest past its own, are not run and say so; a
@@ -45,10 +45,12 @@ Breaking changes within the 0.x line are called out explicitly.
   parser's own sentence when the server refused it, a fixed sentence when
   the arguments could not be sent at all (not a JSON object, a `NaN`,
   half a surrogate pair, nested past 32 levels, longer than 20,000
-  characters). What JSON cannot carry fails inside the MCP client when
-  sent on (measured for half a surrogate pair: the connection closes) and
-  would end the search as a server that went away; the bounds on depth
-  and length keep the wire and the trace line small. The server not starting, dying,
+  characters). Sent on, half a surrogate pair fails inside the MCP
+  client and closes the connection, which would end the search as a
+  server that went away, and a `NaN` goes over the wire as `null`, so the
+  server would refuse a value the model did not write (both measured on
+  mcp 2.3); the bounds on depth and length keep the wire and the trace
+  line small. The server not starting, dying,
   timing out, answering with a protocol error or in a shape the arm does
   not read is a `ToolServerError` — a `HypothesistError`, so the search
   stops and no round is spent — and the arm asks nothing more of that

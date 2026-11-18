@@ -1375,7 +1375,7 @@ def _nested(depth: int) -> dict:
 
 
 def _listed_deep(depth: int) -> list:
-    """``"close"`` inside ``depth`` lists."""
+    """``"close"`` inside ``depth`` lists, for a ``depth`` of one or more."""
     value: list = ["close"]
     for _ in range(depth - 1):
         value = [value]
@@ -1397,9 +1397,9 @@ def _listed_deep(depth: int) -> list:
 def test_arguments_that_cannot_be_sent_are_the_model_s_mistake_and_end_no_search(
     view, tmp_path, monkeypatch, arguments
 ):
-    # Sent on, each of these fails inside the client (measured: a lone
-    # surrogate closes the connection), and the search would end on a
-    # server that had done nothing wrong.
+    # Sent on, a lone surrogate closes the connection (measured), and the
+    # search would end on a server that had done nothing wrong; the others
+    # are past bounds no call a model means comes near, or are no object.
     reached = _counted(monkeypatch)
     script = [says("", ("feature_stats", arguments)), says("", STATS), says(ANSWER)]
     with arm(build_server(view), script, tmp_path) as (hypothesist, model):
@@ -1653,11 +1653,19 @@ def test_a_server_that_does_not_list_its_tools_is_a_failed_seam():
 
 def test_a_wait_on_the_server_is_taken_in_slices_and_ends_as_the_task_does(monkeypatch):
     # A stand-in portal handing out futures the test settles itself, and a
-    # ``wait`` that keeps the bound each slice was waited under.
+    # ``wait`` that keeps the bound each slice was waited under. A future
+    # read before it is settled says so: a wait that went around ``wait``
+    # fails here, where it would otherwise sit on a result that never comes.
+    class Unsettled(Future):
+        def result(self, timeout=None):
+            if not self.done():
+                raise AssertionError("the result was read before the task was done")
+            return super().result(timeout)
+
     futures: list[Future] = []
 
     def start_task_soon(_function, *_arguments):
-        futures.append(Future())
+        futures.append(Unsettled())
         return futures[-1]
 
     portal = SimpleNamespace(start_task_soon=start_task_soon)
@@ -1674,31 +1682,31 @@ def test_a_wait_on_the_server_is_taken_in_slices_and_ends_as_the_task_does(monke
 
         return waited
 
-    # Three slices, none longer than the bound, then the task's result.
-    monkeypatch.setattr(toolarm, "wait", settling_after(3, lambda f: f.set_result("done")))
-    assert toolarm._waited(portal, object) == "done"
-    assert slices == [toolarm._POLL_S] * 3
-
-    # A timeout that IS the task's result is raised as that, once the task
-    # is done: not taken for a slice running out, and not waited through.
-    slices.clear()
-    own = TimeoutError("the look-up's own")
-    monkeypatch.setattr(toolarm, "wait", settling_after(2, lambda f: f.set_exception(own)))
-    with pytest.raises(TimeoutError, match="the look-up's own"):
-        toolarm._waited(portal, object)
-    assert len(slices) == 2
-
-    # An interrupt between slices is heard, and takes the task with it.
     def interrupted(_waiting, timeout):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(toolarm, "wait", interrupted)
-    with pytest.raises(KeyboardInterrupt):
-        toolarm._waited(portal, object)
-    assert futures[-1].cancelled()
+    with monkeypatch.context() as patched:
+        # Three slices, none longer than the bound, then the task's result.
+        patched.setattr(toolarm, "wait", settling_after(3, lambda f: f.set_result("done")))
+        assert toolarm._waited(portal, object) == "done"
+        assert slices == [toolarm._POLL_S] * 3
+
+        # A timeout that IS the task's result is raised as that, once the
+        # task is done: not taken for a slice running out, not waited through.
+        slices.clear()
+        own = TimeoutError("the look-up's own")
+        patched.setattr(toolarm, "wait", settling_after(2, lambda f: f.set_exception(own)))
+        with pytest.raises(TimeoutError, match="the look-up's own"):
+            toolarm._waited(portal, object)
+        assert len(slices) == 2
+
+        # An interrupt between slices is heard, and takes the task with it.
+        patched.setattr(toolarm, "wait", interrupted)
+        with pytest.raises(KeyboardInterrupt):
+            toolarm._waited(portal, object)
+        assert futures[-1].cancelled()
 
     # And on a real loop: a task longer than a slice is waited for.
-    monkeypatch.undo()
     monkeypatch.setattr(toolarm, "_POLL_S", 0.02)
 
     async def slow():

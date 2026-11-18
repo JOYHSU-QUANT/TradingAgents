@@ -7,7 +7,7 @@ memory for most of the suite, started as a stdio child where the process
 is the point (that it answers, that its dying is a failed seam, that its
 stderr is kept).
 
-Five groups. A ROUND: the model looks things up, each result goes back
+The groups. A ROUND: the model looks things up, each result goes back
 with what is left, and the last message is the answer. THE LIMITS: the
 call past the limit is not run, the third backtest is not run, and a model
 that will not stop is asked once more without tools. A FAILED SEAM: the
@@ -19,6 +19,7 @@ version, and states facts.
 
 from __future__ import annotations
 
+import io
 import itertools
 import json
 import re
@@ -29,7 +30,9 @@ from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 
+import anyio
 import pytest
+from anyio.from_thread import start_blocking_portal
 from mcp import StdioServerParameters
 from mcp.client.stdio import stdio_client
 
@@ -49,10 +52,14 @@ from contrib.discovery.toolarm import (
     FORCED_ASK,
     FORCED_HEADER,
     FORCED_NOTE_CAP,
+    MAX_ARGUMENT_CHARS,
+    MAX_ARGUMENT_DEPTH,
+    MAX_NAME_CHARS,
     NOT_AN_OBJECT,
     NOTE_CAP,
     PACK_VERSION,
     REMAINING,
+    RESULT_CAP,
     SENTENCES,
     SPENT,
     TRACE_KEYS,
@@ -60,9 +67,12 @@ from contrib.discovery.toolarm import (
     Limits,
     Pack,
     ToolArmError,
+    ToolCall,
     ToolHypothesist,
     ToolServerError,
+    TraceKind,
     addendum,
+    read_reply,
 )
 from contrib.discovery.tools_server import (
     IMPORT_ROOT,
@@ -84,7 +94,7 @@ from .test_tools_server import _refusal
 # the paragraph appended to the system prompt, the sentences the arm says.
 # Changing any of it moves the digest: bump ``PACK_VERSION`` with it (after
 # the wording is frozen, plan §5, that is a new set of runs) and pin both.
-PINNED = (1, "ceae0b2e47608083dfb1e1e56c0420e99d9d842ebd2273563e7a4a189a5d25c2")
+PINNED = (1, "8ccac92289e51072cc19013584ae872ff5ffd28c28334e15a634105c6b6d5640")
 
 SYSTEM = "THE-SYSTEM-PROMPT as the research package wrote it."
 USER = "THE-USER-PROMPT with what was tried. Propose ONE new rule."
@@ -525,7 +535,7 @@ def test_a_mistake_of_the_model_s_is_shown_to_it_marked_and_counted(view, tmp_pa
         "error": "x",
     }
     script = [
-        says("three mistakes", no_such_feature, no_such_tool, not_a_number, invalid=[unparsed]),
+        says("four mistakes", no_such_feature, no_such_tool, not_a_number, invalid=[unparsed]),
         says(ANSWER),
     ]
     with arm(build_server(view), script, tmp_path) as (hypothesist, model):
@@ -702,8 +712,8 @@ def test_a_server_that_never_answers_the_handshake_is_a_failed_seam_after_the_co
 ):
     # The SDK first probes for its newer handshake under a bound of its own
     # (ten seconds), which the caller's does not move: shortened here so the
-    # test waits on the bound it is about. Left alone if the SDK renames it.
-    monkeypatch.setattr("mcp.client.session.DISCOVER_TIMEOUT_SECONDS", 0.2, raising=False)
+    # test waits on the bound it is about. Red if the SDK renames it, on purpose.
+    monkeypatch.setattr("mcp.client.session.DISCOVER_TIMEOUT_SECONDS", 0.2)
     # A child that starts and says nothing: the bound on the start is the
     # caller's, not the life of the child.
     silent = stdio_client(
@@ -880,6 +890,8 @@ def test_the_trace_opens_with_the_pack_and_every_line_is_one_of_five_shapes(
         pack = hypothesist.pack
     raw = trace_text(tmp_path)
     assert raw.endswith("\n") and "\n\n" not in raw
+    # One line ending on every platform: the file is written as it reads.
+    assert b"\r" not in (tmp_path / "trace.jsonl").read_bytes()
     lines = [json.loads(line) for line in raw.splitlines()]
     assert {line["kind"] for line in lines} == set(_KEYS)
     for line in lines:
@@ -888,7 +900,7 @@ def test_the_trace_opens_with_the_pack_and_every_line_is_one_of_five_shapes(
     opening = lines[0]
     assert [line["kind"] for line in lines].count("pack") == 1
     assert TRACE_VERSION == _TRACE_PINNED
-    assert {kind: set(keys) for kind, keys in TRACE_KEYS.items()} == _KEYS
+    assert {kind.value: set(keys) for kind, keys in TRACE_KEYS.items()} == _KEYS
     assert opening == {
         "kind": "pack",
         "trace_version": TRACE_VERSION,
@@ -956,9 +968,8 @@ def test_what_a_model_is_told_is_pinned_to_the_pack_s_version():
     assert (PACK_VERSION, pack.digest()) == PINNED, (
         "what a model of the tool arm reads changed: bump PACK_VERSION and pin the new digest"
     )
-    # The digest reads the server's wording, the paragraph and the limits.
+    # The digest reads the limits, and with them the paragraph.
     assert pack.digest() != Pack.of(tool_specs(), Limits(lookups=4, backtests=2)).digest()
-    assert pack.digest() != replace(pack, tools=pack.tools[:2]).digest()
     document = pack.document()
     # Every sentence the arm can say into a conversation is in the table the
     # digest is taken over — the two a forced ask is written out with too,
@@ -1003,8 +1014,9 @@ def test_the_paragraph_states_facts_and_gives_no_advice():
         "A tool reads the training bars and nothing after them",
         "The validation bars stay hidden from you and from every tool",
         "the validation figures a scored rule is listed with are measured on them",
-        "at most 5 tool call(s), of which at most 2 may be backtest_train",
-        "Every call counts, one refused for a mistake in its arguments included",
+        "at most 5 tool call(s), of which at most 2 may be backtest_train call(s) that return a score",
+        "a backtest_train call refused that way does not count toward the 2",
+        "Every call counts toward the 5, one refused for a mistake in its arguments included",
         "Each result ends with a line saying how many are left",
         "Nothing you look up is kept for the next round",
         "Before each tool call, write one line saying what you are about to check and why",
@@ -1140,6 +1152,7 @@ def test_an_arm_that_cannot_be_started_as_asked_is_refused_by_name(
         f"trace: {nowhere} is not a directory to write trace.jsonl in",
         trace=nowhere / "trace.jsonl",
         server=params,
+        server_log=log,
     )
     _refused(
         view,
@@ -1199,9 +1212,9 @@ def test_the_arm_starts_the_server_as_a_child_and_keeps_its_stderr(params, view,
     assert mistake["status"] == "error"
     assert mistake["content"] == f"{_refusal(view, *UNKNOWN)}\n{left(1, 1)}"
     # The child read the arm's store and wrote nothing to it; its stderr
-    # went to the file it was given.
+    # is the file it was given, where a server with nothing to report says nothing.
     assert artifact_digest(params.db) == before
-    assert log.is_file()
+    assert log.read_text(encoding="utf-8") == ""
     with ResearchStore(params.db) as store:
         assert Ledger(store).rules_tried(COIN) == 0
 
@@ -1225,3 +1238,435 @@ def test_the_module_reaches_no_manifest_and_needs_no_sdk_to_import():
         ],
         "sdk": False,
     }
+
+
+# -- the limits, further ---------------------------------------------------------------------------
+
+REFUSED_RULE = (BACKTEST_TOOL, {"rule": {**BUY_12, "stop_loss": 0.02}})
+
+
+def test_a_backtest_the_parser_refuses_is_a_call_and_not_a_backtest(view, tmp_path, monkeypatch):
+    # Decided 2026-11-19: the backtest limit is on training scores seen, and
+    # a rule the parser refused showed none. It still counts toward the five.
+    reached = _counted(monkeypatch)
+    script = [
+        says("a slip", REFUSED_RULE),
+        says("another", REFUSED_RULE),
+        says("first", BACKTEST),
+        says("second", BACKTEST),
+        says("third", BACKTEST),
+        says(ANSWER),
+    ]
+    with arm(build_server(view), script, tmp_path) as (hypothesist, model):
+        assert hypothesist.propose(SYSTEM, USER) == ANSWER
+    assert reached == [REFUSED_RULE, REFUSED_RULE, BACKTEST, BACKTEST]
+    assert [message["content"] for message in results(model)] == [
+        f"{_refusal(view, *REFUSED_RULE)}\n{left(4, 2)}",
+        f"{_refusal(view, *REFUSED_RULE)}\n{left(3, 2)}",
+        answered(view, *BACKTEST, 2, 1),
+        answered(view, *BACKTEST, 1, 0),
+        f"{BACKTESTS_SPENT}\n{left(0, 0)}",
+    ]
+    answer = traced(tmp_path, "answer")[0]
+    assert (answer["lookups"], answer["backtests"], answer["tool_errors"]) == (5, 2, 2)
+
+
+def test_what_keeps_a_call_from_being_run_is_asked_in_one_order(view, tmp_path, monkeypatch):
+    reached = _counted(monkeypatch)
+    unparsed = {"name": BACKTEST_TOOL, "args": "{", "id": "call_cut", "error": "x"}
+    # One call in the round and no backtest: the smallest limits there are.
+    burst = says("", BACKTEST, STATS, invalid=[unparsed])
+    with arm(build_server(view), [burst, says(ANSWER)], tmp_path, limits=Limits(1, 0)) as (
+        hypothesist,
+        model,
+    ):
+        hypothesist.propose(SYSTEM, USER)
+    # The backtest took the round's one call and met its own limit; after it
+    # nothing is left, and that is said before anything else about a call.
+    assert [message["content"] for message in results(model)] == [
+        f"{BACKTESTS_SPENT}\n{left(0, 0)}",
+        SPENT,
+        SPENT,
+    ]
+    assert [line["limit"] for line in traced(tmp_path, "tool")] == [
+        "backtests",
+        "lookups",
+        "lookups",
+    ]
+    # With a call left, arguments that cannot be sent are said before the
+    # backtest limit: there is no backtest to be out of.
+    second = tmp_path / "second"
+    second.mkdir()
+    script = [says("", invalid=[{**unparsed, "id": "call_cut_2"}]), says(ANSWER)]
+    with arm(build_server(view), script, second, limits=Limits(2, 0)) as (hypothesist, model):
+        hypothesist.propose(SYSTEM, USER)
+    assert results(model)[0]["content"] == f"{NOT_AN_OBJECT}\n{left(1, 0)}"
+    assert reached == []
+    # And every backtest the round has may be all its calls.
+    assert Limits(lookups=2, backtests=2) == Limits(2, 2)
+
+
+# -- the forced ask, further ------------------------------------------------------------------------
+
+
+def _forced_human(model) -> str:
+    bound, (system, human) = model.asked[-1]
+    assert not bound and system == ("system", SYSTEM)
+    return human[1]
+
+
+def test_a_forced_ask_after_nothing_was_looked_up_lists_nothing(view, tmp_path):
+    # No backtest allowed and nothing else asked: the arm refused every
+    # call itself, so there is nothing of the training bars to write out.
+    script = [says("   ", BACKTEST), says("", BACKTEST), says("", BACKTEST), says(ANSWER)]
+    with arm(build_server(view), script, tmp_path, limits=Limits(1, 0)) as (hypothesist, model):
+        assert hypothesist.propose(SYSTEM, USER) == ANSWER
+    assert _forced_human(model) == f"{USER}\n\n{FORCED_ASK}"
+
+
+def test_the_lines_a_model_wrote_are_shown_back_stripped_and_cut(view, tmp_path):
+    long = "x" * (FORCED_NOTE_CAP + 500)
+    script = [
+        says(f"  {long}  ", STATS),
+        says("  padded  ", STATS),  # told the round's one call is spent
+        says("dropped with the conversation it ended", STATS),
+        says(ANSWER),
+    ]
+    with arm(build_server(view), script, tmp_path, limits=Limits(1, 0)) as (hypothesist, model):
+        assert hypothesist.propose(SYSTEM, USER) == ANSWER
+    body = json.dumps(call(view, *STATS))
+    assert _forced_human(model) == (
+        f"{USER}\n\n{FORCED_HEADER}\n"
+        f"note: {long[:FORCED_NOTE_CAP]}\n"
+        f"{STATS[0]} {json.dumps(STATS[1])}\n-> {body}\n"
+        f"note: padded\n\n{FORCED_ASK}"
+    )
+
+
+def test_a_reply_that_asks_for_a_tool_when_none_is_bound_is_no_answer(view, tmp_path):
+    # Asked without tools and answering with a call: the client still has
+    # them. Its empty text is not handed to the loop as the round's answer.
+    script = [says("", STATS), says("", STATS), says("", STATS), says("", STATS)]
+    with arm(build_server(view), script, tmp_path, limits=Limits(1, 0)) as (hypothesist, model):
+        with pytest.raises(HypothesistError, match="asked for a tool when it was given none") as no:
+            hypothesist.propose(SYSTEM, USER)
+        assert not isinstance(no.value, ToolServerError)
+    assert [bound for bound, _messages in model.asked] == [True, True, True, False]
+    assert traced(tmp_path, "answer") == []
+    failure = traced(tmp_path)[-1]
+    assert (failure["kind"], failure["side"], failure["error"]) == (
+        "failed",
+        "model",
+        "HypothesistError",
+    )
+
+
+# -- arguments that cannot be sent -------------------------------------------------------------------
+
+
+def _nested(depth: int) -> dict:
+    arguments: dict = {"feature": "close"}
+    for _ in range(depth):
+        arguments = {"x": arguments}
+    return arguments
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"feature": "clo\ud83dse"},
+        _nested(MAX_ARGUMENT_DEPTH + 1),
+        {"feature": "c" * (MAX_ARGUMENT_CHARS + 1)},
+        ["feature", "close"],
+    ],
+    ids=["half a surrogate pair", "nested too deep", "too long", "a list"],
+)
+def test_arguments_that_cannot_be_sent_are_the_model_s_mistake_and_end_no_search(
+    view, tmp_path, monkeypatch, arguments
+):
+    # Sent on, each of these fails inside the client (measured: a lone
+    # surrogate closes the connection), and the search would end on a
+    # server that had done nothing wrong.
+    reached = _counted(monkeypatch)
+    script = [says("", ("feature_stats", arguments)), says("", STATS), says(ANSWER)]
+    with arm(build_server(view), script, tmp_path) as (hypothesist, model):
+        assert hypothesist.propose(SYSTEM, USER) == ANSWER
+    assert reached == [STATS]
+    first, second = results(model)
+    assert first["content"] == f"{NOT_AN_OBJECT}\n{left(4, 2)}" and first["status"] == "error"
+    assert second["content"] == answered(view, *STATS, 3, 2)
+    mistake = traced(tmp_path, "tool")[0]
+    assert (mistake["arguments"], mistake["sent"], mistake["tool_error"]) == (None, False, True)
+    # The line it is written on is short, whatever was sent.
+    assert max(len(line) for line in trace_text(tmp_path).splitlines()[1:]) < 2 * RESULT_CAP
+
+
+def test_arguments_at_the_bounds_are_sent(view, tmp_path, monkeypatch):
+    reached = _counted(monkeypatch)
+    deep = _nested(MAX_ARGUMENT_DEPTH - 1)
+    with arm(build_server(view), [says("", ("feature_stats", deep)), says(ANSWER)], tmp_path) as (
+        hypothesist,
+        model,
+    ):
+        hypothesist.propose(SYSTEM, USER)
+    # The server's to refuse, in the look-up's own sentence: not the arm's.
+    assert reached == [("feature_stats", deep)]
+    assert results(model)[0]["content"].startswith(_refusal(view, "feature_stats", deep))
+
+
+def test_a_tool_name_no_wire_carries_is_not_sent_and_is_cut_where_it_is_written(
+    view, tmp_path, monkeypatch
+):
+    reached = _counted(monkeypatch)
+    script = [
+        says("", ("feature_stats\ud83d", {"feature": "close"}), ("x" * 500, {"feature": "close"})),
+        says(ANSWER),
+    ]
+    with arm(build_server(view), script, tmp_path) as (hypothesist, model):
+        assert hypothesist.propose(SYSTEM, USER) == ANSWER
+    assert reached == []
+    assert [message["content"] for message in results(model)] == [
+        f"{NOT_AN_OBJECT}\n{left(4, 2)}",
+        f"{NOT_AN_OBJECT}\n{left(3, 2)}",
+    ]
+    assert [line["tool"] for line in traced(tmp_path, "tool")] == [
+        "feature_stats?",
+        "x" * MAX_NAME_CHARS,
+    ]
+
+
+def test_a_long_result_is_cut_in_the_trace_and_not_in_the_conversation(view, tmp_path):
+    # A refusal that quotes a long name back: the model reads all of it,
+    # the trace keeps the head and the length.
+    long = ("feature_stats", {"feature": "f" * (RESULT_CAP + 100)})
+    with arm(build_server(view), [says("", long), says(ANSWER)], tmp_path) as (hypothesist, model):
+        hypothesist.propose(SYSTEM, USER)
+    content = results(model)[0]["content"]
+    line = traced(tmp_path, "tool")[0]
+    assert len(content) > RESULT_CAP
+    assert line["result"] == content[:RESULT_CAP] and line["result_chars"] == len(content)
+
+
+# -- how it is started, further ---------------------------------------------------------------------
+
+
+def test_a_server_under_another_name_or_listing_other_tools_is_refused(view, tmp_path, monkeypatch):
+    with monkeypatch.context() as patched:
+        patched.setattr(tools_server, "SERVER_NAME", "another-server")
+        _refused(
+            view, tmp_path, "the server answered as 'another-server'", server=build_server(view)
+        )
+    # The right name and version, and other words: what a model would read
+    # is then not the pack the suite pins, whatever the version says.
+    served = build_server(view)
+    stats, *rest = tool_specs()
+    reworded = replace(stats, description=f"{stats.description} And more.")
+    monkeypatch.setattr(toolarm, "tool_specs", lambda: (reworded, *rest))
+    _refused(view, tmp_path, "lists tools other than this build's", server=served)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_server_that_is_a_path_or_a_child_with_no_log_is_refused(view, params, tmp_path):
+    _refused(view, tmp_path, "server: expected the parameters", server="not-a-server")
+    _refused(view, tmp_path, "server: expected the parameters", server=tmp_path / "arm.sqlite")
+    # A child's stderr is the one place it says why: it is not left to
+    # whatever this process's stderr happens to be.
+    _refused(view, tmp_path, "a server started as a child has to be given one", server=params)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_pack_built_by_hand_is_held_to_what_one_listed_is():
+    pack = Pack.of(tool_specs(), DEFAULT_LIMITS)
+    tools = list(pack.tools)
+    assert Pack(tools_json=json.dumps(tools, sort_keys=True), limits=DEFAULT_LIMITS) == pack
+    for tools_json, sentence in (
+        ("{", "pack.tools_json: not JSON"),
+        (None, "pack.tools_json: not JSON"),
+        ("{}", "expected a list of tools, got dict"),
+        ("[]", "the tools are [], not the look-ups"),
+        (json.dumps(tools[:2], sort_keys=True), "not the look-ups"),
+        (json.dumps([*tools[:2], {**tools[2], "strict": True}], sort_keys=True), "a tool is"),
+        (json.dumps([*tools[:2], {"type": "tool", "function": tools[2]["function"]}]), "a tool is"),
+        (json.dumps([*tools[:2], "backtest_train"]), "a tool is"),
+        (json.dumps(tools, sort_keys=True, indent=1), "not the canonical spelling"),
+    ):
+        with pytest.raises(ToolArmError, match=re.escape(sentence)):
+            Pack(tools_json=tools_json, limits=DEFAULT_LIMITS)
+    with pytest.raises(ToolArmError, match="pack.limits: expected Limits"):
+        replace(pack, limits=(5, 2))
+    # What it hands out is the caller's own: changing it changes no pack.
+    pack.tools[0]["function"]["name"] = "renamed"
+    assert pack.tools[0]["function"]["name"] == "feature_stats"
+    assert pack.digest() == Pack.of(tool_specs(), DEFAULT_LIMITS).digest()
+    # And the tables it is written from are not an importer's to change.
+    with pytest.raises(TypeError):
+        SENTENCES["spent"] = "Carry on."
+    with pytest.raises(TypeError):
+        TRACE_KEYS[TraceKind.ANSWER] = ("kind",)
+
+
+# -- the small parts ---------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [
+        # Arguments that are no object.
+        (
+            SimpleNamespace(content="", tool_calls=[{"name": "t", "args": "close", "id": "a"}]),
+            (ToolCall(id="a", name="t", arguments=None), None, None),
+        ),
+        # A call the client could not parse, and could not name either.
+        (
+            SimpleNamespace(content="", invalid_tool_calls=[{"args": "{", "id": "b"}]),
+            (ToolCall(id="b", name="", arguments=None), None, None),
+        ),
+        # The lists as tuples; token counts that are counts, and ones that are not.
+        (
+            SimpleNamespace(
+                content="",
+                tool_calls=({"name": "t", "args": {}, "id": "c"},),
+                usage_metadata={"input_tokens": 7, "output_tokens": True},
+            ),
+            (ToolCall(id="c", name="t", arguments={}), 7, None),
+        ),
+        (
+            SimpleNamespace(
+                content="",
+                tool_calls=[{"name": "t", "args": {"k": 1}, "id": "d"}],
+                usage_metadata={"input_tokens": "7", "output_tokens": 2.0},
+            ),
+            (ToolCall(id="d", name="t", arguments={"k": 1}), None, None),
+        ),
+    ],
+)
+def test_a_reply_is_read_field_by_field(reply, expected):
+    call_, input_tokens, output_tokens = expected
+    read = read_reply(reply, LABEL)
+    assert read.calls == (call_,)
+    assert (read.input_tokens, read.output_tokens) == (input_tokens, output_tokens)
+    assert read.message is reply
+
+
+def test_a_call_with_an_empty_id_cannot_be_answered():
+    reply = SimpleNamespace(content="", tool_calls=[{"name": "t", "args": {}, "id": ""}])
+    with pytest.raises(HypothesistError, match="a tool call with no id"):
+        read_reply(reply, LABEL)
+
+
+def _text(text: str) -> SimpleNamespace:
+    return SimpleNamespace(type="text", text=text)
+
+
+@pytest.mark.parametrize(
+    ("content", "is_error"),
+    [
+        ([SimpleNamespace(type="image", data="...")], False),
+        ([], False),
+        ([_text("a"), _text("b")], False),
+        ([_text("  ")], False),
+        ([_text("{}")], None),
+    ],
+    ids=["no text", "nothing", "two texts", "blank text", "no verdict"],
+)
+def test_an_answer_in_a_shape_the_arm_does_not_read_is_a_failed_seam(content, is_error):
+    class Client:
+        async def call_tool(self, name, arguments, timeout):
+            return SimpleNamespace(content=content, is_error=is_error)
+
+    with start_blocking_portal() as portal:
+        session = toolarm._Session(portal, Client(), 5.0)
+        with pytest.raises(ToolServerError, match="in a shape this arm does not read"):
+            session.call("feature_stats", {"feature": "close"})
+
+
+def test_a_server_that_does_not_list_its_tools_is_a_failed_seam():
+    class Client:
+        async def list_tools(self):
+            raise RuntimeError("the listing went away")
+
+        async def call_tool(self, name, arguments, timeout):
+            return SimpleNamespace(content=[_text('{"bars": 3}')], is_error=True)
+
+    with start_blocking_portal() as portal:
+        session = toolarm._Session(portal, Client(), 5.0)
+        sentence = "did not list its tools: RuntimeError: the listing went away"
+        with pytest.raises(ToolServerError, match=re.escape(sentence)):
+            session.listing()
+        # The one block of text, and the server's own verdict on the call.
+        assert session.call("feature_stats", {}) == ('{"bars": 3}', True)
+
+
+def test_a_wait_on_the_server_is_taken_in_slices_and_ends_as_the_task_does():
+    async def slow():
+        await anyio.sleep(toolarm._POLL_S * 2.5)
+        return "done"
+
+    async def timed_out():
+        raise TimeoutError("the look-up's own")
+
+    with start_blocking_portal() as portal:
+        # Longer than a slice: waited for, not given up on.
+        assert toolarm._waited(portal, slow) == "done"
+        # A timeout that is the task's result is raised, not waited through
+        # (the two timeouts are one class on newer interpreters).
+        with pytest.raises(TimeoutError, match="the look-up's own"):
+            toolarm._waited(portal, timed_out)
+
+
+def test_what_went_wrong_is_read_out_of_the_groups_it_is_raised_in():
+    class Group(Exception):
+        """Raised as the SDK's task groups raise: the failures are its ``exceptions``."""
+
+        def __init__(self, *leaves):
+            super().__init__("unhandled errors in a TaskGroup")
+            self.exceptions = list(leaves)
+
+    group = Group(ValueError("closed"), Group(ValueError("closed"), KeyError("k" * 500)))
+    said = toolarm._described(group)
+    first, second = said.split("; ")
+    # Each leaf once, each cut to a line: a long first one cannot push the next out.
+    assert first == "ValueError: closed" and second.startswith("KeyError: 'kkk")
+    assert len(second) == 200
+    # Something that only looks like a group is described as itself.
+    odd = RuntimeError("odd")
+    odd.exceptions = 7
+    assert toolarm._described(odd) == "RuntimeError: odd"
+    assert toolarm._described(Group(RuntimeError("x"))) == "RuntimeError: x"
+
+
+def test_closing_a_connection_that_is_already_gone_is_quiet_and_said(caplog):
+    class Manager:
+        def __enter__(self):
+            return "the client"
+
+        def __exit__(self, *exc):
+            raise RuntimeError("the pipe is closed")
+
+    portal = SimpleNamespace(wrap_async_context_manager=lambda _client: Manager())
+    with (
+        caplog.at_level("WARNING", logger=toolarm.__name__),
+        toolarm._connected(portal, object(), 1.0) as client,
+    ):
+        assert client == "the client"
+    assert "closing the look-ups' server: RuntimeError: the pipe is closed" in caplog.text
+
+
+def test_a_trace_line_that_is_not_its_kind_s_shape_is_a_defect_and_takes_no_number():
+    out = io.StringIO()
+    trace, state = toolarm._Trace(out), toolarm._Round(number=1)
+    with pytest.raises(RuntimeError, match="a 'answer' trace line carries"):
+        trace.write(TraceKind.ANSWER, state, forced=False)
+    assert out.getvalue() == "" and state.seq == 0
+    trace.write(TraceKind.FAILED, state, side="model", error="RuntimeError")
+    assert json.loads(out.getvalue()) == {
+        "kind": "failed",
+        "round": 1,
+        "seq": 1,
+        "side": "model",
+        "error": "RuntimeError",
+    }
+    # The vocabularies a line is written in.
+    assert [kind.value for kind in TraceKind] == ["pack", "model", "tool", "answer", "failed"]
+    assert [limit.value for limit in toolarm.Limit] == ["lookups", "backtests"]
+    assert [seam.value for seam in toolarm.Seam] == ["model", "server"]

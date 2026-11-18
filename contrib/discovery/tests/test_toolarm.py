@@ -10,7 +10,8 @@ stderr is kept).
 The groups. A ROUND: the model looks things up, each result goes back
 with what is left, and the last message is the answer. THE LIMITS: the
 call past the limit is not run, the third backtest is not run, and a model
-that will not stop is asked once more without tools. A FAILED SEAM: the
+that will not stop, or whose message cannot be sent back, is asked once
+more without tools. A FAILED SEAM: the
 server or the model not answering is a ``HypothesistError`` and spends no
 round. THE TRACE: every line parses, carries what the plan lists, and
 holds neither prompt. THE PACK: what a model is told is pinned to a
@@ -38,7 +39,12 @@ from mcp import StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from contrib.autoresearch.evaluator import EvaluationError
-from contrib.autoresearch.hypothesis import ChatHypothesist, build_system_prompt, search
+from contrib.autoresearch.hypothesis import (
+    MAX_RESPONSE_CHARS,
+    ChatHypothesist,
+    build_system_prompt,
+    search,
+)
 from contrib.autoresearch.ledger import Ledger, ProposalOutcome
 from contrib.autoresearch.ports import Hypothesist, HypothesistError
 from contrib.autoresearch.store import ResearchStore
@@ -56,7 +62,7 @@ from contrib.discovery.toolarm import (
     MAX_ARGUMENT_CHARS,
     MAX_ARGUMENT_DEPTH,
     MAX_NAME_CHARS,
-    NOT_AN_OBJECT,
+    NOT_SENDABLE,
     NOTE_CAP,
     PACK_VERSION,
     REMAINING,
@@ -95,7 +101,7 @@ from .test_tools_server import _refusal
 # the paragraph appended to the system prompt, the sentences the arm says.
 # Changing any of it moves the digest: bump ``PACK_VERSION`` with it (after
 # the wording is frozen, plan §5, that is a new set of runs) and pin both.
-PINNED = (1, "f9c6b7e46c55d3fae2fd7953f98fdad4163b9af17cf172b504dadb2deb3382f9")
+PINNED = (1, "a57bff1d58575acbb8d10fe5776337f6af100e76689d744a024ef5fef30dca8d")
 
 SYSTEM = "THE-SYSTEM-PROMPT as the research package wrote it."
 USER = "THE-USER-PROMPT with what was tried. Propose ONE new rule."
@@ -138,6 +144,11 @@ class Scripted:
     ``asked`` keeps each conversation it was handed and whether the tools
     were bound for it; a step that is an exception is raised; a script run
     dry is a provider that went away.
+
+    As a real client does, it has to encode the conversation to send it:
+    one it cannot — half a surrogate pair, a ``NaN`` — is refused where a
+    real request would fail, so a reply put back that should not have been
+    is a red test and not something only a provider would notice.
     """
 
     def __init__(self, script):
@@ -152,8 +163,23 @@ class Scripted:
     def invoke(self, messages):
         return self._answer(False, messages)
 
+    @staticmethod
+    def _request(messages) -> bytes:
+        said = [
+            message
+            if isinstance(message, (tuple, dict))
+            else [
+                message.content,
+                getattr(message, "tool_calls", None),
+                getattr(message, "invalid_tool_calls", None),
+            ]
+            for message in messages
+        ]
+        return json.dumps(said, allow_nan=False, ensure_ascii=False).encode("utf-8")
+
     def _answer(self, bound, messages):
         self.asked.append((bound, messages))
+        self._request(messages)
         if not self.script:
             raise RuntimeError("the provider is down")
         step = self.script.pop(0)
@@ -531,7 +557,7 @@ def test_a_mistake_of_the_model_s_is_shown_to_it_marked_and_counted(view, tmp_pa
     reached = _counted(monkeypatch)
     no_such_feature = UNKNOWN
     no_such_tool = ("no_such_tool", {})
-    not_a_number = ("conditional_returns", {**RETURNS[1], "horizon": float("nan")})
+    not_an_object = ("conditional_returns", "horizon 6, long")
     unparsed = {
         "name": "feature_stats",
         "args": '{"feature": ',
@@ -539,21 +565,21 @@ def test_a_mistake_of_the_model_s_is_shown_to_it_marked_and_counted(view, tmp_pa
         "error": "x",
     }
     script = [
-        says("four mistakes", no_such_feature, no_such_tool, not_a_number, invalid=[unparsed]),
+        says("four mistakes", no_such_feature, no_such_tool, not_an_object, invalid=[unparsed]),
         says(ANSWER),
     ]
     with arm(build_server(view), script, tmp_path) as (hypothesist, model):
         assert hypothesist.propose(SYSTEM, USER) == ANSWER
 
-    # What the server refuses comes back in the look-up's own sentence;
-    # arguments that are no JSON object never reach it. All four count.
+    # What the server refuses comes back in the look-up's own sentence; a
+    # call that cannot be sent never reaches it. All four count.
     assert reached == [no_such_feature, no_such_tool]
     messages = results(model)
     assert [message["content"] for message in messages] == [
         f"{_refusal(view, *no_such_feature)}\n{left(4, 2)}",
         f"{_refusal(view, *no_such_tool)}\n{left(3, 2)}",
-        f"{NOT_AN_OBJECT}\n{left(2, 2)}",
-        f"{NOT_AN_OBJECT}\n{left(1, 1)}",
+        f"{NOT_SENDABLE}\n{left(2, 2)}",
+        f"{NOT_SENDABLE}\n{left(1, 1)}",
     ]
     assert [message["status"] for message in messages] == ["error"] * 4
     assert messages[3]["tool_call_id"] == "call_unparsed"
@@ -567,6 +593,59 @@ def test_a_mistake_of_the_model_s_is_shown_to_it_marked_and_counted(view, tmp_pa
     ]
     assert [line["arguments"] for line in tools] == [{"feature": "sma_9"}, {}, None, None]
     assert (lines[-1]["lookups"], lines[-1]["tool_errors"]) == (4, 4)
+
+
+@pytest.mark.parametrize(
+    ("note", "made"),
+    [
+        ("a bad argument", ("feature_stats", {"feature": "clo\ud83dse"})),
+        ("a bad name", ("feature_stats\ud83d", {"feature": "close"})),
+        ("not a number", ("conditional_returns", {**RETURNS[1], "horizon": float("nan")})),
+        ("a bad \ud83d note", STATS),
+    ],
+    ids=["half a pair in arguments", "half a pair in a name", "a NaN", "half a pair in the text"],
+)
+def test_a_message_that_cannot_be_sent_back_ends_the_round_s_tool_use_and_not_the_search(
+    view, tmp_path, monkeypatch, note, made
+):
+    # Put back into the conversation, such a message is one no client can
+    # encode a request from (measured with the repo's own client, a lone
+    # surrogate: the next call of the model raises before anything is
+    # sent), and a slip of the model's would end the search as a model
+    # that did not answer. So the conversation is left there, and the rule
+    # is asked for without tools — with what the round did look up.
+    reached = _counted(monkeypatch)
+    script = [says("first, a look", STATS), says(note, made, STATS), says(ANSWER)]
+    with arm(build_server(view), script, tmp_path) as (hypothesist, model):
+        assert hypothesist.propose(SYSTEM, USER) == ANSWER
+    # Neither call of that message was run, the sound one beside it included.
+    assert reached == [STATS]
+    assert [bound for bound, _messages in model.asked] == [True, True, False]
+    body = json.dumps(call(view, *STATS))
+    assert model.asked[-1][1] == [
+        ("system", SYSTEM),
+        (
+            "human",
+            f"{USER}\n\n{FORCED_HEADER}\nnote: first, a look\n"
+            f"{STATS[0]} {json.dumps(STATS[1])}\n-> {body}\n\n{FORCED_ASK}",
+        ),
+    ]
+    lines = traced(tmp_path)
+    assert [line["kind"] for line in lines[1:]] == ["model", "tool", "model", "model", "answer"]
+    assert (lines[3]["tool_calls"], lines[4]["bound"]) == (2, False)
+    assert (lines[-1]["forced"], lines[-1]["lookups"], lines[-1]["tool_errors"]) == (True, 1, 0)
+
+
+def test_the_scripted_client_refuses_a_conversation_no_request_could_carry():
+    # The guard the test above stands on: without it the stand-in would
+    # take back a message a real client could not send.
+    model = Scripted([says(ANSWER)] * 3)
+    garbled = says("", ("feature_stats", {"feature": "clo\ud83dse"}))
+    with pytest.raises(UnicodeEncodeError):
+        model.invoke([("human", USER), garbled])
+    with pytest.raises(ValueError, match="Out of range float values"):
+        model.invoke([("human", USER), says("", ("feature_stats", {"feature": float("nan")}))])
+    assert model.invoke([("human", USER), says("fine", STATS)]).content == ANSWER
 
 
 # -- (e) a failed seam ----------------------------------------------------------------------------
@@ -835,6 +914,7 @@ _KEYS = {
         "addendum",
         "sentences",
         "forced_note_chars",
+        "argument_bounds",
         "tools",
     },
     "model": {
@@ -983,7 +1063,7 @@ def test_what_a_model_is_told_is_pinned_to_the_pack_s_version():
         REMAINING,
         SPENT,
         BACKTESTS_SPENT,
-        NOT_AN_OBJECT,
+        NOT_SENDABLE,
         FORCED_HEADER,
         FORCED_ASK,
     }
@@ -992,6 +1072,13 @@ def test_what_a_model_is_told_is_pinned_to_the_pack_s_version():
         "{tool} {arguments}\n-> {result}",
     )
     assert document["forced_note_chars"] == FORCED_NOTE_CAP
+    # So are the bounds past which a call is answered as one that cannot be
+    # sent: a model is told something else on the far side of each.
+    assert document["argument_bounds"] == {
+        "chars": MAX_ARGUMENT_CHARS,
+        "depth": MAX_ARGUMENT_DEPTH,
+        "name_chars": MAX_NAME_CHARS,
+    }
     # A sentence written into the module and left out of the table would be
     # one a model reads and the digest does not: every public constant of
     # the module that is a sentence — a string with a space in it — is in
@@ -1191,6 +1278,11 @@ def test_without_the_sdk_the_arm_says_how_to_install_it_before_it_opens_anything
 def test_the_hypothesist_is_closed_with_its_block(view, tmp_path):
     with arm(build_server(view), [says(ANSWER), says(ANSWER)], tmp_path) as (hypothesist, _model):
         assert hypothesist.propose(SYSTEM, USER) == ANSWER
+        # What it was opened with is read, not set: the trace's opening line
+        # says what this search's model is told, and stays true.
+        for name in ("pack", "label"):
+            with pytest.raises(AttributeError):
+                setattr(hypothesist, name, None)
     with pytest.raises(RuntimeError, match="closed with its `with` block"):
         hypothesist.propose(SYSTEM, USER)
 
@@ -1304,7 +1396,7 @@ def test_what_keeps_a_call_from_being_run_is_asked_in_one_order(view, tmp_path, 
     script = [says("", invalid=[{**unparsed, "id": "call_cut_2"}]), says(ANSWER)]
     with arm(build_server(view), script, second, limits=Limits(2, 0)) as (hypothesist, model):
         hypothesist.propose(SYSTEM, USER)
-    assert results(model)[0]["content"] == f"{NOT_AN_OBJECT}\n{left(1, 0)}"
+    assert results(model)[0]["content"] == f"{NOT_SENDABLE}\n{left(1, 0)}"
     assert reached == []
 
 
@@ -1385,28 +1477,39 @@ def _listed_deep(depth: int) -> list:
 @pytest.mark.parametrize(
     "arguments",
     [
-        {"feature": "clo\ud83dse"},
-        # One level past the bound, in objects and in lists; one character past it.
+        # One level past the bound, in objects and in lists; one character
+        # past it, as the characters a model typed and as the longer
+        # spelling a trace line writes them in.
         _nested(MAX_ARGUMENT_DEPTH),
         {"feature": _listed_deep(MAX_ARGUMENT_DEPTH)},
         {"feature": "c" * (MAX_ARGUMENT_CHARS - len('{"feature": ""}') + 1)},
+        {"feature": "漲" * (MAX_ARGUMENT_CHARS // 6)},
         ["feature", "close"],
+        {"feature": ("close",)},
+        {7: "close"},
     ],
-    ids=["half a surrogate pair", "nested too deep", "lists too deep", "too long", "a list"],
+    ids=[
+        "nested too deep",
+        "lists too deep",
+        "too long",
+        "too long as written",
+        "a list",
+        "a tuple inside",
+        "a key that is no text",
+    ],
 )
 def test_arguments_that_cannot_be_sent_are_the_model_s_mistake_and_end_no_search(
     view, tmp_path, monkeypatch, arguments
 ):
-    # Sent on, a lone surrogate closes the connection (measured), and the
-    # search would end on a server that had done nothing wrong; the others
-    # are past bounds no call a model means comes near, or are no object.
+    # Past bounds no call a model means comes near, or not what JSON says
+    # they are: answered by the arm, and never handed to the server.
     reached = _counted(monkeypatch)
     script = [says("", ("feature_stats", arguments)), says("", STATS), says(ANSWER)]
     with arm(build_server(view), script, tmp_path) as (hypothesist, model):
         assert hypothesist.propose(SYSTEM, USER) == ANSWER
     assert reached == [STATS]
     first, second = results(model)
-    assert first["content"] == f"{NOT_AN_OBJECT}\n{left(4, 2)}" and first["status"] == "error"
+    assert first["content"] == f"{NOT_SENDABLE}\n{left(4, 2)}" and first["status"] == "error"
     assert second["content"] == answered(view, *STATS, 3, 2)
     mistake = traced(tmp_path, "tool")[0]
     assert (mistake["arguments"], mistake["sent"], mistake["tool_error"]) == (None, False, True)
@@ -1435,25 +1538,45 @@ def test_arguments_at_the_bounds_are_sent(view, tmp_path, monkeypatch):
     ]
 
 
-def test_a_tool_name_no_wire_carries_is_not_sent_and_is_cut_where_it_is_written(
+def test_a_tool_name_longer_than_any_tool_s_is_not_sent_and_is_cut_where_it_is_written(
     view, tmp_path, monkeypatch
 ):
     reached = _counted(monkeypatch)
-    script = [
-        says("", ("feature_stats\ud83d", {"feature": "close"}), ("x" * 500, {"feature": "close"})),
-        says(ANSWER),
-    ]
+    script = [says("", ("x" * 500, {"feature": "close"})), says(ANSWER)]
     with arm(build_server(view), script, tmp_path) as (hypothesist, model):
         assert hypothesist.propose(SYSTEM, USER) == ANSWER
     assert reached == []
-    assert [message["content"] for message in results(model)] == [
-        f"{NOT_AN_OBJECT}\n{left(4, 2)}",
-        f"{NOT_AN_OBJECT}\n{left(3, 2)}",
-    ]
-    assert [line["tool"] for line in traced(tmp_path, "tool")] == [
-        "feature_stats?",
-        "x" * MAX_NAME_CHARS,
-    ]
+    # The one sentence names both halves of a call: here it is the name.
+    assert "its tool name or its arguments" in NOT_SENDABLE
+    assert [message["content"] for message in results(model)] == [f"{NOT_SENDABLE}\n{left(4, 2)}"]
+    assert [line["tool"] for line in traced(tmp_path, "tool")] == ["x" * MAX_NAME_CHARS]
+    # A name that is no text a wire carries is read with the half pair
+    # replaced, so that it can be written down at all.
+    garbled = SimpleNamespace(
+        content="", tool_calls=[{"name": "feature_stats\ud83d", "args": {}, "id": "call_g"}]
+    )
+    read = read_reply(garbled, LABEL)
+    assert read.calls == (ToolCall(id="call_g", name="feature_stats?", arguments=None),)
+    assert read.replayable is False
+
+
+def test_a_call_built_by_hand_is_held_to_what_one_read_is():
+    assert ToolCall(id="a", name="n" * MAX_NAME_CHARS, arguments=None).arguments is None
+    for fields, sentence in (
+        ({"id": "", "name": "t", "arguments": {}}, "answered by its id"),
+        ({"id": 5, "name": "t", "arguments": {}}, "answered by its id"),
+        ({"id": "a", "name": "n" * (MAX_NAME_CHARS + 1), "arguments": None}, "at most 64"),
+        ({"id": "a", "name": None, "arguments": None}, "at most 64"),
+        ({"id": "a", "name": "t", "arguments": ["close"]}, "an object or nothing, got list"),
+    ):
+        with pytest.raises(ValueError, match=sentence):
+            ToolCall(**fields)
+
+
+def test_the_bound_on_a_call_s_length_is_the_loop_s_bound_on_an_answer():
+    # A rule too long to be proposed is not worth looking up: the two
+    # bounds are one number, and this is what holds them together.
+    assert MAX_ARGUMENT_CHARS == MAX_RESPONSE_CHARS
 
 
 def test_a_long_result_is_cut_in_the_trace_and_not_in_the_conversation(view, tmp_path):
@@ -1540,6 +1663,8 @@ def test_a_pack_built_by_hand_is_held_to_what_one_listed_is():
         (json.dumps([*tools[:2], {"type": "function", "function": None}]), "a tool is"),
         (json.dumps([*tools[:2], _with_function(tools[2], strict=True)]), "a tool is"),
         (json.dumps([*tools[:2], _with_function(tools[2], description=None)]), "a tool is"),
+        (json.dumps([*tools[:2], _with_function(tools[2], description=5)]), "a tool is"),
+        (json.dumps([*tools[:2], _with_function(tools[2], parameters=[])]), "a tool is"),
         (json.dumps(tools[::-1], sort_keys=True), "not the look-ups"),
         (json.dumps(tools, sort_keys=True, indent=1), "not the canonical spelling"),
     ):

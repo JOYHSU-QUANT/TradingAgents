@@ -41,22 +41,27 @@ text.
 :class:`Limits`). Every call a model makes in a round counts until none is
 left, a refused one included; the result of each call that counted ends
 with a line saying what is left (decided 2026-11-19: what is measured is
-research, not counting). A backtest the
-parser refused counts as a call and not as a backtest (decided 2026-11-19):
-that limit is on training scores seen, and a slip of grammar shows none. A
-call past the limit is not run and is answered with a sentence saying so; a
-call after THAT ends the conversation, and the rule is asked for once more
-with no tools — in a fresh conversation, the round's look-ups written out
-as text, since a provider may refuse a history of tool calls that comes
-with no tools, and how a client spells "call nothing" differs by provider.
+research, not counting). A backtest the parser refused counts as a call and
+not as a backtest (decided 2026-11-19): that limit is on training scores
+seen, and a slip of grammar shows none. A call past the limit is not run
+and is answered with a sentence saying so; a later MESSAGE that still calls
+a tool ends the conversation, and the rule is asked for once more with no
+tools — in a fresh conversation, the round's look-ups written out as text,
+since a provider may refuse a history of tool calls that comes with no
+tools, and how a client spells "call nothing" differs by provider. A
+message that cannot be sent back as the model wrote it — half a surrogate
+pair in a call, which no client can encode a request from — ends the
+conversation the same way, and at once.
 
 **A failed seam is not an answer** (plan §2.3). The model not answering, a
 reply this module cannot read, the server gone, a look-up that timed out or
 that the stored history cannot answer: each is a ``HypothesistError``, so
 ``search()`` stops without spending a round. A mistake of the MODEL's — a
-feature that does not exist, a rule the parser refuses, arguments that
-cannot be sent at all — is not: it is answered in a result marked as an
-error, shown to the model, and counts as a call.
+feature that does not exist, a rule the parser refuses, a call that cannot
+be sent at all — is not: it is answered in a result marked as an error,
+shown to the model, and counts as a call; or, when the message it came in
+cannot be sent back, the round is answered without tools. Either way the
+search goes on.
 
 **Nothing is kept between rounds** (plan §2.4): each ``propose()`` starts
 from the two prompts it is handed. (The research package's prompt does
@@ -114,7 +119,7 @@ __all__ = [
     "MAX_ARGUMENT_DEPTH",
     "MAX_NAME_CHARS",
     "NOTE_CAP",
-    "NOT_AN_OBJECT",
+    "NOT_SENDABLE",
     "PACK_VERSION",
     "REMAINING",
     "RESULT_CAP",
@@ -164,16 +169,22 @@ if BACKTEST_TOOL not in TOOL_NAMES:  # pragma: no cover - a rename upstream of t
 CONNECT_TIMEOUT_S: Final = 180.0
 CALL_TIMEOUT_S: Final = 60.0
 
-# How often a wait on the server looks up from it. A wait on another
-# thread's result is one an interrupt does not break on every platform, so
-# it is taken in slices: a Ctrl-C is heard within one.
+# How often the wait for a look-up, or for the tools' listing, looks up
+# from it. A wait on another thread's result is one an interrupt does not
+# break on every platform, so it is taken in slices: a Ctrl-C is heard
+# within one. (The handshake and the close are not waited this way.)
 _POLL_S: Final = 0.5
 
-# What of a call is sent to the server at all. A rule is a few hundred
-# characters and nests half a dozen deep, so these are far from any call a
-# model means; past them a call is answered as arguments that cannot be
-# sent, and neither the wire nor a trace line is handed megabytes.
-MAX_ARGUMENT_CHARS: Final = 20_000
+# What of a call is sent to the server at all. A call's arguments, written
+# as JSON, may be as long as the loop lets an answer be (its
+# ``MAX_RESPONSE_CHARS``, which the suite holds this to): a rule longer
+# than that could not be proposed, so there is nothing in looking it up. A
+# rule nests half a dozen deep and a tool's name is a word. Past any of the
+# three a call is answered as one that cannot be sent, so neither the wire,
+# nor a trace line, nor the round written out as text is handed whatever a
+# model writes. A model is answered differently past them, so they are in
+# the pack.
+MAX_ARGUMENT_CHARS: Final = 8000
 MAX_ARGUMENT_DEPTH: Final = 32
 MAX_NAME_CHARS: Final = 64
 
@@ -227,6 +238,7 @@ TRACE_KEYS: Final[Mapping[TraceKind, tuple[str, ...]]] = MappingProxyType(
             "addendum",
             "sentences",
             "forced_note_chars",
+            "argument_bounds",
             "tools",
         ),
         TraceKind.MODEL: (
@@ -271,7 +283,11 @@ SPENT: Final = (
     "single JSON object, and nothing else."
 )
 BACKTESTS_SPENT: Final = "No backtest_train call is left this round, so this one was not run."
-NOT_AN_OBJECT: Final = "The arguments of this call were not a valid JSON object, so it was not run."
+# One sentence for every way a call cannot be sent (:func:`_read_call`), so
+# it names both halves of a call: the fault may be in either.
+NOT_SENDABLE: Final = (
+    "This call was not run: its tool name or its arguments could not be sent as written."
+)
 FORCED_HEADER: Final = (
     "WHAT YOU LOOKED UP THIS ROUND on the training bars (no tool read the validation bars), in "
     "order:"
@@ -280,8 +296,10 @@ FORCED_HEADER: Final = (
 # before a call, and a look-up with what it returned.
 FORCED_NOTE: Final = "note: {text}"
 FORCED_LOOKUP: Final = "{tool} {arguments}\n-> {result}"
+# True of both ways a round's tool use ends early: the calls spent and
+# another made, and a message that could not be sent back as it was written.
 FORCED_ASK: Final = (
-    "Your tool calls for this round are spent and no tool is at hand now. Propose ONE new rule "
+    "Your tool calls for this round are over and no tool is at hand now. Propose ONE new rule "
     "as a single JSON object, and nothing else."
 )
 # How much of a line the model wrote is shown back to it when it is asked
@@ -296,7 +314,7 @@ SENTENCES: Final[Mapping[str, str]] = MappingProxyType(
         "remaining": REMAINING,
         "spent": SPENT,
         "backtests_spent": BACKTESTS_SPENT,
-        "not_an_object": NOT_AN_OBJECT,
+        "not_sendable": NOT_SENDABLE,
         "forced_header": FORCED_HEADER,
         "forced_note": FORCED_NOTE,
         "forced_lookup": FORCED_LOOKUP,
@@ -320,8 +338,9 @@ _ADDENDUM: Final = "\n".join(
         "arguments included; a backtest_train call refused that way does not count toward the "
         "{backtests}. The result of each call that counts ends with a line saying how many "
         "are left.",
-        "- When none is left, a further call is not run and returns a sentence saying so; "
-        "after one more, you are asked for your rule with no tool at hand.",
+        "- When none is left, a further call is not run and returns a sentence saying so. If a "
+        "later message of yours still calls a tool, you are asked for your rule with no tool at "
+        "hand.",
         "- Nothing you look up is kept for the next round: each round starts from the prompt "
         "alone.",
         "- Before each tool call, write one line saying what you are about to check and why.",
@@ -450,10 +469,14 @@ class Pack:
                 or tool["type"] != "function"
                 or not isinstance(function, dict)
                 or set(function) != _FUNCTION_KEYS
+                or not isinstance(function["name"], str)
+                or not isinstance(function["description"], str)
+                or not isinstance(function["parameters"], dict)
             ):
                 raise ToolArmError(
                     f"pack.tools_json: a tool is {{'type': 'function', 'function': "
-                    f"{{{', '.join(sorted(_FUNCTION_KEYS))}}}}}, got {tool!r:.200}"
+                    f"{{{', '.join(sorted(_FUNCTION_KEYS))}}}}} with a name and a description "
+                    f"in text and its parameters as an object, got {tool!r:.200}"
                 )
             names.append(function["name"])
         if tuple(names) != TOOL_NAMES:
@@ -496,6 +519,11 @@ class Pack:
             "addendum": addendum(self.limits),
             "sentences": dict(SENTENCES),
             "forced_note_chars": FORCED_NOTE_CAP,
+            "argument_bounds": {
+                "chars": MAX_ARGUMENT_CHARS,
+                "depth": MAX_ARGUMENT_DEPTH,
+                "name_chars": MAX_NAME_CHARS,
+            },
             "tools": list(self.tools),
         }
 
@@ -509,22 +537,51 @@ class Pack:
 
 @dataclass(frozen=True)
 class ToolCall:
-    """One call a model asked for. ``arguments`` is ``None`` when they cannot be sent as asked."""
+    """One call a model asked for. ``arguments`` is ``None`` when the call cannot be sent as asked.
+
+    ``name`` is the tool's name as it can be written down — what was
+    asked for, unless that was no text a wire carries or was longer than
+    :data:`MAX_NAME_CHARS`, and then the call has no arguments to send.
+    """
 
     id: str
     name: str
     arguments: dict[str, Any] | None
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.id, str) or not self.id:
+            raise ValueError("a tool call is answered by its id, and this one has none")
+        if not isinstance(self.name, str) or len(self.name) > MAX_NAME_CHARS:
+            raise ValueError(
+                f"a tool call's name is text of at most {MAX_NAME_CHARS} characters, got "
+                f"{self.name!r:.80}"
+            )
+        if self.arguments is not None and not isinstance(self.arguments, dict):
+            raise ValueError(
+                f"a tool call's arguments are an object or nothing, got "
+                f"{type(self.arguments).__name__}"
+            )
+
 
 @dataclass(frozen=True)
 class Reply:
-    """A chat client's reply as this arm reads it: its text, the calls it asks for, what it cost."""
+    """A chat client's reply as this arm reads it: its text, the calls it asks for, what it cost.
+
+    ``replayable`` says the reply can be put back into the conversation:
+    everything in it — its text, each call's name and arguments as the
+    model wrote them — is text a request can be encoded from. A reply
+    with half a surrogate pair in it is not: sent back, the provider's
+    client fails to encode the request (measured 2026-11-19), and a
+    mistake of the model's would end the search as a model that did not
+    answer.
+    """
 
     message: object
     text: str
     calls: tuple[ToolCall, ...]
     input_tokens: int | None
     output_tokens: int | None
+    replayable: bool = True
 
 
 def read_reply(message: object, label: str) -> Reply:
@@ -540,12 +597,11 @@ def read_reply(message: object, label: str) -> Reply:
     content = getattr(message, "content", None)
     if not isinstance(content, str):
         raise HypothesistError(f"{label} answered with {type(content).__name__}, not text")
+    parsed = _listed(message, "tool_calls", label)
+    unparsed = _listed(message, "invalid_tool_calls", label)
     calls = [
-        *(_read_call(item, label, parsed=True) for item in _listed(message, "tool_calls", label)),
-        *(
-            _read_call(item, label, parsed=False)
-            for item in _listed(message, "invalid_tool_calls", label)
-        ),
+        *(_read_call(item, label, parsed=True) for item in parsed),
+        *(_read_call(item, label, parsed=False) for item in unparsed),
     ]
     usage = getattr(message, "usage_metadata", None)
     return Reply(
@@ -554,7 +610,22 @@ def read_reply(message: object, label: str) -> Reply:
         calls=tuple(calls),
         input_tokens=_tokens(usage, "input_tokens"),
         output_tokens=_tokens(usage, "output_tokens"),
+        replayable=_encodes(content)
+        and all(_encodes([item.get("name"), item.get("args")]) for item in (*parsed, *unparsed)),
     )
+
+
+def _encodes(value: object) -> bool:
+    """Whether ``value`` is something every client can encode a request from.
+
+    Text all the way down, and no ``NaN``: one client writes that out and
+    another refuses to, so a reply holding one is not sent back to either.
+    """
+    try:
+        json.dumps(value, allow_nan=False, ensure_ascii=False, default=str).encode("utf-8")
+    except (TypeError, ValueError, RecursionError):
+        return False
+    return True
 
 
 def _listed(message: object, name: str, label: str) -> list[Any]:
@@ -581,7 +652,9 @@ def _read_call(item: object, label: str, *, parsed: bool) -> ToolCall:
     ``null``, so the server would refuse a value the model did not write
     (both measured on mcp 2.3, 2026-11-19). The bounds on depth and length
     are there so that neither the wire nor a trace line is handed whatever
-    a model writes.
+    a model writes. (Not sending such a call is half of it: a reply with
+    half a surrogate pair in it cannot be sent back to the model either,
+    which is :attr:`Reply.replayable`'s to say.)
     """
     if not isinstance(item, Mapping):
         raise HypothesistError(f"{label} asked for a tool call as {type(item).__name__}")
@@ -612,15 +685,24 @@ def _deeper_than(value: object, depth: int) -> bool:
 
 
 def _sendable(arguments: object) -> bool:
-    """Whether ``arguments`` can go over the wire, and into a trace line, as JSON."""
+    """Whether ``arguments`` can go over the wire, and into a trace line, as JSON.
+
+    They can when JSON says exactly what they are — written out and read
+    back they are the same value, which a ``NaN``, a key that is no text
+    and a tuple are not — when that text can be encoded, and when it is
+    within the bounds. The length is the length of the spelling a trace
+    line and a round written out as text use, so the bound is on what is
+    written and not on how many characters a model typed.
+    """
     if _deeper_than(arguments, MAX_ARGUMENT_DEPTH):
         return False
     try:
-        written = json.dumps(arguments, allow_nan=False, ensure_ascii=False)
-        written.encode("utf-8")
+        written = json.dumps(arguments, allow_nan=False)
+        json.dumps(arguments, ensure_ascii=False).encode("utf-8")
+        same = json.loads(written) == arguments
     except (TypeError, ValueError):
         return False
-    return len(written) <= MAX_ARGUMENT_CHARS
+    return same and len(written) <= MAX_ARGUMENT_CHARS
 
 
 def _tokens(usage: object, key: str) -> int | None:
@@ -857,8 +939,8 @@ class ToolHypothesist:
     def __init__(
         self, *, chat: ChatHypothesist, bound: Any, session: _Session, trace: _Trace, pack: Pack
     ) -> None:
-        self.label = chat.label
-        self.pack = pack
+        self._label = chat.label
+        self._pack = pack
         self._chat = chat
         self._bound = bound
         self._session = session
@@ -866,6 +948,16 @@ class ToolHypothesist:
         self._rounds = 0
         self._tools_failed: str | None = None
         self._closed = False
+
+    @property
+    def label(self) -> str:
+        """The model's label, as the research package labels it."""
+        return self._label
+
+    @property
+    def pack(self) -> Pack:
+        """What this search's model is told, as the trace's opening line has it."""
+        return self._pack
 
     @classmethod
     @contextmanager
@@ -993,14 +1085,14 @@ class ToolHypothesist:
 
     def _propose(self, system: str, user: str, state: _Round) -> str:
         messages: list[object] = [
-            ("system", f"{system}\n\n{addendum(self.pack.limits)}"),
+            ("system", f"{system}\n\n{addendum(self._pack.limits)}"),
             ("human", user),
         ]
         while True:
             reply = self._ask(messages, state, bound=True)
             if not reply.calls:
                 return self._answer(reply, state, forced=False)
-            if state.told_spent:
+            if state.told_spent or not reply.replayable:
                 return self._forced(system, user, state)
             messages.append(reply.message)
             note = reply.text.strip()
@@ -1020,8 +1112,8 @@ class ToolHypothesist:
             # catches it and for its reason: the provider SDKs share no base
             # class, and each of these means no answer came back. An
             # interrupt is not an ``Exception`` and passes.
-            raise HypothesistError(f"{self.label} did not answer: {exc}") from exc
-        reply = read_reply(raw, self.label)
+            raise HypothesistError(f"{self._label} did not answer: {exc}") from exc
+        reply = read_reply(raw, self._label)
         self._trace.write(
             TraceKind.MODEL,
             state,
@@ -1043,7 +1135,7 @@ class ToolHypothesist:
         full), its arguments cannot be sent, no backtest is left. The last
         two count as calls.
         """
-        limits = self.pack.limits
+        limits = self._pack.limits
         started = time.monotonic()
         if state.lookups >= limits.lookups:
             state.told_spent = True
@@ -1051,7 +1143,7 @@ class ToolHypothesist:
         state.lookups += 1
         ended: dict[str, Any]
         if call.arguments is None:
-            body, ended = NOT_AN_OBJECT, {"tool_error": True}
+            body, ended = NOT_SENDABLE, {"tool_error": True}
         elif call.name == BACKTEST_TOOL and state.backtests >= limits.backtests:
             body, ended = BACKTESTS_SPENT, {"limit": Limit.BACKTESTS}
         else:
@@ -1125,7 +1217,7 @@ class ToolHypothesist:
         reply = self._ask([("system", system), ("human", "\n".join(asked))], state, bound=False)
         if reply.calls:
             raise HypothesistError(
-                f"{self.label} asked for a tool when it was given none: its client is not the "
+                f"{self._label} asked for a tool when it was given none: its client is not the "
                 f"one the research package built"
             )
         return self._answer(reply, state, forced=True)

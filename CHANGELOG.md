@@ -43,14 +43,15 @@ Breaking changes within the 0.x line are called out explicitly.
   round as text, and a reply to THAT which still asks for a tool is no
   answer. A mistake of the model's comes back marked as an error: the
   parser's own sentence when the server refused it, a fixed sentence when
-  the arguments could not be sent at all (not a JSON object, a `NaN`,
-  half a surrogate pair, nested past 32 levels, longer than 20,000
-  characters). Sent on, half a surrogate pair fails inside the MCP
-  client and closes the connection, which would end the search as a
-  server that went away, and a `NaN` goes over the wire as `null`, so the
-  server would refuse a value the model did not write (both measured on
-  mcp 2.3); the bounds on depth and length keep the wire and the trace
-  line small. The server not starting, dying,
+  the call could not be sent at all (arguments that are no JSON object,
+  nested past 32 levels or longer than 8,000 characters as written — the
+  loop's own bound on an answer — or a tool name past 64 characters);
+  those bounds are in the pack. A message that cannot be sent BACK — half
+  a surrogate pair anywhere in it, or a `NaN` in a call — ends the
+  round's tool use at once and the rule is asked for without tools: put
+  back into the conversation, the provider's client cannot encode the
+  next request (measured with the repo's client), and a slip of the
+  model's would end the search as a model that did not answer. The server not starting, dying,
   timing out, answering with a protocol error or in a shape the arm does
   not read is a `ToolServerError` — a `HypothesistError`, so the search
   stops and no round is spent — and the arm asks nothing more of that

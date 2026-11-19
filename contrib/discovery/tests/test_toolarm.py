@@ -91,6 +91,7 @@ from contrib.discovery.tools_server import (
     load_view,
     tool_specs,
 )
+from contrib.discovery.tooluse import RoundUse, read_trace, trace_use
 
 from .conftest import BUY, BUY_12, COIN, FLAT, arm_store, open_arm
 from .test_research_tools import _rewrite
@@ -1365,6 +1366,45 @@ def test_a_backtest_the_parser_refuses_is_a_call_and_not_a_backtest(view, tmp_pa
     ]
     answer = traced(tmp_path, "answer")[0]
     assert (answer["lookups"], answer["backtests"], answer["tool_errors"]) == (5, 2, 2)
+
+
+def test_what_the_arm_counts_is_what_its_trace_is_read_back_as(view, tmp_path):
+    # The bench reads a finished search's trace back and re-derives each
+    # round's counts from the round's own lines (``tooluse.trace_use``),
+    # refusing an answer line that says otherwise. That is a second
+    # statement of this arm's counting rules, so one round here walks the
+    # ways a call ends that the two could count differently — a backtest
+    # that scores, a mistake, a call past either limit — and the reader has
+    # to come to the arm's own counts: were one of those rules to change on
+    # one side alone, a paid search that met it would stop at its trace. (A
+    # look-up that is no backtest and simply answers is not in this round;
+    # the reader's own suite, ``test_tooluse.py``, holds that one.)
+    unsendable = ("feature_stats", ["close"])  # arguments that are no object
+    script = [
+        # A backtest that scores; one the parser refuses (a call and a
+        # mistake, no backtest); a call that cannot be sent (the same); a
+        # second that scores; a third, past the backtest limit (a call, and
+        # neither); and a sixth call, past the round's limit (not counted).
+        says("six at once", BACKTEST, REFUSED_RULE, unsendable, BACKTEST, BACKTEST, STATS),
+        # Told none is left, it calls again: asked once more with no tools.
+        says("one more", STATS),
+        says(ANSWER),
+        # The next round asks for nothing and answers.
+        says(ANSWER),
+    ]
+    with arm(build_server(view), script, tmp_path) as (hypothesist, _model):
+        assert hypothesist.propose(SYSTEM, USER) == ANSWER
+        assert hypothesist.propose(SYSTEM, USER) == ANSWER
+    answers = traced(tmp_path, "answer")
+    assert [(a["lookups"], a["backtests"], a["tool_errors"], a["forced"]) for a in answers] == [
+        (5, 2, 2, True),
+        (0, 0, 0, False),
+    ]
+    pack, use = trace_use(read_trace(tmp_path / "trace.jsonl"), replicate=0)
+    assert use.rounds == (RoundUse(5, 2, 2, True), RoundUse(0, 0, 0, False))
+    assert (use.model_calls, use.seam_failed) == (4, False)
+    assert (pack.model, pack.limits, pack.pack_version) == (LABEL, DEFAULT_LIMITS, PACK_VERSION)
+    assert pack.pack_digest == hypothesist.pack.digest()
 
 
 def test_what_keeps_a_call_from_being_run_is_asked_in_one_order(view, tmp_path, monkeypatch):

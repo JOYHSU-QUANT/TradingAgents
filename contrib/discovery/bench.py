@@ -27,12 +27,47 @@ is the point of this module:
    the whole pool's validation figures are read off the Grid arm's store
    after every arm has searched and chosen, and written to ``oracle.json``.
 
+**The tool arm** (tools plan §3.5, T4) is a model arm with the
+training-window look-ups at hand (:mod:`.toolarm`): a manifest names it in
+the model arm's place, and it is searched last, as that arm is. Its
+hypothesist is OPENED for each search and not built once, because it
+stands on a server that reads that search's own store: the server is
+started as a child on the experiment the arm stored, while the search
+holds the store open, and its stderr and the search's trace are kept
+beside the store under ``arms/llm_tools/``. What the arm found is in
+``verdicts.json`` with every other arm's, in the same shape; what it spent
+looking — calls a round, the model's mistakes, rounds answered without
+tools, tokens — is read off each trace once and written to a record of its
+own, ``tool_use.json`` (:mod:`.tooluse`), which a run with no tool arm
+does not have.
+
+**The two sides of that arm's seam fail differently** (decided
+2026-11-19). The MODEL not answering is a failed seam like any arm's:
+recorded, counted apart, and the run goes on. The look-ups' SERVER not
+answering — it did not start, it died, a look-up timed out or could not be
+answered — stops the run (:class:`KeptForInquiry`): nothing is recorded,
+the staging is kept with the trace and the server's log in it — renamed
+(``.search.kept-…``), the name being the mark every later reader goes by,
+and holding a note saying why (``kept-for-inquiry.txt``) — and the claim
+stays. The directory is then refused to the next search and to every
+reader of a search's records, pointing at the note, until someone has
+looked and removed both; the staging alone, by its name, is enough to
+refuse it, so the claim removed and the evidence left is not a world to
+search past. The rule for a provider that went away would have
+the world re-run until its model happened not to ask what the server could
+not answer. What else is a defect on this side stops the run the same way,
+because what the search left is the evidence of it: a finished search
+whose trace cannot be read back, or is not the search its ledger and its
+manifest describe; an arm that cannot be opened once its server is up; a
+trace or a log that cannot be written.
+
 Everything is built in a staging directory inside the run directory and
-moved into place at the end (the two records, then the arms' stores into
-``arms/``), so a run that ends before the records are in leaves the
-directory as the landing left it but for at most ``verdicts.json`` (if it
-ends between the two moves), which the guard and calibrate refuse by
-name; one that ends while the stores move in — a failed rename or an
+moved into place at the end (the records, ``oracle.json`` last, then the
+arms' stores into ``arms/``), so a run that ends before the records are in
+leaves the directory as the landing left it but for at most the records
+that go in before the oracle's (``verdicts.json``, and a tool arm's
+``tool_use.json``, if it ends between the moves), which the guard and
+calibrate refuse by name; one that ends while the stores move in — a failed rename or an
 interrupt — leaves the records and keeps the staging that holds the rest,
 named in a failed rename's refusal and, after an interrupt, by the next
 ``search``. ``arms/`` itself is made first, atomically, as the claim on
@@ -67,7 +102,9 @@ import logging
 import os
 import shutil
 import tempfile
+import traceback
 from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, replace
 from functools import cached_property
 from pathlib import Path
@@ -88,9 +125,20 @@ from .landing import (
     verify,
     world_dir,
 )
-from .manifest import LlmArm, Manifest, SeedSet, WorldKind
+from .manifest import LlmArm, LlmToolsArm, Manifest, SeedSet, WorldKind
 from .oracle import Oracle, PlantedFigures, frame_for, planted_figures, pool_reference
 from .records import Reader, RecordError, dumps
+from .toolarm import (
+    PACK_VERSION,
+    Limits,
+    Pack,
+    ToolArmError,
+    ToolHypothesist,
+    ToolServerError,
+    require_client_sdk,
+)
+from .tools_server import ServerParams, tool_specs
+from .tooluse import TOOL_USE_FILENAME, SearchUse, ToolUse, TracePack, read_trace, trace_use
 from .upstream import (
     ChatHypothesist,
     Experiment,
@@ -105,6 +153,7 @@ from .verdict import ArmSnapshot, ArmVerdict, Ended, final_verdict, snapshot_arm
 
 __all__ = [
     "ARMS_DIRNAME",
+    "INQUIRY_FILENAME",
     "ORACLE_FILENAME",
     "VERDICTS_FILENAME",
     "VERDICTS_VERSION",
@@ -112,6 +161,7 @@ __all__ = [
     "ArmResult",
     "BenchError",
     "CalibrationRow",
+    "KeptForInquiry",
     "RowKey",
     "Searched",
     "Verdicts",
@@ -131,8 +181,11 @@ __all__ = [
     "row_key",
     "run_world",
     "seam_note",
+    "server_log_of",
     "store_path",
+    "tool_arm",
     "tools_experiment",
+    "trace_of",
 ]
 
 # What a searched run directory holds beside the landing (plan §2's layout).
@@ -154,16 +207,21 @@ logger = logging.getLogger(__name__)
 
 
 class Arm(VocabEnum, noun="arm"):
-    """The arms this runner runs: the two that walk the pool, and the model where one is named."""
+    """The arms this runner runs: the two that walk the pool, and a model arm where one is named.
+
+    The model arm answers from the two prompts alone; the tool arm is the
+    same model with the training-window look-ups at hand (tools plan T4).
+    """
 
     RANDOM = "random"
     GRID = "grid"
     LLM = "llm"
+    LLM_TOOLS = "llm_tools"
 
     @property
     def walks_pool(self) -> bool:
-        """Whether this arm proposes from the candidate pool; the model may answer outside it."""
-        return self is not Arm.LLM
+        """Whether this arm proposes from the candidate pool; a model may answer outside it."""
+        return self in (Arm.RANDOM, Arm.GRID)
 
 
 # -- the records ------------------------------------------------------------------------------
@@ -292,6 +350,16 @@ def experiment_id(arm: Arm, replicate: int) -> str:
 def store_path(run_dir: Path, arm: Arm, replicate: int) -> Path:
     """``<run>/arms/<arm>/replicate-<k>.sqlite`` (plan §2's layout)."""
     return run_dir / ARMS_DIRNAME / arm.value / f"replicate-{replicate}.sqlite"
+
+
+def trace_of(store: Path) -> Path:
+    """``replicate-<k>.trace.jsonl`` beside a tool-arm replicate's store: that search's trace."""
+    return store.with_suffix(".trace.jsonl")
+
+
+def server_log_of(store: Path) -> Path:
+    """``replicate-<k>.server.log`` beside it: what that search's look-ups server said on stderr."""
+    return store.with_suffix(".server.log")
 
 
 @dataclass(frozen=True)
@@ -466,16 +534,55 @@ def _give_back(claim: Path) -> None:
 
 
 def _search_left(run_dir: Path) -> list[str]:
-    """What a search has left in ``run_dir``: the claim and the two records, in that order."""
-    return [n for n in (ARMS_DIRNAME, VERDICTS_FILENAME, ORACLE_FILENAME) if (run_dir / n).exists()]
+    """What a search has left in ``run_dir``: the claim and the records, in the order they are made.
+
+    ``tool_use.json`` is a tool arm's alone, so on a world with no such arm
+    this lists what it always did.
+    """
+    names = (ARMS_DIRNAME, VERDICTS_FILENAME, TOOL_USE_FILENAME, ORACLE_FILENAME)
+    return [name for name in names if (run_dir / name).exists()]
 
 
 _STAGING_PREFIX = ".search.partial-"
 
+# The note a search that stopped on its tools' side leaves in the staging
+# it keeps: why it stopped, and that the staging is there to be read.
+INQUIRY_FILENAME = "kept-for-inquiry.txt"
+
+
+# What a staging is renamed to when a search that stopped on its tools'
+# side keeps it. The NAME is the mark that it was kept on purpose: a rename
+# writes no byte, and the disk that could not take a trace's next line is
+# not to be relied on to take a note saying so.
+_KEPT_PREFIX = ".search.kept-"
+
 
 def _kept_staging(run_dir: Path) -> list[str]:
-    """The search stagings in ``run_dir``: a running search's, one a failed store move kept, or a kill's."""
-    return sorted(p.name for p in run_dir.glob(f"{_STAGING_PREFIX}*"))
+    """The search stagings in ``run_dir``: a running search's, one a failed store move kept, a kill's, or one kept for inquiry."""
+    return sorted(
+        path.name
+        for prefix in (_STAGING_PREFIX, _KEPT_PREFIX)
+        for path in run_dir.glob(f"{prefix}*")
+    )
+
+
+def _mark_kept(staging: Path) -> Path:
+    """Rename ``staging`` so that its name says it is kept on purpose; where it is afterwards.
+
+    A rename that fails leaves the staging where it was, under the name it
+    had, and is logged: the note inside (:func:`_kept_for_inquiry`) is then
+    the one mark, and is read as one.
+    """
+    kept = staging.with_name(_KEPT_PREFIX + staging.name.removeprefix(_STAGING_PREFIX))
+    try:
+        staging.rename(kept)
+    except OSError as exc:
+        # The failure's own sentence and no stack: what this is raised
+        # while handling may be a provider's failure, and a logged stack
+        # would print that one's sentence with it.
+        logger.warning("could not rename the kept staging %s to %s: %s", staging, kept, exc)
+        return staging
+    return kept
 
 
 def _holds_stores(staging: Path) -> bool:
@@ -488,17 +595,161 @@ def _holds_stores(staging: Path) -> bool:
         return True
 
 
+def _kept_on_purpose(run_dir: Path) -> list[str]:
+    """The stagings in ``run_dir`` a search kept ON PURPOSE (:func:`_kept_for_inquiry`).
+
+    Those named as kept (:func:`_mark_kept`) — and one still under a
+    staging's ordinary name that holds the note, which is what a rename
+    that failed leaves. Either mark alone is enough: the two are made by
+    different means so that one disk's refusal does not lose both.
+    """
+    return [
+        name
+        for name in _kept_staging(run_dir)
+        if name.startswith(_KEPT_PREFIX) or (run_dir / name / INQUIRY_FILENAME).is_file()
+    ]
+
+
+def _unread_evidence(run_dir: Path) -> str | None:
+    """The refusal for a directory still holding a staging kept for inquiry, whatever else it holds.
+
+    The claim beside such a staging is what makes the next search stop;
+    with the claim removed and the staging left, the directory would read
+    as never searched, and the evidence would be searched past after all.
+    So the staging itself refuses the directory, to every reader of a
+    search's records and to the next search (the two verbs that read the
+    landing alone, the oracle's preview and the look-ups by hand, do not
+    ask).
+    """
+    on_purpose = _kept_on_purpose(run_dir)
+    if not on_purpose:
+        return None
+    # What to remove is said of the staging alone. Both callers ask only
+    # when the directory holds something other than a bare claim (an empty
+    # ``arms/`` beside the staging is :func:`_unfinished`'s to speak of), so
+    # here the claim is already gone, or ``arms/`` holds a finished search's
+    # stores: there is no claim to name, and nobody is told to delete stores.
+    return (
+        f"{run_dir} holds {on_purpose}, kept on purpose by a search that stopped on its tools' "
+        f"side: read {INQUIRY_FILENAME} in it, where it holds one, and the tool arm's trace and "
+        f"its server's log under {ARMS_DIRNAME}/{Arm.LLM_TOOLS.value}/ there. This directory is "
+        f"neither searched nor read while that staging is in it; once the staging has been "
+        f"looked into, remove the staging by hand"
+    )
+
+
 def _unfinished(run_dir: Path, left: list[str]) -> str:
     """The sentence for a search that is running or did not finish: nothing prescribed while one may run.
 
     The staging is named with the claim: a run killed outright leaves one
     holding whole store copies, which removing ``arms/`` alone would leave
-    behind.
+    behind. One kept ON PURPOSE — by a search that stopped on its tools'
+    side — is marked as that (:func:`_kept_on_purpose`: by its name, or by
+    the note in it), and is said to be: "remove them by hand" alone would
+    have the evidence removed unread.
     """
-    return (
-        f"{run_dir} holds {left + _kept_staging(run_dir)}: a search of this world is running or "
-        f"did not finish; once no search is running, remove them by hand to search the world again"
+    kept = _kept_staging(run_dir)
+    sentence = (
+        f"{run_dir} holds {left + kept}: a search of this world is running or did not finish; "
+        f"once no search is running, remove them by hand to search the world again"
     )
+    on_purpose = _kept_on_purpose(run_dir)
+    if on_purpose:
+        sentence += (
+            f" — but {on_purpose} was kept on purpose by a search that stopped on its tools' side: "
+            f"read {INQUIRY_FILENAME} in it, where it holds one, and the tool arm's trace and "
+            f"its server's log under {ARMS_DIRNAME}/{Arm.LLM_TOOLS.value}/ there, before removing "
+            f"anything"
+        )
+    return sentence
+
+
+class KeptForInquiry(BenchError):
+    """A search stopped on its tool arm's side, and what it left is kept to be looked into.
+
+    A refusal of its own class because it is the one a batch must not run
+    past (the CLI ends on it with an exit code of its own): the world next
+    in line would meet the same server.
+    """
+
+
+class _ToolsSideStop(Exception):
+    """A run has to stop on its tool arm's side; the sentence says what failed.
+
+    Raised where the failure is met and turned into the operator's refusal
+    in one place (``run_world``), which is also where the staging is marked
+    to be kept — so no line that stops a run this way can forget to.
+    """
+
+
+def _spent(
+    trace: Path, result: ArmResult, told: TracePack | None, tools: LlmToolsArm
+) -> tuple[TracePack, SearchUse]:
+    """What a finished tool-arm search was told and what it spent, read off its trace.
+
+    Held to the search's own result, to the arm the manifest names
+    (``tools``), and to what an earlier replicate of the arm was ``told``:
+    one manifest's tool arm is one model under one pack. A trace this
+    build wrote and cannot read back, or one that is not the search the
+    ledger holds or the arm the manifest names, is a defect on this side,
+    and the trace is the evidence of it: the run stops as it does for a
+    server that failed, the trace kept, and not thrown away with a search
+    that was paid for.
+    """
+    try:
+        pack, use = trace_use(read_trace(trace), result.replicate)
+        _hold_pack_to_arm(trace.name, pack, tools)
+        if told is not None and pack != told:
+            raise BenchError(
+                f"{result.experiment_id} was told {pack}, an earlier replicate {told}; one "
+                f"manifest's tool arm is one model under one pack"
+            )
+        _hold_use_to_result(trace.name, use, result)
+    except RecordError as exc:
+        raise _ToolsSideStop(
+            f"what {result.experiment_id} spent could not be read back from its trace — {exc}"
+        ) from exc
+    return pack, use
+
+
+def _kept_for_inquiry(
+    run_dir: Path, staging: Path, why: str, cause: BaseException | None
+) -> KeptForInquiry:
+    """The refusal a run that stopped on its tools' side ends with, written into the staging it keeps.
+
+    The caller keeps the staging and the claim (``run_world``'s
+    ``finally``); here the staging is first renamed as kept
+    (:func:`_mark_kept`), which is the mark every later reader goes by.
+    The sentence goes to the operator once; the note is what is still
+    there when the directory is next looked at, and what the next
+    command's refusal points to. Where the failure was an exception this
+    process caught (``cause``), its traceback goes under the sentence: the
+    sentence is a line, and a defect is found by its stack. The exception's
+    own stack and no chained one: what it was raised while handling may be
+    a provider's failure, whose sentence this package writes to no file (it
+    may quote what the provider was sent). A note that cannot be written
+    is logged and not raised over — the refusal is the one to report, and
+    the staging is kept either way, and marked by its name. (Unmarked only
+    where the rename and the note BOTH failed: kept still, and read by the
+    next command as any staging a run left behind.)
+    """
+    staging = _mark_kept(staging)
+    sentence = (
+        f"{run_dir}: {why}. Nothing is recorded for this world: a failure on the tools' side is "
+        f"looked into, not searched past. What the search left is kept in {staging} (what a "
+        f"tool arm's search got to write — its server's own log, and its trace once the arm was "
+        f"open — is under {ARMS_DIRNAME}/{Arm.LLM_TOOLS.value}/ there), and the claim "
+        f"{ARMS_DIRNAME}/ stays: the next search of this world is refused until both are removed "
+        f"by hand"
+    )
+    note = f"{sentence}\n"
+    if cause is not None:
+        note += "\n" + "".join(traceback.format_exception(cause, chain=False))
+    try:
+        (staging / INQUIRY_FILENAME).write_text(note, encoding="utf-8", errors="replace")
+    except (OSError, ValueError) as exc:
+        logger.warning("could not write %s into %s: %s", INQUIRY_FILENAME, staging, exc)
+    return KeptForInquiry(sentence)
 
 
 def require_artifact(run_dir: Path, manifest: Manifest) -> None:
@@ -621,8 +872,8 @@ def tools_experiment(run_dir: Path) -> Experiment:
 _MODEL_RETRIES = 6
 
 
-def model_hypothesist(llm: LlmArm) -> ChatHypothesist:
-    """The model the manifest names, built the way the research package builds it, or a named refusal.
+def model_hypothesist(llm: LlmArm | LlmToolsArm) -> ChatHypothesist:
+    """The model a model arm of the manifest names, built the way the research package builds it, or a named refusal.
 
     Nothing is asked of the model here, so this is also the check that a
     world can be searched at all before minutes of work or any money is
@@ -635,38 +886,112 @@ def model_hypothesist(llm: LlmArm) -> ChatHypothesist:
     default because a replicate is not resumed: a transient failure at
     round 28 would throw away the 27 calls before it.
     """
+    path = "arms.llm_tools" if isinstance(llm, LlmToolsArm) else "arms.llm"
     try:
         hypothesist = ChatHypothesist.build(
             llm.provider, llm.model, temperature=llm.temperature, max_retries=_MODEL_RETRIES
         )
     except Exception as exc:  # noqa: BLE001 - the clients share no base class for this
-        raise BenchError(f"arms.llm: {exc}") from exc
+        raise BenchError(f"{path}: {exc}") from exc
     if getattr(hypothesist.model, "temperature", llm.temperature) is None:
         raise BenchError(
-            f"arms.llm: the client for {llm.provider}/{llm.model} dropped temperature "
+            f"{path}: the client for {llm.provider}/{llm.model} dropped temperature "
             f"{llm.temperature}; the manifest would describe a run that did not use it"
         )
     return hypothesist
 
 
-def _arms(manifest: Manifest) -> list[tuple[Arm, int, PoolHypothesist | ChatHypothesist]]:
-    """The arms to run, in order: the Random replicates as listed, Grid, then the model's replicates.
+def tool_arm(tools: LlmToolsArm) -> tuple[ChatHypothesist, Limits]:
+    """The tool arm's model and its limits, or a named refusal, before anything is started for it.
 
-    The model last: it is the only arm that costs money, so a world whose
-    pool arms cannot run has spent nothing.
+    What can be known to be wrong without a server: a pack version that
+    is not this build's — the manifest would describe a run told other
+    words than it was — the SDK the arm's client is built on, the model
+    (:func:`model_hypothesist`), and a client that will not be bound with
+    this build's tools. Asked
+    where a world is landed and again where it is searched, as the model
+    arm's check is, so neither a backfill nor the pool arms' minutes are
+    spent on an arm that cannot run.
+    """
+    if tools.pack_version != PACK_VERSION:
+        raise BenchError(
+            f"arms.llm_tools.pack_version: this build tells a model about its tools at pack "
+            f"version {PACK_VERSION}, the manifest asks for {tools.pack_version}"
+        )
+    try:
+        require_client_sdk()
+        limits = Limits(lookups=tools.lookups, backtests=tools.backtests)
+    except ToolArmError as exc:
+        raise BenchError(f"arms.llm_tools: {exc}") from exc
+    model = model_hypothesist(tools)
+    bind = getattr(model.model, "bind_tools", None)
+    if not callable(bind):
+        raise BenchError(f"arms.llm_tools: {model.label} takes no tools: its client has no bind_tools")
+    try:
+        # Bound once here with the pack this build pins, and the result let
+        # go: a client can have the method and still refuse to be bound (the
+        # base class every chat client inherits it from raises), and that is
+        # learnt by asking. Nothing is sent to a provider by it.
+        bind(list(Pack.of(tool_specs(), limits).tools))
+    except Exception as exc:  # noqa: BLE001 - each client refuses in a class of its own
+        raise BenchError(
+            f"arms.llm_tools: {model.label} could not be given the tools: {exc}"
+        ) from exc
+    return model, limits
+
+
+# How an arm's hypothesist is had for one search: handed the arm's own copy
+# of the artifact and the experiment stored in it, it gives the hypothesist
+# for as long as the search lasts.
+_Asked = PoolHypothesist | ChatHypothesist | ToolHypothesist
+_Opened = Callable[[Path, Experiment], AbstractContextManager[_Asked]]
+
+
+def _arms(manifest: Manifest) -> list[tuple[Arm, int, _Opened]]:
+    """The arms to run, in order: the Random replicates as listed, Grid, then a model arm's replicates.
+
+    Each as the way its hypothesist is OPENED for its search, not as a
+    hypothesist: the tool arm's is opened over a server that reads the
+    arm's own copy of the artifact under the experiment stored in it
+    (tools plan §1 #8), and neither exists until the loop makes it. The
+    other arms' hypothesists hold nothing of a store and are built here.
+
+    A model arm last: it is the only arm that costs money, so a world
+    whose pool arms cannot run has spent nothing.
     """
     pool = enumerate_pool(manifest.search_space)
     world_id = manifest.world.id
-    arms: list[tuple[Arm, int, PoolHypothesist | ChatHypothesist]] = [
-        (Arm.RANDOM, seed, RandomHypothesist(pool, world_id=world_id, search_seed=seed))
+
+    def held(hypothesist: PoolHypothesist | ChatHypothesist) -> _Opened:
+        return lambda path, experiment: nullcontext(hypothesist)
+
+    arms: list[tuple[Arm, int, _Opened]] = [
+        (Arm.RANDOM, seed, held(RandomHypothesist(pool, world_id=world_id, search_seed=seed)))
         for seed in manifest.arms.random.search_seeds
     ]
-    arms.append((Arm.GRID, 0, GridHypothesist(pool)))
+    arms.append((Arm.GRID, 0, held(GridHypothesist(pool))))
     llm = manifest.arms.llm
     if llm is not None:
         # One adapter: it holds a client and no state of a search.
-        model = model_hypothesist(llm)
-        arms += [(Arm.LLM, k, model) for k in range(llm.replicates)]
+        asked = held(model_hypothesist(llm))
+        arms += [(Arm.LLM, k, asked) for k in range(llm.replicates)]
+    tools = manifest.arms.llm_tools
+    if tools is not None:
+        model, limits = tool_arm(tools)
+
+        def with_tools(path: Path, experiment: Experiment) -> AbstractContextManager[_Asked]:
+            # The server is started on the experiment the arm STORED — its
+            # split is the one the arm's trials are measured under — and
+            # its stderr and the search's trace are kept beside the store.
+            return ToolHypothesist.open(
+                model,
+                ServerParams.for_experiment(path, experiment),
+                trace=trace_of(path),
+                server_log=server_log_of(path),
+                limits=limits,
+            )
+
+        arms += [(Arm.LLM_TOOLS, k, with_tools) for k in range(tools.replicates)]
     return arms
 
 
@@ -686,6 +1011,10 @@ def run_world(
     # directory and send the operator to delete the records).
     manifest = own_manifest(run_dir)
     left = _search_left(run_dir)
+    if left != [ARMS_DIRNAME] and (unread := _unread_evidence(run_dir)) is not None:
+        # With the claim beside it, the sentence below names both; without
+        # it — the claim removed and the staging left — this one does.
+        raise BenchError(unread)
     if left == [ARMS_DIRNAME]:
         # The claim alone is what a search in progress leaves (it is made
         # first, the records moved in last): nothing is prescribed while one
@@ -695,9 +1024,12 @@ def run_world(
         # A staging kept by a failed store move holds the stores the claim did
         # not receive; it is named so it is not left behind by a re-search.
         kept = _kept_staging(run_dir)
+        records = [VERDICTS_FILENAME, ORACLE_FILENAME]
+        if TOOL_USE_FILENAME in left:
+            records.insert(1, TOOL_USE_FILENAME)
         raise BenchError(
             f"{run_dir} holds {left + kept}: this world was searched before, and a search is "
-            f"spent once — remove {ARMS_DIRNAME}/, {VERDICTS_FILENAME}, {ORACLE_FILENAME}"
+            f"spent once — remove {ARMS_DIRNAME}/, {', '.join(records)}"
             + (" and the kept staging" if kept else "")
             + " by hand to search it again"
         )
@@ -729,10 +1061,18 @@ def run_world(
         # would be told the world was searched.
         _give_back(claim)
         raise
+    # Set when the run stopped on its tool arm's side (``_ToolsSideStop``):
+    # what the search left is then kept for whoever looks into it, the
+    # claim with it. A flag, where the rest of the ending is read off the
+    # directory: it is set before the note is written, so a note that could
+    # not be written does not have the evidence discarded.
+    inquiry = False
     try:
         results: list[ArmResult] = []
+        uses: list[SearchUse] = []
+        told: TracePack | None = None
         landing: Landing | None = None
-        for arm, replicate, hypothesist in _arms(manifest):
+        for arm, replicate, opened in _arms(manifest):
             path = store_path(staging, arm, replicate)
             _copy_artifact(run_dir, path)
             with ResearchStore(path) as store:
@@ -745,13 +1085,57 @@ def run_world(
                 experiment = ledger.create_experiment(
                     experiment_for(manifest, experiment_id(arm, replicate))
                 )
-                report = search(
-                    ledger,
-                    experiment,
-                    hypothesist,
-                    model=hypothesist.label if isinstance(hypothesist, ChatHypothesist) else arm.value,
-                    max_trials=manifest.budget.max_trials,
-                )
+                name = experiment_id(arm, replicate)
+                tools_failed: str | None = None
+                try:
+                    with opened(path, experiment) as hypothesist:
+                        report = search(
+                            ledger,
+                            experiment,
+                            hypothesist,
+                            model=(
+                                arm.value
+                                if isinstance(hypothesist, PoolHypothesist)
+                                else hypothesist.label
+                            ),
+                            max_trials=manifest.budget.max_trials,
+                        )
+                        if isinstance(hypothesist, ToolHypothesist):
+                            tools_failed = hypothesist.tools_failed
+                except ToolServerError as exc:
+                    # ``search()`` keeps a seam's failure to itself, so this
+                    # one came from the opening: the server did not come up.
+                    raise _ToolsSideStop(f"the look-ups' server failed in {name} — {exc}") from exc
+                except ToolArmError as exc:
+                    # What can be refused without a server was, before any
+                    # arm ran (``tool_arm``). What is left to be refused
+                    # HERE is found once the child is started — a server
+                    # that is not this build's, a client that will not be
+                    # bound after all — and the child's log is where it
+                    # says why: kept, with the rest. (The opening's other
+                    # refusals — a trace that exists, limits that are none —
+                    # cannot be met in a staging just made, from limits
+                    # ``tool_arm`` built.)
+                    raise _ToolsSideStop(f"{name} could not be opened — {exc}") from exc
+                except OSError as exc:
+                    if arm is not Arm.LLM_TOOLS:
+                        raise
+                    # The arm's own files: a trace that could not be written
+                    # in the middle of a search that was being paid for, a
+                    # log that could not be opened for its server. What was
+                    # written is kept, with the rest.
+                    raise _ToolsSideStop(
+                        f"{name} could not open or write its trace or its server's log — {exc}"
+                    ) from exc
+                if tools_failed is not None:
+                    # Not a seam failure to count apart and search past
+                    # (decided 2026-11-19): that rule is for a provider that
+                    # went away. A world re-run until its model happens not
+                    # to ask what the server could not answer is a sample
+                    # picked by the model's behaviour, and a defect on this
+                    # side would be re-run over. The run stops, nothing is
+                    # recorded, and what was written is kept to be read.
+                    raise _ToolsSideStop(f"the look-ups' server failed in {name} — {tools_failed}")
                 for line in report.describe():
                     say(line)
                 snapshot = snapshot_arm(
@@ -772,12 +1156,33 @@ def run_world(
                 result = ArmResult(arm=arm, replicate=replicate, snapshot=snapshot, holdout=holdout)
                 say(result.describe(holdout=show_holdout))
                 results.append(result)
+                tools = manifest.arms.llm_tools
+                if arm is Arm.LLM_TOOLS and tools is not None:
+                    # Read once the search is over and its trace closed:
+                    # what the search spent, kept where a table can read it
+                    # after the trace is gone.
+                    told, use = _spent(trace_of(path), result, told, tools)
+                    uses.append(use)
         verdicts = Verdicts(
             world_id=world_id,
             pool_size=pool_size,
             manifest_digest=digest,
             results=tuple(results),
         )
+        tool_use: ToolUse | None = None
+        tools = manifest.arms.llm_tools
+        if tools is not None and told is not None:
+            try:
+                tool_use = ToolUse(
+                    world_id=world_id, manifest_digest=digest, pack=told, searches=tuple(uses)
+                )
+                _hold_use_to_manifest(TOOL_USE_FILENAME, tool_use, tools)
+            except RecordError as exc:
+                # Each search was held as it was read; a record of them all
+                # that cannot be built is the same defect, found later.
+                raise _ToolsSideStop(
+                    f"what the tool arm's searches spent does not make a record — {exc}"
+                ) from exc
         # The oracle last (plan §4.4): read on the Grid arm's store after
         # every arm has searched and chosen. The oracle path files nothing,
         # so the store is the arm's record still.
@@ -802,16 +1207,23 @@ def run_world(
         oracle = Oracle(world_id=world_id, manifest_digest=digest, planted=planted, pool=reference)
         for line in oracle.describe(holdout=show_holdout):
             say(line)
-        # Written whole in staging, then moved: the two records first, then
+        # Written whole in staging, then moved: the records first, then
         # each arm's store into the claim. A failure before the records are
-        # both in leaves the directory as the landing left it (at most one
-        # record, which calibrate and the guard refuse by name); a failure
+        # all in leaves the directory as the landing left it (but for the
+        # records already moved, which calibrate and the guard refuse by
+        # name, the oracle's not being among them); a failure
         # while the stores move in leaves the records and the staging that
         # still holds the unmoved stores, named in the refusal so nothing
         # is lost. The landed manifest is not touched.
-        (staging / VERDICTS_FILENAME).write_bytes(verdicts.dumps().encode("utf-8"))
-        (staging / ORACLE_FILENAME).write_bytes(oracle.dumps().encode("utf-8"))
-        for name in (VERDICTS_FILENAME, ORACLE_FILENAME):
+        # ``oracle.json`` goes in last, whatever else there is: it is what
+        # the ``finally`` below reads "the records are in" off.
+        written = {VERDICTS_FILENAME: verdicts.dumps()}
+        if tool_use is not None:
+            written[TOOL_USE_FILENAME] = tool_use.dumps()
+        written[ORACLE_FILENAME] = oracle.dumps()
+        for name, text in written.items():
+            (staging / name).write_bytes(text.encode("utf-8"))
+        for name in written:
             os.replace(staging / name, run_dir / name)
         done: list[str] = []
         try:
@@ -824,6 +1236,15 @@ def run_world(
                 f"failed after {done}; the rest are in {staging / ARMS_DIRNAME} — move them in by "
                 f"hand, then remove {staging}"
             ) from exc
+    except _ToolsSideStop as stop:
+        # The one place the staging is marked to be kept, whichever line
+        # stopped the run: the refusal says it was, and has to be true.
+        # The flag first, so that whatever happens while the staging is
+        # renamed and its note written — an interrupt, a full disk — the
+        # ``finally`` below leaves it alone.
+        inquiry = True
+        cause = stop.__cause__
+        raise _kept_for_inquiry(run_dir, staging, str(stop), cause) from cause
     finally:
         # Decided from the directory, not from how far the code got: an
         # interrupt can land between a rename and the line after it. The
@@ -833,12 +1254,17 @@ def run_world(
         # operator removes them) and a staging still holding stores the
         # claim did not receive is kept — a failed rename and an interrupt
         # alike; emptied by the moves, it goes. Before it is in, the
-        # half-made run goes and the claim is given back.
+        # half-made run goes and the claim is given back — unless the run
+        # stopped on its tool arm's side (``inquiry``), when neither is
+        # touched here: the staging — by now renamed as kept — is the
+        # evidence, and the claim is what makes the next search name it
+        # instead of running past it.
         records_in = (run_dir / ORACLE_FILENAME).exists()
-        if not (records_in and _holds_stores(staging)):
-            discard_staging(staging)
-        if not records_in:
-            _give_back(claim)
+        if not inquiry:
+            if not (records_in and _holds_stores(staging)):
+                discard_staging(staging)
+            if not records_in:
+                _give_back(claim)
     return verdicts, oracle
 
 
@@ -911,26 +1337,38 @@ class CalibrationRow:
 
 @dataclass(frozen=True)
 class Searched:
-    """A searched run directory read and held together: its manifest and the two records."""
+    """A searched run directory read and held together: its manifest and its records.
+
+    ``tool_use`` is what the tool arm's searches spent (:mod:`.tooluse`):
+    present exactly when the manifest names that arm.
+    """
 
     manifest: Manifest
     verdicts: Verdicts
     oracle: Oracle
+    tool_use: ToolUse | None = None
 
 
 def read_searched(run_dir: Path) -> Searched | None:
     """``run_dir``'s manifest and records, each held to the others; ``None`` if nothing searched it.
 
     A directory holding none of what a search leaves (``arms/``,
-    ``verdicts.json``, ``oracle.json``) is a world not yet searched; one
-    holding some of it but not both records is a search in progress or one
-    that did not finish, refused by name rather than dropped without a
-    word. A record that cannot be read, or that is not its manifest's —
-    another world, pool, arm set, digest, set of conditions, budget, or a
-    pool arm's rule outside the pool — is refused by name. Every reader of the
-    records comes through here.
+    ``verdicts.json``, a tool arm's ``tool_use.json``, ``oracle.json``) is
+    a world not yet searched; one holding some of it but not both the
+    verdicts and the oracle's record is a search in progress or one that
+    did not finish, refused by name rather than dropped without a word.
+    So is one holding a staging a search kept for inquiry, whatever else
+    it holds: a world that stopped is not one never searched. A record
+    that cannot be read, or that is not its manifest's — another world,
+    pool, arm set, digest, set of conditions, budget, a pool arm's rule
+    outside the pool, or a tool arm's use that is not the arm's — is
+    refused by name. Every reader of the records comes through here.
     """
     left = _search_left(run_dir)
+    if left != [ARMS_DIRNAME] and (unread := _unread_evidence(run_dir)) is not None:
+        # Before "not yet searched": a staging kept for inquiry whose claim
+        # was removed is a world that was searched, and stopped.
+        raise BenchError(unread)
     if not left:
         return None
     if VERDICTS_FILENAME not in left or ORACLE_FILENAME not in left:
@@ -957,6 +1395,8 @@ def read_searched(run_dir: Path) -> Searched | None:
     expected.add((Arm.GRID, 0))
     if manifest.arms.llm is not None:
         expected |= {(Arm.LLM, k) for k in range(manifest.arms.llm.replicates)}
+    if manifest.arms.llm_tools is not None:
+        expected |= {(Arm.LLM_TOOLS, k) for k in range(manifest.arms.llm_tools.replicates)}
     held = {(result.arm, result.replicate) for result in verdicts.results}
     if held != expected:
         raise BenchError(
@@ -999,7 +1439,104 @@ def read_searched(run_dir: Path) -> Searched | None:
             f"beside it writes one of {pool_size}"
         )
     _hold_oracle_to_manifest(run_dir / ORACLE_FILENAME, oracle, manifest)
-    return Searched(manifest=manifest, verdicts=verdicts, oracle=oracle)
+    return Searched(
+        manifest=manifest,
+        verdicts=verdicts,
+        oracle=oracle,
+        tool_use=_read_tool_use(run_dir, manifest, verdicts),
+    )
+
+
+def _read_tool_use(run_dir: Path, manifest: Manifest, verdicts: Verdicts) -> ToolUse | None:
+    """``tool_use.json`` of a searched directory, held to the manifest and the verdicts beside it.
+
+    Written by a search exactly when its manifest names the tool arm, so
+    one missing where it is due, or present where none is, is a directory
+    this build's search did not leave.
+    """
+    path = run_dir / TOOL_USE_FILENAME
+    tools = manifest.arms.llm_tools
+    if tools is None:
+        if path.exists():
+            raise BenchError(f"{path}: the manifest beside it names no tool arm to have written it")
+        return None
+    if not path.is_file():
+        raise BenchError(
+            f"{run_dir} ran a tool arm and holds no {TOOL_USE_FILENAME}; a search writes it with "
+            f"{VERDICTS_FILENAME}"
+        )
+    use = read_record(path, ToolUse.loads)
+    if (use.world_id, use.manifest_digest) != (verdicts.world_id, verdicts.manifest_digest):
+        raise BenchError(
+            f"{path} is for {use.world_id} under manifest {use.manifest_digest}; "
+            f"{VERDICTS_FILENAME} beside it is for {verdicts.world_id} under "
+            f"{verdicts.manifest_digest}"
+        )
+    _hold_use_to_manifest(path, use, tools)
+    by_replicate = {r.replicate: r for r in verdicts.results if r.arm is Arm.LLM_TOOLS}
+    for spent in use.searches:
+        _hold_use_to_result(path, spent, by_replicate[spent.replicate])
+    return use
+
+
+def _hold_use_to_manifest(where: Path | str, use: ToolUse, tools: LlmToolsArm) -> None:
+    """Refuse a tool-use record that is not of the tool arm a manifest names (``tools``).
+
+    The replicates the arm has, each once, and the pack that arm is run
+    under (:func:`_hold_pack_to_arm`): the record says what the searches
+    were told, and the manifest is what the run is filed under.
+    """
+    replicates = sorted(search.replicate for search in use.searches)
+    if replicates != list(range(tools.replicates)):
+        raise BenchError(
+            f"{where} holds the tool arm's replicate(s) {replicates}; the manifest names "
+            f"{tools.replicates}, numbered from 0"
+        )
+    _hold_pack_to_arm(where, use.pack, tools)
+
+
+def _hold_pack_to_arm(where: Path | str, pack: TracePack, tools: LlmToolsArm) -> None:
+    """Refuse what a search says it was told when it is not what the manifest's tool arm sets.
+
+    The pack version and the two limits; and the model, by the label the
+    research package builds a model under and files its answers by
+    (``provider/model``) — a search told as another model's is not this
+    arm's, whatever its limits.
+    """
+    told = (pack.pack_version, pack.limits.lookups, pack.limits.backtests)
+    asked = (tools.pack_version, tools.lookups, tools.backtests)
+    if told != asked:
+        raise BenchError(
+            f"{where}: the searches were told pack version {told[0]} under limits of {told[1]} "
+            f"call(s) and {told[2]} backtest(s); the manifest sets {asked[0]}, {asked[1]} and "
+            f"{asked[2]}"
+        )
+    label = f"{tools.provider}/{tools.model}"
+    if pack.model != label:
+        raise BenchError(
+            f"{where}: the searches are those of the model {pack.model}; the manifest's tool arm "
+            f"names {label}"
+        )
+
+
+def _hold_use_to_result(where: Path | str, use: SearchUse, result: ArmResult) -> None:
+    """Refuse what a search is said to have spent when it is not what its verdict says it did.
+
+    A round of the trace is an answer of the search — the loop asks once a
+    round — and the search ended on a failed seam in the one exactly when
+    it did in the other.
+    """
+    snapshot = result.snapshot
+    if len(use.rounds) != snapshot.answers:
+        raise BenchError(
+            f"{where}: {result.experiment_id}'s trace answered {len(use.rounds)} round(s) and its "
+            f"ledger holds {snapshot.answers} answer(s); a round is one answer"
+        )
+    if use.seam_failed != (snapshot.ended is Ended.SEAM_FAILED):
+        raise BenchError(
+            f"{where}: {result.experiment_id} ended {snapshot.ended.value}, and its trace "
+            + ("ends on a failed seam" if use.seam_failed else "ends on no failed seam")
+        )
 
 
 def iter_searched(run_dirs: Iterable[Path]) -> Iterator[tuple[Path, Searched]]:

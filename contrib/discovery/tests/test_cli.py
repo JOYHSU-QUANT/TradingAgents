@@ -126,7 +126,7 @@ def test_a_manifest_that_cannot_be_read_is_a_named_refusal(tmp_path, capsys):
     assert "cannot read the manifest" in capsys.readouterr().err
     other = tmp_path / "other.json"
     other.write_text(
-        example_manifest().dumps().replace('"manifest_version": 3', '"manifest_version": 4'),
+        example_manifest().dumps().replace('"manifest_version": 4', '"manifest_version": 5'),
         encoding="utf-8",
     )
     assert main(["generate", "--manifest", str(other), "--root", root]) == 1
@@ -349,7 +349,9 @@ def test_report_prints_the_rows_and_says_when_nothing_is_searched(tmp_path, caps
     class Row:
         unsealed = []
 
-        def describe(self, *, unseal):
+        def describe(self, *, unseal, prices):
+            # No price was given on these command lines, so none is passed on.
+            assert prices is None
             self.unsealed.append(unseal)
             return ["headline", "  diagnostics"]
 

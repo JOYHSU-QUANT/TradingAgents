@@ -42,7 +42,9 @@ JSON 層。定義見「訓練區間查詢（工具組 T1）」一節。
 **工具組 T2（MCP 伺服器，已落地）**：`tools_server.py`＝把那三個查詢包成一個走 MCP 的 stdio 伺服器，另加 `tools` 指令讓人手動試玩。
 定義見「MCP 伺服器（工具組 T2）」一節。
 **工具組 T3（會用工具的提問器，已落地）**：`toolarm.py`＝`ToolHypothesist`，模型在回答規則之前可以先問那個伺服器；每輪上限、trace
-都在這裡。還沒接進 `bench.py`（那是 T4），所以目前沒有指令會用到它。定義見「會用工具的提問器（工具組 T3）」一節。
+都在這裡。定義見「會用工具的提問器（工具組 T3）」一節。
+**工具組 T4（接進 benchmark，已落地）**：manifest v4 的 `arms.llm_tools`、`search` 多跑會用工具的模型臂、`tool_use.json`（每輪查了幾次與 token 數）、
+`report` 多印查詢次數與估算花費。定義見「工具組接進 benchmark（工具組 T4）」一節。
 
 已經有的東西：
 
@@ -67,8 +69,12 @@ JSON 層。定義見「訓練區間查詢（工具組 T1）」一節。
   （`SearchSpace.candidates`，讀 manifest 時就枚舉、parser 拒絕就 manifest 拒絕）；定義見「三臂與判定」一節。
 - [`bench.py`](./bench.py)：`run_world(run_dir)` 把一個落地世界按計畫 §3 的順序跑到底；`preview_oracle(run_dir)`＝搜尋前的
   oracle 讀數（只准 dev seed）；`calibration_table(run_dirs)`＝誤判率表；`Verdicts`／`ArmResult`＝`verdicts.json` 的紀錄。
-- [`records.py`](./records.py)：各份 JSON 紀錄（manifest、verdict 快照、`verdicts.json`、`oracle.json`、`scores.json`）共用的嚴格讀取器
-  （`Reader`，各模組帶自己的 error class；manifest 以外的紀錄錯誤共用 `RecordError` 基底、`Reader.version` 統一版本檢查）；`from_dict` 管
+  工具組的每個 replicate 在這裡各開一次提問器（`tool_arm()` 是開跑前的檢查），伺服器側失敗時停下整個 run。
+- [`tooluse.py`](./tooluse.py)：工具組的搜尋花了什麼。`read_trace`／`trace_use` 把一份 trace 讀回來整理成每輪的次數與 token 數，
+  `ToolUse`＝`tool_use.json` 的紀錄，`usage_lines()`＝`report` 多印的那兩行，`Prices`＝估算花費用的單價。定義見「工具組接進 benchmark（工具組 T4）」一節。
+- [`records.py`](./records.py)：各份 JSON 紀錄（manifest、verdict 快照、`verdicts.json`、`oracle.json`、`scores.json`、`tool_use.json`）共用的嚴格讀取器
+  （`Reader`，各模組帶自己的 error class；manifest 以外的紀錄錯誤共用 `RecordError` 基底、`Reader.version` 統一版本檢查，
+  manifest 同時讀兩個版本所以用 `Reader.one_version_of`）；`from_dict` 管
   鍵集合與只有原始文件才能做的檢查（版本、寫出的 id／hash 對衍生值、parser），每個欄位自己的值一律在 `__post_init__`
   驗（與 autoresearch 的 `Penalty.from_dict` 同款）；重複的 JSON key 拒絕。
 - [`worlds.py`](./worlds.py)：`generate(manifest)` 把一個 seed 變成一份 `WorldHistory`（4h bars、1d 聚合、hourly funding、
@@ -91,7 +97,8 @@ JSON 層。定義見「訓練區間查詢（工具組 T1）」一節。
   後面的那段說明）、`read_reply`／`tool_message`（不 import langchain 的讀與寫）。只 import `research_tools`／`tools_server`／`upstream`。
   定義見「會用工具的提問器（工具組 T3）」一節。
 - [`cli.py`](./cli.py)：`python -m contrib.discovery generate --manifest <path> [--root <dir>]`、`oracle --run <dir>`、
-  `search --run <dir>`、`calibrate [--root <dir>]`、`score --run <dir>`、`report [--root <dir>] [--unseal]`、`tools --run <dir>`。
+  `search --run <dir>`、`calibrate [--root <dir>]`、`score --run <dir>`、
+  `report [--root <dir>] [--unseal] [--price-in <美元> --price-out <美元>]`、`tools --run <dir>`。
 
 ## 世界生成器（generator v1）
 
@@ -181,7 +188,8 @@ parser 讀成 feature 名、regime 給數字會被 parser 拒絕，兩種都在�
 **`search --run <dir>`**（`bench.run_world`，計畫 §3 步驟 2–5，順序就是重點）：
 1. 讀落地的 `manifest.json`（必須是這個目錄自己的：目錄名＝manifest 的 digest，落地後手改過 kind／penalty／budget 的
    manifest 會指到別的目錄名，拒絕）；只有 `arms/`＝另一個搜尋正在跑或沒跑完，拒絕（句子只說「等沒有搜尋在跑再手動移除」，
-   不叫人刪活的 claim）；有紀錄＝這個世界搜過了，拒絕（一個世界只搜一次，要重搜就手動移除）。
+   不叫人刪活的 claim）；有紀錄＝這個世界搜過了，拒絕（一個世界只搜一次，要重搜就手動移除）；有一個刻意保留的暫存資料夾
+   （`.search.kept-*`，工具組那一側停下時留的，見「工具組接進 benchmark（工具組 T4）」）＝拒絕，不管 `arms/` 還在不在。
    池與 `pool_size` 在讀 manifest 時就已核對（見「候選池」）。
 2. 先核對 `world.sqlite` 的 SHA-256 等於 manifest 的 `artifact_sha256`（對不上拒絕：同 seed 的 null 雙胞胎 artifact 複製錯目錄，形狀檢查全部會過）；每臂把 `world.sqlite` 複製到自己的 store（`arms/random/replicate-<search seed>.sqlite`、`arms/grid/replicate-0.sqlite`），
    第一顆先跑 `verify()`（落地時的驗收再跑一次：artifact 真的是 manifest 描述的世界）；每臂以 `experiment_for()`＋
@@ -195,8 +203,9 @@ parser 讀成 feature 名、regime 給數字會被 parser 拒絕，兩種都在�
 4. 所有臂跑完才讀 oracle（計畫 §4.4）：在 grid 臂的 store 上算埋的規則的 train／validation／holdout（null 世界為 null）與
    full-pool reference（整池 validation net sharpe、最佳者、過 `threshold(pool_size)` 的個數），不落 ledger。
 5. 全部先寫進 run 目錄下的 staging（`.search.partial-*`），最後先搬 `verdicts.json`／`oracle.json`，再把各臂 store 逐一搬進
-   開頭就建好的 `arms/`（claim）；`manifest.json` 不動（`pool_size` 由 `generate` 回填）。紀錄搬好之前任何原因中途結束都把
-   staging 與 claim 移除，目錄回到落地狀態——只有停在兩次搬檔之間會多留一個 `verdicts.json`，guard 與 calibrate 都會點名拒絕；
+   開頭就建好的 `arms/`（claim）；`manifest.json` 不動（`pool_size` 由 `generate` 回填）。紀錄搬好之前中途結束都把
+   staging 與 claim 移除，目錄回到落地狀態——只有兩個例外：停在搬檔之間會多留已經搬進去的紀錄（`verdicts.json`，工具組還有 `tool_use.json`；
+   `oracle.json` 一定最後搬），guard 與 calibrate 都會點名拒絕；工具組那一側停下時 staging 與 claim 刻意保留（見「工具組接進 benchmark（工具組 T4）」）；
    紀錄搬好之後搬 store 中途結束，**staging 保留**、不丟資料：搬檔失敗（例如 Windows 防毒鎖檔）時拒絕句子點名哪些臂已進
    `arms/`、其餘 store 在哪個 staging 路徑，手動搬完再刪 staging；剛好 Ctrl-C 時只印「interrupted」、staging 一樣保留。
    收尾看的是目錄本身（`oracle.json` 在不在、staging 裡還有沒有 store），不是程式跑到哪一行，所以中斷落在兩行之間也一樣。
@@ -331,7 +340,7 @@ coin、experiment 的整個 split、成本、indicator lookback。它不讀 mani
 
 **怎麼啟動。**
 
-- benchmark（T4，還沒接）：`ServerParams.for_experiment(資料檔, experiment).command()` 給出整條指令
+- benchmark（`search` 跑工具組時，見「工具組接進 benchmark（工具組 T4）」）：`ServerParams.for_experiment(資料檔, experiment).command()` 給出整條指令
   （`python -m contrib.discovery.tools_server --db=… --coin=… --split=<JSON> --costs=<JSON> --indicator-lookback=N`，每個參數都是一個
   `--旗標=值`，值以 `-` 開頭也不會被看成另一個旗標），要在 `IMPORT_ROOT`（repo 根目錄）底下啟動。coin、split、成本、lookback 從同一個
   experiment 取，不會拿到別組的。
@@ -407,8 +416,8 @@ sse-starlette 要求比 dashboard 釘的版本更新的 starlette，兩者放不
 ## 會用工具的提問器（工具組 T3）
 
 `toolarm.py` 的 `ToolHypothesist`：一個可以先查訓練區間、再回答規則的 hypothesist。`search()` 完全不用改——查詢都發生在一次 `propose()`
-裡面，`propose()` 最後回的還是一段文字（一條規則），由迴圈照舊解析、量測、寫紀錄。這一步還沒接進 `bench.py`（那是 T4），所以目前沒有指令會用到它，
-也沒有花過任何 API 費用：測試全部用照劇本回答的假模型，伺服器則是真的。
+裡面，`propose()` 最後回的還是一段文字（一條規則），由迴圈照舊解析、量測、寫紀錄。`search` 在 manifest 指名 `arms.llm_tools` 時會用到它（見「工具組接進 benchmark（工具組 T4）」）。
+到目前為止沒有花過任何 API 費用：測試全部用照劇本回答的假模型，伺服器則是真的。
 
 **一輪怎麼走。**
 
@@ -418,14 +427,15 @@ sse-starlette 要求比 dashboard 釘的版本更新的 starlette，兩者放不
 
 每一輪都從那兩段 prompt 重新開始，上一輪查過的東西不帶過來（計畫 §2.4）。
 
-用法（T4 會這樣接）：
+用法（`bench.py` 就是這樣接的；檔名是每個 replicate 的 store 換副檔名）：
 
 ```python
 with ToolHypothesist.open(
     chat,                                             # autoresearch 的 ChatHypothesist
     ServerParams.for_experiment(db, experiment),      # 這一組自己的資料檔與 experiment
-    trace=arm_dir / "trace.jsonl",
-    server_log=arm_dir / "server.log",
+    trace=arm_dir / "replicate-0.trace.jsonl",
+    server_log=arm_dir / "replicate-0.server.log",
+    limits=Limits(lookups=5, backtests=2),            # manifest 的 arms.llm_tools 寫的那兩個數
 ) as hypothesist:
     report = search(ledger, experiment, hypothesist, model=hypothesist.label, max_trials=...)
 ```
@@ -513,7 +523,7 @@ trace 或 `server_log` 檔已存在（各是一組搜尋自己的，不覆寫；
 要寫入的資料夾不存在、伺服器的名稱／版本／列出的工具對不上。這些是還沒問模型任何東西就拒絕，
 要呼叫方去修，不是接縫失敗。檔案與資料夾的檢查在啟動伺服器之前做，不會等暖機完才報錯。
 
-**Trace（`trace.jsonl`，每行一個 JSON 物件，照發生順序）。**
+**Trace（每行一個 JSON 物件，照發生順序；經 `search` 跑的時候檔名是 `replicate-<k>.trace.jsonl`）。**
 
 | `kind` | 什麼時候寫 | 欄位 |
 |---|---|---|
@@ -543,8 +553,8 @@ trace 或 `server_log` 檔已存在（各是一組搜尋自己的，不覆寫；
 trace 除耗時外逐行相同。**模型自己寫的字照原樣留著**，而 user prompt 本來就列了試過的規則的驗證分數，所以模型如果在說明裡引用那些分數，
 trace 的 `text` 欄就會有；那是模型本來就看得到的東西，不是多漏出去的。
 
-**還沒做的。** 接進 `bench.py`、manifest 的 `arms.llm_tools`、`report` 印查詢次數與花費，都是 T4。真模型一次都還沒碰過這些工具，第一次是
-12 月的試跑（計畫 §5）；上限與這一節的文字到那時才定案。
+**還沒做的。** 真模型一次都還沒碰過這些工具，第一次是 12 月的試跑（計畫 §5）；上限與這一節的文字到那時才定案。
+接進 `bench.py` 的部分見「工具組接進 benchmark（工具組 T4）」一節。
 
 **已知風險（沒連過真的供應商，只能等試跑驗證）。** 三種情況下，第二次呼叫模型可能被供應商以 400 拒絕，那會變成接縫失敗、搜尋在第一次查詢後就停：
 
@@ -565,6 +575,123 @@ DeepSeek 的 client 會把 `reasoning_content` 帶回去，裡面有壞字元時
   故意交一個不合法的回答，把幾個字元帶到下一輪。這條通道是搜尋迴圈的，每一組都有；只是只有工具組手上有值得帶的東西。試跑時看有沒有這種行為。
 - 沒開 thinking 時，盲猜組只回 JSON，工具組卻被要求在每次呼叫前寫一行，等於多了一點打草稿的空間。T5／T6 都沒有對照這一點，寫結果時要註明。
 - 連線建立那一段（伺服器暖機中）在 Windows 上按 Ctrl-C 可能要等到握手結束才生效；查詢進行中的等待每 0.5 秒醒來一次，不受影響。
+
+## 工具組接進 benchmark（工具組 T4）
+
+manifest 的 `arms.llm_tools` 有填時，`search` 在 Random／Grid 之後跑「會用工具的模型臂」。它跟盲猜的模型臂（`arms.llm`）一樣排在最後，因為它花錢。
+一份 manifest 最多指名一個模型臂（`llm` 或 `llm_tools`，兩個都填會被拒絕）：工具組與盲猜組是同一個 seed 的兩個落地目錄，
+跟「LLM 臂（PR 5）」一節的「一個世界兩個目錄」是同一條規則。
+
+`arms.llm_tools` 的欄位＝`arms.llm` 的五個，再加三個：
+
+| 欄位 | 意思 |
+|---|---|
+| `lookups` | 每輪（一次回答之前）最多幾次工具呼叫，至少 1 |
+| `backtests` | 其中最多幾次拿得到訓練分數的 `backtest_train`，0 到 `lookups` |
+| `pack_version` | 模型多讀到的那整包文字的版本，要等於這一版程式的 `toolarm.PACK_VERSION` |
+
+三個都在 manifest 的身分裡：上限或版本不同，就是另一個目錄、表上另一列。
+
+**每個 replicate 怎麼跑。** 跟模型臂一樣一顆 store（`arms/llm_tools/replicate-<k>.sqlite`）、同一個 `search()`、同一份 split／成本／penalty／預算。
+差別在提問器：模型臂的在開跑前建一次，工具組的每個 replicate 各開一次。`bench` 先複製 artifact、在那顆 store 裡建好 experiment，
+再用**那個 experiment** 的 coin／split／成本／indicator window 啟動查詢伺服器子程序（`ServerParams.for_experiment`），搜尋結束就關掉。
+搜尋迴圈與伺服器會同時開著同一顆 store（伺服器只在啟動時讀到訓練區間結尾，之後不再碰檔案）；測試用真的子程序跑過這個情況。
+store 旁邊多兩個檔：`replicate-<k>.trace.jsonl`（trace，格式見上一節）與 `replicate-<k>.server.log`（伺服器的 stderr，正常是空的）。
+
+**找到什麼與花了什麼，分兩個檔。** `verdicts.json` 的格式沒有動，工具組的結果跟其他臂寫在一起、形狀相同。每輪查了幾次寫在另一個檔
+`tool_use.json`（[`tooluse.py`](./tooluse.py)），每個 replicate 搜尋結束後從它的 trace 讀一次整理出來。示意（實際的檔鍵照字母排、
+逐行縮排；這裡是測試裡那次搜尋的內容，模型是照劇本回答的假模型，兩個 replicate：第一個跑完兩輪，第二個第一次呼叫模型就沒回應；
+下面 `report` 的兩行印的是同一次搜尋）：
+
+```json
+{
+  "tool_use_version": 1,
+  "world_id": "SYN-EB3BC030", "manifest_digest": "0123abcd",
+  "model": "scripted/model", "pack_version": 1, "pack_digest": "<整包文字的 SHA-256>",
+  "limits": {"lookups": 4, "backtests": 1},
+  "searches": [
+    {"replicate": 0, "seam_failed": false,
+     "model_calls": 4, "unmetered_calls": 0, "input_tokens": 480000, "output_tokens": 120000,
+     "rounds": [{"lookups": 2, "backtests": 1, "tool_errors": 0, "forced": false},
+                {"lookups": 1, "backtests": 0, "tool_errors": 1, "forced": false}]},
+    {"replicate": 1, "seam_failed": true,
+     "model_calls": 0, "unmetered_calls": 0, "input_tokens": 0, "output_tokens": 0, "rounds": []}
+  ]
+}
+```
+
+- `rounds` 一筆是一輪有回答的搜尋：`lookups`＝計數的呼叫、`backtests`＝其中拿到訓練分數的、`tool_errors`＝其中是模型自己的錯的
+  （一次呼叫不會同時是兩者）、`forced`＝這一輪是不是被強制作答。
+- 每一輪的這四個數是提問器邊跑邊記的；整理時會拿同一輪的模型行與工具行重算一次，對不上就拒絕。所以這個檔寫的每個數字，trace 裡都逐行對得出來。
+- `model`＝ledger 記的那個模型名字（`provider/model`），讀的時候會核對它等於 manifest 的 `arms.llm_tools` 指名的那一個。
+- `seam_failed`＝這個 replicate 是不是因為模型沒回應而結束；結束前有回答的輪次與已經花掉的 token 照樣記。
+- `unmetered_calls`＝供應商沒有回報完整用量的模型呼叫次數（兩個數缺一個就算；負數也當成沒回報）。有回報的那一半照樣加進 token 數。
+
+沒有工具組的 manifest 不會有這個檔。`calibrate`／`report`／`score` 讀到工具組的目錄時會核對它，下面任何一項不對都具名拒絕：
+該有而沒有、不該有而有、世界或 manifest digest 不對、replicate 對不上、上限或 `pack_version` 或模型跟 manifest 不同、輪數不等於 ledger
+的答案數、「以 seam 失敗結束」跟 `verdicts.json` 說的不一致。`report` 另外核對同一列的每個世界讀到的是同一包文字（`pack_digest` 相同）；
+同一個 `pack_version` 底下 digest 不同，代表是不同版本的程式跑的；這時 `report` 會具名拒絕、整張表不印，不會把兩者算進同一個比例。
+
+**`report` 在工具組那一列多印兩行**（其他臂的列不變）：
+
+```
+  tool use over 2 round(s) of 1 finished search(es): calls a round median 1.5 (max 2), 0 round(s) asked for no tool; backtests 1; the model's mistakes 1 of 3 call(s); answered without tools 0/2 = 0.0%
+  tokens reported by scripted/model over 2 search(es), failed seams included: 480,000 in, 120,000 out, in 4 model call(s) that came back (a floor: a retried call counts once, a reply that was not read not at all)
+```
+
+- 第一行只算**跑完的搜尋**的輪次，跟那一列的找回率同一個分母：每輪呼叫次數的中位數與最大值、沒有要求任何工具的輪數
+  （被強制作答的輪次不算在這裡，不管它被計數了幾次：它要求過工具）、拿到訓練分數的試跑數、模型自己的錯佔幾次呼叫、強制作答的輪數與比例。
+- **強制作答的輪次留在主指標裡**（2026-11-19 拍板）：那一輪交出來的規則照常量測、照常計入找回與誤判，這一行只是把比例另外印出來。
+  比例多高要調上限或文字，12 月試跑後、正式開跑前定。
+- 第二行是供應商回報的 token 數，寫明是哪個模型的；seam 失敗的搜尋也算進去，因為錢已經花了。**這個數是下限**：只算「有回來、讀得懂」的模型呼叫。
+  client 自己重試掉的呼叫只算到最後成功的那一次，讀不懂的回覆完全不在裡面（trace 沒有那一筆）；沒回報完整用量的呼叫另外標出個數。
+- 加 `--price-in <美元> --price-out <美元>`（每一百萬 token 的單價，兩個要一起給）就在第二行後面多印估算花費。
+  單價不寫在 manifest、程式也不內建：它不是實驗條件，內建的表下次跑就過期了。估算用的就是上面那個下限，而且把每個輸入 token 都照原價算、
+  沒有扣 prompt caching 的折扣，所以兩個方向都可能偏，只能當量級看。一組單價是一個模型的；同一個 root 底下有兩個模型的工具組時，
+  兩列都會用這組單價算，要自己分開跑。沒有任何一次呼叫把輸入與輸出兩個數都回報時不印金額，改印「無法估算」（token 數照樣印有回報的那一半）。
+  單價不是 0 以上的有限數是用法錯誤（exit 2，訊息會指名是哪個旗標）；給了單價但表上沒有工具組的列，會在 stderr 說一句「沒有東西可以估」
+  （root 底下一個搜過的世界都沒有時，只會印「no searched world」）。
+
+**兩種失敗分開處理**（2026-11-19 拍板）：
+
+| 哪一側 | 例子 | 怎麼算 |
+|---|---|---|
+| 模型 | 供應商斷線、重試 6 次仍失敗、回覆讀不懂 | 跟模型臂一樣：那個 replicate 記 `seam_failed`、不進分母，其他照跑。讀表前照舊把有 seam 失敗的世界整個重跑（除了模型臂那幾樣，還要移除 `tool_use.json`） |
+| 查詢伺服器 | 起不來、中途死掉、查詢逾時、某個查詢 store 答不出來 | **`search` 停下來**，**exit 3**，不寫任何紀錄 |
+
+**exit 3 是這種停法專用的**（2026-11-19 拍板）。其他具名拒絕（例如「這個世界搜過了」）是 exit 1。跑一批世界的腳本因此分得出來：
+看到 3 就整批停下（下一個世界會遇到同一個伺服器），看到 1 可以跳過。停下之後對同一個目錄再下指令，拿到的是一般的拒絕（exit 1）。
+所以**重跑同一個批次迴圈之前，要先處理停下的那個世界**：不然腳本會把它當成「搜過了」跳過去，接著在下一個世界遇到同一個伺服器、再花一次錢才停。
+
+伺服器側停下來時，run 目錄會留著空的 `arms/` 與暫存資料夾，暫存資料夾會從 `.search.partial-…` 改名成 `.search.kept-…`。
+**這個名字就是「刻意保留」的記號**：改名不用寫任何位元組，所以就算磁碟滿到連說明檔都寫不進去，之後的指令還是認得出來
+（改名失敗時退而求其次，靠裡面的說明檔認）。錯誤訊息會寫出暫存資料夾的路徑；
+trace（伺服器起來、提問器也開成功之後才有）與伺服器的 log 在它底下的 `arms/llm_tools/`，前面跑完的臂的 store 也在。暫存資料夾裡另有一個
+`kept-for-inquiry.txt`：開頭就是那句錯誤訊息；失敗是這個程序接到的例外時（伺服器起不來、trace 讀不回來），下面附那個例外自己的 traceback
+（不附它是在處理哪個例外時發生的：那可能是供應商的錯誤，句子裡可能引用送出去的內容，這個套件不把它寫到任何地方）。
+之後對這個目錄再下 `search`、`calibrate`、`score`、`report` 都會被拒絕，拒絕的句子會指出這個資料夾是刻意留下來的、要先讀那個說明檔。
+**要 `arms/` 與暫存資料夾兩樣都移掉才會放行**：只移掉 `arms/`、留著暫存資料夾，一樣被拒絕（否則這個世界會被當成沒搜過、直接重跑，
+等於把證據跳過去）。`oracle --run` 與 `tools --run` 不看這些，照常可用。寫結果時需要「停了幾次」這個數，清理前先把暫存資料夾搬到別處，不要直接刪。
+
+下面這些情況走同一條路，因為都是程式這一側的問題，而留下來的檔案就是證據：
+
+- 搜尋跑完了，但它的 trace 讀不回來；或 trace 的輪數跟 ledger 的答案數對不上；或 trace 記的上限、`pack_version`、模型跟 manifest 不同；
+  或同一個世界的兩個 replicate 讀到的不是同一包文字。
+- 伺服器已經啟動之後，提問器才發現開不起來（伺服器的名稱或版本不是這一版的、列出的工具跟這一版不同）。
+- 搜尋途中 trace 寫不進去（例如磁碟滿了）。
+
+為什麼不照模型斷線的規則「不看結果重跑」：這種失敗多半是程式缺陷或資料問題。重跑到模型剛好沒問那個查詢為止，樣本就變成照模型行為挑的，
+缺陷也被蓋掉。代價是同一個世界已經跑完的 replicate 的 API 費用作廢。
+
+**開始前就拒絕的**（`generate` 與 `search` 都查，所以不會先花掉落地或 Random／Grid 的時間）：`pack_version` 不是這一版的、
+沒裝 `discovery-tools` 選用安裝、模型建不起來或丟掉 temperature（同模型臂）、client 綁不上這一版的工具（這裡會真的綁一次，
+不連網；只看有沒有 `bind_tools` 這個方法不夠，langchain 的基底類別一定有，不支援時是呼叫了才丟錯）。
+
+**還沒做的。** T5（不用 LLM 的對照組）。送不出去的呼叫在 trace 裡仍然分不出是哪一種原因（T3 留下的，試跑需要時再加欄位）。
+盲猜組沒有 trace，所以它那一列不印 token 數。
+
+**已知的代價。** 每個 replicate 各啟動一次查詢伺服器，每次都要重新暖機（5000 根的世界約 12 秒），而各 replicate 讀到的訓練區間其實相同。
+這是照計畫「每組各建」做的，沒有改成一個世界共用一個伺服器；只多花時間，不多花 API 費用。
 
 ## 評分（PR 4）
 
@@ -623,14 +750,16 @@ staging 開不起來時 claim 歸還；搬 store 失敗或中斷時保留 stagin
 | MCP 伺服器：記憶體內客戶端列得出三個工具、每個呼叫的結果等於純函式的 dict；模型的錯回解析器原句並標成錯誤；store 答不出來＝協定層錯誤、不帶原句；指標 enum／運算子／regime／上下界等於 autoresearch 的表；schema 裡沒有 `$ref`；每個 schema 對測試裡的呼叫不比解析器窄、對形狀錯誤不比它寬；每個回答（含數字是 null 的）符合輸出 schema；暖機只跳過 store 沒有的序列、之後只有那些指標的查詢回錯，序列在卻算不出來則拒絕啟動；沒裝 SDK 在讀資料與複製前就拒絕；空檔與不是 store 的檔拒絕；只有 view 自己的拒絕被說成參數的錯；程式缺陷在新舊兩種握手下都只回固定一句；說明裡沒有「該怎麼下結論」的句子；`tool_specs()` 每次重建、互不共用；送中斷能停掉正在服務的子程序（exit 130）；`tools` 指令的 exit code 等於子程序的；每段說明有跑得動的範例與每個輸出欄位；範例不讀 funding／regime／realized vol、不用 `max_bars`；說明與 schema 的雜湊釘在版本號上；啟動參數只有五樣且過得了命令列；資料檔不存在時拒絕且不建檔；`tools` 指令拒絕測試用 seed、對著複本啟動、命令列不含埋入規則的字、artifact 位元組不變；真的 stdio 子程序（直接啟動與經 `tools` 指令各一次）回答與 view 相同、store 位元組不變；啟動失敗＝連線關閉而非卡住；伺服器模組在全新直譯器裡只載入 `research_tools`／`tools_server`／`upstream`，CLI 不需要 SDK 就能 import；同 seed 的 conditional 世界與 null 雙胞胎，回答的鍵、型別、拒絕句完全相同 | `tests/test_tools_server.py` |
 | 會用工具的提問器：假模型查三次後回答，`propose()` 回那段文字、每個工具結果＝伺服器的回答＋剩餘額度、trace 筆數對得上；經真的 `search()` 兩輪照常寫 ledger；每輪從兩段 prompt 重新開始；第 6 次呼叫與第 3 次拿得到分數的試跑不執行、回固定句子（後者照算一次）；被解析器拒絕的試跑算一次呼叫、不算一次試跑；三個「不執行」的檢查有固定順序；一則訊息多個呼叫逐一計數、每個都有回覆；模型不停呼叫時改用不綁工具的模型、開新對話、只附伺服器回答過的查詢與模型寫的說明（去頭尾空白、最多 2000 字元），沒查到東西就不附；強制作答的回覆還帶工具呼叫＝接縫失敗、不交出空答案；模型的錯（指標打錯、工具不存在）回解析器原句並標成錯誤、計數；送不出去的呼叫（參數解析不了、不是物件、巢狀過深、過長、鍵不是文字；工具名稱過長）不送伺服器、回固定句子、不結束搜尋，剛好在界線上的照送；放不回對話的訊息（半個 surrogate 在參數／名稱／呼叫 id／文字裡，或參數帶 NaN）直接改成強制作答、同一則裡的呼叫都不執行、搜尋照常繼續；假模型跟真的 client 一樣拒絕編不出請求的對話；呼叫長度上限等於搜尋迴圈對回答的長度上限；`pack` 與 `label` 只能讀；store 答不出來（之後不再花模型呼叫；經真的 `search()` 不扣提案次數、不寫 refusal）、子程序中途死掉、查詢逾時、握手不回應、啟動不了、回答形狀不對、列不出工具，都是 `ToolServerError`；模型沒回應是 `HypothesistError`、下一輪可再問；回覆讀不懂（五種）也是；中斷原樣穿過；trace 每行是五種形狀之一且等於模組的 `TRACE_KEYS`、不合形狀的行拒寫且不佔序號、開頭一筆是整包文字與 schema、模型文字與工具結果過長會截斷並記原長、沒有任何一段 prompt、沒有日期、沒有失敗原句、沒有 `\r`；伺服器失敗的那一次查詢照樣寫一筆；把訓練區間之後的資料全部改掉，trace 除耗時外逐行相同；整包文字的雜湊釘在 `PACK_VERSION` 上，模組裡每個句子常數都在 `SENTENCES`；那段說明含計畫要的事實句、不含建議用字、不含世界類型／coin／日期；手建的 `Pack` 與 `Pack.of` 受同樣的檢查、交出去的工具是複本、兩張表不可改；上限不合法、client 不支援工具、`server` 是路徑、子程序沒給 log、trace 或 log 已存在（伺服器不會被啟動）或兩者同檔或資料夾不存在、伺服器名稱／版本／工具清單對不上、沒裝 SDK，都在問模型之前拒絕；真的 stdio 子程序回答與 view 相同、store 位元組不變、啟動失敗的原因寫進指定的 log；等待伺服器的方式（分段等、任務自己的逾時照樣丟出）、例外群組的拆解、關閉失敗只記 warning；模組在全新直譯器裡只載入 `research_tools`／`toolarm`／`tools_server`／`upstream`、不需要 SDK | `tests/test_toolarm.py` |
 | 提問器不 import langchain 所依賴的三種形狀，對著 langchain 本身驗：`AIMessage`（含解析失敗的呼叫與用量）讀得出來；tuple＋回覆物件＋`{"role": "tool"}` dict 組成的對話轉得成 langchain 的訊息（含錯誤標記）；工具定義已經是 langchain 會送出去的函式格式；langchain 自己的假 chat model 綁上工具後走得完一輪 | `contrib/tests/test_toolarm_wire.py` |
+| 工具組的 trace 讀得回來：每輪的次數與 token 數等於 trace 寫的；模型中途沒回應的搜尋保留已回答的輪次與已花的 token；兩個數缺一個（或不是 0 以上的整數）的呼叫另外計數、有回報的那一半照樣加進總數；輪次重複、跳號、沒結束、結束後還有行、伺服器側失敗、計數不合理，都拒絕；trace 檔逐行對照提問器的欄位表（不是 JSON、不是物件、種類不認得、欄位多或少、開頭不是 pack、pack 出現兩次、版本不對、讀不到檔）；`tool_use.json` 讀寫來回相等、每個欄位的拒絕、每輪不超過上限；`report` 的兩行只算跑完的搜尋的輪次、token 算全部、給了單價才印花費；單價必須是非負的有限數 | `tests/test_tooluse.py` |
+| 工具組經 `bench` 跑完一個世界（假模型、真的 stdio 伺服器子程序、搜尋迴圈同時開著同一顆 store）：排在 Random／Grid 之後、每個 replicate 有 store／trace／伺服器 log、landed artifact 不變、ledger 記模型自己的名字、模型讀到的上限是 manifest 寫的、對話裡沒有世界類型；`tool_use.json` 逐位元等於預期、`verdicts.json` 的鍵沒有變；`calibrate`／`report` 有工具組那一列、多印的兩行與花費只出現在那一列；`report` 的兩個單價要一起給；`search` 有這個檔才印它的路徑；`tool_use.json` 跟 manifest 或 `verdicts.json` 對不上的十二種情況每個讀取端都拒絕、該有而沒有與不該有而有也拒絕；同一個世界的 Random／Grid 結果與 oracle 跟沒有工具組的那次搜尋逐鍵相同（只差 experiment 的建立時間）；伺服器中途死掉、伺服器起不來、伺服器起來後提問器才開不起來、trace 讀不回來或跟 ledger／manifest／前一個 replicate 對不上、搜尋途中 trace 寫不進去，都讓 `search` 停下（`KeptForInquiry`，經指令是 exit 3）、不寫紀錄、留下空的 `arms/`（claim）與改名成 `.search.kept-*` 的暫存資料夾（這些測試裡伺服器 log 都在，trace 是提問器開成功才有）與說明檔（接得到例外時附那個例外自己的 traceback、不附它是在處理哪個例外時發生的），拒絕是從造成停下的那個例外 raise 出來的，之後的 `search`／`calibrate`／`score`／`report` 以一般的拒絕（exit 1）擋下並指向說明檔；只移掉 `arms/`、留著暫存資料夾一樣被擋（旁邊有整套紀錄也一樣），兩樣都移掉才回到落地時的樣子；說明檔寫不進去只記 warning、暫存照樣改名並被認出來；改名失敗時留在原名、靠說明檔認；標記途中被中斷，暫存資料夾與 claim 照樣留著；名字不是 `.search.kept-*` 又沒有說明檔的暫存資料夾（被強制結束的 run 留下的）不會被說成刻意保留；Random／Grid 自己的 `OSError` 照舊原樣丟出、不保留任何東西；trace 記的模型名稱用 autoresearch 真的 `build` 產生的寫法核對；`oracle.json` 最後才搬進去；工具組跑不起來時 `search` 在任何一臂開始之前就拒絕；`pack_version` 不對在 `generate` 與 `search` 開始前就拒絕、沒裝 SDK／client 沒有 `bind_tools`／模型建不起來都具名；v3 的 run 目錄名稱等於改動前的 digest、搜出來的結果與 v4 相同、沒有被改寫成別的版本 | `tests/test_bench_tools.py` |
 
-## Manifest 格式（v3）
+## Manifest 格式（v4）
 
 示意（空字串與 `{}` 是佔位，不是可載入的值）：
 
 ```json
 {
-  "manifest_version": 3,
+  "manifest_version": 4,
   "world": {
     "id": "SYN-EB3BC030",
     "kind": "null-v1 | conditional-v1 | conditional-v2",
@@ -650,7 +779,7 @@ staging 開不起來時 claim 歸還；搬 store 失敗或中斷時保留 stagin
     "threshold_grid": {"funding_zscore_14": [-2.0, -1.0], "realized_vol_20": [0.002, 0.004]},
     "candidate_order": "templates_then_grid", "pool_size": null
   },
-  "arms": {"random": {"search_seeds": [0, 1]}, "llm": null},
+  "arms": {"random": {"search_seeds": [0, 1]}, "llm": null, "llm_tools": null},
   "scoring": {"version": "1", "recovery": {"theta_behavior": 0.8, "require_positive_holdout": true}},
   "null_definition_version": "v1",
   "artifact_sha256": null
@@ -667,6 +796,19 @@ staging 開不起來時 claim 歸還；搬 store 失敗或中斷時保留 stagin
 目前只有 `templates_then_grid`（定義見「三臂與判定」）。`artifact_sha256`（v3 起）手寫時留 `null`，`generate` 落地時回填成關閉後的
 `world.sqlite` 的 SHA-256，所有會複製 artifact 的指令在複製前核對：同 seed 的 null 雙胞胎與 conditional 世界只差價格路徑，形狀的檢查全部會過，
 這是唯一分得出來的東西；`calibrate`／`report`／`score` 不讀 artifact，不要求它存在。
+
+`arms.llm_tools`（v4 起）可為 `null`；填了的形式是 `arms.llm` 的五個欄位加 `lookups`、`backtests`、`pack_version`
+（見「工具組接進 benchmark（工具組 T4）」）。`llm` 與 `llm_tools` 最多填一個；`arms.llm_tools.world_subset` 一樣必須含本世界。
+
+**v3 的 manifest 照樣讀。** 2026-11-10 那批世界是在 v3 底下搜的，之後的結果要拿來跟它們並排。run 目錄是用 manifest 文字的 digest 命名的，
+旁邊的紀錄也寫著那個 digest，所以 v3 不能被「當成 v4 讀」：讀進來的 manifest 記得自己是第 3 版（`Manifest.manifest_version`），
+寫回去時鍵跟 v3 寫的一模一樣（版本號是 3、`arms` 底下沒有 `llm_tools` 這個鍵），digest 因此不變，目錄名、`verdicts.json`、表上的列
+都跟以前對得上（測試釘住兩個實際的 digest）。v3 的 manifest 不能指名工具組；v3 與 v4 各用自己的鍵集合讀，寫錯版本的鍵會被拒絕。
+其他版本一律拒絕。
+
+**v3 的世界與 v4 的世界不會併成同一列。** 版本號在 manifest 的身分裡（這正是 v3 目錄名不變的前提），所以就算其他條件完全相同，
+`calibrate`／`report` 也會把 v3 與 v4 分成兩列、各算各的比例。要把新世界加進舊的那一列，新 manifest 就要寫 `"manifest_version": 3`
+（`generate` 照樣讀得進來，只是不能指名工具組）。
 
 v1 候選池的兩個限制（寫在這裡，因為它們定義了 full-pool reference 的假說類）：每個 template 的 exit 只有 `max_bars`（LLM 臂可提
 exit 規則，池不行）；每個 template 都有 gate（池裡沒有「只有進場」的候選）。`arms.llm.world_subset` 必須含本世界，否則讀 manifest 時就拒絕。
@@ -690,7 +832,11 @@ exit 規則，池不行）；每個 template 都有 gate（池裡沒有「只有
   arms/random/replicate-<search seed>.sqlite   每個 Random replicate 自己的 store（search 寫；k＝search seed）
   arms/grid/replicate-0.sqlite                 Grid 臂的 store（確定性，只有一個 replicate）
   arms/llm/replicate-<k>.sqlite                每個模型 replicate 自己的 store（search 寫；k 從 0 起）
+  arms/llm_tools/replicate-<k>.sqlite          工具組每個 replicate 自己的 store（search 寫；k 從 0 起）
+  arms/llm_tools/replicate-<k>.trace.jsonl     那個 replicate 的 trace（模型呼叫、工具呼叫、回答）
+  arms/llm_tools/replicate-<k>.server.log      那個 replicate 的查詢伺服器的 stderr（正常是空的）
   verdicts.json              每臂每 replicate 的快照、最終判定、selected 的 holdout（search 寫）
+  tool_use.json              工具組每個 replicate 每輪查了幾次與 token 數（search 寫；沒有工具組就沒有這個檔）
   oracle.json                各臂跑完後才寫：埋的規則三段數字＋餘裕判定、full-pool reference（search 寫）
   scores.json                每臂每 replicate 的三項指標與找回判定（score 寫，可重跑）
 ```

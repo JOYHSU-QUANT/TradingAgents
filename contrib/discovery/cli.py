@@ -23,7 +23,10 @@ Six in the order a world goes through them (plan §3):
   pool's reference (``oracle.json``), in that order (:mod:`.bench` keeps
   it). A world is searched once; a manifest that is not the directory's
   own is refused. A manifest that names a model arm runs it too, last: it
-  is the one arm that costs money.
+  is the one arm that costs money. Where that arm is the one with tools,
+  what its searches spent is written beside the verdicts
+  (``tool_use.json``), and a failure of the look-ups' server stops the run
+  with a refusal that names what was kept.
 - ``calibrate --root DIR`` — every searched run directory under the root
   tallied by world kind, seed set, set of conditions (a digest printed on
   each row, so two calibrations under one root are two rows) and arm: on
@@ -40,6 +43,9 @@ Six in the order a world goes through them (plan §3):
   oracle's pass rate and the recovery where it had room, the diagnostics
   (plan §3's last step). Reads no store. A test seed's rows keep everything
   read from the holdout sealed unless ``--unseal`` is given (plan §4.2).
+  A tool arm's rows also say what its searches spent; ``--price-in`` and
+  ``--price-out`` (US dollars a million tokens, given together) add an
+  estimated cost.
 
 And one beside that order, for a person (tools plan §3.3):
 
@@ -62,15 +68,24 @@ generator does not make, a landed history an arm could not measure on, a
 run directory searched before or not landed, a record a later build
 cannot read, a store that cannot be opened, a path that cannot be read or
 written — with the sentence on stderr; ``2`` argparse's usage errors;
-``130`` interrupted, with a search's staging removed — unless its records
-were already in, when the staging holding the stores ``arms/`` did not
-receive is kept and the next ``search`` names it.
+``3`` a search stopped on its tool arm's side — the look-ups' server, the
+arm's own files, an arm that could not be opened, or a trace that could
+not be read back as the search it was — with what it left kept to be
+looked into (:class:`~.bench.KeptForInquiry`): a code of its own, so that a batch
+over many worlds can stop on it and skip a world that is merely searched
+already; ``130`` interrupted, with a search's staging removed — unless its
+records were already in, when the staging holding the stores ``arms/`` did
+not receive is kept and the next ``search`` names it, or the interrupt
+landed while a search that had stopped on its tool arm's side was marking
+what it keeps, when the staging and the claim are kept (and marked as for
+``3``, if the interrupt came after the staging was renamed).
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import math
 import shutil
 import signal
 import subprocess
@@ -86,10 +101,12 @@ from .bench import (
     ORACLE_FILENAME,
     VERDICTS_FILENAME,
     BenchError,
+    KeptForInquiry,
     calibration_table,
     model_hypothesist,
     preview_oracle,
     run_world,
+    tool_arm,
     tools_experiment,
 )
 from .landing import ARTIFACT_FILENAME, MANIFEST_FILENAME, default_root, land_world
@@ -97,10 +114,32 @@ from .manifest import Manifest, ManifestError
 from .records import RecordError
 from .scoring import SCORES_FILENAME, report_table, require_this_scorer, score_world
 from .tools_server import IMPORT_ROOT, LaunchError, ServerParams, require_sdk
+from .tooluse import TOOL_USE_FILENAME, Prices
 from .upstream import EvaluationError, FeatureError, SplitError, StoreError, render_fetch
 from .worlds import WorldError, generate
 
-__all__ = ["main"]
+__all__ = ["EXIT_KEPT_FOR_INQUIRY", "main"]
+
+# What ``search`` exits with when it stopped on its tool arm's side and kept
+# what it left (the module docstring's exit codes).
+EXIT_KEPT_FOR_INQUIRY = 3
+
+
+def _price(text: str) -> float:
+    """A price off the command line: a finite number of US dollars, at or above zero.
+
+    Refused here, as the flag is read, so the refusal names the flag: a
+    usage error like any other argument that is not what its flag takes.
+    """
+    try:
+        value = float(text)
+    except ValueError:
+        value = math.nan
+    if not math.isfinite(value) or value < 0:
+        raise argparse.ArgumentTypeError(
+            f"expected a number of US dollars at or above zero, got {text!r}"
+        )
+    return value
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -117,7 +156,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="build a world from its manifest, land it in its own store, and check it",
     )
     generate_cmd.add_argument(
-        "--manifest", required=True, help="path to the world's manifest (JSON, version 3)"
+        "--manifest",
+        required=True,
+        help="path to the world's manifest (JSON, version 4; version 3 is still read)",
     )
     generate_cmd.add_argument(
         "--root",
@@ -170,6 +211,18 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print a test seed's recovery and holdout figures, which are sealed by default",
     )
+    for flag, what in (("--price-in", "input"), ("--price-out", "output")):
+        report_cmd.add_argument(
+            flag,
+            type=_price,
+            default=None,
+            metavar="USD",
+            help=(
+                f"what a million {what} tokens of the tool arm's model cost, in US dollars; "
+                f"given with the other, the tool arm's rows print an estimated cost beside "
+                f"their token counts"
+            ),
+        )
 
     tools_cmd = subparsers.add_parser(
         "tools",
@@ -200,6 +253,10 @@ def _cmd_generate(args: argparse.Namespace) -> int:
         # the backfill (the provider is part of the directory's identity,
         # so it cannot be corrected in place).
         model_hypothesist(manifest.arms.llm)
+    if manifest.arms.llm_tools is not None:
+        # And the tool arm's: its model, the SDK its client is built on,
+        # and a pack version that is this build's.
+        tool_arm(manifest.arms.llm_tools)
     space = manifest.search_space
     manifest = replace(manifest, search_space=replace(space, pool_size=len(space.candidates)))
     root = Path(args.root) if args.root else default_root()
@@ -240,6 +297,8 @@ def _cmd_search(args: argparse.Namespace) -> int:
     # arm that finished is worth seeing before the next one starts.
     run_world(run_dir, on_line=print)
     print(f"verdicts: {run_dir / VERDICTS_FILENAME}")
+    if (run_dir / TOOL_USE_FILENAME).is_file():
+        print(f"tool use: {run_dir / TOOL_USE_FILENAME}")
     print(f"oracle: {run_dir / ORACLE_FILENAME}")
     return 0
 
@@ -271,14 +330,29 @@ def _cmd_score(args: argparse.Namespace) -> int:
 
 
 def _cmd_report(args: argparse.Namespace) -> int:
+    # The prices first: a table is not printed and then found to be
+    # missing half of what it was asked to say.
+    if (args.price_in is None) != (args.price_out is None):
+        raise BenchError(
+            "--price-in and --price-out are given together: a cost is estimated from both"
+        )
+    prices = None if args.price_in is None else Prices(input=args.price_in, output=args.price_out)
     root, run_dirs = _root_and_runs(args)
     rows = report_table(run_dirs)
     if not rows:
         print(f"no searched world under {root}")
         return 0
     for row in rows:
-        for line in row.describe(unseal=args.unseal):
+        for line in row.describe(unseal=args.unseal, prices=prices):
             print(line)
+    if prices is not None and not any(row.uses for row in rows):
+        # On stderr, beside the table and not in it: prices that priced
+        # nothing are worth a word, and are no row.
+        print(
+            f"note: no row under {root} is a tool arm's, so --price-in and --price-out priced "
+            f"nothing",
+            file=sys.stderr,
+        )
     return 0
 
 
@@ -365,6 +439,12 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         return 130
+    except KeptForInquiry as exc:
+        # Its own code (decided 2026-11-19): the one refusal a batch over
+        # many worlds must not run past, where "searched before" (1) is one
+        # it skips. The next world in line would meet the same server.
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_KEPT_FOR_INQUIRY
     except (
         ManifestError,
         WorldError,
@@ -388,6 +468,8 @@ def main(argv: list[str] | None = None) -> int:
         # ledger's, say — propagates as the defect it is). ``OSError`` is
         # on the list, unlike in the research package's CLI, because a
         # model's network errors become a failed seam before they reach
-        # here: an ``OSError`` can only be the manifest or the run directory.
+        # here: an ``OSError`` can only be the manifest or the run directory
+        # (the tool arm's own files are the bench's to answer for: it stops
+        # the run on one, as on its server, and keeps what was written).
         print(f"error: {exc}", file=sys.stderr)
         return 1

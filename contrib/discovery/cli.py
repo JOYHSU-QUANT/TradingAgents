@@ -68,9 +68,13 @@ generator does not make, a landed history an arm could not measure on, a
 run directory searched before or not landed, a record a later build
 cannot read, a store that cannot be opened, a path that cannot be read or
 written — with the sentence on stderr; ``2`` argparse's usage errors;
-``130`` interrupted, with a search's staging removed — unless its records
-were already in, when the staging holding the stores ``arms/`` did not
-receive is kept and the next ``search`` names it.
+``3`` a search stopped on its tool arm's side — the look-ups' server, or a
+trace that could not be read back — with what it left kept to be looked
+into (:class:`~.bench.KeptForInquiry`): a code of its own, so that a batch
+over many worlds can stop on it and skip a world that is merely searched
+already; ``130`` interrupted, with a search's staging removed — unless its
+records were already in, when the staging holding the stores ``arms/`` did
+not receive is kept and the next ``search`` names it.
 """
 
 from __future__ import annotations
@@ -93,6 +97,7 @@ from .bench import (
     ORACLE_FILENAME,
     VERDICTS_FILENAME,
     BenchError,
+    KeptForInquiry,
     calibration_table,
     model_hypothesist,
     preview_oracle,
@@ -109,7 +114,11 @@ from .tooluse import TOOL_USE_FILENAME, Prices
 from .upstream import EvaluationError, FeatureError, SplitError, StoreError, render_fetch
 from .worlds import WorldError, generate
 
-__all__ = ["main"]
+__all__ = ["EXIT_KEPT_FOR_INQUIRY", "main"]
+
+# What ``search`` exits with when it stopped on its tool arm's side and kept
+# what it left (the module docstring's exit codes).
+EXIT_KEPT_FOR_INQUIRY = 3
 
 
 def _price(text: str) -> float:
@@ -426,6 +435,12 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         return 130
+    except KeptForInquiry as exc:
+        # Its own code (decided 2026-11-19): the one refusal a batch over
+        # many worlds must not run past, where "searched before" (1) is one
+        # it skips. The next world in line would meet the same server.
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_KEPT_FOR_INQUIRY
     except (
         ManifestError,
         WorldError,
@@ -449,6 +464,8 @@ def main(argv: list[str] | None = None) -> int:
         # ledger's, say — propagates as the defect it is). ``OSError`` is
         # on the list, unlike in the research package's CLI, because a
         # model's network errors become a failed seam before they reach
-        # here: an ``OSError`` can only be the manifest or the run directory.
+        # here: an ``OSError`` can only be the manifest or the run directory
+        # (the tool arm's own files are the bench's to answer for: it stops
+        # the run on one, as on its server, and keeps what was written).
         print(f"error: {exc}", file=sys.stderr)
         return 1

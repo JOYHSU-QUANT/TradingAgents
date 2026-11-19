@@ -31,8 +31,10 @@ The frozen values the research package already has — ``CostModel``,
 ``Penalty`` — are serialised through their own records, not re-described.
 Every record here is read the way theirs are (:mod:`.records`): exactly
 the keys written, every value checked in ``__post_init__``, a manifest
-from another version refused by name rather than read as something it is
-not.
+of a version this build does not read refused by name, and one of an
+earlier version it does read (``READ_VERSIONS``) read by that version's
+own key set and written back as that version — never read as something it
+is not.
 """
 
 from __future__ import annotations
@@ -118,7 +120,11 @@ __all__ = [
 # and the records beside it carry the digest: read as version 4, every
 # directory landed before would be named for another manifest.
 MANIFEST_VERSION: Final = 4
-READ_VERSIONS: Final = (3, MANIFEST_VERSION)
+# Written out, not derived from the line above: at the next version this
+# has to be decided again, and the build's own version is always read.
+READ_VERSIONS: Final = (3, 4)
+if MANIFEST_VERSION not in READ_VERSIONS:  # pragma: no cover - a bump that forgot this line
+    raise RuntimeError(f"this build writes manifest version {MANIFEST_VERSION} and does not read it")
 _TOOL_ARM_SINCE: Final = 4
 
 
@@ -1126,6 +1132,11 @@ class Arms:
         }
         if tool_arm:
             document["llm_tools"] = None if self.llm_tools is None else self.llm_tools.to_dict()
+        elif self.llm_tools is not None:
+            # Not dropped without a word: the shape has nowhere to put it.
+            raise ManifestError(
+                "arms.llm_tools: the arms of a manifest before version 4 have no tool arm to write"
+            )
         return document
 
     @classmethod

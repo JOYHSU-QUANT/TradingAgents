@@ -82,7 +82,7 @@ from .bench import (
 from .manifest import Manifest, ManifestError, Planted, Recovery, SeedSet, WorldKind
 from .oracle import evaluate_unfiled, frame_for
 from .records import Reader, RecordError, dumps
-from .tooluse import Prices, SearchUse, usage_lines
+from .tooluse import Prices, SearchUse, TracePack, usage_lines
 from .upstream import (
     Condition,
     Experiment,
@@ -913,12 +913,23 @@ class ReportRow:
     entries: tuple[ReportEntry, ...]
     failed: int
     uses: tuple[SearchUse, ...] = ()
+    pack: TracePack | None = None
 
     def __post_init__(self) -> None:
         uses = tuple(_read.sequence(self.uses, "row.uses"))
         if any(not isinstance(use, SearchUse) for use in uses):
             raise ScoreError("row.uses: expected SearchUses")
         object.__setattr__(self, "uses", uses)
+        # What the row's searches were told — one pack for the whole row
+        # (``report_table`` refuses a row of two) — there exactly when
+        # there are searches it was told to.
+        if self.pack is not None and not isinstance(self.pack, TracePack):
+            raise ScoreError("row.pack: expected a TracePack or None")
+        if (self.pack is None) != (not uses):
+            raise ScoreError(
+                "row.pack: what the searches were told goes with the searches' tool use, and "
+                "with nothing else"
+            )
         object.__setattr__(self, "kind", _read.enum(WorldKind, self.kind, "row.kind"))
         _read.text(self.null_definition_version, "row.null_definition_version")
         object.__setattr__(self, "seed_set", _read.enum(SeedSet, self.seed_set, "row.seed_set"))
@@ -1014,7 +1025,8 @@ class ReportRow:
         holdout figures, so a sealed row prints them too.
         """
         effort = [f"  {effort_note([e.effort for e in self.entries])}"] if self.entries else []
-        return [*self._lines(unseal=unseal), *effort, *usage_lines(self.uses, prices)]
+        model = None if self.pack is None else self.pack.model
+        return [*self._lines(unseal=unseal), *effort, *usage_lines(self.uses, prices, model=model)]
 
     def _lines(self, *, unseal: bool) -> list[str]:
         head = row_head(
@@ -1087,12 +1099,24 @@ def report_table(run_dirs: Iterable[Path]) -> list[ReportRow]:
     rows: dict[RowKey, list[ReportEntry]] = {}
     failed: Counter[RowKey] = Counter()
     uses: dict[RowKey, list[SearchUse]] = {}
+    packs: dict[RowKey, TracePack] = {}
     for run_dir, searched in iter_searched(run_dirs):
         scores = read_scores(run_dir, searched)
         if searched.tool_use is not None:
-            uses.setdefault(row_key(searched.manifest, Arm.LLM_TOOLS), []).extend(
-                searched.tool_use.searches
-            )
+            tools_key = row_key(searched.manifest, Arm.LLM_TOOLS)
+            # A row is one set of conditions, and those name the model, the
+            # pack's version and the limits; what they cannot name is the
+            # pack's WORDS, which the digest does. Two worlds of one row
+            # told different words under one version are two builds' runs,
+            # and one rate over both would be over two experiments.
+            told = packs.setdefault(tools_key, searched.tool_use.pack)
+            if searched.tool_use.pack != told:
+                raise ScoreError(
+                    f"{run_dir}: its tool arm was told {searched.tool_use.pack}; another world "
+                    f"of the same conditions was told {told}. One row is one pack: a digest "
+                    f"that differs under one pack version is another build's wording"
+                )
+            uses.setdefault(tools_key, []).extend(searched.tool_use.searches)
         oracle = searched.oracle
         by_arm = {(r.arm, r.replicate): r for r in searched.verdicts.results}
         for score in scores.results:
@@ -1118,7 +1142,11 @@ def report_table(run_dirs: Iterable[Path]) -> list[ReportRow]:
             )
     return [
         ReportRow(
-            *key, entries=tuple(rows[key]), failed=failed[key], uses=tuple(uses.get(key, ()))
+            *key,
+            entries=tuple(rows[key]),
+            failed=failed[key],
+            uses=tuple(uses.get(key, ())),
+            pack=packs.get(key),
         )
         for key in in_row_order(rows)
     ]

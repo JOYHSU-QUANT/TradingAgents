@@ -127,8 +127,9 @@ def test_a_manifest_may_name_the_tool_arm_in_the_model_arm_s_place():
         other = Manifest.from_dict(_with_tools(**changed))
         assert other.identity() != manifest.identity()
         assert other.conditions() != manifest.conditions()
-    # No backtest at all is a limit the arm may have.
+    # No backtest at all is a limit the arm may have, and so is every call a backtest.
     assert Manifest.from_dict(_with_tools(backtests=0)).arms.llm_tools.backtests == 0
+    assert Manifest.from_dict(_with_tools(backtests=5)).arms.llm_tools.backtests == 5
 
 
 @pytest.mark.parametrize(
@@ -162,6 +163,23 @@ def test_a_manifest_names_one_model_arm_at_most():
     record["arms"]["llm"] = example_manifest().to_dict()["arms"]["llm"]
     with pytest.raises(ManifestError, match="names one model arm, llm or llm_tools"):
         Manifest.from_dict(record)
+
+
+def test_the_arms_hold_each_arm_to_its_own_record_and_write_no_arm_a_shape_has_no_place_for():
+    arms = example_manifest().arms
+    tools = Manifest.from_dict(_with_tools()).arms.llm_tools
+    # The model arm's record is not the tool arm's, though it has its five fields.
+    with pytest.raises(ManifestError, match="arms.llm_tools: expected an LlmToolsArm or None"):
+        replace(arms, llm=None, llm_tools=arms.llm)
+    with pytest.raises(ManifestError, match="arms.llm: expected an LlmArm or None"):
+        replace(arms, llm=tools)
+    # Written in the shape of a version before the tool arm, an arm that is
+    # there is refused — not left out without a word.
+    with_tools = replace(arms, llm=None, llm_tools=tools)
+    assert sorted(with_tools.to_dict(tool_arm=True)) == ["llm", "llm_tools", "random"]
+    with pytest.raises(ManifestError, match="before version 4 have no tool arm to write"):
+        with_tools.to_dict(tool_arm=False)
+    assert sorted(arms.to_dict(tool_arm=False)) == ["llm", "random"]
 
 
 # -- the version before the tool arm, still read ----------------------------------------------------

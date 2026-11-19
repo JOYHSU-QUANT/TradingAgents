@@ -32,7 +32,7 @@ import pytest
 
 from contrib.autoresearch.ports import HypothesistError
 from contrib.autoresearch.store import ResearchStore
-from contrib.discovery import bench, cli
+from contrib.discovery import bench, cli, scoring, toolarm
 from contrib.discovery.bench import (
     ARMS_DIRNAME,
     INQUIRY_FILENAME,
@@ -41,6 +41,7 @@ from contrib.discovery.bench import (
     Arm,
     ArmResult,
     BenchError,
+    KeptForInquiry,
     calibration_table,
     experiment_id,
     read_searched,
@@ -51,7 +52,7 @@ from contrib.discovery.bench import (
     tool_arm,
     trace_of,
 )
-from contrib.discovery.cli import main
+from contrib.discovery.cli import EXIT_KEPT_FOR_INQUIRY, main
 from contrib.discovery.landing import MANIFEST_FILENAME
 from contrib.discovery.manifest import LlmToolsArm, Manifest
 from contrib.discovery.scoring import SCORES_FILENAME, ScoreError, report_table, score_world
@@ -72,6 +73,7 @@ from contrib.discovery.verdict import Ended
 from .conftest import COIN, PLANTED, bench_manifest, land_run
 from .test_bench import LANDED, _listing, _quick_oracle
 from .test_toolarm import _FAILING, ANSWER, BACKTEST, FATAL, STATS, UNKNOWN, Scripted, says
+from .test_tooluse import answer as trace_answer, model as trace_model
 
 # Not the arm's defaults, so the limits a model is told are seen to be the manifest's.
 LIMITS = Limits(lookups=4, backtests=1)
@@ -142,13 +144,13 @@ SPENT = (
 )
 USE_LINE = (
     "  tool use over 2 round(s) of 1 finished search(es): calls a round median 1.5 (max 2), 0 "
-    "round(s) made none; backtests 1; the model's mistakes 1 of 3 call(s); answered without "
-    "tools 0/2 = 0.0%"
+    "round(s) asked for no tool; backtests 1; the model's mistakes 1 of 3 call(s); answered "
+    "without tools 0/2 = 0.0%"
 )
 TOKENS_LINE = (
-    "  tokens reported over 2 search(es), failed seams included: 480,000 in, 120,000 out, in 4 "
-    "model call(s) that came back (a floor: a retried call counts once, a reply that was not "
-    "read not at all)"
+    f"  tokens reported by {LABEL} over 2 search(es), failed seams included: 480,000 in, 120,000 "
+    f"out, in 4 model call(s) that came back (a floor: a retried call counts once, a reply that "
+    f"was not read not at all)"
 )
 COST = (
     "; estimated cost US$3.24 on those counts, at US$3 in and US$15 out a million tokens with no "
@@ -357,6 +359,9 @@ def test_the_report_command_prints_a_cost_when_it_is_given_both_prices(tooled, c
             f"argument --price-in: expected a number of US dollars at or above zero, got {bad!r}"
             in captured.err
         )
+    # Nothing is a price: a model that costs nothing is priced at nothing.
+    assert main(["report", "--root", root, "--price-in", "0", "--price-out", "0"]) == 0
+    assert "estimated cost US$0.00 on those counts, at US$0 in" in capsys.readouterr().out
     # Prices that priced nothing are said to have, beside the table and not in it.
     plain_row = SimpleNamespace(uses=(), describe=lambda *, unseal, prices: ["a pool arm's row"])
     monkeypatch.setattr(cli, "report_table", lambda run_dirs: [plain_row])
@@ -386,13 +391,42 @@ def test_a_row_is_held_to_one_use_for_each_search_of_the_tool_arm(tooled):
     run, *_ = tooled
     rows = {row.arm: row for row in report_table([run])}
     tools, grid = rows[Arm.LLM_TOOLS], rows[Arm.GRID]
-    for wrong in ((), SPENT[:1], (SPENT[0], replace(SPENT[1], seam_failed=False))):
+    for wrong in (SPENT[:1], (SPENT[0], replace(SPENT[1], seam_failed=False))):
         with pytest.raises(ScoreError, match="row.uses"):
             replace(tools, uses=wrong)
     with pytest.raises(ScoreError, match="row.uses: 2 search"):
-        replace(grid, uses=SPENT)
+        replace(grid, uses=SPENT, pack=tools.pack)
     with pytest.raises(ScoreError, match="row.uses: expected SearchUses"):
         replace(tools, uses=("spent",))
+    # What the searches were told goes with them, and with nothing else.
+    assert (tools.pack.model, tools.pack.limits, grid.pack) == (LABEL, LIMITS, None)
+    for row, changes in ((tools, {"uses": ()}), (tools, {"pack": None}), (grid, {"uses": SPENT})):
+        with pytest.raises(ScoreError, match="row.pack: what the searches were told"):
+            replace(row, **changes)
+    with pytest.raises(ScoreError, match="row.pack: expected a TracePack"):
+        replace(tools, pack="the pack")
+
+
+def test_one_row_is_one_pack_and_tallies_every_world_of_its_conditions(tooled, monkeypatch):
+    run, *_ = tooled
+    searched = read_searched(run)
+    # Two worlds of one set of conditions (this one, met twice): the row
+    # holds both worlds' searches.
+    monkeypatch.setattr(
+        scoring, "iter_searched", lambda run_dirs: iter([(run, searched), (run, searched)])
+    )
+    (tools,) = (row for row in report_table([run]) if row.arm is Arm.LLM_TOOLS)
+    assert (tools.searches, tools.failed, tools.uses) == (2, 2, SPENT + SPENT)
+    # The conditions name the model, the pack's version and the limits; the
+    # pack's WORDS are named by its digest alone. A world told other words
+    # under the same version is another build's run, and is not tallied in.
+    reworded = replace(searched.tool_use.pack, pack_digest="cd" * 32)
+    other = replace(searched, tool_use=replace(searched.tool_use, pack=reworded))
+    monkeypatch.setattr(
+        scoring, "iter_searched", lambda run_dirs: iter([(run, searched), (run, other)])
+    )
+    with pytest.raises(ScoreError, match="One row is one pack"):
+        report_table([run])
 
 
 # -- the record, held to the manifest and the verdicts beside it ------------------------------------
@@ -429,7 +463,15 @@ def _one_round_short(record: dict) -> None:
             r"told pack version 1 under limits of 5 call\(s\) and 1 backtest\(s\); the manifest "
             r"sets 1, 4 and 1",
         ),
+        (
+            lambda r: r["limits"].update(backtests=2),
+            r"under limits of 4 call\(s\) and 2 backtest\(s\); the manifest sets 1, 4 and 1",
+        ),
         (lambda r: r.update(pack_version=2), "told pack version 2"),
+        (
+            lambda r: r.update(model="another/model"),
+            f"are those of the model another/model; the manifest's tool arm names {LABEL}",
+        ),
         (_one_round_short, r"llm_tools-0's trace answered 1 round\(s\) and its ledger holds 2"),
         (
             lambda r: r["searches"][1].update(seam_failed=False),
@@ -447,7 +489,9 @@ def _one_round_short(record: dict) -> None:
         "a-replicate-missing",
         "a-replicate-misnumbered",
         "other-limits",
+        "another-backtest-limit",
         "another-pack",
+        "another-model",
         "a-round-missing",
         "a-failed-seam-unsaid",
         "a-failed-seam-invented",
@@ -557,11 +601,30 @@ def _assert_stopped_for_inquiry(run: Path) -> Path:
         rf"finish.* but \['{staging.name}'\] was kept on purpose by a search that stopped on its "
         rf"tools' side: read {INQUIRY_FILENAME} in it"
     )
+    for reader in (run_world, read_searched, score_world, lambda r: calibration_table([r])):
+        with pytest.raises(BenchError, match=refusal) as refused:
+            reader(run)
+        # The ordinary refusal: only the search that stopped is the one a batch stops on.
+        assert not isinstance(refused.value, KeptForInquiry)
     with pytest.raises(BenchError, match=refusal):
-        run_world(run)
-    with pytest.raises(BenchError, match=refusal):
-        calibration_table([run])
+        report_table([run])
     return staging
+
+
+def _assert_cleared_only_with_the_evidence(run: Path, staging: Path) -> None:
+    """The claim removed and the staging left is still a world that stopped, to every reader."""
+    (run / ARMS_DIRNAME).rmdir()
+    refusal = (
+        rf"holds \['{staging.name}'\], kept on purpose by a search that stopped on its tools' "
+        rf"side: read {INQUIRY_FILENAME} in it.* once that staging and arms/ are both removed"
+    )
+    for reader in (run_world, read_searched, lambda r: calibration_table([r])):
+        with pytest.raises(BenchError, match=refusal):
+            reader(run)
+    # Both gone, the directory is as it was landed: not searched, and may be.
+    shutil.rmtree(staging)
+    assert _listing(run) == LANDED
+    assert read_searched(run) is None
 
 
 def test_a_server_that_dies_in_a_round_stops_the_run_and_keeps_what_it_left(
@@ -579,7 +642,7 @@ def test_a_server_that_dies_in_a_round_stops_the_run_and_keeps_what_it_left(
         monkeypatch,
         [says("fine", STATS), says("not a rule"), says("fatal", FATAL), says("not a rule")],
     )
-    with pytest.raises(BenchError) as stopped:
+    with pytest.raises(KeptForInquiry) as stopped:
         run_world(run)
     said = str(stopped.value)
     assert "the look-ups' server failed in llm_tools-0" in said
@@ -599,14 +662,14 @@ def test_a_server_that_dies_in_a_round_stops_the_run_and_keeps_what_it_left(
     assert [line["kind"] for line in lines].count("answer") == 1
     assert (lines[-2]["arguments"], lines[-2]["result"]) == ({"feature": "volume"}, None)
     assert (lines[-1]["kind"], lines[-1]["side"]) == ("failed", "server")
-    # Cleared by hand, the directory is as it was landed, and may be searched.
-    shutil.rmtree(staging)
-    (run / ARMS_DIRNAME).rmdir()
-    assert _listing(run) == LANDED
+    # The failure happened in the server's process and inside ``search()``,
+    # which keeps a seam's sentence and no exception: the note is the sentence.
+    assert (staging / INQUIRY_FILENAME).read_text(encoding="utf-8") == f"{said}\n"
+    _assert_cleared_only_with_the_evidence(run, staging)
 
 
 def test_a_server_that_does_not_start_stops_the_run_before_the_model_is_asked(
-    fresh_tools_run, monkeypatch
+    fresh_tools_run, monkeypatch, capsys
 ):
     run = fresh_tools_run
     real = bench.ServerParams.for_experiment
@@ -616,10 +679,11 @@ def test_a_server_that_does_not_start_stops_the_run_before_the_model_is_asked(
         classmethod(lambda cls, db, experiment: real(db.with_name("missing.sqlite"), experiment)),
     )
     model = scripted(monkeypatch, [says(ANSWER)])
-    with pytest.raises(BenchError) as stopped:
-        run_world(run)
-    said = str(stopped.value)
-    assert "the look-ups' server failed in llm_tools-0" in said and "did not start" in said
+    # Through the command: a code of its own, for a batch to stop on.
+    assert main(["search", "--run", str(run)]) == EXIT_KEPT_FOR_INQUIRY == 3
+    said = capsys.readouterr().err
+    assert said.startswith(f"error: {run}: the look-ups' server failed in llm_tools-0")
+    assert "did not start" in said and "looked into, not searched past" in said
     assert model.asked == []
     staging = _assert_stopped_for_inquiry(run)
     # No trace was begun; why the server did not come up is on its stderr, kept.
@@ -628,6 +692,12 @@ def test_a_server_that_does_not_start_stops_the_run_before_the_model_is_asked(
     assert "is not a file with a store in it" in (kept / "replicate-0.server.log").read_text(
         encoding="utf-8"
     )
+    # The failure was an exception this process caught: its stack is under the sentence.
+    note = (staging / INQUIRY_FILENAME).read_text(encoding="utf-8")
+    assert "Traceback (most recent call last)" in note and "ToolServerError" in note
+    # The directory searched again is the ordinary refusal, which a batch skips.
+    assert main(["search", "--run", str(run)]) == 1
+    assert "was kept on purpose by a search that stopped" in capsys.readouterr().err
 
 
 def test_a_trace_that_cannot_be_read_back_stops_the_run_and_keeps_the_trace(
@@ -643,7 +713,7 @@ def test_a_trace_that_cannot_be_read_back_stops_the_run_and_keeps_the_trace(
 
     monkeypatch.setattr(bench, "trace_use", unreadable)
     scripted(monkeypatch, [says("not a rule"), says("not a rule")])
-    with pytest.raises(BenchError) as stopped:
+    with pytest.raises(KeptForInquiry) as stopped:
         run_world(run)
     said = str(stopped.value)
     assert "what llm_tools-0 spent could not be read back from its trace" in said
@@ -655,18 +725,149 @@ def test_a_trace_that_cannot_be_read_back_stops_the_run_and_keeps_the_trace(
     assert [line["kind"] for line in lines].count("answer") == 2
 
 
-def test_an_arm_that_cannot_be_opened_as_asked_is_a_refusal_and_leaves_the_directory_as_landed(
+def _a_round_the_ledger_does_not_hold(lines: list[dict]) -> list[dict]:
+    return [*lines, trace_model(3), trace_answer(3)]
+
+
+def _other_words(lines: list[dict]) -> list[dict]:
+    return [{**lines[0], "pack_digest": "cd" * 32}, *lines[1:]]
+
+
+@pytest.mark.parametrize(
+    ("replicates", "forged", "sentence"),
+    [
+        (
+            1,
+            _a_round_the_ledger_does_not_hold,
+            r"llm_tools-0's trace answered 3 round\(s\) and its ledger holds 2 answer\(s\)",
+        ),
+        (2, _other_words, "llm_tools-1 was told .* an earlier replicate .* one model under one pack"),
+    ],
+    ids=["a-trace-that-is-not-the-ledger-s-search", "a-replicate-told-other-words"],
+)
+def test_a_trace_that_is_not_its_search_s_stops_the_run_with_the_trace_kept(
+    landed_world, fresh_tools_run, tmp_path, monkeypatch, replicates, forged, sentence
+):
+    # The reader itself is real here: the trace is read, and what is wrong
+    # with it is found by the checks a finished search is held to.
+    artifact, _landing = landed_world
+    run = fresh_tools_run
+    if replicates != 1:
+        run = land_run(tmp_path, artifact, tools_manifest(replicates=replicates))
+    scripted(monkeypatch, [says("not a rule")] * (2 * replicates))
+    real = bench.read_trace
+    read: list[Path] = []
+
+    def forging(path):
+        read.append(path)
+        # The last replicate's trace is the one that is not what it should be.
+        return forged(real(path)) if len(read) == replicates else real(path)
+
+    monkeypatch.setattr(bench, "read_trace", forging)
+    with pytest.raises(KeptForInquiry, match=sentence):
+        run_world(run)
+    staging = _assert_stopped_for_inquiry(run)
+    assert [path.name for path in read] == [
+        f"replicate-{k}.trace.jsonl" for k in range(replicates)
+    ]
+    # Every replicate's trace is kept, the finished ones' with the one that stopped the run.
+    assert all((staging / path.relative_to(staging)).is_file() for path in read)
+
+
+def test_limits_that_are_not_the_manifest_s_stop_the_run_at_the_first_search(
     fresh_tools_run, monkeypatch
 ):
-    # Not the tools' side failing: nothing was started that could be looked into.
-    def refuse(*args, **kwargs):
-        raise ToolArmError("the server lists tools other than this build's at version 1")
-
-    monkeypatch.setattr(bench.ToolHypothesist, "open", refuse)
-    scripted(monkeypatch, [says(ANSWER)])
-    with pytest.raises(BenchError, match="llm_tools-0: the server lists tools other than"):
+    # A search told other limits than its manifest sets is not that
+    # manifest's arm: found when its trace is read, the trace kept.
+    scripted(monkeypatch, [says("not a rule"), says("not a rule")])
+    real = bench.tool_arm
+    monkeypatch.setattr(
+        bench, "tool_arm", lambda tools: (real(tools)[0], Limits(lookups=5, backtests=2))
+    )
+    with pytest.raises(
+        KeptForInquiry,
+        match=r"told pack version 1 under limits of 5 call\(s\) and 2 backtest\(s\); the "
+        r"manifest sets 1, 4 and 1",
+    ):
         run_world(fresh_tools_run)
-    assert _listing(fresh_tools_run) == LANDED
+    _assert_stopped_for_inquiry(fresh_tools_run)
+
+
+def test_an_arm_that_cannot_be_opened_once_its_server_is_up_stops_the_run_and_keeps_the_log(
+    fresh_tools_run, monkeypatch
+):
+    # What can be refused without a server is, before any arm runs
+    # (``tool_arm``). A refusal at the opening comes after the child was
+    # started, and the child's log is where it says why: kept, with the rest.
+    run = fresh_tools_run
+
+    def not_this_build_s(info):
+        raise ToolArmError("the server answered as 'another' version '9'")
+
+    monkeypatch.setattr(toolarm, "_require_this_server", not_this_build_s)
+    model = scripted(monkeypatch, [says(ANSWER)])
+    with pytest.raises(KeptForInquiry) as stopped:
+        run_world(run)
+    said = str(stopped.value)
+    assert "llm_tools-0 could not be opened — the server answered as 'another' version '9'" in said
+    assert model.asked == []
+    staging = _assert_stopped_for_inquiry(run)
+    kept = staging / ARMS_DIRNAME / Arm.LLM_TOOLS.value
+    # The real child was started and stopped; its log is there, and no trace was begun.
+    assert _listing(kept) == ["replicate-0.server.log", "replicate-0.sqlite"]
+    note = (staging / INQUIRY_FILENAME).read_text(encoding="utf-8")
+    assert note.startswith(f"{said}\n") and "ToolArmError" in note
+
+
+def test_a_trace_that_cannot_be_written_mid_search_stops_the_run_and_keeps_what_was(
+    fresh_tools_run, monkeypatch
+):
+    run = fresh_tools_run
+    scripted(monkeypatch, [says("not a rule"), says("not a rule")])
+    real = toolarm._Trace.write
+    written: list[str] = []
+
+    def full(self, kind, state=None, **payload):
+        if len(written) == 3:
+            raise OSError(28, "No space left on device")
+        written.append(kind.value)
+        return real(self, kind, state, **payload)
+
+    monkeypatch.setattr(toolarm._Trace, "write", full)
+    with pytest.raises(KeptForInquiry, match="llm_tools-0 could not go on writing its trace"):
+        run_world(run)
+    staging = _assert_stopped_for_inquiry(run)
+    # The pack and the first round, which was answered and paid for.
+    kept = staging / ARMS_DIRNAME / Arm.LLM_TOOLS.value / "replicate-0.trace.jsonl"
+    assert [json.loads(line)["kind"] for line in kept.read_text("utf-8").splitlines()] == written
+    assert written == ["pack", "model", "answer"]
+
+
+def test_a_note_that_cannot_be_written_is_logged_and_the_run_still_ends_as_kept(tmp_path, caplog):
+    missing = tmp_path / "no-such-staging"
+    with caplog.at_level("WARNING", logger=bench.__name__):
+        refusal = bench._kept_for_inquiry(tmp_path, missing, "the server failed", None)
+    assert isinstance(refusal, KeptForInquiry) and "the server failed" in str(refusal)
+    assert f"could not write {INQUIRY_FILENAME}" in caplog.text
+    # A sentence no file takes as it is — half a surrogate pair — is written all the same.
+    staging = tmp_path / ".search.partial-x"
+    staging.mkdir()
+    bench._kept_for_inquiry(tmp_path, staging, "said \ud83d", ValueError("the cause"))
+    note = (staging / INQUIRY_FILENAME).read_text(encoding="utf-8")
+    assert "said ?" in note and "ValueError: the cause" in note
+
+
+def test_only_a_staging_that_holds_the_note_is_said_to_be_kept_on_purpose(tmp_path):
+    # A run killed outright leaves a staging too; it is not evidence
+    # anyone chose to keep, and is not said to be.
+    killed = tmp_path / ".search.partial-killed"
+    killed.mkdir()
+    assert bench._kept_on_purpose(tmp_path) == []
+    assert bench._unread_evidence(tmp_path) is None
+    assert "kept on purpose" not in bench._unfinished(tmp_path, [ARMS_DIRNAME])
+    (killed / INQUIRY_FILENAME).write_text("why\n", encoding="utf-8")
+    assert bench._kept_on_purpose(tmp_path) == [killed.name]
+    assert "kept on purpose" in bench._unfinished(tmp_path, [ARMS_DIRNAME])
 
 
 def test_the_oracle_s_record_goes_in_last_whatever_else_a_search_writes(
@@ -717,10 +918,18 @@ def test_a_tool_arm_this_build_cannot_run_is_refused_before_a_world_is_landed_or
     )
     with pytest.raises(BenchError, match=sentence):
         tool_arm(other.arms.llm_tools)
-    # ``search`` refuses it with the directory left as landed ...
+    # ``search`` refuses it with the directory left as landed, and before
+    # any arm has searched: the pool arms' minutes are not spent on a world
+    # whose model arm cannot run.
+    def searched_anyway(*args, **kwargs):
+        raise AssertionError("an arm searched before the tool arm was asked whether it can run")
+
     run = land_run(tmp_path, artifact, other)
-    with pytest.raises(BenchError, match=sentence):
-        run_world(run)
+    with monkeypatch.context() as patch:
+        patch.setattr(bench, "search", searched_anyway)
+        with pytest.raises(BenchError, match=sentence) as refused:
+            run_world(run)
+    assert not isinstance(refused.value, KeptForInquiry)
     assert _listing(run) == LANDED
     # ... and ``generate`` before anything is written for it.
     written = tmp_path / "other.json"

@@ -52,7 +52,16 @@ from statistics import median
 from typing import Any, Final
 
 from .records import Reader, RecordError, dumps
-from .toolarm import TRACE_KEYS, TRACE_VERSION, Limits, Seam, ToolArmError, TraceKind
+from .toolarm import (
+    BACKTEST_TOOL,
+    TRACE_KEYS,
+    TRACE_VERSION,
+    Limit,
+    Limits,
+    Seam,
+    ToolArmError,
+    TraceKind,
+)
 
 __all__ = [
     "TOOL_USE_FILENAME",
@@ -107,10 +116,12 @@ class RoundUse:
         _read.whole(self.backtests, "round.backtests", minimum=0)
         _read.whole(self.tool_errors, "round.tool_errors", minimum=0)
         _read.flag(self.forced, "round.forced")
-        if self.backtests > self.lookups or self.tool_errors > self.lookups:
+        # A call is at most one of the two: a backtest is counted when it
+        # returned a score, a mistake when it was refused.
+        if self.backtests + self.tool_errors > self.lookups:
             raise ToolUseError(
                 f"round: {self.backtests} backtest(s) and {self.tool_errors} tool error(s) among "
-                f"{self.lookups} call(s); each is one of the calls"
+                f"{self.lookups} call(s); each is one of the calls, and no call is both"
             )
 
     def to_dict(self) -> dict[str, object]:
@@ -132,7 +143,11 @@ class SearchUse:
 
     ``seam_failed`` says the search ended on a round the model did not
     answer; the rounds before it are here, and so are the tokens. Every
-    answered round took at least one model call.
+    answered round took at least one model call, and one that looked
+    something up, or was answered without tools, a second: the answer came
+    in a message of its own. ``unmetered_calls`` counts the calls that
+    reported no count, or one of the two only; what such a call did report
+    is in the sums.
     """
 
     replicate: int
@@ -150,7 +165,8 @@ class SearchUse:
             raise ToolUseError("search.rounds: expected RoundUses")
         object.__setattr__(self, "rounds", rounds)
         _read.flag(self.seam_failed, "search.seam_failed")
-        _read.whole(self.model_calls, "search.model_calls", minimum=len(rounds))
+        took = len(rounds) + sum(round_.lookups > 0 or round_.forced for round_ in rounds)
+        _read.whole(self.model_calls, "search.model_calls", minimum=took)
         _read.whole(self.unmetered_calls, "search.unmetered_calls", minimum=0)
         if self.unmetered_calls > self.model_calls:
             raise ToolUseError(
@@ -159,8 +175,8 @@ class SearchUse:
             )
         _read.whole(self.input_tokens, "search.input_tokens", minimum=0)
         _read.whole(self.output_tokens, "search.output_tokens", minimum=0)
-        if self.unmetered_calls == self.model_calls and (self.input_tokens or self.output_tokens):
-            raise ToolUseError("search: tokens are counted, and no model call reported any")
+        if not self.model_calls and (self.input_tokens or self.output_tokens):
+            raise ToolUseError("search: tokens are counted, and no model call came back")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -224,6 +240,9 @@ class TracePack:
         Both write it under ``model``, ``pack_version``, ``pack_digest``
         and ``limits``, among their other keys.
         """
+        absent = [key for key in ("model", "pack_version", "pack_digest", "limits") if key not in body]
+        if absent:
+            raise ToolUseError(f"pack: no {', '.join(absent)} in it")
         limits = _read.exact(body["limits"], ("lookups", "backtests"), "pack.limits")
         try:
             held = Limits(**limits)
@@ -347,19 +366,67 @@ def read_trace(path: Path) -> list[dict[str, Any]]:
         _read.exact(line, TRACE_KEYS[kind], where)
         if (kind is TraceKind.PACK) != (number == 1):
             raise ToolUseError(f"{where}: a trace opens with its pack, and holds one")
+        if kind is not TraceKind.PACK:
+            _read.whole(line["round"], f"{where}: round", minimum=1)
         lines.append(dict(line))
     if not lines:
         raise ToolUseError(f"{path}: an empty trace; a search writes its pack before it asks")
-    if lines[0]["trace_version"] != TRACE_VERSION:
+    # By type, as a record's version is read: ``True`` and ``1.0`` equal 1.
+    version = lines[0]["trace_version"]
+    if type(version) is not int or version != TRACE_VERSION:
         raise ToolUseError(
-            f"{path}: this build reads trace version {TRACE_VERSION}, got "
-            f"{lines[0]['trace_version']!r}"
+            f"{path}: this build reads trace version {TRACE_VERSION}, got {version!r}"
         )
     return lines
 
 
 def _counted(value: object) -> int | None:
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
+    """A token count as a provider reported one, or ``None``: no count, or nothing that is one.
+
+    A negative number is no count either. A provider that sent one would
+    otherwise have a finished search refused over a figure that is a floor
+    at best.
+    """
+    return value if type(value) is int and value >= 0 else None
+
+
+@dataclass
+class _RoundLines:
+    """What the lines of the round being read add up to, to hold its answer's counts to."""
+
+    asked: int = 0
+    counted: int = 0
+    scored: int = 0
+    mistakes: int = 0
+    bound: bool = True
+
+    def read(self, kind: TraceKind, line: Mapping[str, Any]) -> None:
+        if kind is TraceKind.MODEL:
+            self.asked += 1
+            self.bound = line["bound"] is not False
+        elif kind is TraceKind.TOOL:
+            # As the arm counts (``ToolHypothesist._run``): every call but
+            # one made when none was left; a mistake when it was marked
+            # one; a backtest when the server took it and returned a score.
+            self.counted += line["limit"] != Limit.LOOKUPS.value
+            self.mistakes += line["tool_error"] is True
+            self.scored += (
+                line["tool"] == BACKTEST_TOOL
+                and line["sent"] is True
+                and line["tool_error"] is False
+                and line["limit"] is None
+            )
+
+    def hold(self, number: int, answered: RoundUse) -> None:
+        """Refuse an answer line whose counts are not what the round's own lines add up to."""
+        written = (answered.lookups, answered.backtests, answered.tool_errors, answered.forced)
+        read = (self.counted, self.scored, self.mistakes, not self.bound)
+        if not self.asked or written != read:
+            raise ToolUseError(
+                f"round {number}: its answer says {written[0]} call(s), {written[1]} backtest(s), "
+                f"{written[2]} mistake(s), forced {written[3]}; its {self.asked} model line(s) "
+                f"and its tool lines give {read[0]}, {read[1]}, {read[2]} and {read[3]}"
+            )
 
 
 def trace_use(lines: Sequence[Mapping[str, Any]], replicate: int) -> tuple[TracePack, SearchUse]:
@@ -369,14 +436,20 @@ def trace_use(lines: Sequence[Mapping[str, Any]], replicate: int) -> tuple[Trace
     from one, each ended by its answer, or by the failure the search ended
     on. A round left open, lines after the end, or a failure on the tools'
     side — which the bench does not record (the module docstring) — is
-    refused.
+    refused. An answer's counts are the arm's own, written as it went;
+    they are held here to what the round's model and tool lines add up to
+    and to the pack's limits, so the record is one the trace bears out
+    line by line.
     """
+    if not lines or lines[0].get("kind") != TraceKind.PACK.value:
+        raise ToolUseError("a trace opens with its pack; these lines do not")
     pack = TracePack.from_document(lines[0])
     rounds: list[RoundUse] = []
     seam_failed = False
     # The kind of the last line read: a round is open while it is a model's
     # or a tool's, and ended by an answer or a failure.
     kind = TraceKind.PACK
+    within = _RoundLines()
     model_calls = unmetered = tokens_in = tokens_out = 0
     for line in lines[1:]:
         kind = TraceKind(line["kind"])
@@ -390,24 +463,35 @@ def trace_use(lines: Sequence[Mapping[str, Any]], replicate: int) -> tuple[Trace
                 f"a {kind.value!r} line of round {line['round']!r} where round {number} is being "
                 f"written; a search's rounds are written in order, each to its end"
             )
+        within.read(kind, line)
         if kind is TraceKind.MODEL:
             model_calls += 1
             reported_in = _counted(line["input_tokens"])
             reported_out = _counted(line["output_tokens"])
-            if reported_in is None or reported_out is None:
-                unmetered += 1
-            else:
-                tokens_in += reported_in
-                tokens_out += reported_out
+            # A call short of either count is unmetered; what it did
+            # report is kept, the sums being a floor either way.
+            unmetered += reported_in is None or reported_out is None
+            tokens_in += reported_in or 0
+            tokens_out += reported_out or 0
         elif kind is TraceKind.ANSWER:
-            rounds.append(
-                RoundUse(
-                    lookups=line["lookups"],
-                    backtests=line["backtests"],
-                    tool_errors=line["tool_errors"],
-                    forced=line["forced"],
-                )
+            answered = RoundUse(
+                lookups=line["lookups"],
+                backtests=line["backtests"],
+                tool_errors=line["tool_errors"],
+                forced=line["forced"],
             )
+            within.hold(number, answered)
+            if (
+                answered.lookups > pack.limits.lookups
+                or answered.backtests > pack.limits.backtests
+            ):
+                raise ToolUseError(
+                    f"round {number}: {answered.lookups} call(s) and {answered.backtests} "
+                    f"backtest(s) under limits of {pack.limits.lookups} and "
+                    f"{pack.limits.backtests}"
+                )
+            rounds.append(answered)
+            within = _RoundLines()
         elif kind is TraceKind.FAILED:
             if line["side"] != Seam.MODEL.value:
                 raise ToolUseError(
@@ -451,16 +535,22 @@ class Prices:
         ) / _TOKENS_PER_PRICE
 
 
-def usage_lines(searches: Sequence[SearchUse], prices: Prices | None = None) -> list[str]:
+def usage_lines(
+    searches: Sequence[SearchUse], prices: Prices | None = None, *, model: str | None = None
+) -> list[str]:
     """What a row's tool-arm searches spent, as the lines a table prints under the row.
 
     The first line is over the rounds of the searches that finished, the
     ones the row's rate counts: how many calls a round made, how many
-    rounds made none, how many calls were the model's mistakes, how many
-    rounds were answered without tools — kept in the row's result and
-    printed beside it (decided 2026-11-19). The second is over every
-    search, failed seams included, because those were paid for too; the
-    cost is there when ``prices`` is given.
+    rounds asked for no tool, how many calls were the model's mistakes,
+    how many rounds were answered without tools — kept in the row's result
+    and printed beside it (decided 2026-11-19). A round answered without
+    tools asked for one, so it is not among those that asked for none,
+    whatever it had counted by then. The second line is over every search,
+    failed seams included, because those were paid for too, and names the
+    ``model`` whose tokens they are when it is given; the cost is there
+    when ``prices`` are — one pair of prices is one model's, and a root may
+    hold rows of several.
     """
     if not searches:
         return []
@@ -469,32 +559,37 @@ def usage_lines(searches: Sequence[SearchUse], prices: Prices | None = None) -> 
     if rounds:
         calls = [round_.lookups for round_ in rounds]
         forced = sum(round_.forced for round_ in rounds)
+        idle = sum(not round_.lookups and not round_.forced for round_ in rounds)
         use = (
             f"  tool use over {len(rounds)} round(s) of {len(finished)} finished search(es): "
-            f"calls a round median {median(calls):g} (max {max(calls)}), {calls.count(0)} "
-            f"round(s) made none; backtests {sum(round_.backtests for round_ in rounds)}; the "
-            f"model's mistakes {sum(round_.tool_errors for round_ in rounds)} of {sum(calls)} "
-            f"call(s); answered without tools {forced}/{len(rounds)} = {forced / len(rounds):.1%}"
+            f"calls a round median {median(calls):g} (max {max(calls)}), {idle} round(s) asked "
+            f"for no tool; backtests {sum(round_.backtests for round_ in rounds)}; the model's "
+            f"mistakes {sum(round_.tool_errors for round_ in rounds)} of {sum(calls)} call(s); "
+            f"answered without tools {forced}/{len(rounds)} = {forced / len(rounds):.1%}"
         )
     else:
         use = "  tool use: no finished search answered a round"
     model_calls = sum(search.model_calls for search in searches)
     unmetered = sum(search.unmetered_calls for search in searches)
     spent = (
-        f"  tokens reported over {len(searches)} search(es), failed seams included: "
+        f"  tokens reported{'' if model is None else f' by {model}'} over {len(searches)} "
+        f"search(es), failed seams included: "
         f"{sum(search.input_tokens for search in searches):,} in, "
         f"{sum(search.output_tokens for search in searches):,} out, in {model_calls} model "
         f"call(s) that came back"
     )
     if unmetered:
-        spent += f", {unmetered} of them with no counts"
+        spent += f", {unmetered} of them short of a count"
     # Said on every row: what a retry cost, and a reply that could not be
     # read, are in no line of a trace.
     spent += " (a floor: a retried call counts once, a reply that was not read not at all)"
-    if prices is not None:
+    if prices is not None and unmetered < model_calls:
         spent += (
             f"; estimated cost US${sum(prices.cost(search) for search in searches):,.2f} on "
             f"those counts, at US${prices.input:g} in and US${prices.output:g} out a million "
             f"tokens with no cache discount"
         )
+    elif prices is not None:
+        # No call reported both counts: a figure here would read as a cost.
+        spent += "; no cost is estimated: no call reported its counts"
     return [use, spent]

@@ -37,12 +37,21 @@ Breaking changes within the 0.x line are called out explicitly.
   differently**: the model not answering is a failed seam as for any arm
   (recorded, counted apart, the run goes on); the look-ups' server not
   answering — it did not start, it died, a look-up timed out or the store
-  could not answer it — stops `search` with exit 1, records nothing, and
-  keeps the staging directory (the trace and the server's stderr log in
-  it, and a note, `kept-for-inquiry.txt`, saying why) and the `arms/`
-  claim, so later commands on that directory are refused, pointing at the
-  note, until both are removed by hand. A finished search whose trace
-  cannot be read back stops the run the same way, the trace kept. A
+  could not answer it — stops `search` with **exit 3**, a code of its own
+  so that a batch can stop on it and skip a world that is merely searched
+  already (exit 1), records nothing, and keeps the staging directory (the
+  server's stderr log in it, the trace where the arm was opened, and a
+  note, `kept-for-inquiry.txt`, saying why, with the traceback where the
+  failure was an exception this process caught) and the `arms/` claim.
+  `search`, `calibrate`, `score` and `report` then refuse that directory,
+  pointing at the note, until the staging and the claim are both removed
+  by hand — the staging alone is enough to refuse it. A finished search
+  whose trace cannot be read back, or is not the search its ledger and
+  manifest describe, stops the run the same way, the trace kept; so does
+  an arm that cannot be opened once its server is up, and a trace that
+  cannot be written mid-search. What a round is recorded as having spent
+  is re-derived from that round's own trace lines and refused if the two
+  disagree, and a table row holds its worlds to one pack digest. A
   `pack_version` that is not this build's, a missing `discovery-tools`
   install, a model that cannot be built and a client that will not be
   bound with this build's tools (it is bound once to find out) are

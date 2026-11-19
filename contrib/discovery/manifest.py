@@ -74,6 +74,7 @@ from .upstream import (
 __all__ = [
     "MANIFEST_VERSION",
     "POOL_SIZING",
+    "READ_VERSIONS",
     "Arms",
     "Bars",
     "Budget",
@@ -83,6 +84,7 @@ __all__ = [
     "Difficulty",
     "FundingModel",
     "LlmArm",
+    "LlmToolsArm",
     "Manifest",
     "ManifestError",
     "Planted",
@@ -106,7 +108,18 @@ __all__ = [
 # (plan PR 3); a version-1 manifest's free text there named no order a
 # runner could walk. Version 3 adds ``artifact_sha256``, the digest of the
 # landed ``world.sqlite`` the measuring verbs check before they copy it.
-MANIFEST_VERSION: Final = 3
+# Version 4 adds ``arms.llm_tools``, the model arm that may look things up
+# (tools plan T4).
+#
+# Version 3 is still READ (decided 2026-11-12): the worlds searched under it
+# are what a later run is set beside. A manifest keeps the version it was
+# read at and is written back key for key as that version wrote it, because
+# a run directory is named by a digest of that text (:meth:`Manifest.identity`)
+# and the records beside it carry the digest: read as version 4, every
+# directory landed before would be named for another manifest.
+MANIFEST_VERSION: Final = 4
+READ_VERSIONS: Final = (3, MANIFEST_VERSION)
+_TOOL_ARM_SINCE: Final = 4
 
 
 class ManifestError(ValueError):
@@ -974,36 +987,98 @@ class LlmArm:
     world_subset: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        _read.text(self.provider, "arms.llm.provider")
-        _read.text(self.model, "arms.llm.model")
-        object.__setattr__(
-            self, "temperature", _read.amount(self.temperature, "arms.llm.temperature")
-        )
-        _read.whole(self.replicates, "arms.llm.replicates", minimum=1)
-        object.__setattr__(
-            self,
-            "world_subset",
-            _read.distinct(self.world_subset, "arms.llm.world_subset", _world_id),
-        )
+        _hold_model_arm(self, "arms.llm")
 
     def to_dict(self) -> dict[str, object]:
-        return {
-            "provider": self.provider,
-            "model": self.model,
-            "temperature": self.temperature,
-            "replicates": self.replicates,
-            "world_subset": list(self.world_subset),
-        }
+        return _model_arm_document(self)
 
     @classmethod
     def from_dict(cls, payload: object) -> LlmArm:
+        return cls(**_read.exact(payload, _MODEL_ARM_KEYS, "arms.llm"))
+
+
+@dataclass(frozen=True)
+class LlmToolsArm:
+    """The model arm that may look things up before it answers (tools plan §3.5).
+
+    The model arm's five fields, read as that arm's are, and what a search
+    with tools is run under beside them: how many calls a model may make
+    before one answer (``lookups``), how many of those may be backtests
+    that return a score (``backtests``), and the version of everything the
+    model is told about its tools (``pack_version``: the tool arm's
+    ``PACK_VERSION``). All three are in the manifest's identity, so two
+    runs are one condition exactly when they agree on them.
+
+    The bounds on the two limits are the tool arm's own (its ``Limits``),
+    restated here because a manifest is refused where it is read. Whether
+    ``pack_version`` is THIS build's is not asked here: a manifest written
+    for another pack is still a manifest, and a record of a run under one
+    is still read; the bench asks before it builds the arm.
+    """
+
+    provider: str
+    model: str
+    temperature: float
+    replicates: int
+    world_subset: tuple[str, ...]
+    lookups: int
+    backtests: int
+    pack_version: int
+
+    def __post_init__(self) -> None:
+        _hold_model_arm(self, "arms.llm_tools")
+        _read.whole(self.lookups, "arms.llm_tools.lookups", minimum=1)
+        _read.whole(self.backtests, "arms.llm_tools.backtests", minimum=0)
+        if self.backtests > self.lookups:
+            raise ManifestError(
+                f"arms.llm_tools.backtests: {self.backtests} of {self.lookups} call(s); a "
+                f"backtest is one of the calls"
+            )
+        _read.whole(self.pack_version, "arms.llm_tools.pack_version", minimum=1)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            **_model_arm_document(self),
+            "lookups": self.lookups,
+            "backtests": self.backtests,
+            "pack_version": self.pack_version,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> LlmToolsArm:
         return cls(
             **_read.exact(
                 payload,
-                ("provider", "model", "temperature", "replicates", "world_subset"),
-                "arms.llm",
+                (*_MODEL_ARM_KEYS, "lookups", "backtests", "pack_version"),
+                "arms.llm_tools",
             )
         )
+
+
+# What the two model arms share: which model, how it is asked, how many
+# times, and the worlds it is run on.
+_MODEL_ARM_KEYS: Final = ("provider", "model", "temperature", "replicates", "world_subset")
+
+
+def _hold_model_arm(arm: LlmArm | LlmToolsArm, path: str) -> None:
+    """The shared fields of a model arm, each checked under ``path``."""
+    _read.text(arm.provider, f"{path}.provider")
+    _read.text(arm.model, f"{path}.model")
+    object.__setattr__(arm, "temperature", _read.amount(arm.temperature, f"{path}.temperature"))
+    _read.whole(arm.replicates, f"{path}.replicates", minimum=1)
+    object.__setattr__(
+        arm, "world_subset", _read.distinct(arm.world_subset, f"{path}.world_subset", _world_id)
+    )
+
+
+def _model_arm_document(arm: LlmArm | LlmToolsArm) -> dict[str, object]:
+    return {
+        "provider": arm.provider,
+        "model": arm.model,
+        "temperature": arm.temperature,
+        "replicates": arm.replicates,
+        "world_subset": list(arm.world_subset),
+    }
 
 
 @dataclass(frozen=True)
@@ -1012,30 +1087,57 @@ class Arms:
 
     ``llm`` is optional because the null calibration runs Random and Grid
     first, without a model (plan §4.3); a manifest with no model arm is a
-    complete run of those two.
+    complete run of those two. ``llm_tools`` is the model arm with the
+    training-window look-ups at hand (tools plan §3.5). A manifest names
+    one of the two at most: they are set side by side across two landings
+    of one seed, as the model arm and the full Random and Grid run already
+    are (plan §8 #5), so a row of a table is one arm under one set of
+    conditions.
     """
 
     random: RandomArm
     llm: LlmArm | None = None
+    llm_tools: LlmToolsArm | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.random, RandomArm):
             raise ManifestError(f"arms.random: expected a RandomArm, got {self.random!r}")
         if self.llm is not None and not isinstance(self.llm, LlmArm):
             raise ManifestError(f"arms.llm: expected an LlmArm or None, got {self.llm!r}")
+        if self.llm_tools is not None and not isinstance(self.llm_tools, LlmToolsArm):
+            raise ManifestError(
+                f"arms.llm_tools: expected an LlmToolsArm or None, got {self.llm_tools!r}"
+            )
+        if self.llm is not None and self.llm_tools is not None:
+            raise ManifestError(
+                "arms: a manifest names one model arm, llm or llm_tools; the two are compared "
+                "across two landings of one seed"
+            )
 
-    def to_dict(self) -> dict[str, object]:
-        return {
+    def to_dict(self, *, tool_arm: bool) -> dict[str, object]:
+        """The arms as a manifest writes them; ``tool_arm`` False is the shape before version 4.
+
+        That shape has no ``llm_tools`` key, and nothing to put under one:
+        a manifest of such a version names no tool arm (``Manifest``'s rule).
+        """
+        document: dict[str, object] = {
             "random": self.random.to_dict(),
             "llm": None if self.llm is None else self.llm.to_dict(),
         }
+        if tool_arm:
+            document["llm_tools"] = None if self.llm_tools is None else self.llm_tools.to_dict()
+        return document
 
     @classmethod
-    def from_dict(cls, payload: object) -> Arms:
-        body = _read.exact(payload, ("random", "llm"), "arms")
+    def from_dict(cls, payload: object, *, tool_arm: bool) -> Arms:
+        """The arms as written, read by the key set :meth:`to_dict` writes for the same ``tool_arm``."""
+        keys = ("random", "llm", "llm_tools") if tool_arm else ("random", "llm")
+        body = _read.exact(payload, keys, "arms")
+        tools = body.get("llm_tools")
         return cls(
             random=RandomArm.from_dict(body["random"]),
             llm=None if body["llm"] is None else LlmArm.from_dict(body["llm"]),
+            llm_tools=None if tools is None else LlmToolsArm.from_dict(tools),
         )
 
 
@@ -1110,6 +1212,11 @@ class Manifest:
     artifact copied into the other's directory passes every check of the
     artifact's SHAPE; the measuring verbs compare this digest before they
     copy the file. ``None`` until the world is landed.
+
+    ``manifest_version`` is the version the manifest was written at: this
+    build's for one built in code, the file's own for one read — and it is
+    written back as that version wrote it (``READ_VERSIONS``' comment says
+    why). A version-3 manifest has no tool arm to name.
     """
 
     world: World
@@ -1123,8 +1230,10 @@ class Manifest:
     scoring: Scoring
     null_definition_version: str
     artifact_sha256: str | None = None
+    manifest_version: int = MANIFEST_VERSION
 
     def __post_init__(self) -> None:
+        _read.version_among(self.manifest_version, "manifest_version", READ_VERSIONS)
         for name, kind in (
             ("world", World),
             ("split", Shares),
@@ -1151,18 +1260,25 @@ class Manifest:
                 f"artifact_sha256: a SHA-256 is 64 lower-case hex digits, or null until the world "
                 f"is landed, got {self.artifact_sha256!r}"
             )
-        # The model arm runs the subset's worlds; a manifest is one world,
-        # and one naming a subset it is not in has an arm it will not run.
-        llm = self.arms.llm
-        if llm is not None and self.world.id not in llm.world_subset:
+        if self.arms.llm_tools is not None and self.manifest_version < _TOOL_ARM_SINCE:
             raise ManifestError(
-                f"arms.llm.world_subset: {self.world.id} is not in it, and this manifest is that "
-                f"world; a world outside the subset is run from a manifest with arms.llm null"
+                f"arms.llm_tools: a version-{self.manifest_version} manifest names no tool arm; "
+                f"the arm is written in a manifest of version {_TOOL_ARM_SINCE}"
             )
+        # A model arm runs the subset's worlds; a manifest is one world,
+        # and one naming a subset it is not in has an arm it will not run.
+        for name in ("llm", "llm_tools"):
+            arm = getattr(self.arms, name)
+            if arm is not None and self.world.id not in arm.world_subset:
+                raise ManifestError(
+                    f"arms.{name}.world_subset: {self.world.id} is not in it, and this manifest "
+                    f"is that world; a world outside the subset is run from a manifest with "
+                    f"arms.{name} null"
+                )
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "manifest_version": MANIFEST_VERSION,
+            "manifest_version": self.manifest_version,
             "world": self.world.to_dict(),
             "split": self.split.to_dict(),
             "indicator_lookback": self.indicator_lookback,
@@ -1170,7 +1286,9 @@ class Manifest:
             "penalty": self.penalty.to_dict(),
             "budget": self.budget.to_dict(),
             "search_space": self.search_space.to_dict(),
-            "arms": self.arms.to_dict(),
+            # A version before the tool arm did not write its key, and is
+            # written back as it was read (``READ_VERSIONS``' comment).
+            "arms": self.arms.to_dict(tool_arm=self.manifest_version >= _TOOL_ARM_SINCE),
             "scoring": self.scoring.to_dict(),
             "null_definition_version": self.null_definition_version,
             "artifact_sha256": self.artifact_sha256,
@@ -1178,7 +1296,7 @@ class Manifest:
 
     @classmethod
     def from_dict(cls, payload: object) -> Manifest:
-        _read.version(payload, "manifest_version", MANIFEST_VERSION)
+        version = _read.one_version_of(payload, "manifest_version", READ_VERSIONS)
         body = _read.exact(
             payload,
             (
@@ -1210,10 +1328,11 @@ class Manifest:
             penalty=penalty,
             budget=Budget.from_dict(body["budget"]),
             search_space=SearchSpace.from_dict(body["search_space"]),
-            arms=Arms.from_dict(body["arms"]),
+            arms=Arms.from_dict(body["arms"], tool_arm=version >= _TOOL_ARM_SINCE),
             scoring=Scoring.from_dict(body["scoring"]),
             null_definition_version=body["null_definition_version"],
             artifact_sha256=body["artifact_sha256"],
+            manifest_version=version,
         )
 
     def dumps(self) -> str:

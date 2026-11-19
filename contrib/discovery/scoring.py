@@ -82,6 +82,7 @@ from .bench import (
 from .manifest import Manifest, ManifestError, Planted, Recovery, SeedSet, WorldKind
 from .oracle import evaluate_unfiled, frame_for
 from .records import Reader, RecordError, dumps
+from .tooluse import Prices, SearchUse, usage_lines
 from .upstream import (
     Condition,
     Experiment,
@@ -896,6 +897,12 @@ class ReportRow:
     On a test seed everything read from the holdout is SEALED unless asked
     for (:meth:`describe`), so reading the test set is a deliberate act
     (plan §4.2) and not a side effect of looking at a half-scored root.
+
+    ``uses`` is what the row's searches spent looking things up
+    (:mod:`.tooluse`), one for each search of the tool arm, a failed seam's
+    included; every other arm's row has none. A round answered without
+    tools is in the row's rates like any other (decided 2026-11-19) and is
+    counted on the lines these give.
     """
 
     kind: WorldKind
@@ -905,8 +912,13 @@ class ReportRow:
     arm: Arm
     entries: tuple[ReportEntry, ...]
     failed: int
+    uses: tuple[SearchUse, ...] = ()
 
     def __post_init__(self) -> None:
+        uses = tuple(_read.sequence(self.uses, "row.uses"))
+        if any(not isinstance(use, SearchUse) for use in uses):
+            raise ScoreError("row.uses: expected SearchUses")
+        object.__setattr__(self, "uses", uses)
         object.__setattr__(self, "kind", _read.enum(WorldKind, self.kind, "row.kind"))
         _read.text(self.null_definition_version, "row.null_definition_version")
         object.__setattr__(self, "seed_set", _read.enum(SeedSet, self.seed_set, "row.seed_set"))
@@ -928,6 +940,17 @@ class ReportRow:
                 f"row.kind: a {self.kind.value} row holds scores of the other kind of world"
             )
         object.__setattr__(self, "entries", entries)
+        # One for each search the row tallies, finished or not, and only
+        # on the tool arm's row: the lines printed from them say "of N
+        # search(es)", and N is the row's.
+        due = len(entries) + self.failed if self.arm is Arm.LLM_TOOLS else 0
+        finished = sum(not use.seam_failed for use in uses)
+        if len(uses) != due or (due and finished != len(entries)):
+            raise ScoreError(
+                f"row.uses: {len(uses)} search(es)' tool use, {finished} of them finished, on a "
+                f"{self.arm.value} row of {len(entries)} finished search(es) and {self.failed} "
+                f"failed seam(s)"
+            )
 
     @property
     def searches(self) -> int:
@@ -982,14 +1005,16 @@ class ReportRow:
             f"none {none}"
         ]
 
-    def describe(self, *, unseal: bool = False) -> list[str]:
+    def describe(self, *, unseal: bool = False, prices: Prices | None = None) -> list[str]:
         """The row as lines: the headline first, then the diagnostics; see the class docstring on sealing.
 
-        The last line says what the row's searches actually spent, and is
-        no holdout figure, so a sealed row prints it too.
+        The lines after those say what the row's searches actually spent —
+        answers and rules, and for the tool arm its look-ups and tokens,
+        with an estimated cost when ``prices`` are given — and are no
+        holdout figures, so a sealed row prints them too.
         """
         effort = [f"  {effort_note([e.effort for e in self.entries])}"] if self.entries else []
-        return [*self._lines(unseal=unseal), *effort]
+        return [*self._lines(unseal=unseal), *effort, *usage_lines(self.uses, prices)]
 
     def _lines(self, *, unseal: bool) -> list[str]:
         head = row_head(
@@ -1061,8 +1086,13 @@ def report_table(run_dirs: Iterable[Path]) -> list[ReportRow]:
     """
     rows: dict[RowKey, list[ReportEntry]] = {}
     failed: Counter[RowKey] = Counter()
+    uses: dict[RowKey, list[SearchUse]] = {}
     for run_dir, searched in iter_searched(run_dirs):
         scores = read_scores(run_dir, searched)
+        if searched.tool_use is not None:
+            uses.setdefault(row_key(searched.manifest, Arm.LLM_TOOLS), []).extend(
+                searched.tool_use.searches
+            )
         oracle = searched.oracle
         by_arm = {(r.arm, r.replicate): r for r in searched.verdicts.results}
         for score in scores.results:
@@ -1087,5 +1117,8 @@ def report_table(run_dirs: Iterable[Path]) -> list[ReportRow]:
                 )
             )
     return [
-        ReportRow(*key, entries=tuple(rows[key]), failed=failed[key]) for key in in_row_order(rows)
+        ReportRow(
+            *key, entries=tuple(rows[key]), failed=failed[key], uses=tuple(uses.get(key, ()))
+        )
+        for key in in_row_order(rows)
     ]

@@ -82,6 +82,28 @@ class Reader:
             raise self.error(f"{key}: this build reads version {expected}, got {version!r}")
         return body
 
+    def one_version_of(self, payload: object, key: str, read: Sequence[int]) -> int:
+        """The version ``payload`` was written at, which has to be one of those this build ``read``s.
+
+        For a record whose older versions are still on disk and still read:
+        each is read as what it is — the caller reads the key set its
+        version has — and none is read as another. Asked before the key
+        set, and by ``type``, for :meth:`version`'s two reasons.
+        """
+        return self.version_among(self.mapping(payload, self.noun).get(key), key, read)
+
+    def version_among(self, version: object, key: str, read: Sequence[int]) -> int:
+        """``version`` as one of the versions this build ``read``s: the check on the value alone.
+
+        What :meth:`one_version_of` asks of a document, for a record that
+        also holds its version as a field and is built in code.
+        """
+        if type(version) is not int or version not in read:
+            raise self.error(
+                f"{key}: this build reads versions {', '.join(map(str, read))}, got {version!r}"
+            )
+        return version
+
     def loads(self, text: str) -> Any:
         """The text as JSON, a repeated key refused rather than resolved to the last one.
 

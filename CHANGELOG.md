@@ -10,6 +10,48 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **Discovery Lab: the tool-using model arm runs in the benchmark (tools
+  plan T4).** A manifest may now name `arms.llm_tools` — the model arm's
+  five fields plus `lookups`, `backtests` (the two per-round limits) and
+  `pack_version` — and `search` runs it after Random and Grid, each
+  replicate in its own store with a look-ups server started as a child on
+  the experiment that store holds. A manifest names one model arm at most
+  (`llm` or `llm_tools`): the two are compared across two landings of one
+  seed. **`manifest_version` is 4; version 3 is still read**, and is
+  written back key for key as version 3, so the run directories landed
+  before this change keep their names and their records still match (two
+  digests the previous build gave are pinned by the suite). What a tool
+  arm found is in `verdicts.json`, whose format is unchanged; what it
+  spent is a new record beside it, `tool_use.json`
+  (`contrib/discovery/tooluse.py`), built from each search's trace: per
+  round the calls made, the backtests that returned a score, the model's
+  mistakes and whether the round was answered without tools; per search
+  the model calls and the tokens the provider reported. `report` prints
+  two more lines under the tool arm's row from it, and an estimated cost
+  when given `--price-in` and `--price-out` (US dollars a million tokens;
+  prices are the operator's and are not in a manifest; no cache discount
+  is assumed). The token counts are a floor and say so: a retried call is
+  in them once and a reply that could not be read not at all. A round
+  answered without tools stays in the row's rates and its share is
+  printed beside them. **The two sides of the arm's seam end
+  differently**: the model not answering is a failed seam as for any arm
+  (recorded, counted apart, the run goes on); the look-ups' server not
+  answering — it did not start, it died, a look-up timed out or the store
+  could not answer it — stops `search` with exit 1, records nothing, and
+  keeps the staging directory (the trace and the server's stderr log in
+  it, and a note, `kept-for-inquiry.txt`, saying why) and the `arms/`
+  claim, so later commands on that directory are refused, pointing at the
+  note, until both are removed by hand. A finished search whose trace
+  cannot be read back stops the run the same way, the trace kept. A
+  `pack_version` that is not this build's, a missing `discovery-tools`
+  install, a model that cannot be built and a client that will not be
+  bound with this build's tools (it is bound once to find out) are
+  refused by `generate` and by `search` before anything is landed or
+  run. A version-3 world and a version-4 world are two rows of a table
+  even under otherwise equal conditions: the version is part of a
+  manifest's identity. No real model has used the tools yet; the first is
+  the December trial.
+
 - **Discovery Lab: a hypothesist that may look things up before it answers
   (tools plan T3).** `contrib/discovery/toolarm.py` is `ToolHypothesist`:
   inside one `propose()` the model is bound with the three training-window

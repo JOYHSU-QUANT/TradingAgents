@@ -11,6 +11,7 @@ import pytest
 
 from contrib.autoresearch.dsl import MAX_HOLD_BARS, MarketRegime, parse_spec
 from contrib.autoresearch.store import canonical_coin
+from contrib.discovery.landing import conditions_digest, manifest_digest
 from contrib.discovery.manifest import (
     MANIFEST_VERSION,
     POOL_SIZING,
@@ -21,6 +22,7 @@ from contrib.discovery.manifest import (
     WorldKind,
     opaque_world_id,
 )
+from contrib.discovery.records import Reader
 
 from .conftest import example_manifest
 
@@ -92,6 +94,150 @@ def _edited(**changes):
     return record
 
 
+# -- the tool arm (tools plan T4) -------------------------------------------------------------------
+
+TOOLS = {
+    "provider": "openai",
+    "model": "gpt",
+    "temperature": 0.0,
+    "replicates": 2,
+    "world_subset": ["SYN-EB3BC030"],
+    "lookups": 5,
+    "backtests": 2,
+    "pack_version": 1,
+}
+
+
+def _with_tools(**changes):
+    """The example manifest's record naming the tool arm in the model arm's place."""
+    return _edited(**{"arms.llm": None, "arms.llm_tools": {**TOOLS, **changes}})
+
+
+def test_a_manifest_may_name_the_tool_arm_in_the_model_arm_s_place():
+    manifest = Manifest.from_dict(_with_tools())
+    tools = manifest.arms.llm_tools
+    assert manifest.arms.llm is None
+    assert (tools.replicates, tools.lookups, tools.backtests, tools.pack_version) == (2, 5, 2, 1)
+    assert tools.world_subset == ("SYN-EB3BC030",)
+    assert Manifest.loads(manifest.dumps()) == manifest
+    assert manifest.to_dict()["arms"]["llm_tools"] == TOOLS
+    # The limits and the pack are conditions of the run: another of either
+    # is another directory, and another row of a table.
+    for changed in ({"lookups": 6}, {"backtests": 1}, {"pack_version": 2}):
+        other = Manifest.from_dict(_with_tools(**changed))
+        assert other.identity() != manifest.identity()
+        assert other.conditions() != manifest.conditions()
+    # No backtest at all is a limit the arm may have.
+    assert Manifest.from_dict(_with_tools(backtests=0)).arms.llm_tools.backtests == 0
+
+
+@pytest.mark.parametrize(
+    ("changes", "fragment"),
+    [
+        ({"lookups": 0}, "arms.llm_tools.lookups"),
+        ({"lookups": True}, "arms.llm_tools.lookups"),
+        ({"lookups": 5.0}, "arms.llm_tools.lookups"),
+        ({"backtests": -1}, "arms.llm_tools.backtests"),
+        ({"backtests": 6}, "arms.llm_tools.backtests: 6 of 5 call"),
+        ({"pack_version": 0}, "arms.llm_tools.pack_version"),
+        ({"pack_version": "1"}, "arms.llm_tools.pack_version"),
+        ({"replicates": 0}, "arms.llm_tools.replicates"),
+        ({"provider": ""}, "arms.llm_tools.provider"),
+        ({"temperature": -1}, "arms.llm_tools.temperature"),
+        ({"world_subset": ["BTC"]}, "arms.llm_tools.world_subset"),
+        (
+            {"world_subset": ["SYN-00000000"]},
+            "arms.llm_tools.world_subset: SYN-EB3BC030 is not in it",
+        ),
+        ({"extra": 1}, "arms.llm_tools: expected exactly the keys"),
+    ],
+)
+def test_a_tool_arm_the_benchmark_cannot_run_is_refused_naming_the_path(changes, fragment):
+    with pytest.raises(ManifestError, match=fragment):
+        Manifest.from_dict(_with_tools(**changes))
+
+
+def test_a_manifest_names_one_model_arm_at_most():
+    record = _with_tools()
+    record["arms"]["llm"] = example_manifest().to_dict()["arms"]["llm"]
+    with pytest.raises(ManifestError, match="names one model arm, llm or llm_tools"):
+        Manifest.from_dict(record)
+
+
+# -- the version before the tool arm, still read ----------------------------------------------------
+
+
+def _version_3(manifest: Manifest) -> dict:
+    """``manifest``'s record as a version-3 build wrote it: that version, and no ``llm_tools`` key."""
+    record = manifest.to_dict()
+    record["manifest_version"] = 3
+    del record["arms"]["llm_tools"]
+    return record
+
+
+def test_a_version_3_manifest_is_read_and_written_back_as_version_3():
+    current = example_manifest()
+    record = _version_3(current)
+    old = Manifest.from_dict(record)
+    assert (old.manifest_version, old.arms.llm_tools) == (3, None)
+    # Key for key what was read: no key of a later version is written in.
+    assert old.to_dict() == record
+    assert Manifest.loads(old.dumps()) == old and old.dumps() == Manifest.loads(old.dumps()).dumps()
+    # The version is the one difference from the same manifest written now,
+    # and it is a difference: the two name two directories.
+    assert old != current and replace(old, manifest_version=MANIFEST_VERSION) == current
+    assert old.identity() != current.identity()
+    # Each version is read by its own key set, neither by the other's.
+    with pytest.raises(ManifestError, match="arms: expected exactly the keys"):
+        Manifest.from_dict({**record, "arms": {**record["arms"], "llm_tools": None}})
+    # And a version with no tool arm cannot be made to name one.
+    with pytest.raises(ManifestError, match="a version-3 manifest names no tool arm"):
+        replace(Manifest.from_dict(_with_tools()), manifest_version=3)
+    for version in (2, 5, True, 4.0):
+        with pytest.raises(ManifestError, match="this build reads versions 3, 4, got"):
+            replace(current, manifest_version=version)
+
+
+def test_a_record_s_version_is_one_the_build_reads_and_is_read_by_type():
+    # The reader two-version records share: a version is an ``int`` among
+    # those read, and ``True`` and ``4.0`` — equal to 1 and to 4 — are not.
+    read = Reader(ManifestError, "manifest")
+    assert read.one_version_of({"v": 3, "later": 1}, "v", (3, 4)) == 3
+    assert read.one_version_of({"v": 4}, "v", (3, 4)) == 4
+    for payload, versions in (
+        ({"v": 4.0}, (3, 4)),
+        ({"v": True}, (1, 2)),
+        ({"v": "3"}, (3, 4)),
+        ({"v": 5}, (3, 4)),
+        ({}, (3, 4)),
+    ):
+        with pytest.raises(ManifestError, match="v: this build reads versions"):
+            read.one_version_of(payload, "v", versions)
+    with pytest.raises(ManifestError, match="manifest: expected an object"):
+        read.one_version_of([3], "v", (3, 4))
+
+
+@pytest.mark.parametrize(
+    ("kind", "identity", "conditions"),
+    [
+        (WorldKind.CONDITIONAL_V1, "c533fb4c", "3d22a4f5"),
+        (WorldKind.NULL_V1, "aeeace77", "b5b7801d"),
+    ],
+    ids=lambda value: getattr(value, "value", value),
+)
+def test_a_version_3_manifest_names_the_directory_it_named_before_the_tool_arm(
+    kind, identity, conditions
+):
+    # The two digests the build BEFORE the tool arm gave the example
+    # manifest (develop at f2039c6b, measured 2026-11-19, where version 3
+    # was the only one). A run directory is named by the first and its
+    # records carry it, and a table's rows are keyed by the second: the
+    # worlds searched under version 3 are read only while both stand. They
+    # move if the example manifest is edited, and for no other reason.
+    old = Manifest.from_dict(_version_3(example_manifest(kind=kind)))
+    assert (manifest_digest(old), conditions_digest(old)) == (identity, conditions)
+
+
 @pytest.mark.parametrize(
     ("changes", "fragment"),
     [
@@ -135,7 +281,9 @@ def _edited(**changes):
         ),
         ({"manifest_version": True}, "manifest_version"),
         ({"manifest_version": 1.0}, "manifest_version"),
-        ({"manifest_version": 4, "later": 1}, "this build reads version 3, got 4"),
+        ({"manifest_version": 5, "later": 1}, "this build reads versions 3, 4, got 5"),
+        ({"manifest_version": 2}, "this build reads versions 3, 4, got 2"),
+        ({"arms.llm_tools": _DROP}, "arms: expected exactly the keys"),
         ({"artifact_sha256": "abc"}, "artifact_sha256: a SHA-256 is 64"),
         ({"artifact_sha256": "A" * 64}, "artifact_sha256: a SHA-256 is 64"),
         ({"artifact_sha256": 7}, "artifact_sha256: a SHA-256 is 64"),

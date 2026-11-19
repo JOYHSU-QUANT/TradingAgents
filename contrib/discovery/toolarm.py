@@ -974,6 +974,15 @@ class ToolHypothesist:
         """What this search's model is told, as the trace's opening line has it."""
         return self._pack
 
+    @property
+    def tools_failed(self) -> str | None:
+        """What the look-ups' server failed with, once it has; ``None`` while it answers.
+
+        ``search()`` keeps a failed seam's sentence and not its side, so a
+        caller that treats the two sides differently asks here.
+        """
+        return self._tools_failed
+
     @classmethod
     @contextmanager
     def open(

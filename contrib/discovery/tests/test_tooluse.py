@@ -2,9 +2,11 @@
 
 The traces here are written by hand, a line at a time, in the shapes
 :mod:`contrib.discovery.toolarm` writes — its own table of keys is what
-each line is built from, so a key added there without a thought for the
-reader is a red test here. A trace written by a real search is read in
-``test_bench_tools.py``.
+each line is built from, so a key these tests set that the arm has since
+removed or renamed is a red test here. (A key the arm ADDS is not: it is
+filled in empty. What ties the reader to the arm's counting is the arm's
+own suite, which reads a real trace back, and ``test_bench_tools.py``,
+where a real search's is.)
 """
 
 from __future__ import annotations
@@ -373,7 +375,9 @@ def _record(**changes) -> dict:
         ({"searches": []}, "searches: at least one SearchUse"),
         ({"searches.1.replicate": 0}, "each replicate once"),
         ({"searches.0.rounds.0.lookups": 6}, "replicate 0, round 1: 6 call"),
-        ({"searches.0.rounds.0.backtests": 3}, "each is one of the calls"),
+        # A refusal inside a search or a round says which: thirty rounds a search, several searches.
+        ({"searches.0.rounds.0.backtests": 3}, r"searches\[0\]: rounds\[0\]: round: 3 backtest"),
+        ({"searches.1.model_calls": -1}, r"searches\[1\]: search.model_calls"),
         ({"searches.0.rounds.1.tool_errors": 2}, "0 backtest.s. and 2 tool error.s. among 1 call"),
         # Each within the calls, and too many together: no call is both.
         ({"searches.0.rounds.0.tool_errors": 2}, "1 backtest.s. and 2 tool error.s. among 2 call"),
@@ -400,6 +404,10 @@ def test_a_search_that_no_call_came_back_from_counts_no_tokens():
     for counted in ({"input_tokens": 5}, {"output_tokens": 5}):
         with pytest.raises(ToolUseError, match="tokens are counted, and no model call came back"):
             replace(dead, **counted)
+    # A search that answered no round ended on a failed seam: a budget is a
+    # round at least, so one said to have finished with none is no search.
+    with pytest.raises(ToolUseError, match="answered no round ended on a failed seam"):
+        replace(dead, seam_failed=False)
     # A round answered without tools took a second call, whatever it had
     # counted: the answer came in a message of its own.
     forced = RoundUse(0, 0, 0, True)
@@ -489,6 +497,9 @@ def test_no_cost_is_printed_where_no_call_reported_its_counts():
     line = usage_lines([blind], Prices(input=3, output=15))[1]
     assert line.endswith(f"{FLOOR}; no cost is estimated: no call reported both its counts")
     assert "US$" not in line
+    # Nor where no call came back at all, which is said as that.
+    dead = replace(blind, rounds=(), seam_failed=True, model_calls=0, unmetered_calls=0)
+    assert usage_lines([dead], Prices(3, 15))[1].endswith("; no cost is estimated: no call came back")
     # One call that did is enough for a figure, said to be on those counts.
     some = replace(blind, unmetered_calls=3, input_tokens=100, output_tokens=20)
     assert "estimated cost US$0.00 on those counts" in usage_lines([some], Prices(3, 15))[1]

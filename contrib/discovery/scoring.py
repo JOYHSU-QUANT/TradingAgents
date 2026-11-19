@@ -952,8 +952,9 @@ class ReportRow:
             )
         object.__setattr__(self, "entries", entries)
         # One for each search the row tallies, finished or not, and only
-        # on the tool arm's row: the lines printed from them say "of N
-        # search(es)", and N is the row's.
+        # on the tool arm's row: the lines printed from them count
+        # "finished search(es)" and "search(es)", and both counts are the
+        # row's.
         due = len(entries) + self.failed if self.arm is Arm.LLM_TOOLS else 0
         finished = sum(not use.seam_failed for use in uses)
         if len(uses) != due or (due and finished != len(entries)):

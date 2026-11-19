@@ -621,14 +621,19 @@ def _unread_evidence(run_dir: Path) -> str | None:
     landing alone, the oracle's preview and the look-ups by hand, do not
     ask).
     """
-    noted = _kept_on_purpose(run_dir)
-    if not noted:
+    on_purpose = _kept_on_purpose(run_dir)
+    if not on_purpose:
         return None
+    # What to remove is said of the staging alone: the search that kept it
+    # recorded nothing and left an empty claim, which goes with it — but a
+    # directory someone put such a staging into may hold a finished
+    # search's stores under ``arms/``, and is not told to delete them.
     return (
-        f"{run_dir} holds {noted}, kept on purpose by a search that stopped on its tools' side: "
-        f"read {INQUIRY_FILENAME} in it, where it holds one, and the tool arm's trace and its "
-        f"server's log under {ARMS_DIRNAME}/{Arm.LLM_TOOLS.value}/ there; the world is searched "
-        f"again once that staging and {ARMS_DIRNAME}/ are both removed by hand"
+        f"{run_dir} holds {on_purpose}, kept on purpose by a search that stopped on its tools' "
+        f"side: read {INQUIRY_FILENAME} in it, where it holds one, and the tool arm's trace and "
+        f"its server's log under {ARMS_DIRNAME}/{Arm.LLM_TOOLS.value}/ there. This directory is "
+        f"neither searched nor read while that staging is in it; once it has been looked into, "
+        f"remove it by hand, and with it the empty claim {ARMS_DIRNAME}/ that search left"
     )
 
 
@@ -647,10 +652,10 @@ def _unfinished(run_dir: Path, left: list[str]) -> str:
         f"{run_dir} holds {left + kept}: a search of this world is running or did not finish; "
         f"once no search is running, remove them by hand to search the world again"
     )
-    noted = _kept_on_purpose(run_dir)
-    if noted:
+    on_purpose = _kept_on_purpose(run_dir)
+    if on_purpose:
         sentence += (
-            f" — but {noted} was kept on purpose by a search that stopped on its tools' side: "
+            f" — but {on_purpose} was kept on purpose by a search that stopped on its tools' side: "
             f"read {INQUIRY_FILENAME} in it, where it holds one, and the tool arm's trace and "
             f"its server's log under {ARMS_DIRNAME}/{Arm.LLM_TOOLS.value}/ there, before removing "
             f"anything"
@@ -720,7 +725,7 @@ def _kept_for_inquiry(
     process caught (``cause``), its traceback goes under the sentence: the
     sentence is a line, and a defect is found by its stack. The exception's
     own stack and no chained one: what it was raised while handling may be
-    a provider's failure, whose sentence this package writes nowhere (it
+    a provider's failure, whose sentence this package writes to no file (it
     may quote what the provider was sent). A note that cannot be written
     is logged and not raised over — the refusal is the one to report, and
     the staging is kept either way, and marked by its name. (Unmarked only
@@ -1098,7 +1103,7 @@ def run_world(
                             tools_failed = hypothesist.tools_failed
                 except ToolServerError as exc:
                     # ``search()`` keeps a seam's failure to itself, so this
-                    # one came from the opening: the server did not start.
+                    # one came from the opening: the server did not come up.
                     raise _ToolsSideStop(f"the look-ups' server failed in {name} — {exc}") from exc
                 except ToolArmError as exc:
                     # What can be refused without a server was, before any

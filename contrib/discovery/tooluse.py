@@ -17,8 +17,9 @@ here. A run with no tool arm writes no such file.
 
 The record is a function of the traces alone, so it can be rebuilt from
 them; it carries the manifest's digest as the other records do, and the
-pack the searches were told (its version, its digest, the two limits), so
-a table that sets two runs side by side can say they read the same words.
+pack the searches were told (the model it was told to, its version, its
+digest, the two limits), so a table that sets two runs side by side can
+say they read the same words.
 
 **What is counted.** A round is one answer: the trace's ``answer`` line
 carries the round's counts as the arm kept them. A search that ended
@@ -46,11 +47,11 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from statistics import median
-from typing import Any, Final
+from typing import Any, Final, TypeVar
 
 from .records import Reader, RecordError, dumps
 from .toolarm import (
@@ -92,6 +93,15 @@ class ToolUseError(RecordError):
 
 
 _read = Reader(ToolUseError, "tool use")
+_T = TypeVar("_T")
+
+
+def _located(where: str, read: Callable[[object], _T], payload: object) -> _T:
+    """``read(payload)``, a refusal saying which of many it is: thirty rounds a search, several searches."""
+    try:
+        return read(payload)
+    except ToolUseError as exc:
+        raise ToolUseError(f"{where}: {exc}") from exc
 
 
 # -- the record ---------------------------------------------------------------------------------
@@ -166,6 +176,13 @@ class SearchUse:
             raise ToolUseError("search.rounds: expected RoundUses")
         object.__setattr__(self, "rounds", rounds)
         _read.flag(self.seam_failed, "search.seam_failed")
+        if not rounds and not self.seam_failed:
+            # A budget is at least one round, and a search ends short of
+            # it only on a failed seam (or an interrupt, which is no record).
+            raise ToolUseError(
+                "search: a search that answered no round ended on a failed seam, and this one "
+                "is said not to have"
+            )
         took = len(rounds) + sum(round_.lookups > 0 or round_.forced for round_ in rounds)
         _read.whole(self.model_calls, "search.model_calls", minimum=took)
         _read.whole(self.unmetered_calls, "search.unmetered_calls", minimum=0)
@@ -206,7 +223,8 @@ class SearchUse:
             "search",
         )
         rounds = tuple(
-            RoundUse.from_dict(item) for item in _read.sequence(body["rounds"], "search.rounds")
+            _located(f"rounds[{index}]", RoundUse.from_dict, item)
+            for index, item in enumerate(_read.sequence(body["rounds"], "search.rounds"))
         )
         return cls(**{**body, "rounds": rounds})
 
@@ -328,7 +346,8 @@ class ToolUse:
             manifest_digest=body["manifest_digest"],
             pack=TracePack.from_document(body),
             searches=tuple(
-                SearchUse.from_dict(item) for item in _read.sequence(body["searches"], "searches")
+                _located(f"searches[{index}]", SearchUse.from_dict, item)
+                for index, item in enumerate(_read.sequence(body["searches"], "searches"))
             ),
         )
 
@@ -361,7 +380,12 @@ def read_trace(path: Path) -> list[dict[str, Any]]:
         where = f"{path}:{number}"
         try:
             line = json.loads(written)
-        except json.JSONDecodeError as exc:
+        except (ValueError, RecursionError) as exc:
+            # Every way the text is not JSON this reader takes: malformed
+            # (the decoder's own error is a ``ValueError``), a number of
+            # more digits than an ``int`` is read from, nesting past the
+            # decoder's depth. Each is this trace's refusal, so that the
+            # bench keeps the trace it could not read.
             raise ToolUseError(f"{where}: not a line of JSON ({exc})") from exc
         kind = _read.enum(TraceKind, _read.mapping(line, where).get("kind"), where)
         _read.exact(line, TRACE_KEYS[kind], where)
@@ -475,12 +499,15 @@ def trace_use(lines: Sequence[Mapping[str, Any]], replicate: int) -> tuple[Trace
             tokens_in += reported_in or 0
             tokens_out += reported_out or 0
         elif kind is TraceKind.ANSWER:
-            answered = RoundUse(
-                lookups=line["lookups"],
-                backtests=line["backtests"],
-                tool_errors=line["tool_errors"],
-                forced=line["forced"],
-            )
+            try:
+                answered = RoundUse(
+                    lookups=line["lookups"],
+                    backtests=line["backtests"],
+                    tool_errors=line["tool_errors"],
+                    forced=line["forced"],
+                )
+            except ToolUseError as exc:
+                raise ToolUseError(f"round {number}: {exc}") from exc
             within.hold(number, answered)
             if (
                 answered.lookups > pack.limits.lookups
@@ -543,8 +570,9 @@ def usage_lines(
 
     The first line is over the rounds of the searches that finished, the
     ones the row's rate counts: how many calls a round made, how many
-    rounds asked for no tool, how many calls were the model's mistakes,
-    how many rounds were answered without tools — kept in the row's result
+    rounds asked for no tool, how many backtests returned a score, how
+    many calls were the model's mistakes, how many rounds were answered
+    without tools — kept in the row's result
     and printed beside it (decided 2026-11-19). A round answered without
     tools asked for one, so it is not among those that asked for none,
     whatever it had counted by then. The second line is over every search,
@@ -591,6 +619,9 @@ def usage_lines(
             f"tokens with no cache discount"
         )
     elif prices is not None:
-        # No call reported both counts: a figure here would read as a cost.
-        spent += "; no cost is estimated: no call reported both its counts"
+        # No call reported both counts — or none came back at all: a
+        # figure here would read as a cost.
+        spent += "; no cost is estimated: " + (
+            "no call reported both its counts" if model_calls else "no call came back"
+        )
     return [use, spent]

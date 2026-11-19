@@ -1,11 +1,12 @@
 """The strict readers the package's JSON records share: one spelling, parameterised by the refusal.
 
 The manifest (:mod:`.manifest`), the verdict snapshot (:mod:`.verdict`),
-``verdicts.json`` (:mod:`.bench`), ``oracle.json`` (:mod:`.oracle`) and
-``scores.json`` (:mod:`.scoring`) are frozen values written as JSON and read back EXACTLY — every key present
+``verdicts.json`` (:mod:`.bench`), ``oracle.json`` (:mod:`.oracle`),
+``scores.json`` (:mod:`.scoring`) and a tool arm's ``tool_use.json``
+(:mod:`.tooluse`) are frozen values written as JSON and read back EXACTLY — every key present
 and no other, every value checked, a refusal naming the path inside the
 document. The research package's own records read theirs the same way,
-each with a private copy of these helpers; this package has five records,
+each with a private copy of these helpers; this package has six records,
 so the helpers live here once, and each record module instantiates a
 :class:`Reader` with its own error class — every record's error but the
 manifest's sharing :class:`RecordError`.

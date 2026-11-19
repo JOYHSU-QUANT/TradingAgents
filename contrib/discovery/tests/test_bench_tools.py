@@ -14,8 +14,12 @@ search of the same world without the arm for (c), and (d) is the last
 group: a manifest that names no tool arm, a version-3 one included, leaves
 and reads what it always did.
 
-The two ways the TOOLS' side can fail — a server that dies in a round, one
-that never starts — each stop a run, and are run on fresh directories.
+The ways the TOOL ARM's side can fail each stop a run and keep what it
+left, and are run on fresh directories: a server that dies in a round or
+never starts, an arm that cannot be opened once its server is up, a trace
+that cannot be written, or read back, or is not its search's, and searches
+that do not make a record. The marking of what is kept — by name, by note,
+under an interrupt — is tested on its own.
 """
 
 from __future__ import annotations
@@ -392,7 +396,8 @@ def test_a_row_is_held_to_one_use_for_each_search_of_the_tool_arm(tooled):
     run, *_ = tooled
     rows = {row.arm: row for row in report_table([run])}
     tools, grid = rows[Arm.LLM_TOOLS], rows[Arm.GRID]
-    for wrong in (SPENT[:1], (SPENT[0], replace(SPENT[1], seam_failed=False))):
+    # One use too few; and two, of which two finished where the row has one finished search.
+    for wrong in (SPENT[:1], (SPENT[0], replace(SPENT[0], replicate=1))):
         with pytest.raises(ScoreError, match="row.uses"):
             replace(tools, uses=wrong)
     with pytest.raises(ScoreError, match="row.uses: 2 search"):
@@ -475,8 +480,10 @@ def _one_round_short(record: dict) -> None:
         ),
         (_one_round_short, r"llm_tools-0's trace answered 1 round\(s\) and its ledger holds 2"),
         (
+            # Refused as a record before it is held to anything: a search
+            # that answered no round did end on a failed seam.
             lambda r: r["searches"][1].update(seam_failed=False),
-            "llm_tools-1 ended seam_failed, and its trace ends on no failed seam",
+            r"searches\[1\]: search: a search that answered no round ended on a failed seam",
         ),
         (
             lambda r: r["searches"][0].update(seam_failed=True),
@@ -513,6 +520,27 @@ def test_a_tool_use_record_that_is_not_its_search_s_is_refused_by_every_reader(
     for reader in readers:
         with pytest.raises(BenchError, match=sentence):
             reader(copy)
+
+
+def test_a_search_s_use_is_held_to_how_its_verdict_says_it_ended(tooled):
+    # Both ways round, on the two things a verdict says of a search: how
+    # many answers its ledger holds, and whether it ended on a failed seam.
+    _run, verdicts, *_ = tooled
+    alive, dead = verdicts.results[2], verdicts.results[3]
+    bench._hold_use_to_result("tool_use.json", SPENT[0], alive)
+    bench._hold_use_to_result("tool_use.json", SPENT[1], dead)
+    with pytest.raises(BenchError, match="llm_tools-0 ended budget_spent, and its trace ends on a"):
+        bench._hold_use_to_result("tool_use.json", replace(SPENT[0], seam_failed=True), alive)
+    with pytest.raises(BenchError, match=r"answered 0 round\(s\) and its ledger holds 2 answer"):
+        bench._hold_use_to_result("tool_use.json", SPENT[1], alive)
+    # A search that answered and then lost its model, read as one that finished.
+    answered_then_failed = SimpleNamespace(
+        experiment_id="llm_tools-1", snapshot=SimpleNamespace(answers=2, ended=Ended.SEAM_FAILED)
+    )
+    with pytest.raises(
+        BenchError, match="llm_tools-1 ended seam_failed, and its trace ends on no failed seam"
+    ):
+        bench._hold_use_to_result("tool_use.json", SPENT[0], answered_then_failed)
 
 
 def test_the_record_is_due_exactly_where_the_manifest_names_the_arm(tooled, searched, tmp_path):
@@ -640,7 +668,8 @@ def _assert_cleared_only_with_the_evidence(run: Path, staging: Path) -> None:
     (run / ARMS_DIRNAME).rmdir()
     refusal = (
         rf"holds \['{staging.name}'\], kept on purpose by a search that stopped on its tools' "
-        rf"side: read {INQUIRY_FILENAME} in it.* once that staging and arms/ are both removed"
+        rf"side: read {INQUIRY_FILENAME} in it.* neither searched nor read while that staging "
+        rf"is in it; once it has been looked into, remove it by hand"
     )
     readers = (
         run_world,

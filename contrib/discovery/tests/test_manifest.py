@@ -205,6 +205,8 @@ def test_a_version_3_manifest_is_read_and_written_back_as_version_3():
     # and it is a difference: the two name two directories.
     assert old != current and replace(old, manifest_version=MANIFEST_VERSION) == current
     assert old.identity() != current.identity()
+    # ... and two rows of a table: the version is in the conditions too.
+    assert old.conditions() != current.conditions()
     # Each version is read by its own key set, neither by the other's.
     with pytest.raises(ManifestError, match="arms: expected exactly the keys"):
         Manifest.from_dict({**record, "arms": {**record["arms"], "llm_tools": None}})

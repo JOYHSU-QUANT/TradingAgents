@@ -1278,8 +1278,11 @@ class Manifest:
             )
         # A model arm runs the subset's worlds; a manifest is one world,
         # and one naming a subset it is not in has an arm it will not run.
-        for name in ("llm", "llm_tools"):
-            arm = getattr(self.arms, name)
+        model_arms: tuple[tuple[str, LlmArm | LlmToolsArm | None], ...] = (
+            ("llm", self.arms.llm),
+            ("llm_tools", self.arms.llm_tools),
+        )
+        for name, arm in model_arms:
             if arm is not None and self.world.id not in arm.world_subset:
                 raise ManifestError(
                     f"arms.{name}.world_subset: {self.world.id} is not in it, and this manifest "

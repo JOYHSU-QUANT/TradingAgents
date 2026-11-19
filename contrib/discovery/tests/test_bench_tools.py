@@ -669,7 +669,7 @@ def _assert_cleared_only_with_the_evidence(run: Path, staging: Path) -> None:
     refusal = (
         rf"holds \['{staging.name}'\], kept on purpose by a search that stopped on its tools' "
         rf"side: read {INQUIRY_FILENAME} in it.* neither searched nor read while that staging "
-        rf"is in it; once it has been looked into, remove it by hand"
+        rf"is in it; once the staging has been looked into, remove the staging by hand$"
     )
     readers = (
         run_world,

@@ -1372,10 +1372,13 @@ def test_what_the_arm_counts_is_what_its_trace_is_read_back_as(view, tmp_path):
     # The bench reads a finished search's trace back and re-derives each
     # round's counts from the round's own lines (``tooluse.trace_use``),
     # refusing an answer line that says otherwise. That is a second
-    # statement of this arm's counting rules, so one round here walks every
-    # way a call ends, and the reader has to come to the arm's own counts:
-    # were a rule to change on one side alone, every paid search would stop
-    # at its first trace.
+    # statement of this arm's counting rules, so one round here walks the
+    # ways a call ends that the two could count differently — a backtest
+    # that scores, a mistake, a call past either limit — and the reader has
+    # to come to the arm's own counts: were one of those rules to change on
+    # one side alone, a paid search that met it would stop at its trace. (A
+    # look-up that is no backtest and simply answers is not in this round;
+    # the reader's own suite, ``test_tooluse.py``, holds that one.)
     unsendable = ("feature_stats", ["close"])  # arguments that are no object
     script = [
         # A backtest that scores; one the parser refuses (a call and a

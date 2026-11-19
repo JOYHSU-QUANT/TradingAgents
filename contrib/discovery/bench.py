@@ -624,16 +624,17 @@ def _unread_evidence(run_dir: Path) -> str | None:
     on_purpose = _kept_on_purpose(run_dir)
     if not on_purpose:
         return None
-    # What to remove is said of the staging alone: the search that kept it
-    # recorded nothing and left an empty claim, which goes with it — but a
-    # directory someone put such a staging into may hold a finished
-    # search's stores under ``arms/``, and is not told to delete them.
+    # What to remove is said of the staging alone. Both callers ask only
+    # when the directory holds something other than a bare claim (an empty
+    # ``arms/`` beside the staging is :func:`_unfinished`'s to speak of), so
+    # here the claim is already gone, or ``arms/`` holds a finished search's
+    # stores: there is no claim to name, and nobody is told to delete stores.
     return (
         f"{run_dir} holds {on_purpose}, kept on purpose by a search that stopped on its tools' "
         f"side: read {INQUIRY_FILENAME} in it, where it holds one, and the tool arm's trace and "
         f"its server's log under {ARMS_DIRNAME}/{Arm.LLM_TOOLS.value}/ there. This directory is "
-        f"neither searched nor read while that staging is in it; once it has been looked into, "
-        f"remove it by hand, and with it the empty claim {ARMS_DIRNAME}/ that search left"
+        f"neither searched nor read while that staging is in it; once the staging has been "
+        f"looked into, remove the staging by hand"
     )
 
 

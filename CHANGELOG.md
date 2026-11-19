@@ -42,13 +42,15 @@ Breaking changes within the 0.x line are called out explicitly.
   already (exit 1), records nothing, and keeps the staging directory —
   renamed `.search.kept-…`, the name being the mark that it was kept on
   purpose, since a rename succeeds on a disk too full for a note — with
-  the server's stderr log in it, the trace where the arm was opened, and
-  a note, `kept-for-inquiry.txt`, saying why (with the traceback where
-  the failure was an exception this process caught), and the `arms/`
-  claim.
+  what the arm's search got to write in it (its server's stderr log, its
+  trace once the arm was open) and a note, `kept-for-inquiry.txt`, saying
+  why (with the traceback where the failure was an exception this process
+  caught), and the `arms/` claim.
   `search`, `calibrate`, `score` and `report` then refuse that directory,
   pointing at the note, until the staging and the claim are both removed
-  by hand — the staging alone is enough to refuse it. A finished search
+  by hand — the staging alone, by its name, is enough to refuse it (the
+  oracle's preview and `tools` read the landing only and do not ask). A
+  finished search
   whose trace cannot be read back, or is not the search its ledger and
   manifest describe, stops the run the same way, the trace kept; so does
   an arm that cannot be opened once its server is up, and a trace that

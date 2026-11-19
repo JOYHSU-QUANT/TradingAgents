@@ -49,10 +49,11 @@ answered — stops the run (:class:`KeptForInquiry`): nothing is recorded,
 the staging is kept with the trace and the server's log in it — renamed
 (``.search.kept-…``), the name being the mark every later reader goes by,
 and holding a note saying why (``kept-for-inquiry.txt``) — and the claim
-stays. The directory is then refused to every reader of it, pointing at
-the note, until someone has looked and removed both; the staging alone is
-enough to refuse it, so the claim removed and the evidence left is not a
-world to search past. The rule for a provider that went away would have
+stays. The directory is then refused to the next search and to every
+reader of a search's records, pointing at the note, until someone has
+looked and removed both; the staging alone, by its name, is enough to
+refuse it, so the claim removed and the evidence left is not a world to
+search past. The rule for a provider that went away would have
 the world re-run until its model happened not to ask what the server could
 not answer. What else is a defect on this side stops the run the same way,
 because what the search left is the evidence of it: a finished search
@@ -575,8 +576,11 @@ def _mark_kept(staging: Path) -> Path:
     kept = staging.with_name(_KEPT_PREFIX + staging.name.removeprefix(_STAGING_PREFIX))
     try:
         staging.rename(kept)
-    except OSError:
-        logger.warning("could not rename the kept staging %s to %s", staging, kept, exc_info=True)
+    except OSError as exc:
+        # The failure's own sentence and no stack: what this is raised
+        # while handling may be a provider's failure, and a logged stack
+        # would print that one's sentence with it.
+        logger.warning("could not rename the kept staging %s to %s: %s", staging, kept, exc)
         return staging
     return kept
 
@@ -612,15 +616,19 @@ def _unread_evidence(run_dir: Path) -> str | None:
     The claim beside such a staging is what makes the next search stop;
     with the claim removed and the staging left, the directory would read
     as never searched, and the evidence would be searched past after all.
-    So the staging itself refuses the directory, to every reader.
+    So the staging itself refuses the directory, to every reader of a
+    search's records and to the next search (the two verbs that read the
+    landing alone, the oracle's preview and the look-ups by hand, do not
+    ask).
     """
     noted = _kept_on_purpose(run_dir)
     if not noted:
         return None
     return (
         f"{run_dir} holds {noted}, kept on purpose by a search that stopped on its tools' side: "
-        f"read {INQUIRY_FILENAME} in it, and the trace and the server's log it names; the world "
-        f"is searched again once that staging and {ARMS_DIRNAME}/ are both removed by hand"
+        f"read {INQUIRY_FILENAME} in it, where it holds one, and the tool arm's trace and its "
+        f"server's log under {ARMS_DIRNAME}/{Arm.LLM_TOOLS.value}/ there; the world is searched "
+        f"again once that staging and {ARMS_DIRNAME}/ are both removed by hand"
     )
 
 
@@ -630,8 +638,9 @@ def _unfinished(run_dir: Path, left: list[str]) -> str:
     The staging is named with the claim: a run killed outright leaves one
     holding whole store copies, which removing ``arms/`` alone would leave
     behind. One kept ON PURPOSE — by a search that stopped on its tools'
-    side — holds a note saying so (:func:`_kept_for_inquiry`), and is said
-    to: "remove them by hand" alone would have the evidence removed unread.
+    side — is marked as that (:func:`_kept_on_purpose`: by its name, or by
+    the note in it), and is said to be: "remove them by hand" alone would
+    have the evidence removed unread.
     """
     kept = _kept_staging(run_dir)
     sentence = (
@@ -642,8 +651,9 @@ def _unfinished(run_dir: Path, left: list[str]) -> str:
     if noted:
         sentence += (
             f" — but {noted} was kept on purpose by a search that stopped on its tools' side: "
-            f"read {INQUIRY_FILENAME} in it, and the trace and the server's log it names, before "
-            f"removing anything"
+            f"read {INQUIRY_FILENAME} in it, where it holds one, and the tool arm's trace and "
+            f"its server's log under {ARMS_DIRNAME}/{Arm.LLM_TOOLS.value}/ there, before removing "
+            f"anything"
         )
     return sentence
 
@@ -713,7 +723,9 @@ def _kept_for_inquiry(
     a provider's failure, whose sentence this package writes nowhere (it
     may quote what the provider was sent). A note that cannot be written
     is logged and not raised over — the refusal is the one to report, and
-    the staging is kept, and marked, either way.
+    the staging is kept either way, and marked by its name. (Unmarked only
+    where the rename and the note BOTH failed: kept still, and read by the
+    next command as any staging a run left behind.)
     """
     staging = _mark_kept(staging)
     sentence = (
@@ -729,8 +741,8 @@ def _kept_for_inquiry(
         note += "\n" + "".join(traceback.format_exception(cause, chain=False))
     try:
         (staging / INQUIRY_FILENAME).write_text(note, encoding="utf-8", errors="replace")
-    except (OSError, ValueError):
-        logger.warning("could not write %s into %s", INQUIRY_FILENAME, staging, exc_info=True)
+    except (OSError, ValueError) as exc:
+        logger.warning("could not write %s into %s: %s", INQUIRY_FILENAME, staging, exc)
     return KeptForInquiry(sentence)
 
 
@@ -1237,9 +1249,10 @@ def run_world(
         # claim did not receive is kept — a failed rename and an interrupt
         # alike; emptied by the moves, it goes. Before it is in, the
         # half-made run goes and the claim is given back — unless the run
-        # stopped on the look-ups' server, when both stay as they are: the
-        # staging is the evidence, and the claim is what makes the next
-        # search name it instead of running past it.
+        # stopped on its tool arm's side (``inquiry``), when neither is
+        # touched here: the staging — by now renamed as kept — is the
+        # evidence, and the claim is what makes the next search name it
+        # instead of running past it.
         records_in = (run_dir / ORACLE_FILENAME).exists()
         if not inquiry:
             if not (records_in and _holds_stores(staging)):

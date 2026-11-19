@@ -77,7 +77,8 @@ already; ``130`` interrupted, with a search's staging removed — unless its
 records were already in, when the staging holding the stores ``arms/`` did
 not receive is kept and the next ``search`` names it, or the interrupt
 landed while a search that had stopped on its tool arm's side was marking
-what it keeps, when that is kept as for ``3``.
+what it keeps, when the staging and the claim are kept (and marked as for
+``3``, if the interrupt came after the staging was renamed).
 """
 
 from __future__ import annotations

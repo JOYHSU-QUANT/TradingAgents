@@ -607,6 +607,9 @@ def _kept(run: Path) -> Path:
 def _assert_stopped_for_inquiry(run: Path) -> Path:
     """Nothing recorded, the claim and the staging kept, and the next search and the tables refused."""
     staging = _kept(run)
+    # Marked by its name, which is what every later reader goes by: a real
+    # stop that left it under a staging's ordinary name fell back to the note.
+    assert staging.name.startswith(".search.kept-")
     assert _listing(run) == sorted([*LANDED, ARMS_DIRNAME, staging.name])
     assert _listing(run / ARMS_DIRNAME) == []
     # The arms that finished are kept with the one that did not.
@@ -747,6 +750,10 @@ def test_a_trace_that_cannot_be_read_back_stops_the_run_and_keeps_the_trace(
     assert "what llm_tools-0 spent could not be read back from its trace" in said
     assert "the trace ends inside round 2" in said
     staging = _assert_stopped_for_inquiry(run)
+    # Raised from the reader's own refusal, whose stack is under the sentence in the note.
+    assert isinstance(stopped.value.__cause__, ToolUseError)
+    note = (staging / INQUIRY_FILENAME).read_text(encoding="utf-8")
+    assert "Traceback (most recent call last)" in note and "ToolUseError" in note
     kept = staging / ARMS_DIRNAME / Arm.LLM_TOOLS.value
     # The whole of the search that could not be summarised: both rounds answered.
     lines = read_trace(kept / "replicate-0.trace.jsonl")
@@ -890,9 +897,12 @@ def test_a_trace_that_cannot_be_written_mid_search_stops_the_run_and_keeps_what_
     monkeypatch.setattr(toolarm._Trace, "write", full)
     with pytest.raises(
         KeptForInquiry, match="llm_tools-0 could not open or write its trace or its server's log"
-    ):
+    ) as stopped:
         run_world(run)
     staging = _assert_stopped_for_inquiry(run)
+    assert isinstance(stopped.value.__cause__, OSError)
+    note = (staging / INQUIRY_FILENAME).read_text(encoding="utf-8")
+    assert "Traceback (most recent call last)" in note and "No space left on device" in note
     # The pack and the first round, which was answered and paid for.
     kept = staging / ARMS_DIRNAME / Arm.LLM_TOOLS.value / "replicate-0.trace.jsonl"
     assert [json.loads(line)["kind"] for line in kept.read_text("utf-8").splitlines()] == written
@@ -994,23 +1004,58 @@ def test_only_a_staging_marked_as_kept_is_said_to_be_kept_on_purpose(tmp_path):
     assert "kept on purpose" in bench._unfinished(tmp_path, [ARMS_DIRNAME])
 
 
+@pytest.mark.parametrize(
+    ("refusing", "refusal"),
+    [("ToolUse", ToolUseError), ("_hold_use_to_manifest", BenchError)],
+    ids=["the-record-itself", "the-record-held-to-the-manifest"],
+)
 def test_searches_that_do_not_make_a_record_stop_the_run_with_their_traces_kept(
-    fresh_tools_run, monkeypatch
+    fresh_tools_run, monkeypatch, refusing, refusal
 ):
     # Each search was held as its trace was read; the record of them all is
-    # held once more as it is built, and a refusal there is the same
-    # defect found later — not a run to discard.
-    def refuse(where, use, tools):
-        raise BenchError(f"{where} holds the tool arm's replicate(s) [0, 0]")
+    # built, and held once more, at the end, and a refusal at either is the
+    # same defect found later — not a run to discard.
+    def refuse(*args, **kwargs):
+        raise refusal("searches: each replicate once, got [0, 0]")
 
-    monkeypatch.setattr(bench, "_hold_use_to_manifest", refuse)
+    monkeypatch.setattr(bench, refusing, refuse)
     scripted(monkeypatch, [says("not a rule"), says("not a rule")])
     with pytest.raises(
-        KeptForInquiry, match="what the tool arm's searches spent does not make a record — "
-    ):
+        KeptForInquiry,
+        match="what the tool arm's searches spent does not make a record — searches: each",
+    ) as stopped:
         run_world(fresh_tools_run)
+    assert isinstance(stopped.value.__cause__, refusal)
     staging = _assert_stopped_for_inquiry(fresh_tools_run)
     assert (staging / ARMS_DIRNAME / "llm_tools" / "replicate-0.trace.jsonl").is_file()
+
+
+def test_an_interrupt_while_the_evidence_is_being_marked_still_keeps_it(
+    fresh_tools_run, monkeypatch
+):
+    # The run is marked to be kept BEFORE anything is done to say so, so an
+    # interrupt that lands while the staging is renamed or its note written
+    # leaves the staging and the claim, and not a directory as landed.
+    run = fresh_tools_run
+    real = bench.ServerParams.for_experiment
+    monkeypatch.setattr(
+        bench.ServerParams,
+        "for_experiment",
+        classmethod(lambda cls, db, experiment: real(db.with_name("missing.sqlite"), experiment)),
+    )
+    scripted(monkeypatch, [says(ANSWER)])
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(bench, "_kept_for_inquiry", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        run_world(run)
+    (kept,) = bench._kept_staging(run)
+    assert _listing(run) == sorted([*LANDED, ARMS_DIRNAME, kept])
+    assert _listing(run / kept / ARMS_DIRNAME) == ["grid", "llm_tools", "random"]
+    with pytest.raises(BenchError, match="a search of this world is running or did not finish"):
+        run_world(run)
 
 
 def test_the_oracle_s_record_goes_in_last_whatever_else_a_search_writes(

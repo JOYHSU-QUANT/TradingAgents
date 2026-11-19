@@ -466,7 +466,7 @@ def _refused(
     *,
     where: str = "the answer",
 ) -> Round:
-    """File a refusal in a form the store can hold, and say so when that changed the text.
+    """File a refusal in a form the store can hold, and say so when that changed the answer.
 
     The reason stays whatever refused the answer - the parser's sentence, the
     length - with the surrogates counted after it, so a model that wrote prose

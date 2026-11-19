@@ -17,6 +17,7 @@ the other end would have made that decision untestable.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -201,3 +202,17 @@ def store():
     """A fresh in-memory store, migrated."""
     with ResearchStore() as opened:
         yield opened
+
+
+@pytest.fixture
+def stock_digit_limit():
+    """The interpreter's default limit on converting a whole number, for this test only.
+
+    4,300 digits unless the process was started otherwise
+    (``PYTHONINTMAXSTRDIGITS``, ``-X int_max_str_digits``), and a test about a
+    number being past the limit has to know where the limit is.
+    """
+    before = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    yield
+    sys.set_int_max_str_digits(before)

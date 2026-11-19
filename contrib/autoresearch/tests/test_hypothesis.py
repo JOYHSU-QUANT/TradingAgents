@@ -479,6 +479,7 @@ def test_an_answer_a_parser_accepted_with_a_surrogate_in_it_is_still_not_written
     assert "1 surrogate character(s) in the answer" in stored.refusal
 
 
+@pytest.mark.usefixtures("stock_digit_limit")
 def test_an_answer_holding_a_number_too_long_to_convert_costs_a_round_too(ledger, experiment):
     """The other answer that ended a run: ``json`` raised a plain ``ValueError`` for it.
 

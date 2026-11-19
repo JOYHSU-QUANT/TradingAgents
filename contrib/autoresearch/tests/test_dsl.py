@@ -904,6 +904,7 @@ def test_a_spec_nested_past_what_json_can_read_is_refused_rather_than_raised_on(
         load_spec("[" * 20000 + "]" * 20000)
 
 
+@pytest.mark.usefixtures("stock_digit_limit")
 @pytest.mark.parametrize(
     "text",
     [

@@ -21,9 +21,9 @@ replay 拿它把同一題重問別的模型（考古題）；**sidecar**＝寫�
 | [`replay`](./replay/README.md) | 事後評估：已記錄決策的成績單、同一題重問別的模型（考古題）、配對比較、帶模擬帳戶的回測（含從 `.reports.json` 重跑下半段 graph）與 §5 門檻 | 讀 `paper_trading.db`＋payload＋`autoresearch.sqlite` → 報表、`replay.sqlite` | README 內 |
 | [`carry`](./carry/README.md) | funding carry 的協調者：讀 funding 歷史、套一條規則、寫一份交接檔說兩條腿該持有什麼；`report` 唯讀對帳 | `autoresearch.sqlite`（`signal` 預設先經 autoresearch 的回補介面補 funding，`--no-fetch` 才純讀；可選讀兩腿 store 的 equity）→ 交接檔 JSON；`report` 唯讀兩顆交易帳本，`--json` | [RUNBOOK](./carry/RUNBOOK.md) |
 | [`dashboard`](./dashboard/README.md) | 狀態匯出、告警、唯讀網頁 | 三條線的 `--json` CLI 輸出＋主機狀態 → status 目錄的 JSON、email、網頁 | README 內 |
-| [`discovery`](./discovery/README.md) | 研究迴圈的 benchmark：造有標準答案的合成世界，用 autoresearch 自己的 port 與 `search()` 考它找不找得到埋的規律、會不會在雜訊裡硬掰。離線、不下單、不碰別的套件擁有的任何 store；**骨架（PR 1）、世界生成器＋`generate`（PR 2）、Random／Grid 臂＋oracle 判定＋`search`／`oracle`／`calibrate`（PR 3）、評分器＋`score`／`report`（PR 4）、LLM 臂（PR 5）、工具組 T1／T2（訓練區間的三個查詢、包住它們的 MCP stdio 伺服器與 `tools` 指令；MCP SDK 是選用安裝 `discovery-tools`）已落地** | 合成世界（自造，`generate` 落成 `world.sqlite`）→ 每臂一顆自己的 sqlite（`arms/<arm>/replicate-<k>.sqlite`）、`manifest.json`／`verdicts.json`／`oracle.json`／`scores.json` | README 內 |
+| [`discovery`](./discovery/README.md) | 研究迴圈的 benchmark：造有標準答案的合成世界，用 autoresearch 自己的 port 與 `search()` 考它找不找得到埋的規律、會不會在雜訊裡硬掰。離線、不下單、不碰別的套件擁有的任何 store；**骨架（PR 1）、世界生成器＋`generate`（PR 2）、Random／Grid 臂＋oracle 判定＋`search`／`oracle`／`calibrate`（PR 3）、評分器＋`score`／`report`（PR 4）、LLM 臂（PR 5）、工具組 T1–T3（訓練區間的三個查詢、包住它們的 MCP stdio 伺服器與 `tools` 指令、模型在提案前可以先查詢的提問器；MCP SDK 是選用安裝 `discovery-tools`）已落地；提問器還沒接進 `bench.py`（benchmark 的指令還不會用到它）** | 合成世界（自造，`generate` 落成 `world.sqlite`）→ 每臂一顆自己的 sqlite（`arms/<arm>/replicate-<k>.sqlite`）、`manifest.json`／`verdicts.json`／`oracle.json`／`scores.json` | README 內 |
 | [`core`](./core/) | 共用地板：instants、decimal context、digest、enum guard、atomic io。只依賴標準庫（有測試）、不含策略（慣例） | | |
-| [`tests/`](./tests/) | 跨套件的架構限制：套件圖 `test_package_graph.py` | | |
+| [`tests/`](./tests/) | 跨套件的架構限制：套件圖 `test_package_graph.py`；`discovery` 的提問器與 langchain 之間的訊息形狀 `test_toolarm_wire.py` | | |
 
 ## 2. 系統資料流
 
@@ -100,7 +100,7 @@ graph TD
 
 - `core` 是地板：只依賴標準庫（`test_package_graph.py` 另外掃它），它不 import 任何人。`uniswap_v3` 今天實際**沒有** import `core`：它自己的 `tests/test_isolation.py` 擋掉所有 contrib import，`core` 也在內，`ALLOWED` 那條邊只是預留。
 - `hyperliquid_perp` 與 `uniswap_v3` 彼此完全隔離；`dashboard` 只 import `core`，三條線都透過 CLI 讀。
-- `autoresearch` 借 perp 的詞彙（regime、funding z-score、Candle）；`replay` 與 `carry` 同時借兩個鄰居（perp 與 autoresearch）；`discovery` 只借 `autoresearch`（port、`search()`、ledger 的閘門、評估器）與 `core`，它的 `tests/test_upstream.py` 連 tests 都擋住其他套件、`tradingagents` 與 venue SDK。有借鄰居的套件把借的東西（含 `core`）一律列在自己的 `upstream.py`，其他模組只從那裡 import；沒借鄰居的 perp 與 dashboard 直接 import `core`，沒有這層漏斗；`uniswap_v3` 連 `core` 都不 import（見上）。
+- `autoresearch` 借 perp 的詞彙（regime、funding z-score、Candle）；`replay` 與 `carry` 同時借兩個鄰居（perp 與 autoresearch）；`discovery` 只借 `autoresearch`（port、`search()`、ledger 的閘門、評估器）與 `core`，它的 `tests/test_upstream.py` 連 tests 都擋住其他套件、`tradingagents`、langchain 與 venue SDK（所以「`discovery` 的提問器組出來的訊息，langchain 吃不吃」這一件事驗在不屬於任何套件的 `contrib/tests/test_toolarm_wire.py`）。有借鄰居的套件把借的東西（含 `core`）一律列在自己的 `upstream.py`，其他模組只從那裡 import；沒借鄰居的 perp 與 dashboard 直接 import `core`，沒有這層漏斗；`uniswap_v3` 連 `core` 都不 import（見上）。
 - 邊是單向的：`ALLOWED` 本身有無環測試，`replay`／`carry`／`discovery` 各自的 `tests/test_upstream.py` 再守住「被借的套件不得 import 借它的套件」。
 
 ## 4. 主要 loop

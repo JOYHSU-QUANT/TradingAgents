@@ -40,7 +40,9 @@ SHA-256）、`oracle.json` v2（blockers 改 enum）。**PR 5（LLM 臂，已落
 **工具組 T1（訓練區間查詢的純函式，已落地）**：`research_tools.py`＝會用工具的模型臂在提案前可以做的三種查詢。這一步只有純函式與它們的
 JSON 層。定義見「訓練區間查詢（工具組 T1）」一節。
 **工具組 T2（MCP 伺服器，已落地）**：`tools_server.py`＝把那三個查詢包成一個走 MCP 的 stdio 伺服器，另加 `tools` 指令讓人手動試玩。
-會用工具的 hypothesist、接進 `bench.py` 是之後的 T3–T4，還沒做。定義見「MCP 伺服器（工具組 T2）」一節。
+定義見「MCP 伺服器（工具組 T2）」一節。
+**工具組 T3（會用工具的提問器，已落地）**：`toolarm.py`＝`ToolHypothesist`，模型在回答規則之前可以先問那個伺服器；每輪上限、trace
+都在這裡。還沒接進 `bench.py`（那是 T4），所以目前沒有指令會用到它。定義見「會用工具的提問器（工具組 T3）」一節。
 
 已經有的東西：
 
@@ -84,6 +86,10 @@ JSON 層。定義見「訓練區間查詢（工具組 T1）」一節。
 - [`tools_server.py`](./tools_server.py)：那三個查詢的 MCP 伺服器。`ServerParams`（啟動時收的五樣東西與它們的命令列寫法）、
   `load_view`／`warm`（讀到訓練區間結尾、先把每個指標算一次）、`tool_specs()`（模型看到的說明與 schema）、`build_server`／`serve`／`main`。
   只 import `research_tools` 與 `upstream`；MCP SDK 是選用安裝，只在建伺服器時才 import。定義見「MCP 伺服器（工具組 T2）」一節。
+- [`toolarm.py`](./toolarm.py)：會用工具的提問器。`ToolHypothesist.open(...)`（握著伺服器子程序、trace 檔與 MCP 客戶端的事件迴圈，
+  為期一組搜尋）、`Limits`（每輪上限）、`Pack`／`PACK_VERSION`（模型多讀到的整包文字與它的版本）、`addendum()`（接在 system prompt
+  後面的那段說明）、`read_reply`／`tool_message`（不 import langchain 的讀與寫）。只 import `research_tools`／`tools_server`／`upstream`。
+  定義見「會用工具的提問器（工具組 T3）」一節。
 - [`cli.py`](./cli.py)：`python -m contrib.discovery generate --manifest <path> [--root <dir>]`、`oracle --run <dir>`、
   `search --run <dir>`、`calibrate [--root <dir>]`、`score --run <dir>`、`report [--root <dir>] [--unseal]`、`tools --run <dir>`。
 
@@ -268,8 +274,8 @@ API key 由 provider 從環境變數讀），用同一個 `search()`、同一份
 ## 訓練區間查詢（工具組 T1）
 
 2026-11-10 的模型臂跟著 validation 分數爬坡，連純雜訊世界都爬得上去。工具組要問的是：讓模型在提案前先查**訓練區間**的資料，找回率會不會上升、
-雜訊世界的誤判會不會下降。T1 只做查詢本身，三個純函式。MCP 伺服器（T2，見下一節）包住它們；會用工具的 hypothesist（T3）會經由伺服器呼叫它們，
-不用 LLM 的對照組（T5）會直接呼叫同一組函式，這兩步還沒做。
+雜訊世界的誤判會不會下降。T1 只做查詢本身，三個純函式。MCP 伺服器（T2，見下一節）包住它們；會用工具的 hypothesist（T3，見「會用工具的提問器」一節）經由伺服器呼叫它們；
+不用 LLM 的對照組（T5）會直接呼叫同一組函式，那一步還沒做。
 
 **界線。** 三個查詢都只吃一個 `TrainView`。`TrainView.load(store, coin=, split=, costs=, indicator_lookback=)` 用
 `until_ms = 訓練區間結尾 − 1` 讀 store，所以 validation 與 holdout 的 bar 不是被濾掉，是根本沒有讀進來。view 收的是 experiment 的**整個 split**，
@@ -314,7 +320,7 @@ API key 由 provider 從環境變數讀），用同一個 `search()`、同一份
 
 ## MCP 伺服器（工具組 T2）
 
-T1 的三個查詢，包成一個走 MCP 的伺服器（`tools_server.py`）。會用工具的模型臂（T3，還沒做）不直接呼叫函式，而是問這個伺服器。
+T1 的三個查詢，包成一個走 MCP 的伺服器（`tools_server.py`）。會用工具的提問器（T3，`toolarm.py`）不直接呼叫函式，而是問這個伺服器。
 伺服器是另一個程序，用自己的 stdin／stdout 講 MCP。
 
 **為什麼是另一個程序。** 跑搜尋的那個程序手上有讀到 validation 結尾的資料。伺服器程序啟動時只收五樣東西（`ServerParams`）：資料檔路徑、
@@ -370,7 +376,8 @@ coin、experiment 的整個 split、成本、indicator lookback。它不讀 mani
 - t 值那一句（2026-11-16 拍板）：只說它是對 0 的單樣本 t 值、沒有針對查了幾個條件做校正、要連同 `samples` 與 `baseline_mean_return`
   一起看。不給 p 值，也不給「多大才算數」的門檻。
 - 說明與 schema 有版本號 `TOOLS_VERSION`（目前 1），伺服器把它當成自己的版本回報。測試釘住整份內容的 SHA-256：改了字或詞彙表變了而沒有升
-  版本號，測試就紅。真模型試跑後凍結（計畫 §5）。這個版本號只管伺服器說的話；提問器（T3）接在 prompt 後面的文字與每輪上限，由它自己記版本。
+  版本號，測試就紅。真模型試跑後凍結（計畫 §5）。這個版本號只管伺服器說的話；提問器（T3）接在 prompt 後面的文字由它的 `PACK_VERSION`
+  管，而且那個版本的雜湊把伺服器這邊的字也算進去（見下一節）。
 - `tool_specs()` 每次都重新建一份：呼叫方改了手上的 schema 或範例，不會影響下一次列出來的內容。
 
 **schema 是告示，不擋輸入（2026-11-16 拍板）。** 用的是 SDK 的低階 `Server`：它把 schema 列給客戶端看，但不替我們驗參數。參數原樣交給 T1 的
@@ -389,13 +396,175 @@ coin、experiment 的整個 split、成本、indicator lookback。它不讀 mani
 第四列由伺服器自己接，不交給 SDK：實測 mcp 2.3.0，客戶端如果用舊的握手方式（`initialize`）連線，SDK 會把例外的原文直接回給它，而原文可能帶日期。
 測試用新舊兩種握手各跑一次。
 
-之後的提問器（T3）要把協定層錯誤當成接縫失敗，不能當成工具結果交給模型。伺服器啟動失敗時（資料檔不存在、split 對不上這顆 store），原因印在子程序的
+提問器（T3）把協定層錯誤當成接縫失敗，不當成工具結果交給模型。伺服器啟動失敗時（資料檔不存在、split 對不上這顆 store），原因印在子程序的
 stderr，客戶端收到的是「連線已關閉」的錯誤，不會卡住。開始服務之後才出的錯（例如客戶端不再讀取）不是「拒絕啟動」，照原樣丟出、不包裝成 exit 1 的句子。
-接伺服器的一方要持續讀走子程序的 stderr，否則子程序寫滿管線後會卡住。
+接伺服器的一方要持續讀走子程序的 stderr，否則子程序寫滿管線後會卡住；提問器把它導到一個檔案（`server_log`）。
 
 **安裝。** `pip install -e ".[discovery-tools]"`（`mcp>=2.3,<3`）。沒裝的環境照樣能跑這個套件的其他指令（`tools_server.py` 只在建伺服器時才
 import SDK）；paper 伺服器與 dashboard 的環境都不裝。CI 另開一個 job（`discovery tests`）裝這個選用安裝並跑這個套件的整套測試：SDK 需要的
 sse-starlette 要求比 dashboard 釘的版本更新的 starlette，兩者放不進同一個環境。測試在檔頭直接 import SDK，沒裝就是紅的，不會靜靜跳過。
+
+## 會用工具的提問器（工具組 T3）
+
+`toolarm.py` 的 `ToolHypothesist`：一個可以先查訓練區間、再回答規則的 hypothesist。`search()` 完全不用改——查詢都發生在一次 `propose()`
+裡面，`propose()` 最後回的還是一段文字（一條規則），由迴圈照舊解析、量測、寫紀錄。這一步還沒接進 `bench.py`（那是 T4），所以目前沒有指令會用到它，
+也沒有花過任何 API 費用：測試全部用照劇本回答的假模型，伺服器則是真的。
+
+**一輪怎麼走。**
+
+1. autoresearch 的 system prompt 後面接上一段說明（見下），連同 user prompt 送給綁了三個工具的模型。
+2. 模型每要求一次工具呼叫，提問器就去問伺服器（T2，另一個程序），把結果加上一行「本輪還剩幾次」回給模型。
+3. 模型回一則不帶工具呼叫的訊息，那段文字就是這一輪的答案。
+
+每一輪都從那兩段 prompt 重新開始，上一輪查過的東西不帶過來（計畫 §2.4）。
+
+用法（T4 會這樣接）：
+
+```python
+with ToolHypothesist.open(
+    chat,                                             # autoresearch 的 ChatHypothesist
+    ServerParams.for_experiment(db, experiment),      # 這一組自己的資料檔與 experiment
+    trace=arm_dir / "trace.jsonl",
+    server_log=arm_dir / "server.log",
+) as hypothesist:
+    report = search(ledger, experiment, hypothesist, model=hypothesist.label, max_trials=...)
+```
+
+`open()` 在 `with` 區塊期間握著三樣東西：伺服器子程序、trace 檔、跑 MCP 客戶端的背景事件迴圈（MCP 客戶端是 async，`propose()` 是同步）。
+一組搜尋開一次。
+
+**模型從哪裡來。** 跟 LLM 臂一樣是 autoresearch 的 `ChatHypothesist`；提問器用它手上那個 client 的 `bind_tools` 綁工具。這個模組不
+import langchain（`tests/test_upstream.py` 的規則沒有動）：回覆用屬性讀（`content`／`tool_calls`／`invalid_tool_calls`／
+`usage_metadata`），工具結果寫成一個普通的 dict 訊息（`{"role": "tool", ...}`），工具定義也是普通的 dict。這三種形狀 langchain 吃不吃，
+由 `contrib/tests/test_toolarm_wire.py` 對著 langchain 本身驗（那個資料夾不屬於任何套件，所以不受這個套件「測試也不碰 langchain」的規則管）。
+
+**模型多讀到什麼（`Pack`）。** 除了 autoresearch 的兩段 prompt，工具組的模型還會讀到三樣：
+
+- 三個工具的名稱、說明、輸入 schema，取自伺服器的 `list_tools`（輸出 schema 不會送給模型）。
+- 接在 system prompt 後面的一段說明（`addendum()`）。**只講事實、不給建議（2026-11-19 拍板）**：工具查得到的是訓練區間；驗證區間對模型與每個
+  工具都仍然看不到，而規則旁邊列的驗證數字是在那裡量的；每輪最多幾次、額度用完之前每次都算；查到的東西不會留到下一輪；每次呼叫前先寫一行「要查什麼、為什麼」；
+  最後照舊只回一條規則的 JSON。它同時處理了 system prompt 原本那句「在你看不到的歷史上評分」：有了工具之後，這句話只對一半。
+  不寫「訓練分數不等於驗證分數」這類提醒，理由同 T2：只有工具組讀得到的提醒，會讓結果分不出是工具有用還是提醒有用。
+- 提問器會對模型說的幾句固定的話（`SENTENCES`）：剩餘額度那一行、額度用完、試跑額度用完、呼叫送不出去、強制作答時的標題與要求、
+  以及強制作答時把本輪查詢寫成文字用的兩個模板。另外四個數字也在雜湊裡：`forced_note_chars`（模型自己寫的說明最多回放幾個字元）與
+  `argument_bounds`（呼叫的長度、巢狀層數、工具名稱長度三個上限）。
+  測試會檢查模組裡每一個句子常數都在這張表裡，漏放就紅：不在表裡的句子，改了字雜湊不會動。
+
+有兩樣模型讀得到、但不在這包裡：解析器拒絕時的那一句（那是 autoresearch 的，跟著它的程式碼走），以及各段文字怎麼排（之間的換行、強制作答時參數的 JSON 寫法、
+失敗呼叫的 `status` 標記），後者由測試逐字比對。
+
+這整包有一個版本號 `PACK_VERSION`（目前 1；2026-11-19 拍板用一個數字管整包），測試釘住整包的 SHA-256，所以伺服器的說明改一個字，這邊也會紅。
+T4 的 manifest 只需要記這個數字與每輪上限。連線後先核對兩件事，對不上就拒絕開始：伺服器回報的名稱與版本等於這份程式碼的，以及它列出來的
+三個工具（名稱、說明、輸入 schema）跟這份程式碼的 `tool_specs()` 完全相同。執行時核對的是工具這一部分；那段說明與固定句子本來就出自同一份程式碼，雜湊則由測試釘住，
+所以只要測試是綠的，模型實際讀到的就是釘住的那一包。
+真模型試跑後凍結（計畫 §5）。
+
+**每輪上限（`Limits`；由提問器數，不由伺服器數）。** 起點是每輪 5 次呼叫、其中拿得到分數的 `backtest_train` 最多 2 次，試跑一個世界後定案。
+
+| 情況 | 模型收到什麼 | 算不算一次 |
+|---|---|---|
+| 查得到 | 伺服器的 JSON，後面一行 `[left this round: N tool call(s), of which backtest_train: M]`（2026-11-19 拍板每次都附） | 算 |
+| 模型的錯（指標打錯、規則不合語法、工具名稱不存在） | 解析器那一句＋剩餘額度，標成錯誤 | 算 |
+| 呼叫送不出去（參數 client 解析不了、不是 JSON 物件、轉成 JSON 再讀回來不是同一個值、巢狀超過 32 層、寫成 JSON 超過 8,000 字元；工具名稱超過 64 字元） | 固定一句（「工具名稱或參數無法照原樣送出」）＋剩餘額度，標成錯誤；不送伺服器 | 算 |
+| 帶呼叫的整則訊息放不回對話（訊息裡任何地方有半個 surrogate，或參數帶 NaN／無限大） | 這段對話到此為止，直接改成強制作答；這一則裡的呼叫都不執行 | — |
+| 已經拿到 2 次分數之後的 `backtest_train` | 「試跑額度用完，這次沒有執行」＋剩餘額度；其他工具照常可用 | 算 |
+| 第 6 次呼叫 | 「額度用完，這次沒有執行，請直接回答規則」 | 不算（已經滿了） |
+| 被告知額度用完之後，又有一則訊息帶呼叫 | 這段對話到此為止，改成強制作答（見下）；這一則裡的呼叫不會得到回覆 | — |
+
+三個「不執行」的檢查照這個順序問：總額度用完、呼叫送不出去、試跑額度用完。
+
+**被解析器拒絕的 `backtest_train` 算一次呼叫，但不算一次試跑（2026-11-19 拍板）。** 試跑額度限制的是「看到幾次訓練分數」，語法寫錯的規則沒有
+回任何分數；扣了的話，一次筆誤就少一半的訓練證據，而不用 LLM 的對照組（T5）永遠拿得到兩次乾淨的試跑。
+
+「呼叫送不出去」與「放不回對話」這兩列也都是模型的錯、不是接縫失敗，搜尋照常繼續。（不帶呼叫的訊息就是答案，裡面有什麼都原樣交給搜尋迴圈。）
+
+「送不出去」的三個上限是為了不讓線路、trace 與強制作答時的文字被模型寫的任何東西塞爆。長度上限 8,000 就是搜尋迴圈對一個回答的長度上限
+（autoresearch 的 `MAX_RESPONSE_CHARS`，測試釘住兩者相等）：比它長的規則本來就交不出去，試跑它沒有意義；長度量的是寫進 trace 的那個寫法
+（非 ASCII 字元會被寫成跳脫序列），不是模型打了幾個字。這三個數字在版本雜湊裡，因為超過與否會改變模型被告知的內容。
+
+「放不回對話」那一列有兩個實測（2026-11-19）在後面：半個 surrogate 交給 MCP 客戶端會讓連線關閉；就算不送伺服器，那則回覆放回對話後，
+下一次呼叫模型時供應商的 client 也編不出請求（用 repo 自己的 client 實測），搜尋會被當成「模型沒回應」而結束。NaN 則會被 MCP 客戶端悄悄換成
+`null`，而且有的供應商 client 拒絕編碼它。所以這種訊息不放回去：直接開一段不帶工具的新對話要答案。
+
+一則訊息裡同時要求多次呼叫時，照順序一個一個數，每一個都會得到回覆（有的供應商不接受「有呼叫、沒有回覆」的對話）；例外是那段對話不再使用的時候：觸發強制作答的
+那一則，以及伺服器失敗、搜尋就此結束的那一則。
+
+**強制作答。** 重開一段對話、不綁工具：system prompt 是 autoresearch 原本那份（不接工具說明），user prompt 後面附上這一輪查過的東西
+（純文字：伺服器回答過的每次呼叫與完整結果；模型在每一則帶呼叫的訊息裡寫的說明，每段最多 2000 字元；提問器自己擋掉的呼叫不列，
+觸發強制作答的那一則訊息整則不列）與一句「請回答一條規則」。
+這次回覆如果還帶工具呼叫，代表那個 client 仍然綁著工具，算接縫失敗，不會把空字串當成答案交出去。不沿用原本那段對話有兩個原因（2026-11-19 不連網檢查 langchain-core 1.6.3
+組出來的請求，沒有真的送出去）：不綁工具的 client 會把「帶著工具呼叫的對話」原樣送出、不附工具定義，各家供應商收不收沒有保證；而「這一輪不准
+呼叫工具」各家 client 的寫法不同（`tool_choice="none"` 在 OpenAI 相容的 client 是字面意思，在 Anthropic 的 client 會變成「強制呼叫一個叫
+none 的工具」）。純文字的新對話兩種問題都沒有。
+
+**失敗怎麼算（計畫 §2.3）。** 下面這些都是 `HypothesistError`：`search()` 停下來、不扣提案次數、不寫成 refusal。
+
+- 模型那一側：供應商沒回應、回覆不是文字、工具呼叫沒有 id、client 解析成功的工具呼叫卻沒有工具名稱（client 解析失敗的那種沒有名稱是模型的錯，照「送不出去」處理）。提問器本身沒壞，下一次 `propose()` 可以照常再問（跟 LLM 臂一樣）。
+- 伺服器那一側（`ToolServerError`）：啟動不了、連線中斷、查詢逾時（預設 60 秒）、伺服器回協定層錯誤（store 答不出來）。這條連線不會再回來，
+  之後每一次 `propose()` 直接丟同一個錯誤，不會多花一次模型呼叫去發現。
+
+啟動不了的原因只在子程序的 stderr，所以用子程序啟動伺服器時一定要給 `server_log`（把 stderr 導到那個檔案；不給就拒絕啟動）。
+連線逾時預設 180 秒：伺服器在回應握手之前暖機，5000 根的世界實測暖機約 14 秒（`tools_server.py` 的模組說明）、經 `tools` 指令從啟動到連上 23 秒（上一節）。
+這個逾時管的是握手的 `initialize`；在它之前，SDK 會先用新版握手試探一次，那一段固定 10 秒（mcp 2.3，我們調不動）。所以暖機超過 10 秒的
+世界（幾千根 bar 的都是）實際上走舊版握手連上，而完全不回應的伺服器要等「10 秒＋連線逾時」才會被放棄。兩種握手伺服器都測過（T2）。
+
+`ToolArmError` 是另一回事：沒裝 SDK、上限不合法、`server` 給的是路徑或字串、用子程序卻沒給 `server_log`、模型的 client 不支援工具、
+trace 或 `server_log` 檔已存在（各是一組搜尋自己的，不覆寫；前一次的 log 是那次伺服器說明原因的唯一地方）、兩者指到同一個檔、
+要寫入的資料夾不存在、伺服器的名稱／版本／列出的工具對不上。這些是還沒問模型任何東西就拒絕，
+要呼叫方去修，不是接縫失敗。檔案與資料夾的檢查在啟動伺服器之前做，不會等暖機完才報錯。
+
+**Trace（`trace.jsonl`，每行一個 JSON 物件，照發生順序）。**
+
+| `kind` | 什麼時候寫 | 欄位 |
+|---|---|---|
+| `pack` | 開頭一次 | `trace_version`（trace 自己的格式版本，目前 1）、`pack_version`、`pack_digest`、`server`、`model`、`tools_version`、`limits`、`addendum`、`sentences`、`forced_note_chars`、`argument_bounds`、`tools`（實際綁給模型的說明與 schema） |
+| `model` | 每次呼叫模型 | `round`、`seq`、`bound`（有沒有綁工具）、`text`（模型寫的字，最多 2000 字元）、`text_chars`、`tool_calls`、`input_tokens`、`output_tokens`、`elapsed_ms` |
+| `tool` | 每次工具呼叫 | `round`、`seq`、`tool`、`arguments`、`sent`（有沒有送到伺服器）、`tool_error`（是不是模型的錯）、`limit`（`null`／`"lookups"`／`"backtests"`）、`result`（最多 4000 字元）、`result_chars`、`elapsed_ms` |
+| `answer` | 每輪結束 | `round`、`seq`、`forced`（是不是強制作答）、`lookups`、`backtests`、`tool_errors`、`text`、`text_chars` |
+| `failed` | 接縫失敗 | `round`、`seq`、`side`（`model`／`server`）、`error`（例外的類別名稱） |
+
+每種 `kind` 有哪些欄位寫在模組裡（`TRACE_KEYS`），寫入時逐行核對；欄位或種類有變就升 `TRACE_VERSION`，之後讀舊檔的程式才分得出來。
+`seq` 在一行真的寫進檔案之後才往前數，所以同一輪寫出來的行是 1、2、3 連號，不會因為中間某一步失敗而跳號。
+`kind`、`limit`、`side` 的值各是一個列舉（`TraceKind`／`Limit`／`Seam`），T4 讀 trace 時用同一組。
+
+讀 trace 時的四條規則：
+
+- 一輪正常結束時最後一筆是 `answer`，接縫失敗時是 `failed`。兩者都沒有的輪次是被打斷的：中斷（Ctrl-C）、程序死掉，或接縫失敗以外的任何例外。
+- 伺服器失敗的那一次查詢照樣有一筆 `tool`（`sent` 為 true、`result` 為 `null`），緊接著才是 `failed`，所以看得出搜尋停在哪個工具、什麼參數。
+  `sent` 的意思是「交給伺服器了」，不保證伺服器收到；`failed` 的 `error` 是最底層那個例外的類別名稱。
+- 模型的回覆讀不懂（不是文字、工具呼叫沒有 id）時沒有 `model` 那一筆，只有 `failed`（`error` 是 `HypothesistError`）；那一次呼叫的 token 數不在 trace 裡。
+- 強制作答（`answer` 的 `forced` 為 true）有兩種來源，看前面的行分得出來：前面有一筆 `limit` 為 `"lookups"` 的 `tool`，是額度用完後還繼續呼叫；
+  沒有的話，是那一則訊息放不回對話（它的 `model` 那一筆 `tool_calls` 大於 0，後面卻沒有對應的 `tool`）。
+
+刻意不寫的三樣：兩段 prompt（user prompt 帶驗證區間的數字；需要時可以從 ledger 重建）、任何時間戳（只記耗時）、
+失敗的原句（供應商的錯誤訊息可能引用請求內容；`search()` 的報告已經有那一句）。
+
+「trace 不含驗證區間的數字」說的是提問器自己寫進去的東西：它只寫工具的回答（只讀訓練區間）與上面那些欄位，測試把訓練區間之後的資料全部改掉，
+trace 除耗時外逐行相同。**模型自己寫的字照原樣留著**，而 user prompt 本來就列了試過的規則的驗證分數，所以模型如果在說明裡引用那些分數，
+trace 的 `text` 欄就會有；那是模型本來就看得到的東西，不是多漏出去的。
+
+**還沒做的。** 接進 `bench.py`、manifest 的 `arms.llm_tools`、`report` 印查詢次數與花費，都是 T4。真模型一次都還沒碰過這些工具，第一次是
+12 月的試跑（計畫 §5）；上限與這一節的文字到那時才定案。
+
+**已知風險（沒連過真的供應商，只能等試跑驗證）。** 三種情況下，第二次呼叫模型可能被供應商以 400 拒絕，那會變成接縫失敗、搜尋在第一次查詢後就停：
+
+- 模型開了 thinking／reasoning：repo 的 client 會把回覆的內容區塊壓成純文字，提問器把那則回覆放回對話時，thinking 區塊已經不在了；
+  有些供應商要求帶工具呼叫的那一則回覆原樣送回。目前工具組用固定 temperature、不開 thinking，照理不會遇到。
+- 模型的工具呼叫參數被截斷（不是合法 JSON）：提問器回它一句「工具名稱或參數無法照原樣送出」並計一次，但那則回覆放回對話時，client 會把壞掉的參數字串
+  原樣送出，上游收不收沒有保證。
+
+- 模型叫了一個名稱不合供應商規定的工具（例如帶空白或 `functions.` 前綴）：伺服器會照常拒絕、算模型的錯，但那則回覆放回對話時，供應商可能因為
+  工具名稱不合格式而拒收。
+
+試跑第一輪如果就停在 `failed`／`side: model`，先查這三項。另外一個同類的邊角沒有處理：
+DeepSeek 的 client 會把 `reasoning_content` 帶回去，裡面有壞字元時一樣編不出請求。（供應商回的呼叫 id 帶壞字元的情況有處理：那則訊息一樣不放回去，改成強制作答。）
+
+**已知的限制。**
+
+- 「查到的東西不留到下一輪」只對這個模組成立。autoresearch 的 prompt 會列出被拒絕的回答（解析器那一句會引用原文），所以模型可以花掉一輪、
+  故意交一個不合法的回答，把幾個字元帶到下一輪。這條通道是搜尋迴圈的，每一組都有；只是只有工具組手上有值得帶的東西。試跑時看有沒有這種行為。
+- 沒開 thinking 時，盲猜組只回 JSON，工具組卻被要求在每次呼叫前寫一行，等於多了一點打草稿的空間。T5／T6 都沒有對照這一點，寫結果時要註明。
+- 連線建立那一段（伺服器暖機中）在 Windows 上按 Ctrl-C 可能要等到握手結束才生效；查詢進行中的等待每 0.5 秒醒來一次，不受影響。
 
 ## 評分（PR 4）
 
@@ -452,6 +621,8 @@ staging 開不起來時 claim 歸還；搬 store 失敗或中斷時保留 stagin
 | artifact 的 SHA-256 對不上 manifest（雙胞胎的 `world.sqlite` 複製錯目錄）在複製前拒絕 | `tests/test_bench.py` |
 | 訓練區間查詢：`load` 的讀取上限＝訓練區間結尾 − 1；訓練區間由 split 取出，傳一個「標成 train 的區間」會被拒絕；view 拒絕帶著之後任何一根 bar／日線／funding 的 frame，也拒絕中間有洞的歷史；把最後一根訓練 bar 收盤之後的 bar、日線、funding（含 view 手上那一筆邊界上的 funding 的費率）全部改掉，每個查詢的輸出逐位元不變（對照組：4h／日線／funding 各自改到訓練區間內一點點就會變）；訓練區間不落在午夜時，跨過界線的那一天不被讀入；輸出的鍵與字串不含世界類型／planted／validation／holdout 字樣；模組只 import `upstream`；查詢前後 arm 的 sqlite 位元組相同、ledger 沒有 trial；`backtest_train`＝`evaluate_unfiled` 的 train 段；解析器拒絕的輸入回解析器原句；指標在訓練區間第一根沒有值時三個查詢都拒絕；`feature_stats` 與 `conditional_returns` 的手算金標（分位數、不重疊樣本、t 值、基準報酬）；三個紀錄型別拒絕對不上的數字 | `tests/test_research_tools.py` |
 | MCP 伺服器：記憶體內客戶端列得出三個工具、每個呼叫的結果等於純函式的 dict；模型的錯回解析器原句並標成錯誤；store 答不出來＝協定層錯誤、不帶原句；指標 enum／運算子／regime／上下界等於 autoresearch 的表；schema 裡沒有 `$ref`；每個 schema 對測試裡的呼叫不比解析器窄、對形狀錯誤不比它寬；每個回答（含數字是 null 的）符合輸出 schema；暖機只跳過 store 沒有的序列、之後只有那些指標的查詢回錯，序列在卻算不出來則拒絕啟動；沒裝 SDK 在讀資料與複製前就拒絕；空檔與不是 store 的檔拒絕；只有 view 自己的拒絕被說成參數的錯；程式缺陷在新舊兩種握手下都只回固定一句；說明裡沒有「該怎麼下結論」的句子；`tool_specs()` 每次重建、互不共用；送中斷能停掉正在服務的子程序（exit 130）；`tools` 指令的 exit code 等於子程序的；每段說明有跑得動的範例與每個輸出欄位；範例不讀 funding／regime／realized vol、不用 `max_bars`；說明與 schema 的雜湊釘在版本號上；啟動參數只有五樣且過得了命令列；資料檔不存在時拒絕且不建檔；`tools` 指令拒絕測試用 seed、對著複本啟動、命令列不含埋入規則的字、artifact 位元組不變；真的 stdio 子程序（直接啟動與經 `tools` 指令各一次）回答與 view 相同、store 位元組不變；啟動失敗＝連線關閉而非卡住；伺服器模組在全新直譯器裡只載入 `research_tools`／`tools_server`／`upstream`，CLI 不需要 SDK 就能 import；同 seed 的 conditional 世界與 null 雙胞胎，回答的鍵、型別、拒絕句完全相同 | `tests/test_tools_server.py` |
+| 會用工具的提問器：假模型查三次後回答，`propose()` 回那段文字、每個工具結果＝伺服器的回答＋剩餘額度、trace 筆數對得上；經真的 `search()` 兩輪照常寫 ledger；每輪從兩段 prompt 重新開始；第 6 次呼叫與第 3 次拿得到分數的試跑不執行、回固定句子（後者照算一次）；被解析器拒絕的試跑算一次呼叫、不算一次試跑；三個「不執行」的檢查有固定順序；一則訊息多個呼叫逐一計數、每個都有回覆；模型不停呼叫時改用不綁工具的模型、開新對話、只附伺服器回答過的查詢與模型寫的說明（去頭尾空白、最多 2000 字元），沒查到東西就不附；強制作答的回覆還帶工具呼叫＝接縫失敗、不交出空答案；模型的錯（指標打錯、工具不存在）回解析器原句並標成錯誤、計數；送不出去的呼叫（參數解析不了、不是物件、巢狀過深、過長、鍵不是文字；工具名稱過長）不送伺服器、回固定句子、不結束搜尋，剛好在界線上的照送；放不回對話的訊息（半個 surrogate 在參數／名稱／呼叫 id／文字裡，或參數帶 NaN）直接改成強制作答、同一則裡的呼叫都不執行、搜尋照常繼續；假模型跟真的 client 一樣拒絕編不出請求的對話；呼叫長度上限等於搜尋迴圈對回答的長度上限；`pack` 與 `label` 只能讀；store 答不出來（之後不再花模型呼叫；經真的 `search()` 不扣提案次數、不寫 refusal）、子程序中途死掉、查詢逾時、握手不回應、啟動不了、回答形狀不對、列不出工具，都是 `ToolServerError`；模型沒回應是 `HypothesistError`、下一輪可再問；回覆讀不懂（五種）也是；中斷原樣穿過；trace 每行是五種形狀之一且等於模組的 `TRACE_KEYS`、不合形狀的行拒寫且不佔序號、開頭一筆是整包文字與 schema、模型文字與工具結果過長會截斷並記原長、沒有任何一段 prompt、沒有日期、沒有失敗原句、沒有 `\r`；伺服器失敗的那一次查詢照樣寫一筆；把訓練區間之後的資料全部改掉，trace 除耗時外逐行相同；整包文字的雜湊釘在 `PACK_VERSION` 上，模組裡每個句子常數都在 `SENTENCES`；那段說明含計畫要的事實句、不含建議用字、不含世界類型／coin／日期；手建的 `Pack` 與 `Pack.of` 受同樣的檢查、交出去的工具是複本、兩張表不可改；上限不合法、client 不支援工具、`server` 是路徑、子程序沒給 log、trace 或 log 已存在（伺服器不會被啟動）或兩者同檔或資料夾不存在、伺服器名稱／版本／工具清單對不上、沒裝 SDK，都在問模型之前拒絕；真的 stdio 子程序回答與 view 相同、store 位元組不變、啟動失敗的原因寫進指定的 log；等待伺服器的方式（分段等、任務自己的逾時照樣丟出）、例外群組的拆解、關閉失敗只記 warning；模組在全新直譯器裡只載入 `research_tools`／`toolarm`／`tools_server`／`upstream`、不需要 SDK | `tests/test_toolarm.py` |
+| 提問器不 import langchain 所依賴的三種形狀，對著 langchain 本身驗：`AIMessage`（含解析失敗的呼叫與用量）讀得出來；tuple＋回覆物件＋`{"role": "tool"}` dict 組成的對話轉得成 langchain 的訊息（含錯誤標記）；工具定義已經是 langchain 會送出去的函式格式；langchain 自己的假 chat model 綁上工具後走得完一輪 | `contrib/tests/test_toolarm_wire.py` |
 
 ## Manifest 格式（v3）
 

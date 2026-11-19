@@ -10,10 +10,73 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **Discovery Lab: a hypothesist that may look things up before it answers
+  (tools plan T3).** `contrib/discovery/toolarm.py` is `ToolHypothesist`:
+  inside one `propose()` the model is bound with the three training-window
+  look-ups, calls them through the look-ups' server (T2, a process of its
+  own, over MCP stdio), and the text of its last message is the round's
+  answer — so `search()` is unchanged and files the answer as it files any
+  other. Not yet wired into `bench.py` (T4): no command runs it, and it has
+  only ever been driven by a scripted model. The model is the research
+  package's own `ChatHypothesist`, bound through its client's `bind_tools`;
+  the module imports no model library — a reply is read by attribute and a
+  tool's result goes back as a plain role-keyed `dict` — and
+  `contrib/tests/test_toolarm_wire.py` holds those shapes against
+  langchain itself. What a model reads beyond the two prompts is one
+  versioned pack (`Pack`, `PACK_VERSION`, a digest pinned by the suite):
+  the tools as the server lists them, a paragraph appended to the system
+  prompt, and the few sentences the arm can say. The paragraph states
+  facts and gives no advice: the tools read the training bars, the
+  validation bars stay hidden from the model and from every tool, the
+  limits, that a line is to be written before each call. Before a model
+  is asked anything, the server is checked to be the one this build's
+  wording is pinned against and to list exactly this build's tools, so
+  the pack a model reads is this build's, which the suite pins. Limits are counted by the arm
+  (`Limits`, five calls a round of which two backtests that return a
+  score, the plan's starting point): every call counts until none is
+  left, a refused one included; a backtest the parser refuses counts as a call and not as a
+  backtest; the result of each call that counts ends with a line saying
+  what is left; a call
+  past the limit, and a backtest past its own, are not run and say so; a
+  model that calls again after being told is asked once more with no
+  tools, in a fresh conversation that lists what the server answered this
+  round as text, and a reply to THAT which still asks for a tool is no
+  answer. A mistake of the model's comes back marked as an error: the
+  parser's own sentence when the server refused it, a fixed sentence when
+  the call could not be sent at all (arguments the client could not
+  parse, that are no JSON object or do not survive a round trip through
+  JSON, nested past 32 levels or longer than 8,000 characters as written
+  — the loop's own bound on an answer — or a tool name past 64
+  characters);
+  those bounds are in the pack. A message with calls in it that cannot be
+  sent BACK — half a surrogate pair anywhere in it, or a `NaN` or an
+  infinity in a call — ends the
+  round's tool use at once and the rule is asked for without tools: put
+  back into the conversation, the provider's client cannot encode the
+  next request (measured with the repo's client), and a slip of the
+  model's would end the search as a model that did not answer. The server not starting, dying,
+  timing out, answering with a protocol error or in a shape the arm does
+  not read is a `ToolServerError` — a `HypothesistError`, so the search
+  stops and no round is spent — and the arm asks nothing more of that
+  server. The model not answering is a `HypothesistError` too. Each
+  search writes a `trace.jsonl` (`TRACE_VERSION`, `TRACE_KEYS`, checked a
+  line at a time): the pack once, then every model call (its text between
+  calls, its token counts), every tool call (arguments, result, whether
+  it was refused, whether it met a limit; the call a search ended on
+  included) and each answer. Neither prompt is written to it, nor any
+  instant, nor the sentence of a failure; a model's own words are kept as
+  written, up to 2,000 characters a line, and may repeat a figure its
+  prompt showed it. A refusal to start is a `ToolArmError`, before any
+  server is started where it can be: limits that are not limits, a client
+  that takes no tools, a trace or a log file that exists (neither is
+  written over) or whose directory does not, a child given no file for
+  its stderr. Timeouts: 180 s to connect (the SDK adds a fixed 10 s probe
+  of its own before the handshake the arm's timeout bounds), 60 s a
+  look-up.
 - **Discovery Lab: the training-window look-ups served over MCP (tools
   plan T2).** `contrib/discovery/tools_server.py` is a stdio MCP server
-  around the three look-ups of T1, so that a tool-using arm (T3, not yet
-  written) asks a process of its own instead of calling functions in the
+  around the three look-ups of T1, so that a tool-using arm (T3, the
+  entry above) asks a process of its own instead of calling functions in the
   one that runs the search. The server is started with five things and no
   sixth — a store's path, a coin, the experiment's whole split, its costs
   and its indicator window (`ServerParams`, which writes and reads its own
@@ -60,8 +123,9 @@ Breaking changes within the 0.x line are called out explicitly.
   functions (tools plan T1).** The model arm of 2026-11-10 climbed the
   validation score, in pure-noise worlds too; the next experiment asks
   whether a model that can look at the TRAINING window before it proposes
-  does better. This is the looking, and nothing else yet — no MCP server,
-  no tool-using hypothesist, nothing wired into `search` (T2–T4).
+  does better. This is the looking, and nothing else at this step: the MCP
+  server and the tool-using hypothesist are the two entries above (T2,
+  T3), and nothing is wired into the benchmark's commands yet (T4).
   `contrib/discovery/research_tools.py` holds a `TrainView` — a frame read
   no further than the last training bar (`until_ms` = the window's end
   minus one), built from the experiment's whole split so that the

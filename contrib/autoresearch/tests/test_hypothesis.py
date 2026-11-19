@@ -313,6 +313,122 @@ def test_an_over_long_answer_is_refused_unread_and_stored_clipped(ledger, experi
     assert "characters" in stored.refusal
 
 
+# A surrogate code point, built rather than written: half of the escaped pair
+# an emoji is spelled with, which is what a client hands back when a model (or
+# a cut stream) supplies only one half. ``_ESCAPED`` is the other thing a
+# reader could confuse it with - the six ordinary characters of the escape.
+_HIGH, _LOW = chr(0xD83D), chr(0xDE00)
+_STORED = chr(0xFFFD)
+_ESCAPED = chr(92) + "ud83d"
+
+
+def _writable(text: str) -> bool:
+    """Whether sqlite could bind it, which is whether UTF-8 can write it."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def test_an_answer_holding_a_surrogate_is_a_refusal_and_not_the_end_of_the_run(ledger, experiment):
+    """#425: the write that records the answer used to raise, with every round after it unspent.
+
+    sqlite cannot bind a surrogate, so ``UnicodeEncodeError`` left ``search``
+    from inside the ledger - a model's one mistyped emoji ending a run the
+    module says a bad answer costs exactly one round of.
+    """
+    model = ScriptedModel(["not a rule " + _HIGH, _rule(0)])
+    report = search(ledger, experiment, model, max_trials=2)
+
+    assert report.spent == 2 and report.stopped is None
+    assert report.counts() == {
+        ProposalOutcome.MEASURED: 1,
+        ProposalOutcome.DUPLICATE: 0,
+        ProposalOutcome.REFUSED: 1,
+    }
+    refused, measured = ledger.proposals("btc-4h")
+    assert refused.response == "not a rule " + _STORED
+    assert refused.trial_id is None and refused.spec_hash is None
+    assert "1 surrogate character(s)" in refused.refusal and "U+FFFD" in refused.refusal
+    # Told in so many words, in the very next prompt, like any other refusal.
+    assert f"- {refused.refusal}" in model.asked[1][1]
+    assert measured.response == _rule(0)
+
+
+@pytest.mark.parametrize(
+    ("answer", "count"),
+    [
+        (_HIGH, 1),
+        (_rule(0).replace("breakout", "break" + _HIGH + "out"), 1),  # inside a JSON string
+        (_rule(0) + _LOW, 1),  # after an answer that is otherwise a rule
+        ("```json" + _HIGH + "\n" + _rule(0) + "\n```", 1),  # on the fence line
+        # Both halves, as two characters: what a stream decoded chunk by chunk
+        # leaves. Still not text - UTF-8 writes neither.
+        ("{" + _HIGH + _LOW + "}", 2),
+        (_LOW + " and " + _HIGH + " and " + _LOW, 3),
+    ],
+)
+def test_a_surrogate_anywhere_in_the_answer_is_counted_and_stored_as_the_replacement(
+    ledger, experiment, answer, count
+):
+    assert not _writable(answer)
+    report = search(ledger, experiment, ScriptedModel([answer]), max_trials=1)
+
+    assert report.counts()[ProposalOutcome.REFUSED] == 1
+    assert ledger.trials("btc-4h") == []
+    (stored,) = ledger.proposals("btc-4h")
+    # One for one, so the text is the same length and everything else in it
+    # is where the model put it.
+    assert stored.response == answer.replace(_HIGH, _STORED).replace(_LOW, _STORED)
+    assert stored.response.count(_STORED) == count
+    assert f"{count} surrogate character(s)" in stored.refusal
+    # The sentence goes into the next prompt and onto a terminal: it names the
+    # replacement rather than containing it.
+    assert stored.refusal.isascii()
+
+
+def test_an_over_long_answer_cut_between_two_halves_is_stored_without_the_half(ledger, experiment):
+    """The clip is what leaves the half alone here: its partner is on the other side of it."""
+    answer = "x" * (MAX_RESPONSE_CHARS - 1) + _HIGH + _LOW + "x" * 50
+    search(ledger, experiment, ScriptedModel([answer]), max_trials=1)
+
+    (stored,) = ledger.proposals("btc-4h")
+    assert stored.response == "x" * (MAX_RESPONSE_CHARS - 1) + _STORED
+    assert f"the answer is {len(answer)} characters" in stored.refusal
+    assert "1 surrogate character(s) in the part kept" in stored.refusal
+
+
+def test_a_surrogate_past_the_clip_is_not_stored_and_so_not_reported(ledger, experiment):
+    answer = "x" * MAX_RESPONSE_CHARS + _HIGH
+    search(ledger, experiment, ScriptedModel([answer]), max_trials=1)
+
+    (stored,) = ledger.proposals("btc-4h")
+    assert stored.response == "x" * MAX_RESPONSE_CHARS
+    assert "characters" in stored.refusal and "surrogate" not in stored.refusal
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "not a rule " + _ESCAPED,  # the escape, spelled out: six ordinary characters
+        "not a rule " + _STORED,  # a replacement character the model wrote itself
+        "not a rule " + chr(0x1F600),  # a whole emoji
+        _rule(0).replace("breakout", "break" + _ESCAPED + "out"),  # a JSON escape for one
+    ],
+)
+def test_text_that_can_be_written_is_stored_as_it_arrived(ledger, experiment, answer):
+    """Only the character UTF-8 cannot write is replaced; the parser refuses these itself."""
+    assert _writable(answer)
+    search(ledger, experiment, ScriptedModel([answer]), max_trials=1)
+
+    (stored,) = ledger.proposals("btc-4h")
+    assert stored.outcome is ProposalOutcome.REFUSED
+    assert stored.response == answer
+    assert "surrogate character(s)" not in stored.refusal
+    assert _writable(stored.refusal)
+
+
 @pytest.mark.parametrize("budget", [0, -1, 2.5, True])
 def test_a_budget_that_is_not_a_count_of_answers_is_refused(ledger, experiment, budget):
     with pytest.raises(ValueError, match="max-trials"):

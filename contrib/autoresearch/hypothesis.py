@@ -47,6 +47,11 @@ run's trials and report a search that never happened.
 :class:`~.ledger.Proposal` row, refusals included, so the next run starts
 knowing what already failed instead of paying to rediscover it. Refusals are
 not trials and never raise the promote threshold — only measured rules do.
+The text is stored as it arrived with two exceptions, both refusals and both
+legible from the refusal's own sentence: an answer past ``MAX_RESPONSE_CHARS``
+is clipped to it (the sentence gives the length that arrived), and a surrogate
+character — which UTF-8, and so the store, cannot write — is kept as U+FFFD
+(the sentence gives how many).
 
 Imports the feature stack through :mod:`.research` (pandas, stockstats), so
 the CLI imports this module inside the one command that uses it.
@@ -55,6 +60,7 @@ the CLI imports this module inside the one command that uses it.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Final
@@ -101,6 +107,20 @@ INTERRUPTED: Final = "interrupted"
 # the text itself — and an essay, or a model that streams until it is cut off,
 # would otherwise be written into the ledger in full.
 MAX_RESPONSE_CHARS: Final = 8000
+
+# A surrogate code point: the one kind of character a ``str`` can hold that
+# UTF-8 cannot write, so the one kind sqlite refuses to bind. A client decoding
+# half of an escaped pair (``\ud83d`` with no partner - a model that mistyped
+# an emoji, or a stream cut between the two halves) hands back exactly this,
+# and the write that was meant to record the answer raised instead, ending the
+# run with every remaining round unspent (#425). Each one is stored as U+FFFD,
+# the character that means "something here could not be represented": one for
+# one, so the stored text keeps its length and the cap above still bounds it,
+# and the refusal says how many there were, because a reader of the row cannot
+# otherwise tell a replaced character from a U+FFFD the model wrote itself.
+_SURROGATE: Final = re.compile("[\ud800-\udfff]")
+_REPLACEMENT: Final = chr(0xFFFD)
+_STORED_AS: Final = "each stored as U+FFFD"
 
 # How much of the past goes into a prompt. Both are caps on PROMPT SIZE rather
 # than on what the ledger holds: an experiment with four hundred trials still
@@ -386,15 +406,30 @@ def _resolve(
         # The port says text; a fake or a client returning something else is a
         # defect on this side, not a refusal to teach a model about.
         raise TypeError(f"a hypothesist answers with text, got {type(answer).__name__}")
+    # Decided before the parser reads a character, because both are facts about
+    # the TEXT rather than about a rule: how much of it is kept, and whether
+    # what is kept can be written down at all.
+    kept, unwritable = _SURROGATE.subn(_REPLACEMENT, answer[:MAX_RESPONSE_CHARS])
     if len(answer) > MAX_RESPONSE_CHARS:
+        refusal = (
+            f"the answer is {len(answer)} characters; a rule is one JSON object and has to be "
+            f"under {MAX_RESPONSE_CHARS}"
+        )
+        if unwritable:
+            refusal += f"; {unwritable} surrogate character(s) in the part kept, {_STORED_AS}"
+        return _refused(ledger, experiment, number, kept, model, refusal)
+    if unwritable:
+        # Refused here rather than handed on: the parser would refuse it too
+        # (a surrogate is no part of a rule), but with a sentence about JSON,
+        # and the row could not be written to say so.
         return _refused(
             ledger,
             experiment,
             number,
-            answer[:MAX_RESPONSE_CHARS],
+            kept,
             model,
-            f"the answer is {len(answer)} characters; a rule is one JSON object and has to be "
-            f"under {MAX_RESPONSE_CHARS}",
+            f"the answer holds {unwritable} surrogate character(s), which are not text on "
+            f"their own and which no rule needs, {_STORED_AS}",
         )
     try:
         spec = load_spec(strip_fence(answer))

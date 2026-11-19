@@ -368,7 +368,10 @@ class Proposal:
     the store holds what was actually written - the refusal names the mistake,
     the text is the evidence for it - and for an accepted one it is what lets a
     reader see the difference between what the model wrote and the parsed rule
-    the ledger kept.
+    the ledger kept. The hypothesis loop files two refusals whose text is NOT
+    as it arrived, and the ``refusal`` of each gives the figure that shows it:
+    an over-long answer is clipped (the length that arrived), and a surrogate
+    character is stored as U+FFFD, sqlite being unable to bind one (how many).
     """
 
     proposal_id: int

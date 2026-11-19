@@ -50,8 +50,8 @@ tools — in a fresh conversation, the round's look-ups written out as text,
 since a provider may refuse a history of tool calls that comes with no
 tools, and how a client spells "call nothing" differs by provider. A
 message with calls in it that cannot be sent back as the model wrote it —
-half a surrogate pair anywhere in it, or a ``NaN`` in a call, which not
-every client can encode a request from — ends the conversation the same
+half a surrogate pair anywhere in it, or a ``NaN`` or an infinity in a
+call, which not every client can encode a request from — ends the conversation the same
 way, and at once. (A message with no call is the answer, whatever is in
 it.)
 
@@ -186,9 +186,9 @@ _POLL_S: Final = 0.5
 # nor a trace line, nor the round written out as text is handed whatever a
 # model writes. The length is measured on the spelling a trace line writes
 # (ASCII, the rest escaped), where the loop counts the characters of an
-# answer: one number, two measures that agree on anything a rule is made
-# of. A model is answered differently past the bounds, so they are in the
-# pack.
+# answer: one number and two measures, a few characters apart on anything
+# a rule is made of (the arguments also name the rule's key). A model is
+# answered differently past the bounds, so they are in the pack.
 MAX_ARGUMENT_CHARS: Final = 8000
 MAX_ARGUMENT_DEPTH: Final = 32
 MAX_NAME_CHARS: Final = 64

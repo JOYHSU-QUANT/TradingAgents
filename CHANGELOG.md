@@ -49,8 +49,8 @@ Breaking changes within the 0.x line are called out explicitly.
   — the loop's own bound on an answer — or a tool name past 64
   characters);
   those bounds are in the pack. A message with calls in it that cannot be
-  sent BACK — half a surrogate pair anywhere in it, or a `NaN` in a call
-  — ends the
+  sent BACK — half a surrogate pair anywhere in it, or a `NaN` or an
+  infinity in a call — ends the
   round's tool use at once and the rule is asked for without tools: put
   back into the conversation, the provider's client cannot encode the
   next request (measured with the repo's client), and a slip of the

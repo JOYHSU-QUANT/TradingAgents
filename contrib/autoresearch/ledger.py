@@ -364,7 +364,8 @@ class ProposalOutcome(VocabEnum, noun="proposal outcome"):
 class Proposal:
     """One answer from a model, and what became of it.
 
-    ``response`` is the text as it arrived. For a refused answer nothing else in
+    ``response`` is the text as it arrived, two refusals apart (below). For a
+    refused answer nothing else in
     the store holds what was actually written - the refusal names the mistake,
     the text is the evidence for it - and for an accepted one it is what lets a
     reader see the difference between what the model wrote and the parsed rule

@@ -469,7 +469,8 @@ def _refused(
     """File a refusal in a form the store can hold, and say so when that changed the answer.
 
     The reason stays whatever refused the answer - the parser's sentence, the
-    length - with the surrogates counted after it, so a model that wrote prose
+    length, or ``_resolve``'s own for a rule it could not write down - with
+    the surrogates counted after it, so a model that wrote prose
     AND half an emoji is told both at once rather than one per round (decided
     2026-11-19). The reason itself goes through the same replacement: it is
     built from the model's text, and although every sentence the parser has

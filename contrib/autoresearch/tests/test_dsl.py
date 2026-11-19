@@ -919,9 +919,9 @@ def test_a_whole_number_past_what_the_interpreter_converts_is_refused_rather_tha
     Which names a ``sys`` setting and nothing about the spec, and which nothing
     between here and the hypothesis loop's caller catches.
     """
-    with pytest.raises(SpecError, match="too many digits") as caught:
+    with pytest.raises(SpecError) as caught:
         load_spec(text)
-    assert "sys." not in str(caught.value)
+    assert str(caught.value) == "spec holds a whole number with too many digits to read"
 
 
 def test_a_long_number_that_is_not_whole_is_read_and_refused_for_what_it_is():

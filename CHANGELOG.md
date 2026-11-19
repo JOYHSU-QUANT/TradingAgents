@@ -39,10 +39,13 @@ Breaking changes within the 0.x line are called out explicitly.
   answering — it did not start, it died, a look-up timed out or the store
   could not answer it — stops `search` with **exit 3**, a code of its own
   so that a batch can stop on it and skip a world that is merely searched
-  already (exit 1), records nothing, and keeps the staging directory (the
-  server's stderr log in it, the trace where the arm was opened, and a
-  note, `kept-for-inquiry.txt`, saying why, with the traceback where the
-  failure was an exception this process caught) and the `arms/` claim.
+  already (exit 1), records nothing, and keeps the staging directory —
+  renamed `.search.kept-…`, the name being the mark that it was kept on
+  purpose, since a rename succeeds on a disk too full for a note — with
+  the server's stderr log in it, the trace where the arm was opened, and
+  a note, `kept-for-inquiry.txt`, saying why (with the traceback where
+  the failure was an exception this process caught), and the `arms/`
+  claim.
   `search`, `calibrate`, `score` and `report` then refuse that directory,
   pointing at the note, until the staging and the claim are both removed
   by hand — the staging alone is enough to refuse it. A finished search

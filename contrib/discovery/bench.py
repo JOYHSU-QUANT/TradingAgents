@@ -45,15 +45,20 @@ does not have.
 2026-11-19). The MODEL not answering is a failed seam like any arm's:
 recorded, counted apart, and the run goes on. The look-ups' SERVER not
 answering — it did not start, it died, a look-up timed out or could not be
-answered — stops the run: nothing is recorded, the staging is kept with
-the trace and the server's log in it and a note saying why
-(``kept-for-inquiry.txt``), and the claim stays, so the next search of the
-world is refused, pointing at the note, until someone has looked and
-removed both. The rule for a provider that went away would have the world
-re-run until its model happened not to ask what the server could not
-answer. A finished search whose trace cannot be read back, or is not the
-search its ledger holds, stops the run the same way: that is a defect on
-this side too, and the trace is the evidence of it.
+answered — stops the run (:class:`KeptForInquiry`): nothing is recorded,
+the staging is kept with the trace and the server's log in it — renamed
+(``.search.kept-…``), the name being the mark every later reader goes by,
+and holding a note saying why (``kept-for-inquiry.txt``) — and the claim
+stays. The directory is then refused to every reader of it, pointing at
+the note, until someone has looked and removed both; the staging alone is
+enough to refuse it, so the claim removed and the evidence left is not a
+world to search past. The rule for a provider that went away would have
+the world re-run until its model happened not to ask what the server could
+not answer. What else is a defect on this side stops the run the same way,
+because what the search left is the evidence of it: a finished search
+whose trace cannot be read back, or is not the search its ledger and its
+manifest describe; an arm that cannot be opened once its server is up; a
+trace or a log that cannot be written.
 
 Everything is built in a staging directory inside the run directory and
 moved into place at the end (the records, ``oracle.json`` last, then the
@@ -544,9 +549,36 @@ _STAGING_PREFIX = ".search.partial-"
 INQUIRY_FILENAME = "kept-for-inquiry.txt"
 
 
+# What a staging is renamed to when a search that stopped on its tools'
+# side keeps it. The NAME is the mark that it was kept on purpose: a rename
+# writes no byte, and the disk that could not take a trace's next line is
+# not to be relied on to take a note saying so.
+_KEPT_PREFIX = ".search.kept-"
+
+
 def _kept_staging(run_dir: Path) -> list[str]:
-    """The search stagings in ``run_dir``: a running search's, one a failed store move kept, or a kill's."""
-    return sorted(p.name for p in run_dir.glob(f"{_STAGING_PREFIX}*"))
+    """The search stagings in ``run_dir``: a running search's, one a failed store move kept, a kill's, or one kept for inquiry."""
+    return sorted(
+        path.name
+        for prefix in (_STAGING_PREFIX, _KEPT_PREFIX)
+        for path in run_dir.glob(f"{prefix}*")
+    )
+
+
+def _mark_kept(staging: Path) -> Path:
+    """Rename ``staging`` so that its name says it is kept on purpose; where it is afterwards.
+
+    A rename that fails leaves the staging where it was, under the name it
+    had, and is logged: the note inside (:func:`_kept_for_inquiry`) is then
+    the one mark, and is read as one.
+    """
+    kept = staging.with_name(_KEPT_PREFIX + staging.name.removeprefix(_STAGING_PREFIX))
+    try:
+        staging.rename(kept)
+    except OSError:
+        logger.warning("could not rename the kept staging %s to %s", staging, kept, exc_info=True)
+        return staging
+    return kept
 
 
 def _holds_stores(staging: Path) -> bool:
@@ -560,11 +592,17 @@ def _holds_stores(staging: Path) -> bool:
 
 
 def _kept_on_purpose(run_dir: Path) -> list[str]:
-    """The stagings in ``run_dir`` a search kept ON PURPOSE: those holding its note (:func:`_kept_for_inquiry`)."""
+    """The stagings in ``run_dir`` a search kept ON PURPOSE (:func:`_kept_for_inquiry`).
+
+    Those named as kept (:func:`_mark_kept`) — and one still under a
+    staging's ordinary name that holds the note, which is what a rename
+    that failed leaves. Either mark alone is enough: the two are made by
+    different means so that one disk's refusal does not lose both.
+    """
     return [
         name
         for name in _kept_staging(run_dir)
-        if (run_dir / name / INQUIRY_FILENAME).is_file()
+        if name.startswith(_KEPT_PREFIX) or (run_dir / name / INQUIRY_FILENAME).is_file()
     ]
 
 
@@ -664,24 +702,31 @@ def _kept_for_inquiry(
     """The refusal a run that stopped on its tools' side ends with, written into the staging it keeps.
 
     The caller keeps the staging and the claim (``run_world``'s
-    ``finally``). The sentence goes to the operator once; the note is what
-    is still there when the directory is next looked at, and what the next
+    ``finally``); here the staging is first renamed as kept
+    (:func:`_mark_kept`), which is the mark every later reader goes by.
+    The sentence goes to the operator once; the note is what is still
+    there when the directory is next looked at, and what the next
     command's refusal points to. Where the failure was an exception this
     process caught (``cause``), its traceback goes under the sentence: the
-    sentence is a line, and a defect is found by its stack. A note that
-    cannot be written is logged and not raised over — the refusal is the
-    one to report, and the staging is kept either way.
+    sentence is a line, and a defect is found by its stack. The exception's
+    own stack and no chained one: what it was raised while handling may be
+    a provider's failure, whose sentence this package writes nowhere (it
+    may quote what the provider was sent). A note that cannot be written
+    is logged and not raised over — the refusal is the one to report, and
+    the staging is kept, and marked, either way.
     """
+    staging = _mark_kept(staging)
     sentence = (
         f"{run_dir}: {why}. Nothing is recorded for this world: a failure on the tools' side is "
-        f"looked into, not searched past. What the search left is kept in {staging} (a tool "
-        f"arm's trace, where its server came up, and the server's own log are under "
-        f"{ARMS_DIRNAME}/{Arm.LLM_TOOLS.value}/ there), and the claim {ARMS_DIRNAME}/ stays: the "
-        f"next search of this world is refused until both are removed by hand"
+        f"looked into, not searched past. What the search left is kept in {staging} (what a "
+        f"tool arm's search got to write — its server's own log, and its trace once the arm was "
+        f"open — is under {ARMS_DIRNAME}/{Arm.LLM_TOOLS.value}/ there), and the claim "
+        f"{ARMS_DIRNAME}/ stays: the next search of this world is refused until both are removed "
+        f"by hand"
     )
     note = f"{sentence}\n"
     if cause is not None:
-        note += "\n" + "".join(traceback.format_exception(cause))
+        note += "\n" + "".join(traceback.format_exception(cause, chain=False))
     try:
         (staging / INQUIRY_FILENAME).write_text(note, encoding="utf-8", errors="replace")
     except (OSError, ValueError):
@@ -1045,19 +1090,24 @@ def run_world(
                     raise _ToolsSideStop(f"the look-ups' server failed in {name} — {exc}") from exc
                 except ToolArmError as exc:
                     # What can be refused without a server was, before any
-                    # arm ran (``tool_arm``). A refusal HERE came after the
-                    # child was started — a server that is not this build's,
-                    # a client that will not be bound after all — and the
-                    # child's log is where it says why: kept, with the rest.
+                    # arm ran (``tool_arm``). What is left to be refused
+                    # HERE is found once the child is started — a server
+                    # that is not this build's, a client that will not be
+                    # bound after all — and the child's log is where it
+                    # says why: kept, with the rest. (The opening's other
+                    # refusals — a trace that exists, limits that are none —
+                    # cannot be met in a staging just made, from limits
+                    # ``tool_arm`` built.)
                     raise _ToolsSideStop(f"{name} could not be opened — {exc}") from exc
                 except OSError as exc:
                     if arm is not Arm.LLM_TOOLS:
                         raise
-                    # A trace that could not be written in the middle of a
-                    # search that was being paid for: what was written of
-                    # it is kept, with the rest.
+                    # The arm's own files: a trace that could not be written
+                    # in the middle of a search that was being paid for, a
+                    # log that could not be opened for its server. What was
+                    # written is kept, with the rest.
                     raise _ToolsSideStop(
-                        f"{name} could not go on writing its trace or its log — {exc}"
+                        f"{name} could not open or write its trace or its server's log — {exc}"
                     ) from exc
                 if tools_failed is not None:
                     # Not a seam failure to count apart and search past
@@ -1171,6 +1221,9 @@ def run_world(
     except _ToolsSideStop as stop:
         # The one place the staging is marked to be kept, whichever line
         # stopped the run: the refusal says it was, and has to be true.
+        # The flag first, so that whatever happens while the staging is
+        # renamed and its note written — an interrupt, a full disk — the
+        # ``finally`` below leaves it alone.
         inquiry = True
         cause = stop.__cause__
         raise _kept_for_inquiry(run_dir, staging, str(stop), cause) from cause

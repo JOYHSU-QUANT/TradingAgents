@@ -273,6 +273,16 @@ def test_lines_that_are_no_trace_are_refused_by_name_and_not_by_an_index():
             trace_use(lines, replicate=0)
     with pytest.raises(ToolUseError, match="pack: no pack_version, pack_digest, limits in it"):
         TracePack.from_document({"model": MODEL})
+    with pytest.raises(ToolUseError, match="pack: no model, pack_version, pack_digest, limits"):
+        TracePack.from_document({})
+
+
+def test_nothing_is_a_count_a_provider_may_report(tmp_path):
+    # Zero is a count: a call that reported it is metered, and adds nothing.
+    lines = [pack_line(), model(1, input_tokens=0, output_tokens=0), model(1), answer(1)]
+    _pack, use = trace_use(written(tmp_path, lines), replicate=0)
+    assert (use.model_calls, use.unmetered_calls) == (2, 0)
+    assert (use.input_tokens, use.output_tokens) == (100, 20)
 
 
 def test_a_trace_file_is_held_line_by_line_to_the_shapes_the_arm_writes(tmp_path):
@@ -387,8 +397,15 @@ def test_a_search_that_no_call_came_back_from_counts_no_tokens():
     dead = replace(
         SPENT, rounds=(), seam_failed=True, model_calls=0, input_tokens=0, output_tokens=0
     )
-    with pytest.raises(ToolUseError, match="tokens are counted, and no model call came back"):
-        replace(dead, input_tokens=5)
+    for counted in ({"input_tokens": 5}, {"output_tokens": 5}):
+        with pytest.raises(ToolUseError, match="tokens are counted, and no model call came back"):
+            replace(dead, **counted)
+    # A round answered without tools took a second call, whatever it had
+    # counted: the answer came in a message of its own.
+    forced = RoundUse(0, 0, 0, True)
+    assert replace(SPENT, rounds=(forced,), model_calls=2).model_calls == 2
+    with pytest.raises(ToolUseError, match="search.model_calls: expected a whole number of at least 2"):
+        replace(SPENT, rounds=(forced,), model_calls=1)
     # Calls that came back short of a count may still have reported the other.
     half = replace(SPENT, unmetered_calls=4)
     assert (half.input_tokens, half.unmetered_calls) == (400, 4)
@@ -470,7 +487,7 @@ def test_a_round_that_asked_for_no_tool_is_not_one_that_was_answered_without_the
 def test_no_cost_is_printed_where_no_call_reported_its_counts():
     blind = replace(SPENT, unmetered_calls=4, input_tokens=0, output_tokens=0)
     line = usage_lines([blind], Prices(input=3, output=15))[1]
-    assert line.endswith(f"{FLOOR}; no cost is estimated: no call reported its counts")
+    assert line.endswith(f"{FLOOR}; no cost is estimated: no call reported both its counts")
     assert "US$" not in line
     # One call that did is enough for a figure, said to be on those counts.
     some = replace(blind, unmetered_calls=3, input_tokens=100, output_tokens=20)

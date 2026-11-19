@@ -68,13 +68,16 @@ generator does not make, a landed history an arm could not measure on, a
 run directory searched before or not landed, a record a later build
 cannot read, a store that cannot be opened, a path that cannot be read or
 written — with the sentence on stderr; ``2`` argparse's usage errors;
-``3`` a search stopped on its tool arm's side — the look-ups' server, or a
-trace that could not be read back — with what it left kept to be looked
-into (:class:`~.bench.KeptForInquiry`): a code of its own, so that a batch
+``3`` a search stopped on its tool arm's side — the look-ups' server, the
+arm's own files, an arm that could not be opened, or a trace that could
+not be read back as the search it was — with what it left kept to be
+looked into (:class:`~.bench.KeptForInquiry`): a code of its own, so that a batch
 over many worlds can stop on it and skip a world that is merely searched
 already; ``130`` interrupted, with a search's staging removed — unless its
 records were already in, when the staging holding the stores ``arms/`` did
-not receive is kept and the next ``search`` names it.
+not receive is kept and the next ``search`` names it, or the interrupt
+landed while a search that had stopped on its tool arm's side was marking
+what it keeps, when that is kept as for ``3``.
 """
 
 from __future__ import annotations

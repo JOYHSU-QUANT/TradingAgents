@@ -32,8 +32,9 @@ so a trace that says so is refused here rather than summarised.
 a search that CAME BACK and were read, a failed search's included: they
 were paid for. The sums are a floor. A call the client retried is in them
 once, a reply the arm could not read is not in them at all (the trace has
-no line for either), and a call whose reply carried no counts is counted
-as unmetered and adds nothing. :func:`usage_lines` turns the sums
+no line for either), and a call whose reply was short of a count — the
+input's, the output's or both, or a figure that is no count — is counted
+as unmetered and adds what it did report. :func:`usage_lines` turns the sums
 into an estimated cost when it is handed prices (:class:`Prices`); the
 prices are the operator's, given where the table is asked for, because a
 price is not a condition of a run and a table of them kept here would be
@@ -549,8 +550,8 @@ def usage_lines(
     whatever it had counted by then. The second line is over every search,
     failed seams included, because those were paid for too, and names the
     ``model`` whose tokens they are when it is given; the cost is there
-    when ``prices`` are — one pair of prices is one model's, and a root may
-    hold rows of several.
+    when ``prices`` are and some call reported both its counts — one pair
+    of prices is one model's, and a root may hold rows of several.
     """
     if not searches:
         return []
@@ -591,5 +592,5 @@ def usage_lines(
         )
     elif prices is not None:
         # No call reported both counts: a figure here would read as a cost.
-        spent += "; no cost is estimated: no call reported its counts"
+        spent += "; no cost is estimated: no call reported both its counts"
     return [use, spent]

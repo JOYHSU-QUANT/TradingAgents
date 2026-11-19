@@ -30,6 +30,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from contrib.autoresearch import upstream as research_upstream
 from contrib.autoresearch.ports import HypothesistError
 from contrib.autoresearch.store import ResearchStore
 from contrib.discovery import bench, cli, scoring, toolarm
@@ -503,10 +504,15 @@ def test_a_tool_use_record_that_is_not_its_search_s_is_refused_by_every_reader(
 ):
     run, *_ = tooled
     copy = _rewritten(run, tmp_path, edit)
-    with pytest.raises(BenchError, match=sentence):
-        read_searched(copy)
-    with pytest.raises(BenchError, match=sentence):
-        calibration_table([copy])
+    readers = (
+        read_searched,
+        score_world,
+        lambda r: calibration_table([r]),
+        lambda r: report_table([r]),
+    )
+    for reader in readers:
+        with pytest.raises(BenchError, match=sentence):
+            reader(copy)
 
 
 def test_the_record_is_due_exactly_where_the_manifest_names_the_arm(tooled, searched, tmp_path):
@@ -522,6 +528,21 @@ def test_the_record_is_due_exactly_where_the_manifest_names_the_arm(tooled, sear
     (stray / TOOL_USE_FILENAME).write_bytes((run / TOOL_USE_FILENAME).read_bytes())
     with pytest.raises(BenchError, match="names no tool arm to have written it"):
         read_searched(stray)
+
+
+def test_a_staging_kept_for_inquiry_refuses_its_directory_whatever_else_it_holds(
+    tooled, tmp_path
+):
+    # Beside a whole set of records, too — which no search of this build
+    # leaves, and which is not then read as a world searched and done.
+    run, *_ = tooled
+    copy = _copy(run, tmp_path)
+    assert read_searched(copy) is not None
+    (copy / ".search.kept-abc").mkdir()
+    refusal = r"holds \['\.search\.kept-abc'\], kept on purpose by a search that stopped"
+    for reader in (read_searched, run_world, lambda r: calibration_table([r])):
+        with pytest.raises(BenchError, match=refusal):
+            reader(copy)
 
 
 def test_a_tool_use_record_left_alone_is_a_search_that_did_not_finish(landed_world, tooled, tmp_path):
@@ -618,7 +639,14 @@ def _assert_cleared_only_with_the_evidence(run: Path, staging: Path) -> None:
         rf"holds \['{staging.name}'\], kept on purpose by a search that stopped on its tools' "
         rf"side: read {INQUIRY_FILENAME} in it.* once that staging and arms/ are both removed"
     )
-    for reader in (run_world, read_searched, lambda r: calibration_table([r])):
+    readers = (
+        run_world,
+        read_searched,
+        score_world,
+        lambda r: calibration_table([r]),
+        lambda r: report_table([r]),
+    )
+    for reader in readers:
         with pytest.raises(BenchError, match=refusal):
             reader(run)
     # Both gone, the directory is as it was landed: not searched, and may be.
@@ -771,7 +799,8 @@ def test_a_trace_that_is_not_its_search_s_stops_the_run_with_the_trace_kept(
         f"replicate-{k}.trace.jsonl" for k in range(replicates)
     ]
     # Every replicate's trace is kept, the finished ones' with the one that stopped the run.
-    assert all((staging / path.relative_to(staging)).is_file() for path in read)
+    kept = staging / ARMS_DIRNAME / Arm.LLM_TOOLS.value
+    assert all((kept / path.name).is_file() for path in read)
 
 
 def test_limits_that_are_not_the_manifest_s_stop_the_run_at_the_first_search(
@@ -784,13 +813,36 @@ def test_limits_that_are_not_the_manifest_s_stop_the_run_at_the_first_search(
     monkeypatch.setattr(
         bench, "tool_arm", lambda tools: (real(tools)[0], Limits(lookups=5, backtests=2))
     )
+    # Said where the search's trace is read — not later, when the record
+    # of every search is built, which would say it of a whole arm paid for.
     with pytest.raises(
         KeptForInquiry,
-        match=r"told pack version 1 under limits of 5 call\(s\) and 2 backtest\(s\); the "
-        r"manifest sets 1, 4 and 1",
+        match=r"what llm_tools-0 spent could not be read back from its trace — .*told pack "
+        r"version 1 under limits of 5 call\(s\) and 2 backtest\(s\); the manifest sets 1, 4 and 1",
     ):
         run_world(fresh_tools_run)
     _assert_stopped_for_inquiry(fresh_tools_run)
+
+
+def test_a_pool_arm_s_os_error_is_not_the_tool_arm_s_to_keep_anything_for(
+    landed_world, tmp_path, monkeypatch
+):
+    # Only the tool arm has files of its own to fail on. An ``OSError`` out
+    # of another arm's search is what it always was: raised as itself, the
+    # run discarded, the directory as landed.
+    artifact, landing = landed_world
+    monkeypatch.setattr(bench, "verify", lambda store, manifest: landing)
+
+    def unreadable(self, system, user):
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(bench.PoolHypothesist, "propose", unreadable)
+    run = land_run(tmp_path, artifact, tools_manifest(replicates=1))
+    scripted(monkeypatch, [])
+    with pytest.raises(OSError, match="Input/output error") as raised:
+        run_world(run)
+    assert not isinstance(raised.value, BenchError)
+    assert _listing(run) == LANDED
 
 
 def test_an_arm_that_cannot_be_opened_once_its_server_is_up_stops_the_run_and_keeps_the_log(
@@ -817,6 +869,8 @@ def test_an_arm_that_cannot_be_opened_once_its_server_is_up_stops_the_run_and_ke
     assert _listing(kept) == ["replicate-0.server.log", "replicate-0.sqlite"]
     note = (staging / INQUIRY_FILENAME).read_text(encoding="utf-8")
     assert note.startswith(f"{said}\n") and "ToolArmError" in note
+    # And the refusal itself is raised from what stopped the arm.
+    assert isinstance(stopped.value.__cause__, ToolArmError)
 
 
 def test_a_trace_that_cannot_be_written_mid_search_stops_the_run_and_keeps_what_was(
@@ -834,7 +888,9 @@ def test_a_trace_that_cannot_be_written_mid_search_stops_the_run_and_keeps_what_
         return real(self, kind, state, **payload)
 
     monkeypatch.setattr(toolarm._Trace, "write", full)
-    with pytest.raises(KeptForInquiry, match="llm_tools-0 could not go on writing its trace"):
+    with pytest.raises(
+        KeptForInquiry, match="llm_tools-0 could not open or write its trace or its server's log"
+    ):
         run_world(run)
     staging = _assert_stopped_for_inquiry(run)
     # The pack and the first round, which was answered and paid for.
@@ -843,31 +899,118 @@ def test_a_trace_that_cannot_be_written_mid_search_stops_the_run_and_keeps_what_
     assert written == ["pack", "model", "answer"]
 
 
-def test_a_note_that_cannot_be_written_is_logged_and_the_run_still_ends_as_kept(tmp_path, caplog):
-    missing = tmp_path / "no-such-staging"
-    with caplog.at_level("WARNING", logger=bench.__name__):
-        refusal = bench._kept_for_inquiry(tmp_path, missing, "the server failed", None)
-    assert isinstance(refusal, KeptForInquiry) and "the server failed" in str(refusal)
+def test_a_kept_staging_is_marked_by_its_name_whether_or_not_its_note_can_be_written(
+    tmp_path, caplog, monkeypatch
+):
+    # The disk that could not take a trace's next line may not take a note
+    # either. The mark every later reader goes by is the staging's NAME,
+    # which a rename gives it without writing a byte.
+    run = tmp_path / "run"
+    staging = run / ".search.partial-abc"
+    staging.mkdir(parents=True)
+    real = Path.write_text
+
+    def full(self, *args, **kwargs):
+        if self.name == INQUIRY_FILENAME:
+            raise OSError(28, "No space left on device")
+        return real(self, *args, **kwargs)
+
+    with monkeypatch.context() as patch, caplog.at_level("WARNING", logger=bench.__name__):
+        patch.setattr(Path, "write_text", full)
+        refusal = bench._kept_for_inquiry(run, staging, "the server failed", None)
+    kept = run / ".search.kept-abc"
+    assert isinstance(refusal, KeptForInquiry)
+    assert "the server failed" in str(refusal) and str(kept) in str(refusal)
+    assert _listing(run) == [kept.name] and _listing(kept) == []
     assert f"could not write {INQUIRY_FILENAME}" in caplog.text
+    # No note, and the directory is refused all the same, to a reader that
+    # finds the claim beside it and to one that finds the claim removed.
+    assert bench._kept_on_purpose(run) == [kept.name]
+    assert "kept on purpose" in bench._unfinished(run, [ARMS_DIRNAME])
+    assert f"holds ['{kept.name}'], kept on purpose" in bench._unread_evidence(run)
+
+
+def test_a_staging_that_cannot_be_renamed_is_marked_by_its_note(tmp_path, caplog, monkeypatch):
+    run = tmp_path / "run"
+    staging = run / ".search.partial-abc"
+    staging.mkdir(parents=True)
+
+    def locked(self, target):
+        raise PermissionError("locked by another process")
+
+    with monkeypatch.context() as patch, caplog.at_level("WARNING", logger=bench.__name__):
+        patch.setattr(Path, "rename", locked)
+        refusal = bench._kept_for_inquiry(run, staging, "the server failed", None)
+    # Where it was, under the name it had — which the refusal says — and
+    # still read as kept on purpose, by the note.
+    assert _listing(run) == [staging.name] and str(staging) in str(refusal)
+    assert "could not rename the kept staging" in caplog.text
+    assert (staging / INQUIRY_FILENAME).read_text(encoding="utf-8") == f"{refusal}\n"
+    assert bench._kept_on_purpose(run) == [staging.name]
+
+
+def test_a_note_holds_the_cause_s_own_stack_and_no_sentence_it_was_raised_while_handling(tmp_path):
     # A sentence no file takes as it is — half a surrogate pair — is written all the same.
     staging = tmp_path / ".search.partial-x"
     staging.mkdir()
     bench._kept_for_inquiry(tmp_path, staging, "said \ud83d", ValueError("the cause"))
-    note = (staging / INQUIRY_FILENAME).read_text(encoding="utf-8")
+    note = (tmp_path / ".search.kept-x" / INQUIRY_FILENAME).read_text(encoding="utf-8")
     assert "said ?" in note and "ValueError: the cause" in note
+    # The cause's own stack, and not what it was raised while handling:
+    # that may be a provider's failure, whose sentence may quote what the
+    # provider was sent and is written nowhere by this package.
+    try:
+        try:
+            raise RuntimeError("the provider said: <what it was sent>")
+        except RuntimeError:
+            raise OSError(28, "No space left on device")  # noqa: B904 - the chain is the point
+    except OSError as exc:
+        cause = exc
+    other = tmp_path / ".search.partial-y"
+    other.mkdir()
+    bench._kept_for_inquiry(tmp_path, other, "the trace could not be written", cause)
+    note = (tmp_path / ".search.kept-y" / INQUIRY_FILENAME).read_text(encoding="utf-8")
+    assert "No space left on device" in note and "Traceback (most recent call last)" in note
+    assert "the provider said" not in note
 
 
-def test_only_a_staging_that_holds_the_note_is_said_to_be_kept_on_purpose(tmp_path):
+def test_only_a_staging_marked_as_kept_is_said_to_be_kept_on_purpose(tmp_path):
     # A run killed outright leaves a staging too; it is not evidence
     # anyone chose to keep, and is not said to be.
     killed = tmp_path / ".search.partial-killed"
     killed.mkdir()
+    assert bench._kept_staging(tmp_path) == [killed.name]
     assert bench._kept_on_purpose(tmp_path) == []
     assert bench._unread_evidence(tmp_path) is None
     assert "kept on purpose" not in bench._unfinished(tmp_path, [ARMS_DIRNAME])
+    # Either mark is one: the note inside it, or its name.
     (killed / INQUIRY_FILENAME).write_text("why\n", encoding="utf-8")
     assert bench._kept_on_purpose(tmp_path) == [killed.name]
+    (killed / INQUIRY_FILENAME).unlink()
+    named = tmp_path / ".search.kept-named"
+    named.mkdir()
+    assert bench._kept_staging(tmp_path) == [named.name, killed.name]
+    assert bench._kept_on_purpose(tmp_path) == [named.name]
     assert "kept on purpose" in bench._unfinished(tmp_path, [ARMS_DIRNAME])
+
+
+def test_searches_that_do_not_make_a_record_stop_the_run_with_their_traces_kept(
+    fresh_tools_run, monkeypatch
+):
+    # Each search was held as its trace was read; the record of them all is
+    # held once more as it is built, and a refusal there is the same
+    # defect found later — not a run to discard.
+    def refuse(where, use, tools):
+        raise BenchError(f"{where} holds the tool arm's replicate(s) [0, 0]")
+
+    monkeypatch.setattr(bench, "_hold_use_to_manifest", refuse)
+    scripted(monkeypatch, [says("not a rule"), says("not a rule")])
+    with pytest.raises(
+        KeptForInquiry, match="what the tool arm's searches spent does not make a record — "
+    ):
+        run_world(fresh_tools_run)
+    staging = _assert_stopped_for_inquiry(fresh_tools_run)
+    assert (staging / ARMS_DIRNAME / "llm_tools" / "replicate-0.trace.jsonl").is_file()
 
 
 def test_the_oracle_s_record_goes_in_last_whatever_else_a_search_writes(
@@ -989,6 +1132,32 @@ def test_a_missing_sdk_a_client_with_no_tools_and_a_model_that_cannot_be_built_a
     monkeypatch.setattr(bench.ChatHypothesist, "build", refuse)
     with pytest.raises(BenchError, match="arms.llm_tools: API key for provider is not set"):
         tool_arm(TOOLS)
+
+
+def test_the_model_a_search_is_held_to_is_the_label_the_research_package_builds_one_under(
+    monkeypatch,
+):
+    # A finished search's trace is held to the manifest's model by its
+    # label, and the label's spelling is the research package's
+    # (``ChatHypothesist.build``). Every other test of this module puts its
+    # own ``build`` in that one's place, so this one runs the real one —
+    # over a client that is no provider's — and holds the two spellings
+    # together: were they to part, every paid search would stop at its
+    # first replicate, and no other test would say so.
+    monkeypatch.setattr(
+        research_upstream,
+        "build_chat_model",
+        lambda provider, model, base_url=None, **kwargs: Scripted([]),
+    )
+    for provider, name in (("scripted", "model"), ("openrouter", "vendor/some-model:beta")):
+        arm = replace(TOOLS, provider=provider, model=name)
+        built, limits = tool_arm(arm)
+        pack = TracePack(
+            model=built.label, pack_version=PACK_VERSION, pack_digest="ab" * 32, limits=limits
+        )
+        bench._hold_pack_to_arm("replicate-0.trace.jsonl", pack, arm)
+        with pytest.raises(BenchError, match="are those of the model another/model"):
+            bench._hold_pack_to_arm("replicate-0.trace.jsonl", replace(pack, model="another/model"), arm)
 
 
 # -- (d) a manifest that names no tool arm ----------------------------------------------------------

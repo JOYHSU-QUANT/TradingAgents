@@ -350,7 +350,13 @@ def test_an_answer_holding_a_surrogate_is_a_refusal_and_not_the_end_of_the_run(l
     refused, measured = ledger.proposals("btc-4h")
     assert refused.response == "not a rule " + _STORED
     assert refused.trial_id is None and refused.spec_hash is None
-    assert "1 surrogate character(s)" in refused.refusal and "U+FFFD" in refused.refusal
+    # The parser's own reason first, then the count: prose AND half an emoji
+    # are two mistakes, and a model told only one would spend a round on each.
+    assert refused.refusal.startswith("spec is not valid JSON")
+    assert refused.refusal.endswith(
+        "; 1 surrogate character(s) in the answer, which are not text on their own, "
+        "each stored as U+FFFD"
+    )
     # Told in so many words, in the very next prompt, like any other refusal.
     assert f"- {refused.refusal}" in model.asked[1][1]
     assert measured.response == _rule(0)
@@ -367,6 +373,10 @@ def test_an_answer_holding_a_surrogate_is_a_refusal_and_not_the_end_of_the_run(l
         # leaves. Still not text - UTF-8 writes neither.
         ("{" + _HIGH + _LOW + "}", 2),
         (_LOW + " and " + _HIGH + " and " + _LOW, 3),
+        # The four edges of the two halves' ranges: the whole block is one
+        # range, and a pattern a character short at either end would pass
+        # every case above.
+        ("".join(map(chr, (0xD800, 0xDBFF, 0xDC00, 0xDFFF))), 4),
     ],
 )
 def test_a_surrogate_anywhere_in_the_answer_is_counted_and_stored_as_the_replacement(
@@ -380,12 +390,14 @@ def test_a_surrogate_anywhere_in_the_answer_is_counted_and_stored_as_the_replace
     (stored,) = ledger.proposals("btc-4h")
     # One for one, so the text is the same length and everything else in it
     # is where the model put it.
-    assert stored.response == answer.replace(_HIGH, _STORED).replace(_LOW, _STORED)
+    assert stored.response == "".join(
+        _STORED if 0xD800 <= ord(char) <= 0xDFFF else char for char in answer
+    )
     assert stored.response.count(_STORED) == count
     assert f"{count} surrogate character(s)" in stored.refusal
-    # The sentence goes into the next prompt and onto a terminal: it names the
-    # replacement rather than containing it.
-    assert stored.refusal.isascii()
+    # The sentence goes into the next prompt: it can be written, and it names
+    # the replacement rather than containing it (the parser quotes escaped).
+    assert _writable(stored.refusal) and _STORED not in stored.refusal
 
 
 def test_an_over_long_answer_cut_between_two_halves_is_stored_without_the_half(ledger, experiment):
@@ -414,6 +426,7 @@ def test_a_surrogate_past_the_clip_is_not_stored_and_so_not_reported(ledger, exp
         "not a rule " + _ESCAPED,  # the escape, spelled out: six ordinary characters
         "not a rule " + _STORED,  # a replacement character the model wrote itself
         "not a rule " + chr(0x1F600),  # a whole emoji
+        "not a rule " + chr(0xD7FF) + chr(0xE000),  # the characters either side of the block
         _rule(0).replace("breakout", "break" + _ESCAPED + "out"),  # a JSON escape for one
     ],
 )
@@ -427,6 +440,60 @@ def test_text_that_can_be_written_is_stored_as_it_arrived(ledger, experiment, an
     assert stored.response == answer
     assert "surrogate character(s)" not in stored.refusal
     assert _writable(stored.refusal)
+
+
+def test_a_refusal_that_quoted_a_surrogate_unescaped_would_still_be_written(
+    ledger, experiment, monkeypatch
+):
+    """Every sentence the parser has escapes what it quotes; the run must not depend on that."""
+
+    def quoting(_text):
+        raise SpecError("unknown family break" + _HIGH + "out")
+
+    monkeypatch.setattr(loop, "load_spec", quoting)
+    report = search(ledger, experiment, ScriptedModel(["anything"]), max_trials=1)
+
+    assert report.spent == 1
+    (stored,) = ledger.proposals("btc-4h")
+    assert stored.response == "anything"
+    assert stored.refusal == "unknown family break" + _STORED + "out"
+
+
+def test_an_answer_a_parser_accepted_with_a_surrogate_in_it_is_still_not_written_as_it_is(
+    ledger, experiment, monkeypatch
+):
+    """No rule has a place for one, so the parser refuses them all - until one day it does not.
+
+    Past the parser the answer is written as it arrived, beside its trial, and
+    that is the write that cannot be made.
+    """
+    accepted = loop.load_spec(_rule(0))
+    monkeypatch.setattr(loop, "load_spec", lambda _text: accepted)
+    report = search(ledger, experiment, ScriptedModel([_rule(0) + _HIGH]), max_trials=1)
+
+    assert report.counts()[ProposalOutcome.REFUSED] == 1
+    assert ledger.trials("btc-4h") == []
+    (stored,) = ledger.proposals("btc-4h")
+    assert stored.response == _rule(0) + _STORED
+    assert stored.refusal.startswith("the answer reads as a rule but cannot be written down")
+    assert "1 surrogate character(s) in the answer" in stored.refusal
+
+
+def test_an_answer_holding_a_number_too_long_to_convert_costs_a_round_too(ledger, experiment):
+    """The other answer that ended a run: ``json`` raised a plain ``ValueError`` for it.
+
+    Found reviewing #425. Under the length cap, so it reaches the parser, and
+    over the interpreter's limit on converting a whole number.
+    """
+    answer = "1" * 5000
+    assert len(answer) < MAX_RESPONSE_CHARS
+    report = search(ledger, experiment, ScriptedModel([answer, _rule(0)]), max_trials=2)
+
+    assert report.spent == 2 and report.stopped is None
+    refused, measured = ledger.proposals("btc-4h")
+    assert refused.outcome is ProposalOutcome.REFUSED and "too many digits" in refused.refusal
+    assert refused.response == answer
+    assert measured.outcome is ProposalOutcome.MEASURED
 
 
 @pytest.mark.parametrize("budget", [0, -1, 2.5, True])

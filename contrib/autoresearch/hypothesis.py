@@ -120,7 +120,6 @@ MAX_RESPONSE_CHARS: Final = 8000
 # otherwise tell a replaced character from a U+FFFD the model wrote itself.
 _SURROGATE: Final = re.compile("[\ud800-\udfff]")
 _REPLACEMENT: Final = chr(0xFFFD)
-_STORED_AS: Final = "each stored as U+FFFD"
 
 # How much of the past goes into a prompt. Both are caps on PROMPT SIZE rather
 # than on what the ledger holds: an experiment with four hundred trials still
@@ -406,35 +405,34 @@ def _resolve(
         # The port says text; a fake or a client returning something else is a
         # defect on this side, not a refusal to teach a model about.
         raise TypeError(f"a hypothesist answers with text, got {type(answer).__name__}")
-    # Decided before the parser reads a character, because both are facts about
-    # the TEXT rather than about a rule: how much of it is kept, and whether
-    # what is kept can be written down at all.
-    kept, unwritable = _SURROGATE.subn(_REPLACEMENT, answer[:MAX_RESPONSE_CHARS])
     if len(answer) > MAX_RESPONSE_CHARS:
-        refusal = (
-            f"the answer is {len(answer)} characters; a rule is one JSON object and has to be "
-            f"under {MAX_RESPONSE_CHARS}"
-        )
-        if unwritable:
-            refusal += f"; {unwritable} surrogate character(s) in the part kept, {_STORED_AS}"
-        return _refused(ledger, experiment, number, kept, model, refusal)
-    if unwritable:
-        # Refused here rather than handed on: the parser would refuse it too
-        # (a surrogate is no part of a rule), but with a sentence about JSON,
-        # and the row could not be written to say so.
         return _refused(
             ledger,
             experiment,
             number,
-            kept,
+            answer[:MAX_RESPONSE_CHARS],
             model,
-            f"the answer holds {unwritable} surrogate character(s), which are not text on "
-            f"their own and which no rule needs, {_STORED_AS}",
+            f"the answer is {len(answer)} characters; a rule is one JSON object and has to be "
+            f"under {MAX_RESPONSE_CHARS}",
+            where="the part kept",
         )
     try:
         spec = load_spec(strip_fence(answer))
     except SpecError as exc:
         return _refused(ledger, experiment, number, answer, model, str(exc))
+    if _SURROGATE.search(answer):
+        # No rule has a place for one today - the language has no free text -
+        # so the parser refuses every such answer above, in its own words.
+        # This is for the day it does not: below here the answer is written
+        # as it arrived, and that write is the one that cannot be made.
+        return _refused(
+            ledger,
+            experiment,
+            number,
+            answer,
+            model,
+            "the answer reads as a rule but cannot be written down as it arrived",
+        )
     # A rule already in the experiment writes no trial, so its proposal has
     # nothing to be atomic with and is filed on its own. A NEW rule's answer
     # rides INTO the measurement, so the trial and the row saying where it came
@@ -459,14 +457,36 @@ def _resolve(
 
 
 def _refused(
-    ledger: Ledger, experiment: Experiment, number: int, response: str, model: str, refusal: str
+    ledger: Ledger,
+    experiment: Experiment,
+    number: int,
+    response: str,
+    model: str,
+    refusal: str,
+    *,
+    where: str = "the answer",
 ) -> Round:
+    """File a refusal in a form the store can hold, and say so when that changed the text.
+
+    The reason stays whatever refused the answer - the parser's sentence, the
+    length - with the surrogates counted after it, so a model that wrote prose
+    AND half an emoji is told both at once rather than one per round (decided
+    2026-11-19). The reason itself goes through the same replacement: it is
+    built from the model's text, and although every sentence the parser has
+    quotes that text escaped, one that did not would end the run right here.
+    """
+    stored, replaced = _SURROGATE.subn(_REPLACEMENT, response)
+    if replaced:
+        refusal += (
+            f"; {replaced} surrogate character(s) in {where}, which are not text on their "
+            f"own, each stored as U+FFFD"
+        )
     proposal = ledger.record_proposal(
         experiment,
         outcome=ProposalOutcome.REFUSED,
-        response=response,
+        response=stored,
         model=model,
-        refusal=refusal,
+        refusal=_SURROGATE.sub(_REPLACEMENT, refusal),
     )
     return Round(number=number, proposal=proposal, measurement=None)
 

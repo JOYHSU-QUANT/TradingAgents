@@ -904,6 +904,32 @@ def test_a_spec_nested_past_what_json_can_read_is_refused_rather_than_raised_on(
         load_spec("[" * 20000 + "]" * 20000)
 
 
+@pytest.mark.usefixtures("stock_digit_limit")
+@pytest.mark.parametrize(
+    "text",
+    [
+        "1" * 4301,  # one past what the interpreter converts
+        "-" + "1" * 5000,
+        '{"family": ' + "1" * 5000 + "}",  # anywhere in an object, legal key or not
+    ],
+)
+def test_a_whole_number_past_what_the_interpreter_converts_is_refused_rather_than_raised_on(text):
+    """Not a decode error: ``json`` hands on the interpreter's plain ``ValueError``.
+
+    Which names a ``sys`` setting and nothing about the spec, and which nothing
+    between here and the hypothesis loop's caller catches.
+    """
+    with pytest.raises(SpecError) as caught:
+        load_spec(text)
+    assert str(caught.value) == "spec holds a whole number with too many digits to read"
+
+
+def test_a_long_number_that_is_not_whole_is_read_and_refused_for_what_it_is():
+    """The limit is on whole numbers only; a float of any length converts."""
+    with pytest.raises(SpecError, match="expected an object, got float"):
+        load_spec("1" * 5000 + ".5")
+
+
 def test_a_parameter_value_is_checked_on_the_type_as_well():
     """A param is printed back beside the number it stands for.
 

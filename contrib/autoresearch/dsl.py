@@ -473,6 +473,18 @@ def load_spec(text: str) -> StrategySpec:
         # ended the round with a traceback rather than with a refusal the loop
         # can show the model. Nothing legal here is nested more than five deep.
         raise SpecError("spec is nested too deeply to read") from exc
+    except SpecError:
+        # The two hooks above refuse in this module's own words; the handler
+        # below would otherwise reword them, ``SpecError`` being a ``ValueError``.
+        raise
+    except ValueError as exc:
+        # Not a decode error, so not caught above: the interpreter refuses to
+        # convert a whole number past a few thousand digits, and says so with
+        # a plain ``ValueError`` whose text advises changing a ``sys`` setting.
+        # Left alone it ended the hypothesis loop's run on one answer, the way
+        # a refusal never does (found reviewing #425). No threshold is longer
+        # than a handful of digits.
+        raise SpecError("spec holds a whole number with too many digits to read") from exc
     return parse_spec(payload)
 
 

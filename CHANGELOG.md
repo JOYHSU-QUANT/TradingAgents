@@ -341,6 +341,27 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **An answer holding a surrogate character costs the hypothesis loop one
+  round instead of ending the run** (#425). A model that writes half of an
+  emoji's escaped pair hands the loop a character UTF-8 cannot write, and
+  sqlite cannot bind: the insert that records the answer raised
+  `UnicodeEncodeError`, which `search()` does not catch, so the run stopped
+  there with every later round unspent and no report. The blind-guess arm
+  and the tool-using one (PR #424) both end in that write. The loop now
+  files such an answer as the refusal the parser gives it (no rule has a
+  place for a surrogate, so the parser refuses every one), stores each
+  surrogate as U+FFFD (one for one, so the 8,000-character cap still bounds
+  the row) and adds to the parser's reason how many there were; the next
+  prompt carries both halves of that sentence like any other refusal. An
+  over-long answer whose kept part holds one is still refused for its
+  length, with the count added the same way. Text
+  that can be written is untouched: the six characters of a spelled-out
+  escape, a whole emoji, a U+FFFD the model wrote itself. Reviewing the fix
+  turned up a second answer that ended a run the same way: a whole number
+  of more than 4,300 digits, for which `json` raises the interpreter's
+  plain `ValueError` rather than a decode error. `load_spec` now refuses it
+  as a spec failure (`spec holds a whole number with too many digits to
+  read`), for a hand-written spec as well.
 - **The replay retries an OpenRouter routing error instead of recording the
   question as refused** (#415). When none of a model's upstream providers
   serves a call, OpenRouter answers with the last provider's status (a 400

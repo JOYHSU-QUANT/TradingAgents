@@ -47,6 +47,11 @@ run's trials and report a search that never happened.
 :class:`~.ledger.Proposal` row, refusals included, so the next run starts
 knowing what already failed instead of paying to rediscover it. Refusals are
 not trials and never raise the promote threshold — only measured rules do.
+The text is stored as it arrived with two exceptions, both refusals and both
+legible from the refusal's own sentence: an answer past ``MAX_RESPONSE_CHARS``
+is clipped to it (the sentence gives the length that arrived), and a surrogate
+character — which UTF-8, and so the store, cannot write — is kept as U+FFFD
+(the sentence gives how many).
 
 Imports the feature stack through :mod:`.research` (pandas, stockstats), so
 the CLI imports this module inside the one command that uses it.
@@ -55,6 +60,7 @@ the CLI imports this module inside the one command that uses it.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Final
@@ -101,6 +107,19 @@ INTERRUPTED: Final = "interrupted"
 # the text itself — and an essay, or a model that streams until it is cut off,
 # would otherwise be written into the ledger in full.
 MAX_RESPONSE_CHARS: Final = 8000
+
+# A surrogate code point: the one kind of character a ``str`` can hold that
+# UTF-8 cannot write, so the one kind sqlite refuses to bind. A client decoding
+# half of an escaped pair (``\ud83d`` with no partner - a model that mistyped
+# an emoji, or a stream cut between the two halves) hands back exactly this,
+# and the write that was meant to record the answer raised instead, ending the
+# run with every remaining round unspent (#425). Each one is stored as U+FFFD,
+# the character that means "something here could not be represented": one for
+# one, so the stored text keeps its length and the cap above still bounds it,
+# and the refusal says how many there were, because a reader of the row cannot
+# otherwise tell a replaced character from a U+FFFD the model wrote itself.
+_SURROGATE: Final = re.compile("[\ud800-\udfff]")
+_REPLACEMENT: Final = chr(0xFFFD)
 
 # How much of the past goes into a prompt. Both are caps on PROMPT SIZE rather
 # than on what the ledger holds: an experiment with four hundred trials still
@@ -395,11 +414,25 @@ def _resolve(
             model,
             f"the answer is {len(answer)} characters; a rule is one JSON object and has to be "
             f"under {MAX_RESPONSE_CHARS}",
+            where="the part kept",
         )
     try:
         spec = load_spec(strip_fence(answer))
     except SpecError as exc:
         return _refused(ledger, experiment, number, answer, model, str(exc))
+    if _SURROGATE.search(answer):
+        # No rule has a place for one today - the language has no free text -
+        # so the parser refuses every such answer above, in its own words.
+        # This is for the day it does not: below here the answer is written
+        # as it arrived, and that write is the one that cannot be made.
+        return _refused(
+            ledger,
+            experiment,
+            number,
+            answer,
+            model,
+            "the answer reads as a rule but cannot be written down as it arrived",
+        )
     # A rule already in the experiment writes no trial, so its proposal has
     # nothing to be atomic with and is filed on its own. A NEW rule's answer
     # rides INTO the measurement, so the trial and the row saying where it came
@@ -424,14 +457,37 @@ def _resolve(
 
 
 def _refused(
-    ledger: Ledger, experiment: Experiment, number: int, response: str, model: str, refusal: str
+    ledger: Ledger,
+    experiment: Experiment,
+    number: int,
+    response: str,
+    model: str,
+    refusal: str,
+    *,
+    where: str = "the answer",
 ) -> Round:
+    """File a refusal in a form the store can hold, and say so when that changed the answer.
+
+    The reason stays whatever refused the answer - the parser's sentence, the
+    length, or ``_resolve``'s own for a rule it could not write down - with
+    the surrogates counted after it, so a model that wrote prose
+    AND half an emoji is told both at once rather than one per round (decided
+    2026-11-19). The reason itself goes through the same replacement: it is
+    built from the model's text, and although every sentence the parser has
+    quotes that text escaped, one that did not would end the run right here.
+    """
+    stored, replaced = _SURROGATE.subn(_REPLACEMENT, response)
+    if replaced:
+        refusal += (
+            f"; {replaced} surrogate character(s) in {where}, which are not text on their "
+            f"own, each stored as U+FFFD"
+        )
     proposal = ledger.record_proposal(
         experiment,
         outcome=ProposalOutcome.REFUSED,
-        response=response,
+        response=stored,
         model=model,
-        refusal=refusal,
+        refusal=_SURROGATE.sub(_REPLACEMENT, refusal),
     )
     return Round(number=number, proposal=proposal, measurement=None)
 

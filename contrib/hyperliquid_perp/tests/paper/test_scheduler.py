@@ -1643,9 +1643,10 @@ def test_a_decision_whose_prose_holds_a_lone_surrogate_completes_its_cycle(tmp_p
     assert done is not None and done.event is CycleEvent.COMPLETED  # first poll: no persist retry
     assert _attempt_row(db, done.decision_attempt_id)["status"] == "completed"
     assert _recorded_prose(db, done.output_id) == ("momentum \ufffd up", ["a \ufffd risk"])
-    # One plan for the one decision — the pre-fix restart loop registered
-    # another on every restart.
+    # The audit row landed beside the plan it describes — the row the old
+    # build never managed to write.
     assert db.conn.execute("SELECT COUNT(*) FROM execution_plans").fetchone()[0] == 1
+    assert db.conn.execute("SELECT COUNT(*) FROM ai_outputs").fetchone()[0] == 1
     db.close()
 
 
@@ -1662,9 +1663,9 @@ def test_a_restart_finishes_such_a_decision_from_its_stored_reply(tmp_path, capl
         # text the decision was parsed from.
         assert stored == _RAW_HALF_PAIR.replace("\\ud83d", "\ufffd")
     else:
-        # Stored as the model wrote it — which is also the row a daemon from
-        # before the fix left behind when it gave up, so this restart is the
-        # one that frees a run stuck on such a row.
+        # Stored as the model wrote it: the escape is still an escape, and
+        # the resume below replaces it again. (The run an old build left
+        # stuck is the next test's.)
         assert stored == _RAW_HALF_PAIR
 
     provider2 = _FakeProvider([])  # would raise if the restart asked again
@@ -1676,18 +1677,75 @@ def test_a_restart_finishes_such_a_decision_from_its_stored_reply(tmp_path, capl
     assert provider2.build_calls == 0 and provider2.decide_calls == 0
     # The resume says what it kept, with the attempt — but only when there was
     # something left to replace: a reply stored already replaced has none.
-    said = [r.getMessage() for r in caplog.records if "lone surrogate" in r.getMessage()]
+    said = [
+        (r.levelname, r.getMessage()) for r in caplog.records if "lone surrogate" in r.getMessage()
+    ]
     if in_the_text:
         assert said == []
     else:
         assert said == [
-            f"decision attempt {done.decision_attempt_id}, resumed: the engine's answer held 2 "
-            "lone surrogate character(s) (half of an emoji's pair), which UTF-8 cannot write; "
-            "each is kept as U+FFFD in the stored reply and in the decision's rationale and "
-            "key risks"
+            (
+                "WARNING",
+                f"decision attempt {done.decision_attempt_id}, resumed: the engine's answer "
+                "held 2 lone surrogate character(s) (half of an emoji's pair), which UTF-8 "
+                "cannot write; U+FFFD stands in for each wherever this answer or its decision "
+                "is kept",
+            )
         ]
     assert _recorded_prose(db, done.output_id) == ("momentum \ufffd up", ["a \ufffd risk"])
     assert _attempt_row(db, done.decision_attempt_id)["pending_raw_response"] is None
+    db.close()
+
+
+def test_a_run_the_old_build_left_stuck_finishes_on_its_first_restart(tmp_path, monkeypatch):
+    # Issue #427 from start to finish. The first process behaves as the build
+    # before the fix did — both replacements are switched off for it, in
+    # memory — and ends the way that build's daemon ended: the plan
+    # registered, the audit write refused ten polls running, the exception
+    # out of poll(). What it leaves in the store is what a stuck run holds.
+    from contrib.hyperliquid_perp.domains.perp import target_decision as parser
+    from contrib.hyperliquid_perp.paper.reconcile import reconcile_on_restart
+    from contrib.hyperliquid_perp.paper.scheduler import _MAX_PERSIST_FAILURES
+    from contrib.hyperliquid_perp.persistence.repository import _base as store_seam
+
+    def as_before(text):
+        return text, 0
+
+    with monkeypatch.context() as old_build:
+        old_build.setattr(parser, "replace_lone_surrogates", as_before)
+        old_build.setattr(store_seam, "replace_lone_surrogates", as_before)
+        parsed = parser.parse_target_decision(_RAW_HALF_PAIR, DecisionConfig())
+        db, clock, engine, scheduler, provider = _setup(tmp_path, [parsed], [snap()])
+        for _ in range(_MAX_PERSIST_FAILURES - 1):
+            assert scheduler.poll() is None  # decided and gated; the audit write is retried
+        with pytest.raises(UnicodeEncodeError):
+            scheduler.poll()  # the budget is spent — the old daemon exits here
+    assert db.conn.execute("SELECT COUNT(*) FROM ai_outputs").fetchone()[0] == 0
+    assert db.conn.execute("SELECT COUNT(*) FROM execution_plans").fetchone()[0] == 1
+    assert repo.find_in_progress_attempt(db.conn, "r")["pending_raw_response"] == _RAW_HALF_PAIR
+
+    # The supervisor restarts it on this build: the restart reconciliation
+    # cancels the plan the dead process left, then a new engine and scheduler
+    # resume from the stored reply — the same one, which now parses to prose
+    # the store can write.
+    report = reconcile_on_restart(db, run_id="r", now=clock.now())
+    assert len(report.canceled_plan_ids) == 1
+    engine2 = PaperExecutionEngine(
+        db=db,
+        run_id="r",
+        asset=engine._asset,
+        clock=clock,
+        provider=ScriptedSnapshotProvider("BTC", [snap()]),
+        risk_config=engine._risk,
+        decision_config=DecisionConfig(),
+        paper_config=PaperTradingConfig.from_dict(None),
+    )
+    provider2 = _FakeProvider([])  # would raise if the restart asked again
+    done = _restart(db, clock, engine2, provider2).poll()
+    assert done is not None and done.event is CycleEvent.COMPLETED
+    assert provider2.build_calls == 0 and provider2.decide_calls == 0
+    assert _recorded_prose(db, done.output_id) == ("momentum \ufffd up", ["a \ufffd risk"])
+    assert repo.find_in_progress_attempt(db.conn, "r") is None
     db.close()
 
 
@@ -1696,7 +1754,7 @@ def test_a_provider_error_holding_a_lone_surrogate_is_recorded_and_the_ladder_go
     # reached the attempt row's ``error_message`` unguarded, and that write
     # raised out of the very first poll — this lane has no ten-poll
     # containment. The store's encode seam (``repository._base._encode``)
-    # keeps it as U+FFFD, for this column and every other text column.
+    # keeps it as U+FFFD, for this column and the other text written through it.
     failed = RetryableDecisionError("timeout", "upstream said \ud83d")
     db, clock, engine, scheduler, provider = _setup(
         tmp_path, [failed, set_target("long", 1)], [snap()]

@@ -1093,17 +1093,49 @@ def test_the_note_for_the_operator_names_how_many_and_what_was_kept():
     parsed = parse_target_decision(_half_pair_reply(in_the_text=False), _CFG)
     assert surrogate_replacement_note(parsed) == (
         "the engine's answer held 2 lone surrogate character(s) (half of an emoji's pair), "
-        "which UTF-8 cannot write; each is kept as U+FFFD in the stored reply and in the "
-        "decision's rationale and key risks"
+        "which UTF-8 cannot write; U+FFFD stands in for each wherever this answer or its "
+        "decision is kept"
     )
 
 
-def test_parsing_logs_nothing_whatever_it_replaced(caplog):
+@pytest.mark.parametrize("in_the_text", [False, True], ids=["escaped", "in-the-text"])
+def test_parsing_logs_nothing_whatever_it_replaced(caplog, in_the_text):
     # The parser is shared with the replay, which parses recorded answers by
     # the thousand; the lanes that store an answer do the saying.
     with caplog.at_level(logging.DEBUG):
-        parse_target_decision(_half_pair_reply(in_the_text=True), _CFG)
+        parsed = parse_target_decision(_half_pair_reply(in_the_text=in_the_text), _CFG)
+    assert parsed.replaced_surrogates == 2
     assert caplog.records == []
+
+
+def test_every_character_is_counted_wherever_in_the_prose_it_stands():
+    # Two in the rationale, none in the first risk, one in the second, two
+    # side by side in the third: the count is of characters, not of fields,
+    # and no position in the list is special.
+    reply = _text(
+        rationale=f"{_HALF} up {_HALF}",
+        key_risks=["a clean risk", f"a {_HALF} risk", f"{_HALF}{_HALF}"],
+    )
+    parsed = parse_target_decision(reply, _CFG)
+    assert parsed.is_valid
+    assert parsed.decision.rationale == "\ufffd up \ufffd"
+    assert parsed.decision.key_risks == ("a clean risk", "a \ufffd risk", "\ufffd\ufffd")
+    assert parsed.replaced_surrogates == 5
+
+
+def test_a_reply_holding_it_both_ways_counts_fewer_on_resume_and_is_the_same_decision():
+    # The rationale holds the character itself, the risk spells an escape.
+    # Collected, both are replaced: two. The stored reply already has U+FFFD
+    # in the rationale, so the resume replaces only the escape: one. The
+    # count takes no part in equality, so the two results are still equal —
+    # "exactly the decision the crashed process held".
+    reply = _text(rationale=f"momentum {_HALF} up", key_risks=[f"a {_HALF} risk"])
+    reply = reply.replace("\\ud83d", _HALF, 1)
+    assert reply.count(_HALF) == 1 and reply.count("\\ud83d") == 1
+    first = parse_target_decision(reply, _CFG)
+    again = parse_target_decision(first.raw_response, _CFG)
+    assert (first.replaced_surrogates, again.replaced_surrogates) == (2, 1)
+    assert again == first
 
 
 @pytest.mark.parametrize("count", [-1, True, 1.0, "1", None], ids=repr)

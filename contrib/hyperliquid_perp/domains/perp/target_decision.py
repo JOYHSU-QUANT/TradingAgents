@@ -24,7 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
@@ -244,7 +244,10 @@ class ParsedDecision:
     kept as U+FFFD — in this text, and in the decision's ``rationale`` and
     ``key_risks`` (see :func:`parse_target_decision`). The count is of
     characters replaced across all three, so ``0`` says every one of them is
-    as the model wrote it. ``unavailable_inputs`` is a fact about
+    as the model wrote it. The count takes no part in equality: a resume
+    re-parses the stored text, in which a character the reply itself held is
+    already U+FFFD, so it counts fewer and is still, field for field, the
+    decision the crashed process held. ``unavailable_inputs`` is a fact about
     the run that produced the text, not about the text: the optional data
     categories whose tool call ended in the router's ``could not be
     retrieved`` sentinel (sorted, each once; the empty tuple when the run
@@ -262,7 +265,7 @@ class ParsedDecision:
     invalid_reason: str | None
     raw_response: str
     unavailable_inputs: tuple[str, ...] | None = None
-    replaced_surrogates: int = 0
+    replaced_surrogates: int = field(default=0, compare=False)
 
     def __post_init__(self) -> None:
         if (
@@ -653,14 +656,22 @@ def surrogate_replacement_note(parsed: ParsedDecision) -> str | None:
     ``_resume_pending``, live's ``_adopt``) word it alike; each logs it as a
     WARNING on its own logger, the lane the operator greps. A reply that held
     the character itself is stored already replaced, so its resume has
-    nothing left to count and nothing to say.
+    nothing left to count and nothing to say — and one that held it both
+    ways is counted lower on resume than when it was collected.
+
+    The sentence does not say WHERE the character stood, because that
+    differs by case and it has to be true in each: a reply that spelled an
+    escape is stored as it was written and only the parsed prose changed; a
+    reply that held the character is changed itself; an answer that failed
+    closed is stored nowhere, and the U+FFFD is in the copy the lane logs
+    for diagnosis.
     """
     if not parsed.replaced_surrogates:
         return None
     return (
         f"the engine's answer held {parsed.replaced_surrogates} lone surrogate character(s) "
-        "(half of an emoji's pair), which UTF-8 cannot write; each is kept as U+FFFD in the "
-        "stored reply and in the decision's rationale and key risks"
+        "(half of an emoji's pair), which UTF-8 cannot write; U+FFFD stands in for each "
+        "wherever this answer or its decision is kept"
     )
 
 

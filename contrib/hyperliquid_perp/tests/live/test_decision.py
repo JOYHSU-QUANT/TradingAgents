@@ -626,10 +626,16 @@ def test_resume_startup_finishes_a_decision_whose_prose_holds_a_lone_surrogate(t
     attempt_id = _strand_attempt(db, raw=raw)
     with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.live.decision"):
         assert driver.resume_startup() == "resumed"
-    assert [r.getMessage() for r in caplog.records if "lone surrogate" in r.getMessage()] == [
-        f"decision attempt {attempt_id}, resumed: the engine's answer held 2 lone surrogate "
-        "character(s) (half of an emoji's pair), which UTF-8 cannot write; each is kept as "
-        "U+FFFD in the stored reply and in the decision's rationale and key risks"
+    said = [
+        (r.levelname, r.getMessage()) for r in caplog.records if "lone surrogate" in r.getMessage()
+    ]
+    assert said == [
+        (
+            "WARNING",
+            f"decision attempt {attempt_id}, resumed: the engine's answer held 2 lone surrogate "
+            "character(s) (half of an emoji's pair), which UTF-8 cannot write; U+FFFD stands "
+            "in for each wherever this answer or its decision is kept",
+        )
     ]
     assert driver.pump() == "completed"
     assert provider.requests == 0

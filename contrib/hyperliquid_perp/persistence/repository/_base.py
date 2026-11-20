@@ -52,9 +52,18 @@ def _encode(value: Any) -> Any:
         # (issue #427). Text reaches these columns from outside the program —
         # a model's prose, a provider's error message, a venue's status
         # string — so the storage form of each is U+FFFD, here, for every
-        # writer at once. Silent by design: this seam knows no attempt to name
-        # in a log line. The one producer whose replacement is counted and
-        # logged is the decision parser (``parse_target_decision``).
+        # writer that encodes through this function: ``_insert``, the
+        # patch-style updates, and the two hand-written UPDATEs that bind
+        # free text (the funding backfill breadcrumb, an operator's case
+        # stamp). The hand-written statements that bind only numbers, ids,
+        # instants and the program's own vocabulary do not come through here
+        # and have no outside text to guard. A key
+        # is replaced like any other text while a lookup binds its parameter
+        # as given, so a key holding one is stored altered and then fails
+        # loudly at the lookup; none is built from outside text today. Silent
+        # by design: this seam knows no attempt to name in a log line. The
+        # one producer whose replacement is counted and logged is the
+        # decision parser (``parse_target_decision``).
         return replace_lone_surrogates(value)[0]
     return value
 

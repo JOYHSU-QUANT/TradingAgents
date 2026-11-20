@@ -2142,3 +2142,34 @@ def test_an_insert_and_an_update_both_write_text_holding_a_lone_surrogate(tmp_pa
     stored = repo.get_decision_attempt(db.conn, attempt_id)["error_message"]
     assert stored == "second \ufffd \ufffd"
     db.close()
+
+
+def test_the_two_hand_written_text_updates_go_through_the_seam_too(tmp_path):
+    # Not every writer is ``_insert`` or a patch-style UPDATE: the funding
+    # backfill breadcrumb binds an exception's text, and the operator's case
+    # stamp binds prose typed at a command line, each in a statement of its
+    # own. Both raised ``UnicodeEncodeError`` at the bind until they encoded.
+    db = Database(tmp_path / "p.db")
+    fid = funding_event_id("r1", "BTC", _TS)
+    _pending_funding_row(db, fid)
+    with db.transaction() as conn:
+        repo.set_funding_backfill_outcome(
+            conn, fid, lane="reader_failed", error="reader said \ud83d", at=_TS
+        )
+    assert _backfill_columns(db, fid)[1] == "reader said \ufffd"
+
+    with db.transaction() as conn:
+        repo.insert_exchange_reconciliation_event(
+            conn,
+            run_id="r1",
+            trigger="live_fill_ingest",
+            case_type="fill_malformed",
+            exchange_value="unparsed-deadbeef",
+            timestamp=_TS,
+        )
+    event_id = next(iter(repo.iter_exchange_reconciliation_events(db.conn, "r1")))["event_id"]
+    with db.transaction() as conn:
+        assert repo.stamp_reconciliation_action_if_unset(conn, event_id, "looked at it \ud83d")
+    stamped = next(iter(repo.iter_exchange_reconciliation_events(db.conn, "r1")))
+    assert stamped["action_taken"] == "looked at it \ufffd"
+    db.close()

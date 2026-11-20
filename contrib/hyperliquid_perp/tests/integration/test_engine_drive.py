@@ -87,14 +87,22 @@ def _decision_text(rationale: str) -> str:
     )
 
 
-def _drive_warnings(caplog, text: str) -> tuple[object, list[str]]:
+def _note(count: int) -> str:
+    return (
+        f"the engine's answer held {count} lone surrogate character(s) (half of an emoji's "
+        "pair), which UTF-8 cannot write; U+FFFD stands in for each wherever this answer or "
+        "its decision is kept"
+    )
+
+
+def _drive_warnings(caplog, text: str) -> tuple[object, list[tuple[str, str]]]:
     run = EngineRun(_GraphAnswering(text), CompletionUsageCollector(), cap=None, analysts=["market"])
     with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.integration.engine_drive"):
         parsed = run.drive(
             coin="BTC", trade_date="2026-11-03", decision_cfg=DecisionConfig(), payload_path=None
         )
     said = [
-        record.getMessage()
+        (record.levelname, record.getMessage())
         for record in caplog.records
         if record.name == "contrib.hyperliquid_perp.integration.engine_drive"
     ]
@@ -109,14 +117,19 @@ def test_drive_says_so_when_the_answer_held_half_of_an_emoji(caplog):
     assert text.isascii()
     parsed, said = _drive_warnings(caplog, text)
     assert parsed.is_valid and parsed.replaced_surrogates == 1
-    assert said == [
-        "the engine's answer held 1 lone surrogate character(s) (half of an emoji's pair), "
-        "which UTF-8 cannot write; each is kept as U+FFFD in the stored reply and in the "
-        "decision's rationale and key risks"
-    ]
+    assert said == [("WARNING", _note(1))]
 
 
 def test_drive_says_nothing_of_the_kind_about_a_clean_answer(caplog):
     parsed, said = _drive_warnings(caplog, _decision_text("momentum up"))
     assert parsed.is_valid and parsed.replaced_surrogates == 0
     assert said == []
+
+
+def test_drive_says_so_about_an_answer_that_failed_closed_as_well(caplog):
+    # No decision in it at all, and the character in the text itself: the
+    # answer is stored nowhere, but the copy the lane logs for diagnosis now
+    # shows U+FFFD, and this line is what says the model did not write it.
+    parsed, said = _drive_warnings(caplog, "no decision here \ud83d")
+    assert not parsed.is_valid and parsed.replaced_surrogates == 1
+    assert said == [("WARNING", _note(1))]

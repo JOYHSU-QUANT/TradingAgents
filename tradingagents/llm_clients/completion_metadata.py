@@ -25,7 +25,7 @@ The native ``openai`` provider takes the Responses branch
 whose API reports no stop reason — a bound cap is
 ``status: "incomplete"`` with ``incomplete_details: {"reason":
 "max_output_tokens"}``. :func:`stop_reason_of` reads that pair as the stop
-reason when no stop-reason key is present, so the reader
+reason when no stop reason of the provider's own is filed, so the reader
 does not go blind on the busiest provider's default path. Through
 langchain-openai 1.8.3 the converter filed no ``finish_reason`` at all on
 this branch; 1.8.5 files one that repeats ``status`` (and a

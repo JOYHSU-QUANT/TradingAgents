@@ -270,6 +270,12 @@ def test_passing_a_copy_over_keeps_looking_and_finds_the_status_in_any_slot():
         generations=[[ChatGeneration(message=copy)]], llm_output={"stop_reason": "max_tokens"}
     )
     assert stop_reason_of(reason_further_on) == "max_tokens"
+    # ...in the same slot too, and whatever the status word is (the rule is
+    # "equal to the status", not a list of the words seen so far)...
+    same_slot = _result_with_metadata(
+        {"status": "cancelled", "finish_reason": "cancelled", "stop_reason": "max_tokens"}
+    )
+    assert stop_reason_of(same_slot) == "max_tokens"
     # ...and the status a finish_reason copies may sit in a later slot than
     # the copy itself.
     message = AIMessage(content="whole", response_metadata={"finish_reason": "completed"})

@@ -397,6 +397,26 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **A character the console cannot encode no longer ends a research run**
+  (#430). `print` raises when the stream's encoding has no bytes for a
+  character, and on a Windows console in a legacy code page that is any
+  character outside the page. The research loop prints each round as it
+  lands, and a refusal quotes what the model wrote: a rule whose `family`
+  was an emoji was filed as a refusal, then the line reporting it raised
+  on cp950, `main` answered that as an operator's mistake (exit 1), and the
+  rounds left were never asked — reproduced with the real command, a
+  scripted model and a strict cp950 stream: one proposal filed of three,
+  and `research --dry-run` failing the same way afterwards because the
+  refusal is in the next prompt. The `autoresearch` and `discovery` command
+  lines now set their two standard streams to `backslashreplace` first
+  thing (`contrib/core/console.py`), so such a character is printed as its
+  escape (`\U0001f600`) and the run goes on. Whatever the encoding can
+  carry is printed as it was: on UTF-8 — the server, CI — nothing changes
+  but a lone surrogate, which used to raise there too. The other command
+  lines (replay, uniswap_v3, carry, hyperliquid_perp, dashboard) are not
+  changed; whether they print text that can do this was not looked into.
+  `PYTHONIOENCODING=utf-8` is no longer needed for a research run on
+  Windows.
 - **A rule that stakes next to nothing is refused by the parser instead of
   ending the search** (#432). `sizing.fraction` (and a vol target's
   `max_fraction`) had to be "above 0 and at most 1", so `1e-320` parsed.

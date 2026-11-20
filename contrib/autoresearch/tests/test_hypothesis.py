@@ -20,10 +20,12 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import io
 import json
 import re
 import shutil
 import sqlite3
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -903,3 +905,99 @@ def test_a_rule_staking_next_to_nothing_costs_a_round_and_not_the_run(ledger, ex
     assert refused.trial_id is None
     assert measured.outcome is ProposalOutcome.MEASURED  # the run went on
     assert len(ledger.trials("btc-4h")) == 1
+
+
+# -- a console that cannot encode what a model wrote (issue #430) -------------
+
+_EMOJI = "\U0001f600"  # outside every legacy Windows code page
+_RESEARCH = ["research", "--experiment", "btc-4h", "--provider", "p", "--model", "m"]
+
+
+def _strict_console(monkeypatch, encoding: str = "cp950"):
+    """Stand both standard streams on strict ``encoding``; return a reader of what was written.
+
+    cp950 is the code page of the Windows console this project is run from,
+    and ``errors="strict"`` is what ``sys.stdout`` has there. A fresh pair
+    each call, so one command's output is not read as the next one's.
+    """
+    streams = {
+        name: io.TextIOWrapper(io.BytesIO(), encoding=encoding, errors="strict", newline="")
+        for name in ("stdout", "stderr")
+    }
+    for name, stream in streams.items():
+        monkeypatch.setattr(sys, name, stream)
+
+    def written(name: str) -> str:
+        streams[name].flush()
+        return streams[name].buffer.getvalue().decode(encoding)
+
+    return written
+
+
+def _emoji_rule() -> str:
+    """A rule whose ``family`` is an emoji: refused, in a sentence that quotes it."""
+    return json.dumps(
+        {
+            "family": _EMOJI,
+            "entry": {"long": [{"left": "close", "op": ">", "right": 0}]},
+            "sizing": _SIZING,
+        },
+        ensure_ascii=False,
+    )
+
+
+def test_a_refusal_the_console_cannot_encode_costs_a_round_and_not_the_run(opened, monkeypatch):
+    # issue #430 as it was reproduced. The round was filed, then ``print``
+    # raised on the emoji the refusal quotes, ``main`` reported that as an
+    # operator's mistake (exit 1), and the two rounds left were never asked.
+    path = opened.path
+    opened.close()
+    _serve(monkeypatch, ScriptedModel([_emoji_rule(), _rule(0), _rule(1)]))
+    written = _strict_console(monkeypatch)
+
+    code = main([*_RESEARCH, "--max-trials", "3", "--db", str(path)])
+
+    assert code == 0, written("stderr")
+    out = written("stdout")
+    assert "round 1: refused:" in out
+    assert "\\U0001f600" in out  # the character, as its escape
+    assert "round 2: measured as trial #1" in out
+    assert "round 3: measured as trial #2" in out
+    assert "3 of 3 round(s) spent" in out
+    with ResearchStore(path) as reopened:
+        assert len(Ledger(reopened).proposals("btc-4h")) == 3
+
+
+def test_the_prompt_and_the_report_print_that_refusal_on_such_a_console_too(opened, monkeypatch):
+    # The refusal comes back in the next prompt and in the report, so both
+    # commands met the same character on every run after the one that filed
+    # it. (A rule is measured too: the report lists an experiment's refusals
+    # only once it has a trial to list them under.)
+    path = opened.path
+    opened.close()
+    _serve(monkeypatch, ScriptedModel([_emoji_rule(), _rule(0)]))
+    _strict_console(monkeypatch)
+    assert main([*_RESEARCH, "--max-trials", "2", "--db", str(path)]) == 0
+
+    written = _strict_console(monkeypatch)
+    assert main(["research", "--experiment", "btc-4h", "--dry-run", "--db", str(path)]) == 0
+    assert "\\U0001f600" in written("stdout")
+
+    written = _strict_console(monkeypatch)
+    assert main(["report", "--experiment", "btc-4h", "--db", str(path)]) == 0
+    assert "\\U0001f600" in written("stdout")
+
+
+def test_a_console_that_can_encode_the_character_prints_it_as_it_is(opened, monkeypatch):
+    # UTF-8 — the server, CI: nothing is escaped, and the output is what it
+    # was before the command line touched its streams.
+    path = opened.path
+    opened.close()
+    _serve(monkeypatch, ScriptedModel([_emoji_rule()]))
+    written = _strict_console(monkeypatch, "utf-8")
+
+    assert main([*_RESEARCH, "--max-trials", "1", "--db", str(path)]) == 0
+
+    out = written("stdout")
+    assert _EMOJI in out
+    assert "\\U0001f600" not in out

@@ -22,7 +22,7 @@ replay 拿它把同一題重問別的模型（考古題）；**sidecar**＝寫�
 | [`carry`](./carry/README.md) | funding carry 的協調者：讀 funding 歷史、套一條規則、寫一份交接檔說兩條腿該持有什麼；`report` 唯讀對帳 | `autoresearch.sqlite`（`signal` 預設先經 autoresearch 的回補介面補 funding，`--no-fetch` 才純讀；可選讀兩腿 store 的 equity）→ 交接檔 JSON；`report` 唯讀兩顆交易帳本，`--json` | [RUNBOOK](./carry/RUNBOOK.md) |
 | [`dashboard`](./dashboard/README.md) | 狀態匯出、告警、唯讀網頁 | 三條線的 `--json` CLI 輸出＋主機狀態 → status 目錄的 JSON、email、網頁 | README 內 |
 | [`discovery`](./discovery/README.md) | 研究迴圈的 benchmark：造有標準答案的合成世界，用 autoresearch 自己的 port 與 `search()` 考它找不找得到埋的規律、會不會在雜訊裡硬掰。離線、不下單、不碰別的套件擁有的任何 store；**骨架（PR 1）、世界生成器＋`generate`（PR 2）、Random／Grid 臂＋oracle 判定＋`search`／`oracle`／`calibrate`（PR 3）、評分器＋`score`／`report`（PR 4）、LLM 臂（PR 5）、工具組 T1–T4（訓練區間的三個查詢、包住它們的 MCP stdio 伺服器與 `tools` 指令、模型在提案前可以先查詢的提問器、manifest 的 `arms.llm_tools` 讓 `search` 跑這個會用工具的模型臂；MCP SDK 是選用安裝 `discovery-tools`）已落地；真模型還沒用過這些工具** | 合成世界（自造，`generate` 落成 `world.sqlite`）→ 每臂一顆自己的 sqlite（`arms/<arm>/replicate-<k>.sqlite`）、`manifest.json`／`verdicts.json`／`oracle.json`／`scores.json`；工具組另有每個 replicate 的 trace 與 `tool_use.json` | README 內 |
-| [`core`](./core/) | 共用地板：instants、decimal context、digest、enum guard、atomic io、surrogates（把模型文字裡存不進去的落單 surrogate 換成 U+FFFD）。只依賴標準庫（有測試）、不含策略（慣例） | | |
+| [`core`](./core/) | 共用地板：instants、decimal context、digest、enum guard、atomic io、console（終端機印不出的字元改印跳脫形式）、surrogates（把模型文字裡存不進去的落單 surrogate 換成 U+FFFD）。只依賴標準庫（有測試）、不含策略（慣例） | | |
 | [`tests/`](./tests/) | 跨套件的架構限制：套件圖 `test_package_graph.py`；`discovery` 的提問器與 langchain 之間的訊息形狀 `test_toolarm_wire.py` | | |
 
 ## 2. 系統資料流

@@ -115,7 +115,14 @@ from .records import RecordError
 from .scoring import SCORES_FILENAME, report_table, require_this_scorer, score_world
 from .tools_server import IMPORT_ROOT, LaunchError, ServerParams, require_sdk
 from .tooluse import TOOL_USE_FILENAME, Prices
-from .upstream import EvaluationError, FeatureError, SplitError, StoreError, render_fetch
+from .upstream import (
+    EvaluationError,
+    FeatureError,
+    SplitError,
+    StoreError,
+    escape_unencodable_output,
+    render_fetch,
+)
 from .worlds import WorldError, generate
 
 __all__ = ["EXIT_KEPT_FOR_INQUIRY", "main"]
@@ -430,6 +437,10 @@ _COMMANDS = {
 
 
 def main(argv: list[str] | None = None) -> int:
+    # First thing: a refusal quoting an emoji, printed on a cp950 console,
+    # ended a paid search after one round of three (issue #430). From here on
+    # a character the terminal cannot encode is printed as its escape.
+    escape_unencodable_output()
     # WARNING, not INFO: the backfill logs a line per walk, and over a
     # synthetic port that is the same fact ``render_fetch`` prints below.
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")

@@ -469,8 +469,9 @@ def test_breakout_and_mean_reversion_carry_no_structural_check():
 @pytest.mark.parametrize("fraction", [1.5, 0, -0.25, 0.000999, 1e-320])
 def test_a_margin_fraction_is_a_fraction_of_the_account(fraction):
     # The whole sentence: it is what a model reads back, and the bounds in it
-    # are the rule. ``1e-320`` is the answer that ended a search (issue #432):
-    # "above 0" let it through, and the size it works out to is exactly 0.0.
+    # are the rule. ``1e-320`` is the value that ends a search when a model
+    # sends it (issue #432): "above 0" let it through, and at a price in the
+    # thousands the size it works out to is 0.0.
     said = _message(_base(sizing={"mode": "fixed_margin_fraction", "fraction": fraction}))
     assert said == (
         "spec.sizing: fraction is a fraction of the account, at least 0.001 and at most 1, "

@@ -401,7 +401,7 @@ Breaking changes within the 0.x line are called out explicitly.
   ending the search** (#432). `sizing.fraction` (and a vol target's
   `max_fraction`) had to be "above 0 and at most 1", so `1e-320` parsed.
   Measuring it, the notional survived the multiplications and the size —
-  notional over price — came out as exactly 0.0; `Trade` refuses a size of
+  notional over a price in the thousands or more — came out as 0.0; `Trade` refuses a size of
   zero with a `ValueError`, which is neither a parser refusal nor an
   `EvaluationError`, so nothing caught it. Handed to `search()` as a
   model's answer it ended the run with every later round unspent
@@ -410,15 +410,22 @@ Breaking changes within the 0.x line are called out explicitly.
   the benchmark counts as a tool-side failure and stops a paid world for
   (that half is the finding review's run, #431; it was not re-run here).
   Both shares now have a floor of 0.001, the same figure as the volatility
-  target's, and the refusal is one sentence the model reads: `fraction is a
-  fraction of the account, at least 0.001 and at most 1, got 1e-320`. In
-  `search()` that costs a round; in `backtest_train` it is a `ToolRefusal`;
-  one judgement, the parser's, serves both. Nothing changes for a share
-  from 0.001 up. A trial already on a ledger with a smaller share would no
-  longer be readable by this build (the ledger re-parses what it stored and
-  names the row); 78 research stores on this machine were read for one and
-  the smallest share in any of them was 0.5. The server's live store was
-  not read.
+  target's, and the refusal is one sentence the model reads: `spec.sizing:
+  fraction is a fraction of the account, at least 0.001 and at most 1, got
+  1e-320`. In `search()` that costs a round; in `backtest_train` it is a
+  `ToolRefusal`; one judgement, the parser's, serves both. Nothing changes
+  for a share from 0.001 up. The floor is not a proof that a size cannot
+  come out as 0.0: review built two frames above it that still do (a close
+  jumping by 170 orders of magnitude under a vol target; about a hundred
+  bars each losing 99.9%), and the evaluator is unchanged for them. **A
+  trial already on a ledger with a smaller share stops that experiment on
+  this build**: the ledger re-parses what it stored, so reading the
+  experiment's trials raises a `LedgerError` naming the row, and `report`,
+  `research` and `promote` for it stop there (kept strict, as every other
+  change to the rule language has been). 78 research stores on this
+  machine were read for such a row and the smallest share in any of them
+  was 0.5; the server's live store was not read and is to be checked before
+  the next deploy.
 - **A decision whose prose holds half of an emoji no longer stops the paper
   trader** (#427). A model that writes half of an emoji's escaped pair in
   `rationale` or `key_risks` sends a reply that is plain ASCII and parses to

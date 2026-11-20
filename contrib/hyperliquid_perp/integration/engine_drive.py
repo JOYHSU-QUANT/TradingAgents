@@ -14,6 +14,7 @@ module at load time, and ``--context-only`` must not pull in the engine tree
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
@@ -21,6 +22,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:  # annotation-only: the engine-side imports stay function-local
     from ..domains.perp.target_decision import DecisionConfig, ParsedDecision
     from .completion_usage import CompletionUsageCollector
+
+logger = logging.getLogger(__name__)
 
 
 class EngineRunFailed(Exception):
@@ -97,7 +100,11 @@ class EngineRun:
         from tradingagents.node_names import PORTFOLIO_MANAGER_NODE
 
         from ..common.graph_ticker import graph_ticker
-        from ..domains.perp.target_decision import FINAL_TRADE_DECISION_KEY, parse_target_decision
+        from ..domains.perp.target_decision import (
+            FINAL_TRADE_DECISION_KEY,
+            parse_target_decision,
+            surrogate_replacement_note,
+        )
         from .completion_usage import (
             log_decision_truncation,
             log_unparsed_decision_truncation,
@@ -162,6 +169,12 @@ class EngineRun:
         )
         if truncated and decision_call is not None:
             log_decision_truncation(decision_call, parsed, cap=cap)
+        # The answer held half of an emoji's pair, now U+FFFD (issue #427):
+        # said here, where the answer is collected, because the store cannot
+        # tell a replaced character from one the model wrote.
+        replaced_note = surrogate_replacement_note(parsed)
+        if replaced_note is not None:
+            logger.warning("%s", replaced_note)
         return replace(parsed, unavailable_inputs=collector.recorded)
 
 

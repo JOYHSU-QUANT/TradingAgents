@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from contrib.core.enum_guard import check_enum
 
-from ._base import _insert
+from ._base import _encode, _insert
 from ._vocab import (
     _RECONCILIATION_TRIGGERS,
     MACHINE_DISPOSITIONS,
@@ -218,7 +218,11 @@ def stamp_reconciliation_action_if_unset(
     cur = conn.execute(
         "UPDATE exchange_reconciliation_events SET action_taken = ? "
         "WHERE event_id = ? AND action_taken IS NULL",
-        (action_taken, event_id),
+        # The disposition as text — an operator's prose from ``safe-mode
+        # --stamp-case``, or the daemon's own constant: through the encode
+        # seam like any other text a writer binds (a lone surrogate is stored
+        # as U+FFFD).
+        (_encode(action_taken), event_id),
     )
     if cur.rowcount == 1:
         return True

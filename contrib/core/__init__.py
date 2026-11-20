@@ -10,7 +10,10 @@ trader:
   of indented-JSON-as-bytes it hashes;
 - :mod:`.enum_guard` — the "must be one of" refusal and the ``VocabEnum`` base;
 - :mod:`.instants` — the store's ISO-8601 instant decoder, the epoch-ms
-  conversions and the operator-facing span labels.
+  conversions and the operator-facing span labels;
+- :mod:`.surrogates` — a model's text made safe to store: each lone
+  surrogate replaced with U+FFFD, and counted (issue #427; this one was
+  written here, not moved).
 
 Two rules hold this package at the bottom, both checked by
 ``contrib/tests/test_package_graph.py``: nothing here imports another

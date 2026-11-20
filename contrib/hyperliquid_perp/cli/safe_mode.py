@@ -8,7 +8,35 @@ import argparse
 import sqlite3
 import sys
 
+from contrib.core.surrogates import replace_lone_surrogates
+
 from ._common import _open_existing_db, _sqlite_error_exit
+
+
+def _refuses_unwritable_text(flag: str, text: str) -> bool:
+    """Refuse, by name, operator text holding a lone surrogate; ``True`` if refused.
+
+    Half of a UTF-16 pair is not text: it is what an argument typed in one
+    encoding becomes when the terminal's locale names another. The store
+    keeps U+FFFD in place of one (the repository's encode seam, issue #427),
+    which is right for a model's prose in the middle of a trading cycle and
+    wrong here — an audit note that is partly U+FFFD attests to nothing, the
+    operator is at the keyboard to retype it, and a release must not take
+    effect on words nobody can read back. So the two actions that record a
+    human's words check them before anything is written. The message counts
+    the characters and does not echo them: echoing one is what raises on a
+    UTF-8 console.
+    """
+    _, count = replace_lone_surrogates(text)
+    if not count:
+        return False
+    print(
+        f"error: {flag} holds {count} character(s) that are not text (half of a UTF-16 pair, "
+        "usually an argument typed in an encoding the terminal's locale does not match). The "
+        "store would record U+FFFD in their place, so nothing was written — retype it.",
+        file=sys.stderr,
+    )
+    return True
 
 
 def _cmd_safe_mode(argv: list[str]) -> int:
@@ -260,6 +288,11 @@ def _safe_mode(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+        released_by = args.released_by or getpass.getuser()
+        if _refuses_unwritable_text("--reason", args.reason) or _refuses_unwritable_text(
+            "--released-by", released_by
+        ):
+            return 1
         # A RUNNING live process holds its gate flags in memory and only
         # hydrates them at startup — a release landing under it takes effect
         # in the store but not in that process until its next restart. Warn,
@@ -273,7 +306,6 @@ def _safe_mode(args: argparse.Namespace) -> int:
                 "until it restarts.",
                 file=sys.stderr,
             )
-        released_by = args.released_by or getpass.getuser()
         try:
             manager.release_manual(released_by=released_by, reason=args.reason)
         except ValueError as exc:
@@ -329,6 +361,8 @@ def _stamp_reconciliation_case(db, repo, args) -> int:
             "must record what the human decided about this case (§12.3).",
             file=sys.stderr,
         )
+        return 1
+    if _refuses_unwritable_text("--action", args.action):
         return 1
     action = args.action.strip()
     if action in repo.MACHINE_DISPOSITIONS:

@@ -3,7 +3,8 @@
 Values cross this seam as native Python types (``Decimal``, ``datetime``,
 ``bool``) and are encoded to the schema's storage form here — Decimals to TEXT
 (no REAL float), datetimes to ISO-8601 UTC, bools to ``0`` / ``1`` — so callers
-never hand-serialize.
+never hand-serialize. Text is stored as it is, except that a lone surrogate,
+which SQLite cannot bind, is stored as U+FFFD (issue #427).
 """
 
 from __future__ import annotations
@@ -12,6 +13,8 @@ import sqlite3
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
+
+from contrib.core.surrogates import replace_lone_surrogates
 
 from ..ids import _canonical_instant
 
@@ -42,6 +45,28 @@ def _encode(value: Any) -> Any:
         return str(value)
     if isinstance(value, datetime):
         return _iso_utc(value)
+    if isinstance(value, str):
+        # SQLite binds text as UTF-8, which has no encoding for a lone
+        # surrogate: the write raises ``UnicodeEncodeError``, and the lanes
+        # that retry a failed write retry that one until the daemon exits
+        # (issue #427). Text reaches these columns from outside the program —
+        # a model's prose, a provider's error message, a venue's status
+        # string — so the storage form of each is U+FFFD, here, for every
+        # value a writer encodes through this function: ``_insert``, the
+        # patch-style updates, and the hand-written statements that call it
+        # on what they bind (among them the two that bind free text: the
+        # funding backfill breadcrumb and a reconciliation case's stamp). A
+        # value bound without it is not covered. A key is replaced like any
+        # other text while a lookup binds its parameter as given, so a key
+        # holding one — an id, or a symbol as a venue spells it — is stored
+        # altered and then fails loudly at the lookup; none is known to
+        # arrive that way. Silent
+        # by design: this seam knows no attempt to name in a log line. The
+        # one producer whose replacement is counted is the decision parser
+        # (``parse_target_decision``); the lanes that store its answer log
+        # the count. The ``safe-mode`` command refuses an operator's words
+        # holding one before they reach here.
+        return replace_lone_surrogates(value)[0]
     return value
 
 

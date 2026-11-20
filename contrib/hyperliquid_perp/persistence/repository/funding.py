@@ -358,7 +358,9 @@ def set_funding_backfill_outcome(
         "UPDATE funding_events SET last_backfill_status = ?,"
         " last_backfill_error = ?, last_backfill_at = ?"
         " WHERE funding_event_id = ? AND status = 'pending'",
-        (lane, detail, _iso_utc(at), funding_event_id),
+        # ``detail`` is an exception's text: through the encode seam like any
+        # other text a writer binds (a lone surrogate is stored as U+FFFD).
+        (lane, _encode(detail), _iso_utc(at), funding_event_id),
     )
 
 

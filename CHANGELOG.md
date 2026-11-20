@@ -446,6 +446,28 @@ Breaking changes within the 0.x line are called out explicitly.
   tests' conftest now restores the environment whole after every test
   (`mock.patch.dict(os.environ)`, autouse), and the smoke test also
   requires `UNISWAP_JUDGE_SMOKE=1`.
+- **A Responses completion cut at its cap is read as truncated again on
+  langchain-openai 1.8.4 and later** (#435). That release made the
+  Responses API converter file a `finish_reason` that repeats the
+  response's `status` (`completed`, `incomplete`, `failed`), with a
+  `normalized_finish_reason` beside it. The reader in
+  `tradingagents/llm_clients/completion_metadata.py` takes a filed
+  `finish_reason` before the Responses pair (`status` +
+  `incomplete_details.reason`), so on the native `openai` provider a capped
+  completion read `incomplete` — not one of the truncated spellings, so the
+  perp trader would have recorded the cycle as `invalid_output` rather than
+  `truncated_output` — and a completed one read `completed` where it used
+  to report no reason. It showed as one root test failing on Python 3.11 to
+  3.13 the day 1.8.5 reached CI (3.10 still resolves 1.7.4), which blocked
+  every pull request into `develop`. A `finish_reason` that only repeats
+  the result's own `status` is now passed over, in whichever slot it sits,
+  so the same build reads `max_output_tokens` / no reason on either side of
+  that release; nothing is pinned. The Chat Completions, Anthropic, Gemini
+  and Bedrock rows carry no `status` and are read as before. The cause was
+  read from the 1.8.3 and 1.8.5 sources and from the CI failure; it was not
+  reproduced on a local install of 1.8.5, so the new shape is pinned by a
+  hand-built result and the installed converter's test covers whichever
+  version CI resolves.
 
 ### Added
 

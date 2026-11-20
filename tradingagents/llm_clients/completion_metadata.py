@@ -15,18 +15,24 @@ its streaming path files the ``messageStop`` event the same way (read from
 |----------------------------------------------|------------------------------|---------------------------------------------------------|-----------------------|
 | openai Chat Completions (azure, openrouter,  | ``finish_reason``            | ``generation_info`` (merged into ``response_metadata``) | ``length``            |
 | deepseek, openai_compatible, ollama)         |                              |                                                         |                       |
-| openai Responses API (native ``openai``)     | ``status`` + ``incomplete_details.reason`` | ``response_metadata``; NO finish_reason at all | ``max_output_tokens`` |
+| openai Responses API (native ``openai``)     | ``status`` + ``incomplete_details.reason`` | ``response_metadata``; no stop reason of its own (see below) | ``max_output_tokens`` |
 | anthropic                                    | ``stop_reason``              | ``llm_output`` (merged into ``response_metadata``)      | ``max_tokens``        |
 | google (Gemini)                              | ``finish_reason``            | ``generation_info``, the enum NAME                      | ``MAX_TOKENS``        |
 | bedrock (Converse)                           | ``stopReason`` (camelCase)   | ``response_metadata`` (the raw Converse dict)           | ``max_tokens``        |
 
 The native ``openai`` provider takes the Responses branch
 (``openai_client.py``: ``use_responses_api=True`` on the native base URL),
-whose converter files no stop reason key — a bound cap is
+whose API reports no stop reason — a bound cap is
 ``status: "incomplete"`` with ``incomplete_details: {"reason":
 "max_output_tokens"}``. :func:`stop_reason_of` reads that pair as the stop
 reason when no stop-reason key is present, so the reader
-does not go blind on the busiest provider's default path.
+does not go blind on the busiest provider's default path. Up to
+langchain-openai 1.8.3 the converter filed no ``finish_reason`` at all on
+this branch; from 1.8.4 it files one that repeats ``status`` (and a
+``normalized_finish_reason`` beside it). A ``finish_reason`` that only
+repeats the result's own ``status`` is not a stop reason and is passed over,
+so the pair is what is read on both (issue #435; the difference was read
+from the 1.8.3 and 1.8.5 sources on 2026-11-20).
 
 langchain_core merges ``generation_info`` and ``llm_output`` into the
 message's ``response_metadata`` before ``on_llm_end`` fires, but a reader
@@ -117,14 +123,41 @@ def _incomplete_reason(slots: list[dict[str, Any]]) -> str | None:
     return None
 
 
+def _filed_stop_reason(slots: list[dict[str, Any]]) -> str | None:
+    """The first stop reason a provider filed under its own key, slots in priority order.
+
+    Not every ``finish_reason`` is one. Since langchain-openai 1.8.4 the
+    Responses API converter files ``finish_reason`` as a copy of the
+    response's ``status`` — ``completed``, ``incomplete``, ``failed`` — which
+    says how the call ended, not why it stopped (issue #435). Such a copy is
+    passed over, in whichever slot it sits, so the reason is read where the
+    Responses API actually puts it (:func:`_incomplete_reason`) and one build
+    of this reader gives the same answer on either side of that release. A
+    Chat Completions result carries no ``status``, so nothing of its is
+    passed over.
+    """
+    statuses = {slot.get("status") for slot in slots if isinstance(slot.get("status"), str)}
+    for slot in slots:
+        for key in _STOP_REASON_KEYS:
+            value = slot.get(key)
+            if not isinstance(value, str) or not value:
+                continue
+            if key == "finish_reason" and value in statuses:
+                continue
+            return value
+    return None
+
+
 def _stop_reason(slots: list[dict[str, Any]]) -> str | None:
-    return _first_str(slots, _STOP_REASON_KEYS) or _incomplete_reason(slots)
+    return _filed_stop_reason(slots) or _incomplete_reason(slots)
 
 
 def stop_reason_of(result: LLMResult) -> str | None:
     """The provider's stop reason for the first generation, or ``None`` if absent.
 
-    A ``finish_reason``/``stop_reason``/``stopReason`` key wins; failing that, the Responses
+    A ``finish_reason``/``stop_reason``/``stopReason`` key wins — except a
+    ``finish_reason`` that only repeats the result's Responses ``status``,
+    which is no reason (:func:`_filed_stop_reason`); failing that, the Responses
     API's ``incomplete_details.reason`` (only ever present on an incomplete
     completion) is the stop reason — a completed Responses call reports none.
     """

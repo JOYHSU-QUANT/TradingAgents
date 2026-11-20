@@ -223,14 +223,15 @@ _MAX_TARGET_VOL: Final = 0.1
 # and a vol target's ``max_fraction``). "Above 0" was the whole rule until
 # review fuzzed a tool's arguments and a rule with ``fraction: 1e-320`` went
 # through it (issue #432): the notional survived the multiplications, the
-# size — notional over a price in the thousands or more — came out as 0.0,
-# and ``Trade`` refused it with a ``ValueError`` nothing between there and
-# the search loop catches, so one such answer from a model ends the run. A
-# floor here makes that answer what an unusable rule is everywhere else: a
-# refusal the model reads, costing a round. It is not a proof that a size
-# cannot come out as 0.0 — data absurd enough still does it above the floor
-# (a close jumping by 170 orders of magnitude under a vol target, a hundred
-# bars each losing 99.9%) — only that no stake a model writes does. A thousandth, the same figure as
+# size — notional over a price of about four thousand or more — came out as
+# 0.0, and ``Trade`` refused it with a ``ValueError`` nothing between there
+# and the search loop catches, so one such answer from a model would have
+# ended the run. A floor here makes that answer what an unusable rule is
+# everywhere else: a refusal the model reads, costing a round. It is not a
+# proof that a size cannot come out as 0.0 — data absurd enough still does
+# it above the floor (a close jumping by 170 orders of magnitude under a vol
+# target, a hundred bars each losing 99.9%) — only that no stake a model
+# writes does. A thousandth, the same figure as
 # the volatility target's floor, and far below anything a rule has been
 # written with (the smallest in 78 stores read on 2026-11-20 was 0.5); a
 # stake smaller than that is not a position anyone is asking about.

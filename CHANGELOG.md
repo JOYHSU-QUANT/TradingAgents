@@ -401,7 +401,8 @@ Breaking changes within the 0.x line are called out explicitly.
   ending the search** (#432). `sizing.fraction` (and a vol target's
   `max_fraction`) had to be "above 0 and at most 1", so `1e-320` parsed.
   Measuring it, the notional survived the multiplications and the size —
-  notional over a price in the thousands or more — came out as 0.0; `Trade` refuses a size of
+  notional over a price of about four thousand or more — came out as 0.0;
+  `Trade` refuses a size of
   zero with a `ValueError`, which is neither a parser refusal nor an
   `EvaluationError`, so nothing caught it. Handed to `search()` as a
   model's answer it ended the run with every later round unspent
@@ -418,11 +419,15 @@ Breaking changes within the 0.x line are called out explicitly.
   come out as 0.0: review built two frames above it that still do (a close
   jumping by 170 orders of magnitude under a vol target; about a hundred
   bars each losing 99.9%), and the evaluator is unchanged for them. **A
-  trial already on a ledger with a smaller share stops that experiment on
-  this build**: the ledger re-parses what it stored, so reading the
-  experiment's trials raises a `LedgerError` naming the row, and `report`,
-  `research` and `promote` for it stop there (kept strict, as every other
-  change to the rule language has been). 78 research stores on this
+  trial already on a ledger with a smaller share is unreadable on this
+  build**: the ledger re-parses what it stored and raises a `LedgerError`
+  naming the row. Whatever reads all of that experiment's trials stops
+  there — `research` (the prompt lists them) and the experiment's `report`
+  — as does anything that reads that one row: its own `promote` or
+  `report --trial`, and `signal` when it is the coin's latest promotion.
+  A command that reads only another trial, and `evaluate`, still work
+  (kept strict, as every other change to the rule language has been). 78
+  research stores on this
   machine were read for such a row and the smallest share in any of them
   was 0.5; the server's live store was not read and is to be checked before
   the next deploy.

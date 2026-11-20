@@ -670,8 +670,7 @@ def surrogate_replacement_note(parsed: ParsedDecision) -> str | None:
         return None
     return (
         f"the engine's answer held {parsed.replaced_surrogates} lone surrogate character(s) "
-        "(half of an emoji's pair), which UTF-8 cannot write; U+FFFD stands in for each "
-        "wherever this answer or its decision is kept"
+        "(half of an emoji's pair), which UTF-8 cannot write; each was replaced with U+FFFD"
     )
 
 

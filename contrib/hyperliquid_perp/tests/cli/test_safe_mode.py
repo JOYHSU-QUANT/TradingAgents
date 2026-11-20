@@ -682,6 +682,39 @@ def test_the_stamp_echo_reports_what_was_stored(store, capsys):
         assert row["action_taken"] == "cancelled by hand"  # what the echo claimed
 
 
+def test_the_stamp_echo_reports_what_was_stored_for_a_lone_surrogate_too(store, capsys):
+    # Half of an emoji's pair in the operator's own words. The store keeps
+    # U+FFFD in its place (issue #427), so the echo says U+FFFD as well:
+    # echoing the argument as typed raised on a UTF-8 console AFTER the row
+    # was stamped, and the command reported a fatal error for a stamp that
+    # had landed.
+    path, db = store
+    event_id = _open_case(db, case_type="order_missing_on_exchange", exchange_value="0xacac")
+    db.close()
+    rc = main(
+        [
+            "safe-mode",
+            "--run-id",
+            "r",
+            "--db",
+            str(path),
+            "--stamp-case",
+            str(event_id),
+            "--action",
+            "looked at it \ud83d",
+        ]
+    )
+    assert rc == 0
+    assert "stamped: looked at it \ufffd" in capsys.readouterr().out
+    with Database(path) as db2:
+        (row,) = [
+            r
+            for r in repo.iter_exchange_reconciliation_events(db2.conn, "r")
+            if r["event_id"] == event_id
+        ]
+        assert row["action_taken"] == "looked at it \ufffd"  # what the echo claimed
+
+
 def test_stamping_an_unknown_case_id_is_named_not_silent(store, capsys):
     path, _ = store
     rc = main(

@@ -429,13 +429,15 @@ Breaking changes within the 0.x line are called out explicitly.
   ten-poll containment on that write. So the repository's encode seam
   (`_encode`: the inserts and the patch-style updates of the perp store, and
   now the two hand-written updates that bind free text — the funding
-  backfill breadcrumb and an operator's case stamp) stores a lone surrogate
+  backfill breadcrumb and a reconciliation case's stamp, whose command also
+  echoes the stamp as stored) stores a lone surrogate
   in any text as U+FFFD — silently, as that seam knows no attempt to name;
   the decision parser stays the one place the replacement is counted. Two
   corners are left as they were, on purpose, because nothing reaches them
   today and both fail loudly rather than wrongly: a key or id holding the
   character is stored replaced while a lookup binds it as given, so the
-  lookup raises (ids are built from run ids, instants and venue integers);
+  lookup raises (keys are built from run ids, coin symbols, instants and
+  venue integers, and none is known to arrive holding one);
   and the live lane's recorder of a malformed fill would let that error out
   of the drain if a venue's trade id were a string holding one
   (Hyperliquid's are integers). The replacement itself lives in

@@ -1688,8 +1688,7 @@ def test_a_restart_finishes_such_a_decision_from_its_stored_reply(tmp_path, capl
                 "WARNING",
                 f"decision attempt {done.decision_attempt_id}, resumed: the engine's answer "
                 "held 2 lone surrogate character(s) (half of an emoji's pair), which UTF-8 "
-                "cannot write; U+FFFD stands in for each wherever this answer or its decision "
-                "is kept",
+                "cannot write; each was replaced with U+FFFD",
             )
         ]
     assert _recorded_prose(db, done.output_id) == ("momentum \ufffd up", ["a \ufffd risk"])
@@ -1741,7 +1740,11 @@ def test_a_run_the_old_build_left_stuck_finishes_on_its_first_restart(tmp_path, 
         paper_config=PaperTradingConfig.from_dict(None),
     )
     provider2 = _FakeProvider([])  # would raise if the restart asked again
-    done = _restart(db, clock, engine2, provider2).poll()
+    with monkeypatch.context() as parse_alone:
+        # With the store's own replacement still off: it is the parse that
+        # frees the run, by handing the store prose it can already write.
+        parse_alone.setattr(store_seam, "replace_lone_surrogates", as_before)
+        done = _restart(db, clock, engine2, provider2).poll()
     assert done is not None and done.event is CycleEvent.COMPLETED
     assert provider2.build_calls == 0 and provider2.decide_calls == 0
     assert _recorded_prose(db, done.output_id) == ("momentum \ufffd up", ["a \ufffd risk"])

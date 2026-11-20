@@ -90,8 +90,7 @@ def _decision_text(rationale: str) -> str:
 def _note(count: int) -> str:
     return (
         f"the engine's answer held {count} lone surrogate character(s) (half of an emoji's "
-        "pair), which UTF-8 cannot write; U+FFFD stands in for each wherever this answer or "
-        "its decision is kept"
+        "pair), which UTF-8 cannot write; each was replaced with U+FFFD"
     )
 
 

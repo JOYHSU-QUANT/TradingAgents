@@ -1093,8 +1093,7 @@ def test_the_note_for_the_operator_names_how_many_and_what_was_kept():
     parsed = parse_target_decision(_half_pair_reply(in_the_text=False), _CFG)
     assert surrogate_replacement_note(parsed) == (
         "the engine's answer held 2 lone surrogate character(s) (half of an emoji's pair), "
-        "which UTF-8 cannot write; U+FFFD stands in for each wherever this answer or its "
-        "decision is kept"
+        "which UTF-8 cannot write; each was replaced with U+FFFD"
     )
 
 

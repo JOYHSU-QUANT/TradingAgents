@@ -8,6 +8,8 @@ import argparse
 import sqlite3
 import sys
 
+from contrib.core.surrogates import replace_lone_surrogates
+
 from ._common import _open_existing_db, _sqlite_error_exit
 
 
@@ -330,7 +332,12 @@ def _stamp_reconciliation_case(db, repo, args) -> int:
             file=sys.stderr,
         )
         return 1
-    action = args.action.strip()
+    # A lone surrogate in the operator's words (a pasted note, an argument the
+    # shell decoded oddly) is replaced HERE, before the fence, the write and
+    # the echo below, so all three see one string: the store would keep it as
+    # U+FFFD anyway (issue #427), and an echo of the argument as typed raised
+    # on a UTF-8 console after the row was already stamped.
+    action, _ = replace_lone_surrogates(args.action.strip())
     if action in repo.MACHINE_DISPOSITIONS:
         # The sweep's OWN vocabulary, refused whole (issue #84). Named here
         # rather than left to the operator's word choice, because the RUNBOOK

@@ -218,8 +218,10 @@ def stamp_reconciliation_action_if_unset(
     cur = conn.execute(
         "UPDATE exchange_reconciliation_events SET action_taken = ? "
         "WHERE event_id = ? AND action_taken IS NULL",
-        # An operator's prose: through the encode seam like any other text a
-        # writer binds (a lone surrogate is stored as U+FFFD).
+        # The disposition as text — an operator's prose from ``safe-mode
+        # --stamp-case``, or the daemon's own constant: through the encode
+        # seam like any other text a writer binds (a lone surrogate is stored
+        # as U+FFFD).
         (_encode(action_taken), event_id),
     )
     if cur.rowcount == 1:

@@ -633,8 +633,8 @@ def test_resume_startup_finishes_a_decision_whose_prose_holds_a_lone_surrogate(t
         (
             "WARNING",
             f"decision attempt {attempt_id}, resumed: the engine's answer held 2 lone surrogate "
-            "character(s) (half of an emoji's pair), which UTF-8 cannot write; U+FFFD stands "
-            "in for each wherever this answer or its decision is kept",
+            "character(s) (half of an emoji's pair), which UTF-8 cannot write; each was "
+            "replaced with U+FFFD",
         )
     ]
     assert driver.pump() == "completed"

@@ -8,6 +8,7 @@ rule from phase2-spec.md §2.4.
 from __future__ import annotations
 
 import json
+import logging
 from decimal import Decimal
 
 import pytest
@@ -24,6 +25,7 @@ from contrib.hyperliquid_perp.domains.perp.target_decision import (
     extract_json_block,
     format_fingerprint,
     parse_target_decision,
+    surrogate_replacement_note,
 )
 
 _CFG = DecisionConfig()
@@ -946,3 +948,171 @@ def test_an_echo_and_a_hallucinated_mode_are_indistinguishable():
     hallucinated = parse_target_decision(_text(decision_mode="hold"), _CFG)
     assert echo.invalid_reason == hallucinated.invalid_reason == "invalid_decision_mode"
     assert echo.decision == hallucinated.decision
+
+
+# --------------------------------------------------------------------------
+# A lone surrogate in the answer is stored as U+FFFD (issue #427)
+# --------------------------------------------------------------------------
+
+_HALF = "\ud83d"  # the first half of an emoji's UTF-16 pair, with no second half
+
+# The three legal shapes a decision takes; the prose rides on each.
+_LEGAL_SHAPES = {
+    "long": {},
+    "flat": {"target_side": "flat", "requested_target_margin_pct": 0},
+    "maintain": {
+        "decision_mode": "maintain_current",
+        "target_side": None,
+        "requested_target_margin_pct": None,
+    },
+}
+
+
+def _half_pair_reply(*, in_the_text: bool, **overrides) -> str:
+    """A reply whose rationale and first risk each hold half a pair.
+
+    ``_text`` writes JSON the way a model does, so the half pair is six ASCII
+    characters there and only ``json.loads`` makes it one. ``in_the_text``
+    puts the character itself into the reply instead — what a client hands
+    over when the provider's own JSON carried the escape.
+    """
+    reply = _text(
+        rationale=f"momentum {_HALF} up", key_risks=[f"a {_HALF} risk", "another"], **overrides
+    )
+    assert reply.isascii()
+    return reply.replace("\\ud83d", _HALF) if in_the_text else reply
+
+
+@pytest.mark.parametrize("in_the_text", [False, True], ids=["escaped", "in-the-text"])
+@pytest.mark.parametrize("shape", sorted(_LEGAL_SHAPES))
+def test_a_lone_surrogate_in_the_prose_is_replaced_and_the_decision_stands(shape, in_the_text):
+    reply = _half_pair_reply(in_the_text=in_the_text, **_LEGAL_SHAPES[shape])
+    parsed = parse_target_decision(reply, _CFG)
+    assert parsed.is_valid
+    decision = parsed.decision
+    assert decision.rationale == "momentum \ufffd up"
+    assert decision.key_risks == ("a \ufffd risk", "another")
+    assert parsed.replaced_surrogates == 2
+    # The reply is kept as it arrived when it can be stored as it arrived.
+    assert parsed.raw_response == (reply.replace(_HALF, "\ufffd") if in_the_text else reply)
+    # Everything a store writes from this result encodes: the reply (the §3.1
+    # resume store), the reason and the risks as audit_rows spells them.
+    for stored in (
+        parsed.raw_response,
+        decision.rationale,
+        json.dumps(list(decision.key_risks), ensure_ascii=False),
+    ):
+        stored.encode("utf-8")
+    # Only the prose moved: the same answer with clean prose decides the same.
+    clean = parse_target_decision(_text(**_LEGAL_SHAPES[shape]), _CFG).decision
+    assert (
+        decision.decision_mode,
+        decision.target_side,
+        decision.requested_target_margin_pct,
+        decision.confidence,
+    ) == (
+        clean.decision_mode,
+        clean.target_side,
+        clean.requested_target_margin_pct,
+        clean.confidence,
+    )
+
+
+@pytest.mark.parametrize("in_the_text", [False, True], ids=["escaped", "in-the-text"])
+def test_the_stored_reply_re_parses_to_the_decision_the_first_parse_made(in_the_text):
+    # A restart resumes by parsing the stored reply again (paper's
+    # _resume_pending, live's _adopt): what is stored has to decide the same.
+    first = parse_target_decision(_half_pair_reply(in_the_text=in_the_text), _CFG)
+    first.raw_response.encode("utf-8")  # it is a reply the store can hold at all
+    again = parse_target_decision(first.raw_response, _CFG)
+    assert again.decision == first.decision
+    assert again.raw_response == first.raw_response
+    # An escape is still an escape in the stored reply, so it is replaced (and
+    # counted) again; a character replaced in the text is gone from it.
+    assert again.replaced_surrogates == (0 if in_the_text else 2)
+
+
+def test_an_answer_that_fails_closed_still_keeps_a_storable_text():
+    parsed = parse_target_decision(f"no decision here {_HALF}", _CFG)
+    _assert_fail_closed(parsed, INVALID_OUTPUT)
+    assert parsed.raw_response == "no decision here \ufffd"
+    assert parsed.replaced_surrogates == 1
+
+
+def test_a_non_str_answer_is_kept_as_a_repr_that_can_be_stored():
+    # ``repr`` of a ``str`` escapes a lone surrogate, but an object's own
+    # ``__repr__`` may hand one back as it is.
+    class _Drifted:
+        def __repr__(self) -> str:
+            return f"<drifted {_HALF}>"
+
+    parsed = parse_target_decision(_Drifted(), _CFG)
+    _assert_fail_closed(parsed, INVALID_OUTPUT)
+    assert parsed.raw_response == "<drifted \ufffd>"
+    assert parsed.replaced_surrogates == 1
+
+
+def test_half_a_pair_in_an_enumerated_field_is_an_invalid_value_like_any_other():
+    reply = _text(decision_mode=f"set_target{_HALF}")
+    parsed = parse_target_decision(reply, _CFG)
+    _assert_fail_closed(parsed, "invalid_decision_mode")
+    # The reply is ASCII and nothing parsed out of it is kept, so nothing was
+    # replaced — the count is of what the result holds, not of what it read.
+    assert parsed.raw_response == reply
+    assert parsed.replaced_surrogates == 0
+
+
+def test_a_clean_answer_is_kept_as_it_is_and_counts_nothing():
+    # A whole emoji and a U+FFFD the model wrote are ordinary text.
+    rationale = "whole \U0001f600 and the model's own \ufffd"
+    reply = _text(rationale=rationale)
+    parsed = parse_target_decision(reply, _CFG)
+    assert parsed.raw_response is reply
+    assert parsed.decision.rationale == rationale
+    assert parsed.replaced_surrogates == 0
+    assert surrogate_replacement_note(parsed) is None
+
+
+@pytest.mark.parametrize("in_the_text", [False, True], ids=["escaped", "in-the-text"])
+def test_a_parse_that_fails_closed_counts_its_reply_and_not_the_prose_it_dropped(in_the_text):
+    # The prose holds half a pair twice and would have parsed, but the margin
+    # is out of range: the result keeps the reply and none of the prose. An
+    # escaped half pair was replaced nowhere the result can show, so it is
+    # not counted (and nothing is said about it); one the reply itself held
+    # was replaced in the reply, which the result does keep.
+    reply = _half_pair_reply(in_the_text=in_the_text, requested_target_margin_pct=500)
+    parsed = parse_target_decision(reply, _CFG)
+    _assert_fail_closed(parsed, "margin_out_of_range")
+    assert parsed.decision == TargetDecision.fail_closed()
+    assert parsed.replaced_surrogates == (2 if in_the_text else 0)
+    assert (surrogate_replacement_note(parsed) is None) is not in_the_text
+    parsed.raw_response.encode("utf-8")
+
+
+def test_the_note_for_the_operator_names_how_many_and_what_was_kept():
+    parsed = parse_target_decision(_half_pair_reply(in_the_text=False), _CFG)
+    assert surrogate_replacement_note(parsed) == (
+        "the engine's answer held 2 lone surrogate character(s) (half of an emoji's pair), "
+        "which UTF-8 cannot write; each is kept as U+FFFD in the stored reply and in the "
+        "decision's rationale and key risks"
+    )
+
+
+def test_parsing_logs_nothing_whatever_it_replaced(caplog):
+    # The parser is shared with the replay, which parses recorded answers by
+    # the thousand; the lanes that store an answer do the saying.
+    with caplog.at_level(logging.DEBUG):
+        parse_target_decision(_half_pair_reply(in_the_text=True), _CFG)
+    assert caplog.records == []
+
+
+@pytest.mark.parametrize("count", [-1, True, 1.0, "1", None], ids=repr)
+def test_a_parsed_decision_refuses_a_count_that_is_not_one(count):
+    with pytest.raises(ValueError, match="^replaced_surrogates must be a count"):
+        ParsedDecision(
+            decision=TargetDecision.fail_closed(),
+            is_valid=False,
+            invalid_reason=INVALID_OUTPUT,
+            raw_response="",
+            replaced_surrogates=count,
+        )

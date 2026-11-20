@@ -609,6 +609,41 @@ def test_resume_startup_resumes_persisted_response_without_reask(tmp_path):
     assert row["status"] == "completed"
 
 
+def test_resume_startup_finishes_a_decision_whose_prose_holds_a_lone_surrogate(tmp_path, caplog):
+    """issue #427: the stored reply is ASCII — half of an emoji's pair written
+    as an escape — and parses to a rationale and a risk no store can write.
+    Unreplaced, the ai_outputs commit fails after the plan is registered
+    (_PlanRegisteredPersistError) and every restart resumes into the same
+    parse. The driver parses through the same function as the paper lane, so
+    the resumed cycle completes and records U+FFFD in their place."""
+    raw = (
+        '{"decision_mode": "set_target", "target_side": "long", '
+        '"requested_target_margin_pct": 5, "confidence": 0.8, '
+        '"rationale": "resume \\ud83d", "key_risks": ["a \\ud83d risk"]}'
+    )
+    assert raw.isascii()
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    attempt_id = _strand_attempt(db, raw=raw)
+    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.live.decision"):
+        assert driver.resume_startup() == "resumed"
+    assert [r.getMessage() for r in caplog.records if "lone surrogate" in r.getMessage()] == [
+        f"decision attempt {attempt_id}, resumed: the engine's answer held 2 lone surrogate "
+        "character(s) (half of an emoji's pair), which UTF-8 cannot write; each is kept as "
+        "U+FFFD in the stored reply and in the decision's rationale and key risks"
+    ]
+    assert driver.pump() == "completed"
+    assert provider.requests == 0
+    assert engine.plans == [f"{attempt_id}#out1"]
+    out = db.conn.execute(
+        "SELECT decision_reason, key_risks FROM ai_outputs WHERE run_id='r'"
+    ).fetchone()
+    assert out["decision_reason"] == "resume \ufffd"
+    assert out["key_risks"] == '["a \ufffd risk"]'
+    row = db.conn.execute("SELECT * FROM decision_attempts WHERE run_id='r'").fetchone()
+    assert row["status"] == "completed"
+    assert row["pending_raw_response"] is None
+
+
 def test_resume_startup_without_response_fails_closed(tmp_path):
     """A stranded attempt the AI never answered fails closed: the row goes
     api_failed and next_decision_at advances, so the driver no longer wedges on

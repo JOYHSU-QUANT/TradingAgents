@@ -397,6 +397,45 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **A decision whose prose holds half of an emoji no longer stops the paper
+  trader** (#427). A model that writes half of an emoji's escaped pair in
+  `rationale` or `key_risks` sends a reply that is plain ASCII and parses to
+  a valid decision — and `json.loads` turns the escape into a character
+  UTF-8 cannot write. The `ai_outputs` insert then raised
+  `UnicodeEncodeError` after the plan was registered: the paper scheduler
+  retried the write for ten polls and exited, and since the stored reply
+  re-parses to the same decision, every restart cancelled the last plan,
+  registered a new one and failed the same way (reproduced on a temporary
+  store, across two restarts). A reply that held the character itself
+  failed one step earlier, at the write that stores it for resume, with no
+  plan registered. `parse_target_decision` now replaces each lone surrogate
+  with U+FFFD — in the reply before anything reads it, and in `rationale`
+  and `key_risks` after the parse — and otherwise takes the decision as it
+  stands: its mode, side, margin and confidence were whole. The result
+  carries how many were replaced (`ParsedDecision.replaced_surrogates`,
+  counting only what the result holds), and a WARNING names the number where
+  the answer is collected (`EngineRun.drive`) and where a restart resumes
+  from its stored text, with the attempt; the parser itself logs nothing,
+  since the replay parses recorded answers through it. The store's schema
+  and `PROMPT_VERSION` are unchanged, and text that can be written is
+  untouched. Because the fix is in the parse, a run already stuck on such a
+  row finishes that cycle on its next restart. The live driver resumes
+  through the same parser and has a test of its own; its failure before the
+  fix was read from the code, not run. Reviewing the fix turned up the same
+  character reaching the store by another road: a provider's error message
+  holding one raised out of the paper scheduler's first poll, with no
+  ten-poll containment on that write. So the repository's encode seam
+  (`_encode`, which every insert and patch-style update of the perp store
+  goes through) now stores a lone surrogate in any text as U+FFFD — silently,
+  as that seam knows no attempt to name; the decision parser stays the one
+  place the replacement is counted. The replacement itself lives in
+  `contrib/core/surrogates.py`, for the packages that still have the same
+  write to guard (#428, #429); `contrib/autoresearch` keeps the copy #425
+  gave it. Not covered here: the reports sidecar is written from the
+  engine's raw final state, so a reply that holds the character itself may
+  still cost that cycle its `.reports.json` (the write is contained and
+  logged; the decision is unaffected). That one is read from the code, not
+  run, and is taken up with the sidecars of #428 and #429.
 - **An answer holding a surrogate character costs the hypothesis loop one
   round instead of ending the run** (#425). A model that writes half of an
   emoji's escaped pair hands the loop a character UTF-8 cannot write, and

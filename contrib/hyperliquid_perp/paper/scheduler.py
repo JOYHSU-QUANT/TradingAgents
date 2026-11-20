@@ -94,7 +94,12 @@ from ..common.inflight import (
     parse_stored_response,
 )
 from ..domains.perp.risk_gate import RiskConfig
-from ..domains.perp.target_decision import DecisionConfig, ParsedDecision, parse_target_decision
+from ..domains.perp.target_decision import (
+    DecisionConfig,
+    ParsedDecision,
+    parse_target_decision,
+    surrogate_replacement_note,
+)
 from ..persistence import audit_rows, repository as repo
 from ..persistence.db import Database
 from ..persistence.ids import decision_attempt_id as derive_attempt_id
@@ -471,6 +476,12 @@ class PaperScheduler:
             # the full text — the row was its only durable copy, and the
             # terminal record clears it.
             return self._fail_untyped(pending, exc)
+        # A stored reply that spells half an emoji's pair as an escape parses
+        # to prose with U+FFFD in its place (issue #427); say so on this lane
+        # too — the process that collected the answer may predate the note.
+        note = None if pending.parsed is None else surrogate_replacement_note(pending.parsed)
+        if note is not None:
+            logger.warning("decision attempt %s, resumed: %s", pending.attempt_id, note)
         # raw_stored is settled: resuming FROM the stored response — already durable.
         self._pending = pending
         return self._finalize(now)

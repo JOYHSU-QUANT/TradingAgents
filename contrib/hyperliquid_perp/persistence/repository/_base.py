@@ -3,7 +3,8 @@
 Values cross this seam as native Python types (``Decimal``, ``datetime``,
 ``bool``) and are encoded to the schema's storage form here — Decimals to TEXT
 (no REAL float), datetimes to ISO-8601 UTC, bools to ``0`` / ``1`` — so callers
-never hand-serialize.
+never hand-serialize. Text is stored as it is, except that a lone surrogate,
+which SQLite cannot bind, is stored as U+FFFD (issue #427).
 """
 
 from __future__ import annotations
@@ -12,6 +13,8 @@ import sqlite3
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
+
+from contrib.core.surrogates import replace_lone_surrogates
 
 from ..ids import _canonical_instant
 
@@ -42,6 +45,17 @@ def _encode(value: Any) -> Any:
         return str(value)
     if isinstance(value, datetime):
         return _iso_utc(value)
+    if isinstance(value, str):
+        # SQLite binds text as UTF-8, which has no encoding for a lone
+        # surrogate: the write raises ``UnicodeEncodeError``, and the lanes
+        # that retry a failed write retry that one until the daemon exits
+        # (issue #427). Text reaches these columns from outside the program —
+        # a model's prose, a provider's error message, a venue's status
+        # string — so the storage form of each is U+FFFD, here, for every
+        # writer at once. Silent by design: this seam knows no attempt to name
+        # in a log line. The one producer whose replacement is counted and
+        # logged is the decision parser (``parse_target_decision``).
+        return replace_lone_surrogates(value)[0]
     return value
 
 

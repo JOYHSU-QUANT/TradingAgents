@@ -29,6 +29,8 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
 
+from contrib.core.surrogates import replace_lone_surrogates
+
 from ...common.config_coercion import config_overrides, decimal_from_yaml, int_from_yaml
 
 __all__ = [
@@ -45,6 +47,7 @@ __all__ = [
     "extract_json_block",
     "format_fingerprint",
     "parse_target_decision",
+    "surrogate_replacement_note",
     "validate_target_decision",
 ]
 
@@ -236,7 +239,12 @@ class ParsedDecision:
     otherwise the fail-closed maintain-current stand-in. ``raw_response``
     preserves the original engine text verbatim for the audit trail (a non-str
     under engine schema drift is preserved as its ``repr``) — an invalid output
-    is recorded, never reconstructed. ``unavailable_inputs`` is a fact about
+    is recorded, never reconstructed. One exception to "verbatim", counted in
+    ``replaced_surrogates``: a lone surrogate, which no store can write, is
+    kept as U+FFFD — in this text, and in the decision's ``rationale`` and
+    ``key_risks`` (see :func:`parse_target_decision`). The count is of
+    characters replaced across all three, so ``0`` says every one of them is
+    as the model wrote it. ``unavailable_inputs`` is a fact about
     the run that produced the text, not about the text: the optional data
     categories whose tool call ended in the router's ``could not be
     retrieved`` sentinel (sorted, each once; the empty tuple when the run
@@ -254,8 +262,15 @@ class ParsedDecision:
     invalid_reason: str | None
     raw_response: str
     unavailable_inputs: tuple[str, ...] | None = None
+    replaced_surrogates: int = 0
 
     def __post_init__(self) -> None:
+        if (
+            not isinstance(self.replaced_surrogates, int)
+            or isinstance(self.replaced_surrogates, bool)
+            or self.replaced_surrogates < 0
+        ):
+            raise ValueError("replaced_surrogates must be a count: an int, zero or more")
         # Sorted and unique, so the row's text is one spelling per set and a
         # reader comparing cycles compares sets, not orders; non-empty text,
         # because the row joins with commas and an empty word would read as
@@ -482,19 +497,40 @@ def parse_target_decision(
     whole, so the cap is not what broke them; and a non-str ``raw`` stays
     ``invalid_output`` whatever the flag says — a cap shortens text, it cannot
     change the engine's return type, so that one is schema drift.
+
+    A lone surrogate — half of an emoji's UTF-16 pair — is replaced with
+    U+FFFD wherever it would be stored (issue #427), and the answer is
+    otherwise parsed as it stands: the decision's mode, side, margin and
+    confidence are whole, and a flaw in its prose is no reason to lose the
+    cycle. It arrives two ways and both are covered. In the text itself, it
+    is replaced before anything reads the text, so the reply that is stored
+    for resume and the reply that is parsed are one text. Written as an
+    escape (six ASCII characters) inside ``rationale`` or ``key_risks``, the
+    reply stores as it is and ``json.loads`` produces the character, so those
+    two fields are replaced after the parse. Left alone, the ``ai_outputs``
+    write fails after the plan is registered, and since the stored reply
+    re-parses to the same decision every restart resumes into the same
+    failure. The number replaced is on the result — counting only what the
+    result holds, so a parse that fails closed counts its reply and not the
+    prose it threw away — because the stored text cannot say which U+FFFD the
+    model wrote. This function stays pure and logs nothing: the lanes that
+    store the answer say so (:func:`surrogate_replacement_note`), and a
+    replay that parses a thousand recorded answers does not.
     """
-    is_str = isinstance(raw, str)
-    raw_text = raw if is_str else ("" if raw is None else repr(raw))
+    raw_text, replaced = replace_lone_surrogates(
+        raw if isinstance(raw, str) else ("" if raw is None else repr(raw))
+    )
 
     def _invalid(reason: str) -> ParsedDecision:
         return ParsedDecision(
             decision=TargetDecision.fail_closed(),
             is_valid=False,
             invalid_reason=reason,
-            raw_response=raw_text,  # type: ignore[arg-type]
+            raw_response=raw_text,
+            replaced_surrogates=replaced,
         )
 
-    if not is_str:
+    if not isinstance(raw, str):
         # A non-str always fails closed here, *before* extraction — its repr may
         # embed a JSON-looking span that must never be parsed as a live decision.
         return _invalid(INVALID_OUTPUT)
@@ -502,10 +538,10 @@ def parse_target_decision(
     # The one verdict the stop reason relabels (see the docstring).
     no_usable_json = TRUNCATED_OUTPUT if truncated else INVALID_OUTPUT
 
-    if not raw_text.strip():  # type: ignore[attr-defined]
+    if not raw_text.strip():
         return _invalid(no_usable_json)
 
-    source = extract_json_block(raw_text)  # type: ignore[arg-type]
+    source = extract_json_block(raw_text)
     if source is None:
         return _invalid(no_usable_json)
     payload = json.loads(source)  # extract_json_block guarantees this is a dict
@@ -582,19 +618,49 @@ def parse_target_decision(
     if not all(isinstance(r, str) and r.strip() for r in raw_risks):
         return _invalid("invalid_key_risks")
 
+    # The two fields of free text. ``json.loads`` has just turned any escaped
+    # half pair in them into the character itself (see the public docstring);
+    # one the reply held directly is already U+FFFD and is not counted twice.
+    rationale, in_rationale = replace_lone_surrogates(rationale.strip())
+    risks = [replace_lone_surrogates(r.strip()) for r in raw_risks]
+
     decision = TargetDecision(
         decision_mode=mode,
         target_side=side,
         requested_target_margin_pct=margin,
         confidence=confidence,
-        rationale=rationale.strip(),
-        key_risks=tuple(r.strip() for r in raw_risks),
+        rationale=rationale,
+        key_risks=tuple(text for text, _ in risks),
     )
     reason = validate_target_decision(decision, config)
     if reason is not None:
+        # Fails closed without the prose, so with the reply's count alone.
         return _invalid(reason)
     return ParsedDecision(
-        decision=decision, is_valid=True, invalid_reason=None, raw_response=raw_text  # type: ignore[arg-type]
+        decision=decision,
+        is_valid=True,
+        invalid_reason=None,
+        raw_response=raw_text,
+        replaced_surrogates=replaced + in_rationale + sum(count for _, count in risks),
+    )
+
+
+def surrogate_replacement_note(parsed: ParsedDecision) -> str | None:
+    """What to tell the operator when ``parsed`` holds replaced characters; else ``None``.
+
+    The one sentence for it, so the engine run that collected the answer and
+    the two restarts that resume from its stored text (paper's
+    ``_resume_pending``, live's ``_adopt``) word it alike; each logs it as a
+    WARNING on its own logger, the lane the operator greps. A reply that held
+    the character itself is stored already replaced, so its resume has
+    nothing left to count and nothing to say.
+    """
+    if not parsed.replaced_surrogates:
+        return None
+    return (
+        f"the engine's answer held {parsed.replaced_surrogates} lone surrogate character(s) "
+        "(half of an emoji's pair), which UTF-8 cannot write; each is kept as U+FFFD in the "
+        "stored reply and in the decision's rationale and key risks"
     )
 
 

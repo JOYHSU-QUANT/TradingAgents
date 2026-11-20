@@ -65,3 +65,58 @@ def test_drive_records_the_optional_inputs_the_run_went_without():
     # left on the router's logger to collect the next run's categories.
     router = logging.getLogger("tradingagents.dataflows.interface")
     assert not any(hasattr(h, "categories") for h in router.handlers)
+
+
+class _GraphAnswering(_Graph):
+    """Answers with the decision text it was built with."""
+
+    def __init__(self, text: str) -> None:
+        super().__init__()
+        self._text = text
+
+    def propagate(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        return ({"final_trade_decision": self._text}, "hold")
+
+
+def _decision_text(rationale: str) -> str:
+    return (
+        '{"decision_mode": "set_target", "target_side": "long", '
+        '"requested_target_margin_pct": 5, "confidence": 0.8, '
+        f'"rationale": "{rationale}", "key_risks": ["a risk"]}}'
+    )
+
+
+def _drive_warnings(caplog, text: str) -> tuple[object, list[str]]:
+    run = EngineRun(_GraphAnswering(text), CompletionUsageCollector(), cap=None, analysts=["market"])
+    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.integration.engine_drive"):
+        parsed = run.drive(
+            coin="BTC", trade_date="2026-11-03", decision_cfg=DecisionConfig(), payload_path=None
+        )
+    said = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "contrib.hyperliquid_perp.integration.engine_drive"
+    ]
+    return parsed, said
+
+
+def test_drive_says_so_when_the_answer_held_half_of_an_emoji(caplog):
+    # issue #427: the model wrote half of an emoji's pair as an escape. The
+    # decision stands with U+FFFD in its place, and the run that collected the
+    # answer is where the operator is told — once, with how many.
+    text = _decision_text("momentum \\ud83d up")
+    assert text.isascii()
+    parsed, said = _drive_warnings(caplog, text)
+    assert parsed.is_valid and parsed.replaced_surrogates == 1
+    assert said == [
+        "the engine's answer held 1 lone surrogate character(s) (half of an emoji's pair), "
+        "which UTF-8 cannot write; each is kept as U+FFFD in the stored reply and in the "
+        "decision's rationale and key risks"
+    ]
+
+
+def test_drive_says_nothing_of_the_kind_about_a_clean_answer(caplog):
+    parsed, said = _drive_warnings(caplog, _decision_text("momentum up"))
+    assert parsed.is_valid and parsed.replaced_surrogates == 0
+    assert said == []

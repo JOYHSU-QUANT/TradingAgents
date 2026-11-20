@@ -2094,3 +2094,51 @@ def test_the_store_classifiers_are_positive_without_a_result_code(error, integri
     assert is_store_integrity_error(error) is integrity
     expected_refusal = isinstance(error, sqlite3.OperationalError) and not integrity
     assert is_store_refusal_error(error) is expected_refusal
+
+
+# --------------------------------------------------------------------------
+# the encode seam stores a lone surrogate as U+FFFD (issue #427)
+# --------------------------------------------------------------------------
+
+
+def test_the_encode_seam_stores_a_lone_surrogate_as_the_replacement_character():
+    from contrib.hyperliquid_perp.persistence.repository._base import _encode
+
+    assert _encode("upstream said \ud83d") == "upstream said \ufffd"
+    # Text SQLite can bind comes back as the same object, emoji and all.
+    clean = "whole \U0001f600, and a model's own \ufffd"
+    assert _encode(clean) is clean
+    # Nothing but text is looked at.
+    assert _encode(None) is None
+    assert _encode(True) == 1
+    assert _encode(Decimal("1.5")) == "1.5"
+
+
+def test_an_insert_and_an_update_both_write_text_holding_a_lone_surrogate(tmp_path):
+    # Both write paths go through the seam: ``_insert`` (here the attempt
+    # row's error_message) and the patch-style UPDATE (the same column,
+    # rewritten). Each raised ``UnicodeEncodeError`` at the bind before.
+    db = Database(tmp_path / "p.db")
+    start = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
+    attempt_id = decision_attempt_id("r", start)
+    with db.transaction() as conn:
+        repo.insert_decision_attempt(
+            conn,
+            decision_attempt_id=attempt_id,
+            timestamp=start,
+            mode="paper",
+            run_id="r",
+            scheduled_at=start,
+            attempt_count=1,
+            status="in_progress",
+            error_type="timeout",
+            error_message="first \ud83d",
+        )
+    assert repo.get_decision_attempt(db.conn, attempt_id)["error_message"] == "first \ufffd"
+    with db.transaction() as conn:
+        repo.update_decision_attempt(
+            conn, attempt_id, error_message="second \udc00 \ud83d", timestamp=start
+        )
+    stored = repo.get_decision_attempt(db.conn, attempt_id)["error_message"]
+    assert stored == "second \ufffd \ufffd"
+    db.close()

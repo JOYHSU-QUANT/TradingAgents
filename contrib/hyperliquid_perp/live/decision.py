@@ -45,6 +45,7 @@ from ..domains.perp.target_decision import (
     DecisionConfig,
     ParsedDecision,
     parse_target_decision,
+    surrogate_replacement_note,
 )
 from ..persistence import audit_rows, ids, repository as repo
 from ..persistence.db import Database
@@ -584,6 +585,10 @@ class LiveDecisionDriver:
                 # is then retried by pump like any other, the caller having
                 # contained the raise rather than exiting.
                 return self._fail_closed(None, non_retryable_message(exc))
+            # Same note as the paper lane's _resume_pending (issue #427).
+            note = None if inflight.parsed is None else surrogate_replacement_note(inflight.parsed)
+            if note is not None:
+                logger.warning("decision attempt %s, resumed: %s", attempt_id, note)
             logger.info("resuming in-progress decision %s from its stored response", attempt_id)
             return "resumed"
         # No resumable response: the LLM call died with the process, or it

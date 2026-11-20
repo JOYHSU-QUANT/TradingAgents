@@ -515,6 +515,10 @@ def test_a_rule_is_handed_to_the_parser_as_it_was_written(view):
 
 
 _UNKNOWN_KEY = {**BUY, "stop_loss": 0.02}
+# issue #432: a stake that works out to a size of 0.0. Tried through the tool
+# it used to reach the evaluator, whose ValueError the server answered with
+# "the look-up failed" — a tool-side failure that stops a paid world.
+_ZERO_SIZE = {**BUY, "sizing": {"mode": "fixed_margin_fraction", "fraction": 1e-320}}
 _CROSS_UNIT = [{"left": "close", "op": ">", "right": "rsi_14"}]
 _FUTURE = [{"left": {"feature": "close", "offset": -1}, "op": ">", "right": 0}]
 
@@ -535,6 +539,7 @@ _FUTURE = [{"left": {"feature": "close", "offset": -1}, "op": ">", "right": 0}]
         ("feature_stats", {"feature": 14}, lambda: parse_feature_name(14, path="feature")),
         ("backtest_train", {"rule": _UNKNOWN_KEY}, lambda: parse_spec(_UNKNOWN_KEY)),
         ("backtest_train", {"rule": "buy the dip"}, lambda: parse_spec("buy the dip")),
+        ("backtest_train", {"rule": _ZERO_SIZE}, lambda: parse_spec(_ZERO_SIZE)),
         (
             "conditional_returns",
             {"conditions": _CROSS_UNIT, "horizon": 3, "side": "long"},

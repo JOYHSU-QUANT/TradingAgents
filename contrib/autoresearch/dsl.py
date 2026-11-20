@@ -219,6 +219,24 @@ LIVE_MARGIN_CAP: Final = 0.6
 _MIN_TARGET_VOL: Final = 0.001
 _MAX_TARGET_VOL: Final = 0.1
 
+# The smallest share of the account a rule may stake as margin (``fraction``,
+# and a vol target's ``max_fraction``). "Above 0" was the whole rule until
+# review fuzzed a tool's arguments and a rule with ``fraction: 1e-320`` went
+# through it (issue #432): the notional survived the multiplications, the
+# size — notional over a price of about four thousand or more — came out as
+# 0.0, and ``Trade`` refused it with a ``ValueError`` nothing between there
+# and the search loop catches, so one such answer from a model would have
+# ended the run. A floor here makes that answer what an unusable rule is
+# everywhere else: a refusal the model reads, costing a round. It is not a
+# proof that a size cannot come out as 0.0 — data absurd enough still does
+# it above the floor (a close jumping by 170 orders of magnitude under a vol
+# target, a hundred bars each losing 99.9%) — only that no stake a model
+# writes does. A thousandth, the same figure as
+# the volatility target's floor, and far below anything a rule has been
+# written with (the smallest in 78 stores read on 2026-11-20 was 0.5); a
+# stake smaller than that is not a position anyone is asking about.
+_MIN_FRACTION: Final = 0.001
+
 # A params key: lower-case, starting with a letter, no surprises. Short
 # because the name is shown back in reports beside the number it stands for.
 _PARAM_NAME: Final = re.compile(r"[a-z][a-z0-9_]{0,31}")
@@ -880,15 +898,18 @@ def _right(
 
 
 def _require_fraction(value: object, name: str) -> float:
-    """A share of the account: above 0, at most 1. Pathless, for the type guards.
+    """A share of the account: :data:`_MIN_FRACTION` to 1. Pathless, for the type guards.
 
     Returns the narrowed float, like :func:`~contrib.autoresearch.vocabulary.require_number`
     does, so a caller
     can store what was validated rather than the thing it was handed.
     """
     number = require_number(value, name)
-    if not 0 < number <= 1:
-        raise SpecError(f"{name} is a fraction of the account, above 0 and at most 1, got {value!r}")
+    if not _MIN_FRACTION <= number <= 1:
+        raise SpecError(
+            f"{name} is a fraction of the account, at least {_MIN_FRACTION} and at most 1, "
+            f"got {value!r}"
+        )
     return number
 
 

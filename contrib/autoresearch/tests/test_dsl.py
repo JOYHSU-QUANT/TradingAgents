@@ -466,13 +466,37 @@ def test_breakout_and_mean_reversion_carry_no_structural_check():
 # -- sizing ----------------------------------------------------------------
 
 
-def test_a_margin_fraction_is_a_fraction_of_the_account():
-    assert "above 0 and at most 1" in _message(
-        _base(sizing={"mode": "fixed_margin_fraction", "fraction": 1.5})
+@pytest.mark.parametrize("fraction", [1.5, 0, -0.25, 0.000999, 1e-320])
+def test_a_margin_fraction_is_a_fraction_of_the_account(fraction):
+    # The whole sentence: it is what a model reads back, and the bounds in it
+    # are the rule. ``1e-320`` is the value that would have ended a search had
+    # a model sent it (issue #432): "above 0" let it through, and at a price
+    # of about four thousand or more the size it works out to is 0.0.
+    said = _message(_base(sizing={"mode": "fixed_margin_fraction", "fraction": fraction}))
+    assert said == (
+        "spec.sizing: fraction is a fraction of the account, at least 0.001 and at most 1, "
+        f"got {float(fraction)!r}"
     )
-    assert "above 0 and at most 1" in _message(
-        _base(sizing={"mode": "fixed_margin_fraction", "fraction": 0})
+
+
+@pytest.mark.parametrize("fraction", [0.001, 0.0010001, 0.25, 1])
+def test_a_margin_fraction_from_a_thousandth_to_the_whole_account_is_taken(fraction):
+    spec = parse_spec(_base(sizing={"mode": "fixed_margin_fraction", "fraction": fraction}))
+    assert spec.sizing.fraction == fraction
+
+
+def test_a_vol_target_s_cap_is_held_to_the_same_floor():
+    # ``max_fraction`` goes through the same guard: the cap is what the stake
+    # becomes whenever the volatility is low, so a cap of next to nothing is
+    # a stake of next to nothing.
+    sizing = {"mode": "vol_target", "target_vol": 0.02, "lookback": 20, "max_fraction": 1e-320}
+    said = _message(_base(family="vol_targeting", sizing=sizing))
+    assert said == (
+        "spec.sizing: max_fraction is a fraction of the account, at least 0.001 and at most "
+        "1, got 1e-320"
     )
+    kept = parse_spec(_base(family="vol_targeting", sizing={**sizing, "max_fraction": 0.001}))
+    assert kept.sizing.max_fraction == 0.001
 
 
 def test_a_sizing_block_carries_only_its_own_modes_fields():

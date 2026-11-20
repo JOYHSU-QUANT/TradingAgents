@@ -875,3 +875,31 @@ def test_report_says_what_a_model_answered_including_what_never_became_a_trial(
     out = capsys.readouterr().out
     assert "answers from a hypothesis loop: 1 measured, 0 duplicate, 2 refused" in out
     assert "refused: spec is not valid JSON" in out
+
+
+def test_a_rule_staking_next_to_nothing_costs_a_round_and_not_the_run(ledger, experiment):
+    # issue #432: ``fraction: 1e-320`` parsed, since it is above 0, and
+    # measuring it raised a ``ValueError`` from ``Trade`` — the size came out
+    # as 0.0 — that nothing between there and here catches. One answer ended
+    # the search with the next round unspent. The parser's floor makes it what
+    # any other unusable rule is: a refusal, in the sentence the model reads.
+    absurd = json.dumps(
+        {
+            "family": "breakout",
+            "entry": {"long": [{"left": "close", "op": ">", "right": 0}]},
+            "exit": {"max_bars": 12},
+            "sizing": {"mode": "fixed_margin_fraction", "fraction": 1e-320},
+        }
+    )
+    report = search(ledger, experiment, ScriptedModel([absurd, _rule(0)]), max_trials=2)
+
+    assert report.spent == 2 and report.stopped is None
+    refused, measured = ledger.proposals("btc-4h")
+    assert refused.outcome is ProposalOutcome.REFUSED
+    assert refused.refusal == (
+        "spec.sizing: fraction is a fraction of the account, at least 0.001 and at most 1, "
+        "got 1e-320"
+    )
+    assert refused.trial_id is None
+    assert measured.outcome is ProposalOutcome.MEASURED  # the run went on
+    assert len(ledger.trials("btc-4h")) == 1

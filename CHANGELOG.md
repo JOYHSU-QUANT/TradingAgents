@@ -397,26 +397,39 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
-- **A character the console cannot encode no longer ends a research run**
-  (#430). `print` raises when the stream's encoding has no bytes for a
-  character, and on a Windows console in a legacy code page that is any
-  character outside the page. The research loop prints each round as it
-  lands, and a refusal quotes what the model wrote: a rule whose `family`
-  was an emoji was filed as a refusal, then the line reporting it raised
-  on cp950, `main` answered that as an operator's mistake (exit 1), and the
-  rounds left were never asked — reproduced with the real command, a
-  scripted model and a strict cp950 stream: one proposal filed of three,
-  and `research --dry-run` failing the same way afterwards because the
-  refusal is in the next prompt. The `autoresearch` and `discovery` command
-  lines now set their two standard streams to `backslashreplace` first
-  thing (`contrib/core/console.py`), so such a character is printed as its
-  escape (`\U0001f600`) and the run goes on. Whatever the encoding can
-  carry is printed as it was: on UTF-8 — the server, CI — nothing changes
-  but a lone surrogate, which used to raise there too. The other command
-  lines (replay, uniswap_v3, carry, hyperliquid_perp, dashboard) are not
-  changed; whether they print text that can do this was not looked into.
-  `PYTHONIOENCODING=utf-8` is no longer needed for a research run on
-  Windows.
+- **A character the output encoding cannot carry no longer ends a research
+  run** (#430). `print` raises when the stream's encoding has no bytes for
+  a character. On Windows that does not happen in a console window, where
+  Python writes UTF-8 through the console API; it happens with output
+  redirected — a pipe, `> run.log`, a tool that captures the command —
+  where `sys.stdout` is the ANSI code page (cp950 on the machine this
+  project is run from) and any character outside it raises. The research
+  loop prints each round as it lands, and a refusal quotes what the model
+  wrote: with a scripted model answering a rule whose `family` was an
+  emoji, the round was filed, the line reporting it raised, `main`
+  answered that as an operator's mistake (exit 1), and the two rounds left
+  were never asked; `research --dry-run` then failed the same way, because
+  the refusal is in the next prompt. The `autoresearch` and `discovery`
+  command lines now make their two standard streams able to print any
+  text, first thing (`contrib/core/console.py`). A redirected stream is
+  written as UTF-8, so a log holds the text itself — the prompt a
+  `--dry-run` prints is the one the model receives — in the encoding a
+  UTF-8 locale (the server) writes already; and an error handler that can
+  raise becomes `backslashreplace`, so what is still outside the encoding
+  (under UTF-8, a lone surrogate) is written as its escape. A terminal
+  keeps its own encoding, and so does a run with `PYTHONIOENCODING` set.
+  Two costs. A reader that decodes a pipe as the ANSI code page no longer
+  reads non-ASCII from these two commands, where a reader expecting UTF-8
+  used not to: `subprocess.run(..., text=True)` is one on Windows, and a
+  test of this repository that runs `report` in a child had to say
+  `encoding="utf-8"` (a script that captures these commands the same way
+  needs the same, or `PYTHONIOENCODING` set for the child). And
+  where the handler was `surrogateescape` — redirected output on Windows,
+  POSIX under the C locale — a byte that could not be decoded, in a file
+  name say, used to be written back as that byte and is now written as an
+  escape. The other command lines (replay, uniswap_v3, carry,
+  hyperliquid_perp, dashboard) are not changed; whether they print text
+  that can do this was not looked into.
 - **A rule that stakes next to nothing is refused by the parser instead of
   ending the search** (#432). `sizing.fraction` (and a vol target's
   `max_fraction`) had to be "above 0 and at most 1", so `1e-320` parsed.

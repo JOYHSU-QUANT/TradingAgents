@@ -400,17 +400,22 @@ def test_a_score_refusal_exits_1_with_its_sentence(tmp_path, capsys, monkeypatch
     assert "error: this world was not searched" in capsys.readouterr().err
 
 
-def test_a_line_the_console_cannot_encode_is_printed_escaped(tmp_path, monkeypatch):
-    # issue #430's other command line. On a cp950 console — this project's
-    # own Windows one — a line naming a path with an emoji in it raised from
-    # ``print``, which here is not even a named refusal: a traceback.
+def test_a_line_the_redirected_output_cannot_encode_is_still_printed(tmp_path, monkeypatch):
+    # issue #430's other command line. With output redirected on Windows the
+    # stream is the ANSI code page (cp950 on this project's machine), and a
+    # line naming a path with an emoji in it raised from ``print`` — which
+    # here is not even a named refusal: a traceback. It is written as UTF-8.
     import io
     import sys
 
-    root = tmp_path / "bench-\U0001f600"
+    emoji = "\U0001f600"
+    root = tmp_path / f"bench-{emoji}"
     root.mkdir()
+    monkeypatch.delenv("PYTHONIOENCODING", raising=False)
     streams = {
-        name: io.TextIOWrapper(io.BytesIO(), encoding="cp950", errors="strict", newline="")
+        name: io.TextIOWrapper(
+            io.BytesIO(), encoding="cp950", errors="surrogateescape", newline=""
+        )
         for name in ("stdout", "stderr")
     }
     for name, stream in streams.items():
@@ -419,6 +424,6 @@ def test_a_line_the_console_cannot_encode_is_printed_escaped(tmp_path, monkeypat
     assert main(["calibrate", "--root", str(root)]) == 0
 
     streams["stdout"].flush()
-    out = streams["stdout"].buffer.getvalue().decode("cp950")
+    out = streams["stdout"].buffer.getvalue().decode("utf-8")
     assert out.startswith("no searched world under ")
-    assert "bench-\\U0001f600" in out
+    assert f"bench-{emoji}" in out

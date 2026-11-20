@@ -47,7 +47,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from contrib.core.console import escape_unencodable_output
+from contrib.core.console import accept_any_text_on_output
 from contrib.core.enum_guard import VocabEnum
 from contrib.core.instants import epoch_ms, from_epoch_ms, gap_label
 from contrib.hyperliquid_perp.domains.perp.indicator_vocab import (
@@ -107,11 +107,11 @@ __all__ = [
     "ResearchDrawdown",
     "ResearchSignal",
     "VocabEnum",
+    "accept_any_text_on_output",
     "build_chat_model",
     "build_market_data",
     "context_analytics",
     "epoch_ms",
-    "escape_unencodable_output",
     "from_epoch_ms",
     "gap_label",
     "interval_to_ms",
@@ -131,7 +131,7 @@ UPSTREAM_PACKAGES: tuple[str, ...] = ("contrib.core", "contrib.hyperliquid_perp"
 # lazily-imported reader and chat model below are in it too: "not imported at
 # module scope" is a load-time choice, not an exemption from the audit.
 BORROWED: tuple[tuple[str, str], ...] = (
-    ("contrib.core.console", "escape_unencodable_output"),
+    ("contrib.core.console", "accept_any_text_on_output"),
     ("contrib.core.enum_guard", "VocabEnum"),
     ("contrib.core.instants", "epoch_ms"),
     ("contrib.core.instants", "from_epoch_ms"),

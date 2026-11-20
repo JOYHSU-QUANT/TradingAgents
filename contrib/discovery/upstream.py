@@ -208,7 +208,7 @@ from contrib.autoresearch.vocabulary import (
     spec_of,
 )
 from contrib.core.atomic_io import atomic_write_bytes
-from contrib.core.console import escape_unencodable_output
+from contrib.core.console import accept_any_text_on_output
 from contrib.core.enum_guard import VocabEnum
 from contrib.core.instants import MAX_EPOCH_MS, epoch_ms, from_epoch_ms
 
@@ -266,6 +266,7 @@ __all__ = [
     "TrialStatus",
     "Verdict",
     "VocabEnum",
+    "accept_any_text_on_output",
     "atomic_write_bytes",
     "backfill_candles",
     "backfill_funding",
@@ -273,7 +274,6 @@ __all__ = [
     "condition_bars",
     "default_db_path",
     "describe_stop",
-    "escape_unencodable_output",
     "epoch_ms",
     "evaluate_segment",
     "evaluate_split",
@@ -389,7 +389,7 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.vocabulary", "require_number"),
     ("contrib.autoresearch.vocabulary", "spec_of"),
     ("contrib.core.atomic_io", "atomic_write_bytes"),
-    ("contrib.core.console", "escape_unencodable_output"),
+    ("contrib.core.console", "accept_any_text_on_output"),
     ("contrib.core.enum_guard", "VocabEnum"),
     ("contrib.core.instants", "MAX_EPOCH_MS"),
     ("contrib.core.instants", "epoch_ms"),

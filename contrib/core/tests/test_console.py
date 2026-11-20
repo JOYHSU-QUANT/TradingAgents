@@ -1,8 +1,14 @@
-"""Tests for the console that escapes what it cannot encode (issue #430).
+"""Tests for the standard streams a command line can print any text to (issue #430).
 
 The command lines that call it pin THAT they do, on their own output
 (``contrib/autoresearch/tests/test_hypothesis.py``, ``contrib/discovery/tests/
-test_cli.py``); this file pins what the call does to a stream.
+test_cli.py``); this file pins what the call does to a stream in each state.
+
+The streams here are stand-ins: a ``TextIOWrapper`` over bytes, redirected by
+default (``isatty()`` is false) or a terminal by subclass. ``cp950`` with
+``surrogateescape`` is what a redirected ``sys.stdout`` was measured to be on
+the Windows machine this project runs on; ``strict`` is tried beside it
+because an emoji raises through both.
 """
 
 from __future__ import annotations
@@ -12,14 +18,22 @@ import sys
 
 import pytest
 
-from contrib.core.console import escape_unencodable_output
+from contrib.core.console import accept_any_text_on_output
 
 _EMOJI = "\U0001f600"  # outside every legacy Windows code page
 _HALF = "\ud83d"  # half of its UTF-16 pair: outside UTF-8 too
 
 
-def _stream(encoding: str, errors: str = "strict") -> io.TextIOWrapper:
-    return io.TextIOWrapper(io.BytesIO(), encoding=encoding, errors=errors, newline="")
+class _Terminal(io.TextIOWrapper):
+    """A stream that says it is a terminal."""
+
+    def isatty(self) -> bool:
+        return True
+
+
+def _stream(encoding: str, errors: str = "surrogateescape", *, terminal: bool = False):
+    kind = _Terminal if terminal else io.TextIOWrapper
+    return kind(io.BytesIO(), encoding=encoding, errors=errors, newline="")
 
 
 def _written(stream: io.TextIOWrapper) -> bytes:
@@ -27,58 +41,107 @@ def _written(stream: io.TextIOWrapper) -> bytes:
     return stream.buffer.getvalue()
 
 
-@pytest.fixture
-def console(monkeypatch):
-    """Stand ``sys.stdout`` and ``sys.stderr`` on fresh strict streams of an encoding."""
-
-    def install(encoding: str) -> tuple[io.TextIOWrapper, io.TextIOWrapper]:
-        out, err = _stream(encoding), _stream(encoding)
-        monkeypatch.setattr(sys, "stdout", out)
-        monkeypatch.setattr(sys, "stderr", err)
-        return out, err
-
-    return install
+@pytest.fixture(autouse=True)
+def _no_encoding_chosen(monkeypatch):
+    # The shell these tests are run from may export it; each test that wants
+    # it set says so.
+    monkeypatch.delenv("PYTHONIOENCODING", raising=False)
 
 
-def test_a_strict_legacy_console_raises_on_an_emoji_which_is_the_defect(console):
-    out, _ = console("cp950")
+def _install(monkeypatch, out, err=None):
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", err if err is not None else _stream("cp950"))
+    return out
+
+
+# -- the premise ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize("errors", ["strict", "surrogateescape"])
+def test_the_premise_a_cp950_stream_raises_on_an_emoji_through_either_handler(errors):
+    # No product code: this is what the stand-in has to do for the tests
+    # below to mean anything, and it is the defect.
+    stream = _stream("cp950", errors)
     with pytest.raises(UnicodeEncodeError):
-        print(f"refused: {_EMOJI}")
-        out.flush()
+        stream.write(_EMOJI)
 
 
-def test_what_the_console_cannot_encode_is_written_as_its_escape(console):
-    out, err = console("cp950")
-    escape_unencodable_output()
-    print(f"refused: {_EMOJI}")
-    print(f"error: {_EMOJI}", file=sys.stderr)
-    assert _written(out) == b"refused: \\U0001f600\n"
-    assert _written(err) == b"error: \\U0001f600\n"
+# -- a redirected stream ---------------------------------------------------------
 
 
-def test_what_the_console_can_encode_is_written_as_it_was(console):
-    # The page's own characters are untouched, beside one that is escaped.
-    out, _ = console("cp950")
-    escape_unencodable_output()
-    text = "\u898f\u5247 rule \u2014 ok"
+@pytest.mark.parametrize("errors", ["strict", "surrogateescape"])
+def test_a_redirected_stream_is_written_as_utf8_whatever_it_was(monkeypatch, errors):
+    out = _install(monkeypatch, _stream("cp950", errors))
+    accept_any_text_on_output()
+    text = f"refused: {_EMOJI} \u898f\u5247 \u2014"
+    print(text)
+    assert _written(out) == (text + "\n").encode("utf-8")
+    assert (out.encoding, out.errors) == ("utf-8", "backslashreplace")
+
+
+def test_what_utf8_itself_cannot_write_is_written_as_its_escape(monkeypatch):
+    out = _install(monkeypatch, _stream("cp950"))
+    accept_any_text_on_output()
+    print(f"half: {_HALF}")
+    assert _written(out) == b"half: \\ud83d\n"
+
+
+def test_both_streams_are_set_each_on_its_own_state(monkeypatch):
+    out, err = _stream("cp950", "strict"), _stream("cp950", "backslashreplace")
+    _install(monkeypatch, out, err)
+    accept_any_text_on_output()
+    print(_EMOJI)
+    print(_EMOJI, file=sys.stderr)
+    assert _written(out) == _written(err) == (_EMOJI + "\n").encode("utf-8")
+    assert err.errors == "backslashreplace"
+
+
+def test_a_handler_that_cannot_raise_is_kept_as_it_was_chosen(monkeypatch):
+    # ``replace`` is the caller's choice (pytest's own capture uses it); the
+    # encoding still becomes UTF-8, because the stream is redirected.
+    out = _install(monkeypatch, _stream("cp950", "replace"))
+    accept_any_text_on_output()
+    assert (out.encoding, out.errors) == ("utf-8", "replace")
+
+
+# -- a terminal, and an encoding the operator chose -------------------------------
+
+
+def test_a_terminal_keeps_its_encoding_and_escapes_what_is_outside_it(monkeypatch):
+    # A terminal displays its own encoding; writing another would garble it.
+    out = _install(monkeypatch, _stream("cp950", "strict", terminal=True))
+    accept_any_text_on_output()
+    text = "\u898f\u5247 \u2014 ok"
     print(text + _EMOJI)
     assert _written(out) == text.encode("cp950") + b"\\U0001f600\n"
+    assert (out.encoding, out.errors) == ("cp950", "backslashreplace")
 
 
-def test_a_utf8_console_is_changed_for_nothing_but_a_lone_surrogate(console):
-    out, _ = console("utf-8")
-    escape_unencodable_output()
+def test_a_terminal_that_can_already_print_anything_is_not_touched(monkeypatch):
+    out = _install(monkeypatch, _stream("utf-8", "replace", terminal=True))
+    accept_any_text_on_output()
+    assert (out.encoding, out.errors) == ("utf-8", "replace")
+
+
+def test_an_encoding_the_operator_chose_is_kept_and_only_made_unable_to_raise(monkeypatch):
+    monkeypatch.setenv("PYTHONIOENCODING", "cp950")
+    out = _install(monkeypatch, _stream("cp950", "strict"))
+    accept_any_text_on_output()
     print(f"refused: {_EMOJI}")
-    assert _written(out) == f"refused: {_EMOJI}\n".encode()
-    print(f"half: {_HALF}")
-    assert _written(out).endswith(b"half: \\ud83d\n")
-
-
-def test_the_mode_is_set_and_nothing_else_about_the_stream_is(console):
-    out, _ = console("cp950")
-    escape_unencodable_output()
-    assert out.errors == "backslashreplace"
+    assert _written(out) == b"refused: \\U0001f600\n"
     assert out.encoding == "cp950"
+
+
+def test_a_handler_the_operator_chose_is_kept_too(monkeypatch):
+    monkeypatch.setenv("PYTHONIOENCODING", "cp950:replace")
+    out = _install(monkeypatch, _stream("cp950", "replace"))
+    accept_any_text_on_output()
+    print(_EMOJI)
+    assert _written(out) == b"?\n"
+    assert (out.encoding, out.errors) == ("cp950", "replace")
+
+
+# -- streams it leaves alone, and must not be stopped by ---------------------------
 
 
 @pytest.mark.parametrize(
@@ -86,28 +149,55 @@ def test_the_mode_is_set_and_nothing_else_about_the_stream_is(console):
     [None, io.StringIO()],
     ids=["no-console", "a-capture-with-no-reconfigure"],
 )
-def test_a_stream_that_is_no_text_wrapper_is_left_alone(monkeypatch, stand_in):
+def test_a_stream_that_is_no_text_wrapper_is_passed_over_and_the_other_still_set(
+    monkeypatch, stand_in
+):
+    err = _stream("cp950", "strict")
     monkeypatch.setattr(sys, "stdout", stand_in)
-    monkeypatch.setattr(sys, "stderr", stand_in)
-    escape_unencodable_output()  # does not raise
-    assert sys.stdout is stand_in and sys.stderr is stand_in
+    monkeypatch.setattr(sys, "stderr", err)
+    accept_any_text_on_output()  # does not raise
+    assert sys.stdout is stand_in
+    assert (err.encoding, err.errors) == ("utf-8", "backslashreplace")
 
 
-def test_a_stream_that_refuses_is_skipped_and_the_other_is_still_set(monkeypatch):
-    # A closed stream cannot be reconfigured. The courtesy must not be what
-    # stops the command — and must still reach the stream that can take it.
+class _Refuses(io.TextIOWrapper):
+    """A stream whose ``reconfigure`` fails the way the given exception says."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__(io.BytesIO(), encoding="cp950", errors="strict")
+        self._error = error
+
+    def reconfigure(self, **_changes) -> None:
+        raise self._error
+
+
+@pytest.mark.parametrize(
+    "error",
+    [ValueError("closed"), BrokenPipeError("the reader has gone"), TypeError("no such keyword")],
+    ids=["closed", "broken-pipe", "odd-stand-in"],
+)
+def test_a_stream_that_refuses_is_passed_over_and_the_other_still_set(monkeypatch, error):
+    # A courtesy must not be what stops the command, whatever the refusal.
+    err = _stream("cp950", "strict")
+    monkeypatch.setattr(sys, "stdout", _Refuses(error))
+    monkeypatch.setattr(sys, "stderr", err)
+    accept_any_text_on_output()
+    assert (err.encoding, err.errors) == ("utf-8", "backslashreplace")
+
+
+def test_a_closed_stream_does_not_stop_it(monkeypatch):
     closed = _stream("cp950")
     closed.close()
-    live = _stream("cp950")
+    err = _stream("cp950", "strict")
     monkeypatch.setattr(sys, "stdout", closed)
-    monkeypatch.setattr(sys, "stderr", live)
-    escape_unencodable_output()
-    assert live.errors == "backslashreplace"
+    monkeypatch.setattr(sys, "stderr", err)
+    accept_any_text_on_output()
+    assert (err.encoding, err.errors) == ("utf-8", "backslashreplace")
 
 
-def test_calling_it_again_changes_nothing(console):
-    out, _ = console("cp950")
-    escape_unencodable_output()
-    escape_unencodable_output()
+def test_calling_it_again_changes_nothing(monkeypatch):
+    out = _install(monkeypatch, _stream("cp950"))
+    accept_any_text_on_output()
+    accept_any_text_on_output()
     print(_EMOJI)
-    assert _written(out) == b"\\U0001f600\n"
+    assert _written(out) == (_EMOJI + "\n").encode("utf-8")

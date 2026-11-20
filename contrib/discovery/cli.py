@@ -120,7 +120,7 @@ from .upstream import (
     FeatureError,
     SplitError,
     StoreError,
-    escape_unencodable_output,
+    accept_any_text_on_output,
     render_fetch,
 )
 from .worlds import WorldError, generate
@@ -437,10 +437,12 @@ _COMMANDS = {
 
 
 def main(argv: list[str] | None = None) -> int:
-    # First thing: a refusal quoting an emoji, printed on a cp950 console,
-    # ended a paid search after one round of three (issue #430). From here on
-    # a character the terminal cannot encode is printed as its escape.
-    escape_unencodable_output()
+    # First thing: with output redirected on Windows, a line holding an emoji
+    # (a path with one in its name is enough) raises from ``print`` — a
+    # traceback here, since nothing below names it. The autoresearch command
+    # line lost a search to the same thing (issue #430). From here on the two
+    # standard streams can print any text (``contrib/core/console``).
+    accept_any_text_on_output()
     # WARNING, not INFO: the backfill logs a line per walk, and over a
     # synthetic port that is the same fact ``render_fetch`` prints below.
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")

@@ -172,11 +172,14 @@ def test_each_provider_row_reads_truncated_and_natural_stops(
     assert whole.output_tokens == 8192
 
 
-def test_the_native_openai_responses_branch_files_no_finish_reason_and_is_still_read():
+def test_the_native_openai_responses_branch_is_read_however_the_converter_files_it():
     # The shipped ``openai`` provider (native base URL) takes the Responses API,
-    # whose converter files ``status`` + ``incomplete_details`` and no
-    # finish_reason at all. The reader must not go blind on that path — this
-    # is the busiest provider's default branch.
+    # which reports ``status`` + ``incomplete_details`` and no stop reason. The
+    # INSTALLED converter decides what this test sees: through langchain-openai
+    # 1.8.3 it filed no finish_reason at all; 1.8.5 files one that
+    # repeats ``status`` (issue #435 — the suite went red the day that
+    # reached CI). The reader must give the same answer on both, and must not
+    # go blind on this path: it is the busiest provider's default branch.
     cut = completion_metadata_of(_openai_responses_result(complete=False))
     assert cut.stop_reason == "max_output_tokens"
     assert cut.truncated is True
@@ -187,6 +190,99 @@ def test_the_native_openai_responses_branch_files_no_finish_reason_and_is_still_
     assert whole.stop_reason is None  # a completed Responses call reports no reason
     assert whole.truncated is False
     assert whole.output_tokens == 8192
+
+
+def _responses_shaped_result(*, complete: bool, finish_reason_in: str) -> LLMResult:
+    """A Responses result with the ``finish_reason`` langchain-openai 1.8.5 files, built by hand.
+
+    The module's rule is to go through the installed converter, and the test
+    above does. But which shape that converter files depends on the version
+    installed, and this shape has to stay pinned on a machine that still has
+    the older one — so it is reproduced here, from the converter's source
+    (``_responses_finish_reason_fields``, read in 1.8.5): ``finish_reason``
+    is the response's ``status`` and ``normalized_finish_reason`` rides
+    beside it. ``finish_reason_in`` names the slot the pair is filed in:
+    1.8.5 files it in ``response_metadata``, beside the status. The
+    ``generation_info`` placement is NOT a shape it produces; it is here so
+    the rule stays "a copy of the status, wherever it sits" and not "in the
+    same dict", should a later release move it.
+    """
+    status = "completed" if complete else "incomplete"
+    metadata: dict[str, object] = {"status": status, "model_name": "gpt-5"}
+    if not complete:
+        metadata["incomplete_details"] = {"reason": "max_output_tokens"}
+    finish = {
+        "finish_reason": status,
+        "normalized_finish_reason": "stop" if complete else "length",
+    }
+    generation_info = None
+    if finish_reason_in == "response_metadata":
+        metadata.update(finish)
+    else:
+        generation_info = finish
+    message = AIMessage(content="cut", response_metadata=metadata)
+    return LLMResult(
+        generations=[[ChatGeneration(message=message, generation_info=generation_info)]]
+    )
+
+
+@pytest.mark.parametrize("slot", ["response_metadata", "generation_info"])
+def test_a_finish_reason_that_repeats_the_responses_status_is_not_the_stop_reason(slot):
+    # issue #435: read as the stop reason, ``incomplete`` is not one of the
+    # truncated spellings, so a completion cut at its cap stopped being
+    # recorded as truncated; and a completed call gained a reason it never had.
+    cut = completion_metadata_of(_responses_shaped_result(complete=False, finish_reason_in=slot))
+    assert cut.stop_reason == "max_output_tokens"
+    assert cut.truncated is True
+    assert cut.model == "gpt-5"
+
+    whole = completion_metadata_of(_responses_shaped_result(complete=True, finish_reason_in=slot))
+    assert whole.stop_reason is None
+    assert whole.truncated is False
+
+
+def _result_with_metadata(metadata: dict[str, object]) -> LLMResult:
+    message = AIMessage(content="cut", response_metadata=metadata)
+    return LLMResult(generations=[[ChatGeneration(message=message)]])
+
+
+def test_only_a_copy_of_the_status_is_passed_over():
+    # A finish_reason that says something the status does not is a stop
+    # reason like any other, status or no status beside it...
+    beside_a_status = _result_with_metadata({"status": "completed", "finish_reason": "length"})
+    assert stop_reason_of(beside_a_status) == "length"
+    # ...and with no status anywhere there is nothing for it to be a copy of,
+    # so even the word ``incomplete`` is read as filed.
+    alone = _result_with_metadata({"finish_reason": "incomplete"})
+    assert stop_reason_of(alone) == "incomplete"
+    # The other providers' keys are never compared with a status.
+    anthropic_spelling = _result_with_metadata({"status": "max_tokens", "stop_reason": "max_tokens"})
+    assert stop_reason_of(anthropic_spelling) == "max_tokens"
+
+
+def test_passing_a_copy_over_keeps_looking_and_finds_the_status_in_any_slot():
+    # Neither is a shape a converter files today; both pin what "passed over"
+    # means. A reason filed further on is still found after a copy...
+    copy = AIMessage(
+        content="cut", response_metadata={"status": "incomplete", "finish_reason": "incomplete"}
+    )
+    reason_further_on = LLMResult(
+        generations=[[ChatGeneration(message=copy)]], llm_output={"stop_reason": "max_tokens"}
+    )
+    assert stop_reason_of(reason_further_on) == "max_tokens"
+    # ...in the same slot too, and whatever the status word is (the rule is
+    # "equal to the status", not a list of the words seen so far)...
+    same_slot = _result_with_metadata(
+        {"status": "cancelled", "finish_reason": "cancelled", "stop_reason": "max_tokens"}
+    )
+    assert stop_reason_of(same_slot) == "max_tokens"
+    # ...and the status a finish_reason copies may sit in a later slot than
+    # the copy itself.
+    message = AIMessage(content="whole", response_metadata={"finish_reason": "completed"})
+    status_in_a_later_slot = LLMResult(
+        generations=[[ChatGeneration(message=message, generation_info={"status": "completed"})]]
+    )
+    assert stop_reason_of(status_in_a_later_slot) is None
 
 
 def test_openai_reasoning_tokens_are_read_as_a_sub_count_of_output():

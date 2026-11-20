@@ -682,12 +682,21 @@ def test_the_stamp_echo_reports_what_was_stored(store, capsys):
         assert row["action_taken"] == "cancelled by hand"  # what the echo claimed
 
 
-def test_the_stamp_echo_reports_what_was_stored_for_a_lone_surrogate_too(store, capsys):
-    # Half of an emoji's pair in the operator's own words. The store keeps
-    # U+FFFD in its place (issue #427), so the echo says U+FFFD as well:
-    # echoing the argument as typed raised on a UTF-8 console AFTER the row
-    # was stamped, and the command reported a fatal error for a stamp that
-    # had landed.
+_HALF_PAIR = "\ud83d"  # half of an emoji's UTF-16 pair: what a mis-decoded argument holds
+
+_UNWRITABLE = (
+    "error: {flag} holds {count} character(s) that are not text (half of a UTF-16 pair, "
+    "usually an argument typed in an encoding the terminal's locale does not match). The "
+    "store would record U+FFFD in their place, so nothing was written — retype it.\n"
+)
+
+
+def test_stamping_refuses_an_action_holding_a_lone_surrogate_and_writes_nothing(store, capsys):
+    # The store would keep U+FFFD in its place (issue #427), and an audit
+    # note that is partly U+FFFD attests to nothing. The operator is at the
+    # keyboard: refuse by name, write nothing, let them retype. (Stored and
+    # then echoed as typed, it raised on a UTF-8 console after the stamp had
+    # landed.)
     path, db = store
     event_id = _open_case(db, case_type="order_missing_on_exchange", exchange_value="0xacac")
     db.close()
@@ -701,18 +710,59 @@ def test_the_stamp_echo_reports_what_was_stored_for_a_lone_surrogate_too(store, 
             "--stamp-case",
             str(event_id),
             "--action",
-            "looked at it \ud83d",
+            f"looked at it {_HALF_PAIR}",
         ]
     )
-    assert rc == 0
-    assert "stamped: looked at it \ufffd" in capsys.readouterr().out
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == _UNWRITABLE.format(flag="--action", count=1)
     with Database(path) as db2:
         (row,) = [
             r
             for r in repo.iter_exchange_reconciliation_events(db2.conn, "r")
             if r["event_id"] == event_id
         ]
-        assert row["action_taken"] == "looked at it \ufffd"  # what the echo claimed
+        assert row["action_taken"] is None  # still open, for the retyped stamp
+
+
+@pytest.mark.parametrize("flag", ["--reason", "--released-by"])
+def test_release_refuses_words_holding_a_lone_surrogate_and_stays_latched(store, capsys, flag):
+    # A release takes effect; it must not take effect on a reason, or a name,
+    # nobody can read back. With the store's own replacement in place this
+    # had become "released, then a fatal error at the echo" for the name and
+    # "released, reason recorded as U+FFFD" for the reason.
+    path, db = store
+    _enter(db, "manual", REASON_NON_BOT_OWNED_ORDER)
+    db.close()
+    words = {"--reason": "checked the venue", "--released-by": "joy"}
+    words[flag] += f" {_HALF_PAIR}{_HALF_PAIR}"
+    rc = main(
+        [
+            "safe-mode",
+            "--run-id",
+            "r",
+            "--db",
+            str(path),
+            "--release",
+            "--reason",
+            words["--reason"],
+            "--released-by",
+            words["--released-by"],
+        ]
+    )
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == _UNWRITABLE.format(flag=flag, count=2)
+    with Database(path) as db2:
+        assert repo.get_scheduler_state(db2.conn, "r")["safe_mode_type"] == "manual"
+        released = [
+            event
+            for event in repo.iter_safe_mode_events(db2.conn, "r")
+            if event["event_type"] == "safe_mode_released"
+        ]
+        assert released == []
 
 
 def test_stamping_an_unknown_case_id_is_named_not_silent(store, capsys):

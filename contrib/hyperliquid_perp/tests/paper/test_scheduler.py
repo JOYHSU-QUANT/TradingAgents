@@ -1675,7 +1675,7 @@ def test_a_restart_finishes_such_a_decision_from_its_stored_reply(tmp_path, capl
         done = scheduler2.poll()
     assert done is not None and done.event is CycleEvent.COMPLETED
     assert provider2.build_calls == 0 and provider2.decide_calls == 0
-    # The resume says what it kept, with the attempt — but only when there was
+    # The resume says so again, with the attempt — but only when there was
     # something left to replace: a reply stored already replaced has none.
     said = [
         (r.levelname, r.getMessage()) for r in caplog.records if "lone surrogate" in r.getMessage()

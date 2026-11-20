@@ -62,8 +62,10 @@ def _encode(value: Any) -> Any:
         # altered and then fails loudly at the lookup; none is known to
         # arrive that way. Silent
         # by design: this seam knows no attempt to name in a log line. The
-        # one producer whose replacement is counted and logged is the
-        # decision parser (``parse_target_decision``).
+        # one producer whose replacement is counted is the decision parser
+        # (``parse_target_decision``); the lanes that store its answer log
+        # the count. The ``safe-mode`` command refuses an operator's words
+        # holding one before they reach here.
         return replace_lone_surrogates(value)[0]
     return value
 

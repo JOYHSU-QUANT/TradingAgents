@@ -1089,7 +1089,7 @@ def test_a_parse_that_fails_closed_counts_its_reply_and_not_the_prose_it_dropped
     parsed.raw_response.encode("utf-8")
 
 
-def test_the_note_for_the_operator_names_how_many_and_what_was_kept():
+def test_the_note_for_the_operator_names_how_many_were_replaced():
     parsed = parse_target_decision(_half_pair_reply(in_the_text=False), _CFG)
     assert surrogate_replacement_note(parsed) == (
         "the engine's answer held 2 lone surrogate character(s) (half of an emoji's pair), "

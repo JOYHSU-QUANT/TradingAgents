@@ -26,10 +26,11 @@ whose API reports no stop reason — a bound cap is
 ``status: "incomplete"`` with ``incomplete_details: {"reason":
 "max_output_tokens"}``. :func:`stop_reason_of` reads that pair as the stop
 reason when no stop-reason key is present, so the reader
-does not go blind on the busiest provider's default path. Up to
+does not go blind on the busiest provider's default path. Through
 langchain-openai 1.8.3 the converter filed no ``finish_reason`` at all on
-this branch; from 1.8.4 it files one that repeats ``status`` (and a
-``normalized_finish_reason`` beside it). A ``finish_reason`` that only
+this branch; 1.8.5 files one that repeats ``status`` (and a
+``normalized_finish_reason`` beside it) — which release in between began
+it was not checked. A ``finish_reason`` that only
 repeats the result's own ``status`` is not a stop reason and is passed over,
 so the pair is what is read on both (issue #435; the difference was read
 from the 1.8.3 and 1.8.5 sources on 2026-11-20).
@@ -126,10 +127,11 @@ def _incomplete_reason(slots: list[dict[str, Any]]) -> str | None:
 def _filed_stop_reason(slots: list[dict[str, Any]]) -> str | None:
     """The first stop reason a provider filed under its own key, slots in priority order.
 
-    Not every ``finish_reason`` is one. Since langchain-openai 1.8.4 the
-    Responses API converter files ``finish_reason`` as a copy of the
-    response's ``status`` — ``completed``, ``incomplete``, ``failed`` — which
-    says how the call ended, not why it stopped (issue #435). Such a copy is
+    Not every ``finish_reason`` is one. A newer langchain-openai (seen in
+    1.8.5, absent in 1.8.3) files ``finish_reason`` on a Responses API result
+    as a copy of the response's ``status`` — ``completed``, ``incomplete``,
+    whatever word the API reports — which says how the call ended, not why
+    it stopped (issue #435). Such a copy is
     passed over, in whichever slot it sits, so the reason is read where the
     Responses API actually puts it (:func:`_incomplete_reason`) and one build
     of this reader gives the same answer on either side of that release. A

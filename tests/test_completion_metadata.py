@@ -175,8 +175,8 @@ def test_each_provider_row_reads_truncated_and_natural_stops(
 def test_the_native_openai_responses_branch_is_read_however_the_converter_files_it():
     # The shipped ``openai`` provider (native base URL) takes the Responses API,
     # which reports ``status`` + ``incomplete_details`` and no stop reason. The
-    # INSTALLED converter decides what this test sees: up to langchain-openai
-    # 1.8.3 it filed no finish_reason at all; from 1.8.4 it files one that
+    # INSTALLED converter decides what this test sees: through langchain-openai
+    # 1.8.3 it filed no finish_reason at all; 1.8.5 files one that
     # repeats ``status`` (issue #435 — the suite went red the day that
     # reached CI). The reader must give the same answer on both, and must not
     # go blind on this path: it is the busiest provider's default branch.
@@ -193,7 +193,7 @@ def test_the_native_openai_responses_branch_is_read_however_the_converter_files_
 
 
 def _responses_shaped_result(*, complete: bool, finish_reason_in: str) -> LLMResult:
-    """A Responses result as langchain-openai 1.8.4 and later file it, built by hand.
+    """A Responses result with the ``finish_reason`` langchain-openai 1.8.5 files, built by hand.
 
     The module's rule is to go through the installed converter, and the test
     above does. But which shape that converter files depends on the version
@@ -201,7 +201,11 @@ def _responses_shaped_result(*, complete: bool, finish_reason_in: str) -> LLMRes
     the older one — so it is reproduced here, from the converter's source
     (``_responses_finish_reason_fields``, read in 1.8.5): ``finish_reason``
     is the response's ``status`` and ``normalized_finish_reason`` rides
-    beside it. ``finish_reason_in`` names the slot the pair is filed in.
+    beside it. ``finish_reason_in`` names the slot the pair is filed in:
+    1.8.5 files it in ``response_metadata``, beside the status. The
+    ``generation_info`` placement is NOT a shape it produces; it is here so
+    the rule stays "a copy of the status, wherever it sits" and not "in the
+    same dict", should a later release move it.
     """
     status = "completed" if complete else "incomplete"
     metadata: dict[str, object] = {"status": status, "model_name": "gpt-5"}
@@ -254,6 +258,25 @@ def test_only_a_copy_of_the_status_is_passed_over():
     # The other providers' keys are never compared with a status.
     anthropic_spelling = _result_with_metadata({"status": "max_tokens", "stop_reason": "max_tokens"})
     assert stop_reason_of(anthropic_spelling) == "max_tokens"
+
+
+def test_passing_a_copy_over_keeps_looking_and_finds_the_status_in_any_slot():
+    # Neither is a shape a converter files today; both pin what "passed over"
+    # means. A reason filed further on is still found after a copy...
+    copy = AIMessage(
+        content="cut", response_metadata={"status": "incomplete", "finish_reason": "incomplete"}
+    )
+    reason_further_on = LLMResult(
+        generations=[[ChatGeneration(message=copy)]], llm_output={"stop_reason": "max_tokens"}
+    )
+    assert stop_reason_of(reason_further_on) == "max_tokens"
+    # ...and the status a finish_reason copies may sit in a later slot than
+    # the copy itself.
+    message = AIMessage(content="whole", response_metadata={"finish_reason": "completed"})
+    status_in_a_later_slot = LLMResult(
+        generations=[[ChatGeneration(message=message, generation_info={"status": "completed"})]]
+    )
+    assert stop_reason_of(status_in_a_later_slot) is None
 
 
 def test_openai_reasoning_tokens_are_read_as_a_sub_count_of_output():

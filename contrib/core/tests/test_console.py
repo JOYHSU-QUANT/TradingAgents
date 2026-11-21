@@ -21,7 +21,7 @@ import pytest
 
 from contrib.core.console import accept_any_text_on_output
 
-_EMOJI = "\U0001f600"  # outside every Windows ANSI code page
+_EMOJI = "\U0001f600"  # outside every Windows ANSI code page but UTF-8 (65001)
 _HALF = "\ud83d"  # half of its UTF-16 pair: outside UTF-8 too
 
 

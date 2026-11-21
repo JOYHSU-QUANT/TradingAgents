@@ -909,7 +909,7 @@ def test_a_rule_staking_next_to_nothing_costs_a_round_and_not_the_run(ledger, ex
 
 # -- output that cannot carry what a model wrote (issue #430) -----------------
 
-_EMOJI = "\U0001f600"  # outside every Windows ANSI code page
+_EMOJI = "\U0001f600"  # outside every Windows ANSI code page but UTF-8 (65001)
 _RESEARCH = ["research", "--experiment", "btc-4h", "--provider", "p", "--model", "m"]
 
 
@@ -976,10 +976,11 @@ def test_a_refusal_the_redirected_output_cannot_encode_costs_a_round_and_not_the
 
 def test_the_prompt_and_the_report_print_that_refusal_when_redirected_too(opened, monkeypatch):
     # The refusal comes back in the next prompt and in the report — each
-    # shows its most recent few — so in the reproduction both commands failed
-    # on the same character right after the run that filed it. (A rule is
-    # measured too: the report lists an experiment's refusals only once it
-    # has a trial to list them under.)
+    # shows its most recent few — so in the reproduction ``research
+    # --dry-run`` failed on the same character right after the run that filed
+    # it, and ``report`` did once a rule had been measured. (That is why one
+    # is measured here: the report lists an experiment's refusals only once
+    # it has a trial to list them under.)
     path = opened.path
     opened.close()
     _serve(monkeypatch, ScriptedModel([_emoji_rule(), _rule(0)]))

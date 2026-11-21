@@ -23,10 +23,10 @@ fail that way, in two steps a stream takes or not on its own state:
 
 1. **A redirected stream is written as UTF-8.** What a reader of those bytes
    gets is the text itself — a model's emoji, the prompt a ``--dry-run`` shows
-   exactly as the model receives it — in the encoding Python on Linux writes
-   already. Not done to a terminal, which already has the encoding it
-   displays; and not done when ``PYTHONIOENCODING`` is set, since then the
-   operator has said how they want the streams encoded.
+   exactly as the model receives it — in the encoding Python writes already
+   under a UTF-8 locale, as on CI. Not done to a terminal, which already has
+   the encoding it displays; and not done when ``PYTHONIOENCODING`` is set,
+   since then the operator has said how they want the streams encoded.
 2. **A handler that can raise becomes ``backslashreplace``,** so what is
    still outside the encoding (under UTF-8, only a lone surrogate) is
    written as its escape. A handler that already cannot raise — ``replace``,
@@ -43,9 +43,10 @@ longer decode the dash in one of its lines until the test said
 or redirects (``|``, ``>``, ``$x = ...``) with ``[Console]::OutputEncoding``,
 the OEM code page unless changed: a dash came out as ``??`` and a Chinese
 character as another one, until that was set to UTF-8 or
-``PYTHONIOENCODING=cp950`` was set for the command. So ``> run.log`` from
-PowerShell holds the text itself only with one of those two; from Git Bash,
-where the command writes the file itself, it does without either.
+``PYTHONIOENCODING=cp950`` was set for the command (which then writes cp950
+again, and escapes what that cannot carry). So ``> run.log`` from PowerShell
+holds the text itself only with one of those two; from Git Bash, where the
+command writes the file itself, it does without either.
 
 The second: where the handler was ``surrogateescape`` — ``sys.stdout`` on
 Windows, console or redirected, and on POSIX under the C locale — a byte

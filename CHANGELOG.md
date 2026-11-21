@@ -415,7 +415,7 @@ Breaking changes within the 0.x line are called out explicitly.
   text, first thing (`contrib/core/console.py`). A redirected stream is
   written as UTF-8, so a log holds the text itself — the prompt a
   `--dry-run` prints is the one the model receives — in the encoding
-  Python on Linux writes already; and an error handler that can
+  Python writes already under a UTF-8 locale; and an error handler that can
   raise becomes `backslashreplace`, so what is still outside the encoding
   (under UTF-8, a lone surrogate) is written as its escape. A terminal
   keeps its own encoding, and so does a run with `PYTHONIOENCODING` set.

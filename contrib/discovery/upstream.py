@@ -110,8 +110,10 @@ What is borrowed and why:
   and ``SplitError`` for a decision span too short to cut);
 - from the floor, the ``VocabEnum`` base every vocabulary here is spelled in
   and the venue's time form (``epoch_ms``, ``from_epoch_ms``, and its upper
-  edge ``MAX_EPOCH_MS``, which bounds the last stamp a world may write), and
-  the atomic write a score is put in place with (``atomic_write_bytes``).
+  edge ``MAX_EPOCH_MS``, which bounds the last stamp a world may write), the
+  atomic write a score is put in place with (``atomic_write_bytes``), and
+  the call that lets the command line print any text
+  (``accept_any_text_on_output``).
 """
 
 from __future__ import annotations

@@ -208,8 +208,9 @@ def test_the_commands_that_touch_no_indicator_do_not_load_the_indicator_stack(tm
         text=True,
         # ``main`` writes a redirected stream as UTF-8 (issue #430). Read with
         # the locale's encoding instead, the dash in ``report``'s "no
-        # experiments in this store" line is not valid cp950 on Windows, and
-        # ``stdout`` comes back ``None``.
+        # experiments in this store" line is not valid where that is cp950
+        # (the Windows machine this project is developed on), and ``stdout``
+        # comes back ``None``.
         encoding="utf-8",
         cwd=root,
         check=True,

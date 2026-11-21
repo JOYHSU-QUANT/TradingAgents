@@ -24,8 +24,11 @@ Most of what is re-exported here is a *domain* import: value types, the two
 vocabularies, and the epoch-ms conversions. They cost nothing at import time
 — ``domains.perp.schema`` and ``domains.perp.indicator_vocab`` sit at the
 bottom of that package's graph, and ``contrib.core.enum_guard`` and
-``contrib.core.instants`` in the shared floor beneath it. Two things are
-deliberately NOT among them, and both are built inside a call instead:
+``contrib.core.instants`` in the shared floor beneath it. (The floor also
+lends ``accept_any_text_on_output``, the command line's one call into
+``contrib.core.console``; that module imports the standard library only.)
+Two things are deliberately NOT among them, and both are built inside a call
+instead:
 
 - the exchange READER, because reaching it pulls in the Hyperliquid SDK,
   which a store-only or gap-check invocation has no use for

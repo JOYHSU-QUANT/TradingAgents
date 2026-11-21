@@ -438,10 +438,11 @@ _COMMANDS = {
 
 def main(argv: list[str] | None = None) -> int:
     # First thing: with output redirected on Windows, a line holding an emoji
-    # (a path with one in its name is enough) raises from ``print`` — a
+    # (a path with one in its name is enough) raised from ``print`` — a
     # traceback here, since nothing below names it. The autoresearch command
-    # line lost a search to the same thing (issue #430). From here on the two
-    # standard streams can print any text (``contrib/core/console``).
+    # line was shown to stop a search the same way (issue #430, with a
+    # scripted model). From here on the two standard streams can print any
+    # text (``contrib/core/console``).
     accept_any_text_on_output()
     # WARNING, not INFO: the backfill logs a line per walk, and over a
     # synthetic port that is the same fact ``render_fetch`` prints below.

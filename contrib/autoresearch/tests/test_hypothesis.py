@@ -909,7 +909,7 @@ def test_a_rule_staking_next_to_nothing_costs_a_round_and_not_the_run(ledger, ex
 
 # -- output that cannot carry what a model wrote (issue #430) -----------------
 
-_EMOJI = "\U0001f600"  # outside every legacy Windows code page
+_EMOJI = "\U0001f600"  # outside every Windows ANSI code page
 _RESEARCH = ["research", "--experiment", "btc-4h", "--provider", "p", "--model", "m"]
 
 
@@ -917,11 +917,11 @@ def _redirected(monkeypatch, encoding: str = "cp950", errors: str = "surrogatees
     """Stand both standard streams on redirected ones; return a reader of the bytes written.
 
     cp950 with ``surrogateescape`` is what ``sys.stdout`` was measured to be
-    on this project's Windows machine with output piped or sent to a file —
-    the only place the defect shows; in a console window the stream is UTF-8
-    already. ``PYTHONIOENCODING`` is cleared, since the shell the suite runs
-    from may export it. A fresh pair each call, so one command's output is
-    not read as the next one's.
+    on the Windows machine this project is developed on, with output piped or
+    sent to a file — the only place an emoji raises there; on a console the
+    stream is UTF-8 already. ``PYTHONIOENCODING`` is cleared, since the shell
+    the suite runs from may export it. A fresh pair each call, so one
+    command's output is not read as the next one's.
     """
     monkeypatch.delenv("PYTHONIOENCODING", raising=False)
     streams = {
@@ -975,10 +975,11 @@ def test_a_refusal_the_redirected_output_cannot_encode_costs_a_round_and_not_the
 
 
 def test_the_prompt_and_the_report_print_that_refusal_when_redirected_too(opened, monkeypatch):
-    # The refusal comes back in the next prompt and in the report, so both
-    # commands met the same character on every run after the one that filed
-    # it. (A rule is measured too: the report lists an experiment's refusals
-    # only once it has a trial to list them under.)
+    # The refusal comes back in the next prompt and in the report — each
+    # shows its most recent few — so in the reproduction both commands failed
+    # on the same character right after the run that filed it. (A rule is
+    # measured too: the report lists an experiment's refusals only once it
+    # has a trial to list them under.)
     path = opened.path
     opened.close()
     _serve(monkeypatch, ScriptedModel([_emoji_rule(), _rule(0)]))

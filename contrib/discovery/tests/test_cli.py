@@ -402,9 +402,10 @@ def test_a_score_refusal_exits_1_with_its_sentence(tmp_path, capsys, monkeypatch
 
 def test_a_line_the_redirected_output_cannot_encode_is_still_printed(tmp_path, monkeypatch):
     # issue #430's other command line. With output redirected on Windows the
-    # stream is the ANSI code page (cp950 on this project's machine), and a
-    # line naming a path with an emoji in it raised from ``print`` — which
-    # here is not even a named refusal: a traceback. It is written as UTF-8.
+    # stream is the ANSI code page (cp950 on the machine this project is
+    # developed on), and a line naming a path with an emoji in it raised from
+    # ``print`` — which here is not even a named refusal: a traceback. It is
+    # written as UTF-8.
     import io
     import sys
 

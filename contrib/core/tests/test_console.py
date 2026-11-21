@@ -7,8 +7,9 @@ test_cli.py``); this file pins what the call does to a stream in each state.
 The streams here are stand-ins: a ``TextIOWrapper`` over bytes, redirected by
 default (``isatty()`` is false) or a terminal by subclass. ``cp950`` with
 ``surrogateescape`` is what a redirected ``sys.stdout`` was measured to be on
-the Windows machine this project runs on; ``strict`` is tried beside it
-because an emoji raises through both.
+the Windows machine this project is developed on; ``strict`` and
+``surrogatepass`` are tried beside it because an emoji raises through all
+three.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ import pytest
 
 from contrib.core.console import accept_any_text_on_output
 
-_EMOJI = "\U0001f600"  # outside every legacy Windows code page
+_EMOJI = "\U0001f600"  # outside every Windows ANSI code page
 _HALF = "\ud83d"  # half of its UTF-16 pair: outside UTF-8 too
 
 
@@ -57,8 +58,8 @@ def _install(monkeypatch, out, err=None):
 # -- the premise ---------------------------------------------------------------
 
 
-@pytest.mark.parametrize("errors", ["strict", "surrogateescape"])
-def test_the_premise_a_cp950_stream_raises_on_an_emoji_through_either_handler(errors):
+@pytest.mark.parametrize("errors", ["strict", "surrogateescape", "surrogatepass"])
+def test_the_premise_a_cp950_stream_raises_on_an_emoji_through_each_raising_handler(errors):
     # No product code: this is what the stand-in has to do for the tests
     # below to mean anything, and it is the defect.
     stream = _stream("cp950", errors)
@@ -69,7 +70,7 @@ def test_the_premise_a_cp950_stream_raises_on_an_emoji_through_either_handler(er
 # -- a redirected stream ---------------------------------------------------------
 
 
-@pytest.mark.parametrize("errors", ["strict", "surrogateescape"])
+@pytest.mark.parametrize("errors", ["strict", "surrogateescape", "surrogatepass"])
 def test_a_redirected_stream_is_written_as_utf8_whatever_it_was(monkeypatch, errors):
     out = _install(monkeypatch, _stream("cp950", errors))
     accept_any_text_on_output()
@@ -97,8 +98,9 @@ def test_both_streams_are_set_each_on_its_own_state(monkeypatch):
 
 
 def test_a_handler_that_cannot_raise_is_kept_as_it_was_chosen(monkeypatch):
-    # ``replace`` is the caller's choice (pytest's own capture uses it); the
-    # encoding still becomes UTF-8, because the stream is redirected.
+    # ``replace`` is the caller's choice (pytest's default capture of the
+    # file descriptors uses it); the encoding still becomes UTF-8, because
+    # the stream is redirected.
     out = _install(monkeypatch, _stream("cp950", "replace"))
     accept_any_text_on_output()
     assert (out.encoding, out.errors) == ("utf-8", "replace")
@@ -121,6 +123,23 @@ def test_a_terminal_that_can_already_print_anything_is_not_touched(monkeypatch):
     out = _install(monkeypatch, _stream("utf-8", "replace", terminal=True))
     accept_any_text_on_output()
     assert (out.encoding, out.errors) == ("utf-8", "replace")
+
+
+def test_each_stream_is_judged_on_whether_it_is_itself_a_terminal(monkeypatch):
+    # ``2> err.log`` typed at a console: stdout is the terminal, stderr is not.
+    out = _stream("cp950", "strict", terminal=True)
+    err = _stream("cp950", "backslashreplace")
+    _install(monkeypatch, out, err)
+    accept_any_text_on_output()
+    assert (out.encoding, out.errors) == ("cp950", "backslashreplace")
+    assert (err.encoding, err.errors) == ("utf-8", "backslashreplace")
+
+
+def test_an_empty_variable_is_no_choice_as_it_is_none_to_the_interpreter(monkeypatch):
+    monkeypatch.setenv("PYTHONIOENCODING", "")
+    out = _install(monkeypatch, _stream("cp950"))
+    accept_any_text_on_output()
+    assert (out.encoding, out.errors) == ("utf-8", "backslashreplace")
 
 
 def test_an_encoding_the_operator_chose_is_kept_and_only_made_unable_to_raise(monkeypatch):

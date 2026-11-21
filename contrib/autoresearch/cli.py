@@ -116,7 +116,7 @@ from .store import (
     canonical_coin,
     default_db_path,
 )
-from .upstream import ExchangeError, from_epoch_ms
+from .upstream import ExchangeError, accept_any_text_on_output, from_epoch_ms
 from .vocabulary import describe_vocabulary
 
 __all__ = ["main", "parse_since"]
@@ -1014,6 +1014,11 @@ def _is_named_measurement_failure(exc: BaseException) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # First thing: with output redirected on Windows, a refusal quoting an
+    # emoji raised from ``print`` and a search of three rounds exited after
+    # one (issue #430, reproduced with a scripted model). From here on the
+    # two standard streams can print any text (``contrib/core/console``).
+    accept_any_text_on_output()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     args = _build_parser().parse_args(sys.argv[1:] if argv is None else argv)
     try:

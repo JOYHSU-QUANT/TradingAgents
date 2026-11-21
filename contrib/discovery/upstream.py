@@ -110,8 +110,10 @@ What is borrowed and why:
   and ``SplitError`` for a decision span too short to cut);
 - from the floor, the ``VocabEnum`` base every vocabulary here is spelled in
   and the venue's time form (``epoch_ms``, ``from_epoch_ms``, and its upper
-  edge ``MAX_EPOCH_MS``, which bounds the last stamp a world may write), and
-  the atomic write a score is put in place with (``atomic_write_bytes``).
+  edge ``MAX_EPOCH_MS``, which bounds the last stamp a world may write), the
+  atomic write a score is put in place with (``atomic_write_bytes``), and
+  the call that lets the command line print any text
+  (``accept_any_text_on_output``).
 """
 
 from __future__ import annotations
@@ -208,6 +210,7 @@ from contrib.autoresearch.vocabulary import (
     spec_of,
 )
 from contrib.core.atomic_io import atomic_write_bytes
+from contrib.core.console import accept_any_text_on_output
 from contrib.core.enum_guard import VocabEnum
 from contrib.core.instants import MAX_EPOCH_MS, epoch_ms, from_epoch_ms
 
@@ -265,6 +268,7 @@ __all__ = [
     "TrialStatus",
     "Verdict",
     "VocabEnum",
+    "accept_any_text_on_output",
     "atomic_write_bytes",
     "backfill_candles",
     "backfill_funding",
@@ -387,6 +391,7 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.vocabulary", "require_number"),
     ("contrib.autoresearch.vocabulary", "spec_of"),
     ("contrib.core.atomic_io", "atomic_write_bytes"),
+    ("contrib.core.console", "accept_any_text_on_output"),
     ("contrib.core.enum_guard", "VocabEnum"),
     ("contrib.core.instants", "MAX_EPOCH_MS"),
     ("contrib.core.instants", "epoch_ms"),

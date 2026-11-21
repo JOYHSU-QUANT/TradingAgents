@@ -576,6 +576,13 @@ Hyperliquid SDK）。所以 `gaps`／`vocab`／`validate-spec` 三個指令一�
 
 ## 已知取捨（記著就好，不開 issue）
 
+- **輸出被導走時寫 UTF-8**（#430；`discovery` 的 CLI 相同）：接管線、`> run.log`、被工具擷取時，
+  這個 CLI 的輸出一律是 UTF-8（直接顯示在終端機的不變；有設 `PYTHONIOENCODING` 的照它）。
+  代價在 Windows PowerShell：它用 `[Console]::OutputEncoding`（沒改過就是 OEM code page）解管線與
+  `>` 的內容，5.1 實測破折號變成 `??`、中文變成別的字。補救擇一：該 session 先下
+  `[Console]::OutputEncoding = [Text.Encoding]::UTF8`，或 `$env:PYTHONIOENCODING = 'cp950'`
+  （換回原本的位元組，編不出來的字元印成跳脫形式）。用 `subprocess.run(text=True)` 擷取的腳本
+  要加 `encoding='utf-8'`。細節在 `contrib/core/console.py`。
 - **indicator 一次算四個名字**（計畫 §10.5）：評估器知道整個 experiment 的 feature 聯集，
   可以只叫 frame 算需要的；沒做，因為一個 frame 服務整個 experiment，聯集遲早全要。
   順帶：regime 分桶讓**每個** spec 都付這趟 indicator walk（5000 根本機實測約 12 秒，

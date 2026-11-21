@@ -5,6 +5,10 @@ package that is not the perp trader can use them without importing the perp
 trader:
 
 - :mod:`.atomic_io` — the atomic text/bytes write (tmp, then replace);
+- :mod:`.console` — the two standard streams made able to print any text
+  (UTF-8 when redirected, an escape for what is still outside the
+  encoding), so a command line does not die reporting a character
+  (issue #430; written here, not moved);
 - :mod:`.decimal_context` — the one pinned decimal context for money math;
 - :mod:`.digest` — the ``sha256:<hex>`` artifact digest and the one spelling
   of indented-JSON-as-bytes it hashes;

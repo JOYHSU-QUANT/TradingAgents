@@ -20,10 +20,12 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import io
 import json
 import re
 import shutil
 import sqlite3
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -903,3 +905,108 @@ def test_a_rule_staking_next_to_nothing_costs_a_round_and_not_the_run(ledger, ex
     assert refused.trial_id is None
     assert measured.outcome is ProposalOutcome.MEASURED  # the run went on
     assert len(ledger.trials("btc-4h")) == 1
+
+
+# -- output that cannot carry what a model wrote (issue #430) -----------------
+
+_EMOJI = "\U0001f600"  # outside every Windows ANSI code page but UTF-8 (65001)
+_RESEARCH = ["research", "--experiment", "btc-4h", "--provider", "p", "--model", "m"]
+
+
+def _redirected(monkeypatch, encoding: str = "cp950", errors: str = "surrogateescape"):
+    """Stand both standard streams on redirected ones; return a reader of the bytes written.
+
+    cp950 with ``surrogateescape`` is what ``sys.stdout`` was measured to be
+    on the Windows machine this project is developed on, with output piped or
+    sent to a file — the only place an emoji raises there; on a console the
+    stream is UTF-8 already. ``PYTHONIOENCODING`` is cleared, since the shell
+    the suite runs from may export it. A fresh pair each call, so one
+    command's output is not read as the next one's.
+    """
+    monkeypatch.delenv("PYTHONIOENCODING", raising=False)
+    streams = {
+        name: io.TextIOWrapper(io.BytesIO(), encoding=encoding, errors=errors, newline="")
+        for name in ("stdout", "stderr")
+    }
+    for name, stream in streams.items():
+        monkeypatch.setattr(sys, name, stream)
+
+    def written(name: str) -> bytes:
+        streams[name].flush()
+        return streams[name].buffer.getvalue()
+
+    return written
+
+
+def _emoji_rule() -> str:
+    """A rule whose ``family`` is an emoji: refused, in a sentence that quotes it."""
+    return json.dumps(
+        {
+            "family": _EMOJI,
+            "entry": {"long": [{"left": "close", "op": ">", "right": 0}]},
+            "sizing": _SIZING,
+        },
+        ensure_ascii=False,
+    )
+
+
+def test_a_refusal_the_redirected_output_cannot_encode_costs_a_round_and_not_the_run(
+    opened, monkeypatch
+):
+    # issue #430 as it was reproduced. The round was filed, then ``print``
+    # raised on the emoji the refusal quotes, ``main`` reported that as an
+    # operator's mistake (exit 1), and the two rounds left were never asked.
+    path = opened.path
+    opened.close()
+    _serve(monkeypatch, ScriptedModel([_emoji_rule(), _rule(0), _rule(1)]))
+    written = _redirected(monkeypatch)
+
+    code = main([*_RESEARCH, "--max-trials", "3", "--db", str(path)])
+
+    assert code == 0, written("stderr")
+    out = written("stdout").decode("utf-8")  # the redirected output is UTF-8 now
+    assert "round 1: refused:" in out
+    assert _EMOJI in out  # the character itself, as the model wrote it
+    assert "round 2: measured as trial #1" in out
+    assert "round 3: measured as trial #2" in out
+    assert "3 of 3 round(s) spent" in out
+    with ResearchStore(path) as reopened:
+        assert len(Ledger(reopened).proposals("btc-4h")) == 3
+
+
+def test_the_prompt_and_the_report_print_that_refusal_when_redirected_too(opened, monkeypatch):
+    # The refusal comes back in the next prompt and in the report — each
+    # shows its most recent few — so in the reproduction ``research
+    # --dry-run`` failed on the same character right after the run that filed
+    # it, and ``report`` did once a rule had been measured. (That is why one
+    # is measured here: the report lists an experiment's refusals only once
+    # it has a trial to list them under.)
+    path = opened.path
+    opened.close()
+    _serve(monkeypatch, ScriptedModel([_emoji_rule(), _rule(0)]))
+    _redirected(monkeypatch)
+    assert main([*_RESEARCH, "--max-trials", "2", "--db", str(path)]) == 0
+
+    written = _redirected(monkeypatch)
+    assert main(["research", "--experiment", "btc-4h", "--dry-run", "--db", str(path)]) == 0
+    assert _EMOJI in written("stdout").decode("utf-8")
+
+    written = _redirected(monkeypatch)
+    assert main(["report", "--experiment", "btc-4h", "--db", str(path)]) == 0
+    assert _EMOJI in written("stdout").decode("utf-8")
+
+
+def test_an_encoding_the_operator_chose_is_kept_and_the_run_still_finishes(opened, monkeypatch):
+    # PYTHONIOENCODING names the encoding the operator wants in the pipe; it
+    # is kept, and the character it cannot carry is written as its escape.
+    path = opened.path
+    opened.close()
+    _serve(monkeypatch, ScriptedModel([_emoji_rule(), _rule(0)]))
+    written = _redirected(monkeypatch, errors="strict")
+    monkeypatch.setenv("PYTHONIOENCODING", "cp950")
+
+    assert main([*_RESEARCH, "--max-trials", "2", "--db", str(path)]) == 0
+
+    out = written("stdout").decode("cp950")
+    assert "\\U0001f600" in out
+    assert "round 2: measured as trial #1" in out

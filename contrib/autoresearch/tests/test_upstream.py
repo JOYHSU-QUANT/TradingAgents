@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ast
 import importlib
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -206,6 +207,14 @@ def test_the_commands_that_touch_no_indicator_do_not_load_the_indicator_stack(tm
         [sys.executable, "-c", probe, str(tmp_path / "autoresearch.sqlite")],
         capture_output=True,
         text=True,
+        # ``main`` writes a redirected stream as UTF-8 (issue #430). Read with
+        # the locale's encoding instead, the dash in ``report``'s "no
+        # experiments in this store" line is not valid where that is cp950
+        # (the Windows machine this project is developed on), and ``stdout``
+        # comes back ``None``. The child is not handed a ``PYTHONIOENCODING``
+        # the shell may export: ``main`` would write that encoding instead.
+        encoding="utf-8",
+        env={k: v for k, v in os.environ.items() if k != "PYTHONIOENCODING"},
         cwd=root,
         check=True,
     )

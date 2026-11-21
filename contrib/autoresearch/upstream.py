@@ -24,8 +24,11 @@ Most of what is re-exported here is a *domain* import: value types, the two
 vocabularies, and the epoch-ms conversions. They cost nothing at import time
 — ``domains.perp.schema`` and ``domains.perp.indicator_vocab`` sit at the
 bottom of that package's graph, and ``contrib.core.enum_guard`` and
-``contrib.core.instants`` in the shared floor beneath it. Two things are
-deliberately NOT among them, and both are built inside a call instead:
+``contrib.core.instants`` in the shared floor beneath it. (The floor also
+lends ``accept_any_text_on_output``, the command line's one call into
+``contrib.core.console``; that module imports the standard library only.)
+Two things are deliberately NOT among them, and both are built inside a call
+instead:
 
 - the exchange READER, because reaching it pulls in the Hyperliquid SDK,
   which a store-only or gap-check invocation has no use for
@@ -47,6 +50,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from contrib.core.console import accept_any_text_on_output
 from contrib.core.enum_guard import VocabEnum
 from contrib.core.instants import epoch_ms, from_epoch_ms, gap_label
 from contrib.hyperliquid_perp.domains.perp.indicator_vocab import (
@@ -106,6 +110,7 @@ __all__ = [
     "ResearchDrawdown",
     "ResearchSignal",
     "VocabEnum",
+    "accept_any_text_on_output",
     "build_chat_model",
     "build_market_data",
     "context_analytics",
@@ -129,6 +134,7 @@ UPSTREAM_PACKAGES: tuple[str, ...] = ("contrib.core", "contrib.hyperliquid_perp"
 # lazily-imported reader and chat model below are in it too: "not imported at
 # module scope" is a load-time choice, not an exemption from the audit.
 BORROWED: tuple[tuple[str, str], ...] = (
+    ("contrib.core.console", "accept_any_text_on_output"),
     ("contrib.core.enum_guard", "VocabEnum"),
     ("contrib.core.instants", "epoch_ms"),
     ("contrib.core.instants", "from_epoch_ms"),

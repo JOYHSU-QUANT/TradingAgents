@@ -397,6 +397,51 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **A character the output encoding cannot carry no longer ends a research
+  run** (#430). `print` raises when the stream's encoding has no bytes for
+  a character and its error handler is one that raises, as `sys.stdout`'s
+  is. On Windows an emoji does not do that on a console, where Python
+  writes UTF-8 through the console API; it does with output redirected — a
+  pipe, `> run.log`, a tool that captures the command — where `sys.stdout`
+  is the ANSI code page (cp950 on the Windows machine this project is
+  developed on) and a character outside it raises. The research
+  loop prints each round as it lands, and a refusal quotes what the model
+  wrote: with a scripted model answering a rule whose `family` was an
+  emoji, the round was filed, the line reporting it raised, `main`
+  answered that as an operator's mistake (exit 1), and the two rounds left
+  were never asked; `research --dry-run` then failed the same way, because
+  the refusal is in the next prompt. The `autoresearch` and `discovery`
+  command lines now make their two standard streams able to print any
+  text, first thing (`contrib/core/console.py`). A redirected stream is
+  written as UTF-8, so a log holds the text itself — the prompt a
+  `--dry-run` prints is the one the model receives — in the encoding
+  Python writes already under a UTF-8 locale; and an error handler that can
+  raise becomes `backslashreplace`, so what is still outside the encoding
+  (under UTF-8, a lone surrogate) is written as its escape. A terminal
+  keeps its own encoding, and so does a run with `PYTHONIOENCODING` set.
+  Two costs. A reader that decodes a pipe as a legacy code page no longer
+  reads non-ASCII from these two commands, where a reader expecting UTF-8
+  used not to. Two were met on that Windows machine.
+  `subprocess.run(..., text=True)`: a test of this repository that runs
+  `report` in a child had to say `encoding="utf-8"`. And **Windows
+  PowerShell 5.1**, which decodes what a command pipes or redirects (`|`,
+  `>`, `$x = ...`) with `[Console]::OutputEncoding` (the OEM code page
+  unless changed): a dash came out as `??` and a Chinese character as
+  another one, where both read correctly before. Either of two lines puts
+  that right — `[Console]::OutputEncoding = [Text.Encoding]::UTF8` in the
+  session, or `$env:PYTHONIOENCODING = 'cp950'` (your code page) to have
+  the old bytes back, with what they cannot carry escaped. Output shown on
+  the console itself, not piped, is unaffected. And
+  where the handler was `surrogateescape` — `sys.stdout` on Windows,
+  console or redirected, and POSIX under the C locale — a byte that could
+  not be decoded (on POSIX, in a file name say) used to be written back as
+  that byte and is now written as an escape. The other command lines
+  (replay, uniswap_v3, carry, hyperliquid_perp, dashboard, and discovery's
+  own `tools_server` entry point) are not changed; whether they print text
+  that can do this was not looked into, except for `tools_server`: it
+  prints to `sys.stderr` only, whose handler escapes, and on Windows it
+  goes on writing the ANSI code page there — into the `server.log` a search
+  keeps of it too.
 - **A rule that stakes next to nothing is refused by the parser instead of
   ending the search** (#432). `sizing.fraction` (and a vol target's
   `max_fraction`) had to be "above 0 and at most 1", so `1e-320` parsed.

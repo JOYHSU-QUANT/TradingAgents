@@ -115,7 +115,14 @@ from .records import RecordError
 from .scoring import SCORES_FILENAME, report_table, require_this_scorer, score_world
 from .tools_server import IMPORT_ROOT, LaunchError, ServerParams, require_sdk
 from .tooluse import TOOL_USE_FILENAME, Prices
-from .upstream import EvaluationError, FeatureError, SplitError, StoreError, render_fetch
+from .upstream import (
+    EvaluationError,
+    FeatureError,
+    SplitError,
+    StoreError,
+    accept_any_text_on_output,
+    render_fetch,
+)
 from .worlds import WorldError, generate
 
 __all__ = ["EXIT_KEPT_FOR_INQUIRY", "main"]
@@ -430,6 +437,13 @@ _COMMANDS = {
 
 
 def main(argv: list[str] | None = None) -> int:
+    # First thing: with output redirected on Windows, a line holding an emoji
+    # (a path with one in its name is enough) raised from ``print`` — a
+    # traceback here, since nothing below names it. The autoresearch command
+    # line was shown to stop a search the same way (issue #430, with a
+    # scripted model). From here on the two standard streams can print any
+    # text (``contrib/core/console``).
+    accept_any_text_on_output()
     # WARNING, not INFO: the backfill logs a line per walk, and over a
     # synthetic port that is the same fact ``render_fetch`` prints below.
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")

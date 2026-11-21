@@ -708,8 +708,8 @@ replicate 開始時，把那個模型 client 外面包一層計數器（[`modelu
   不會留白讓人以為沒花錢；同一列裡有的世界有紀錄、有的沒有時，token 只加總有紀錄的，並另外寫出沒有紀錄的個數。那一行不說原因：
   沒有檔可能是舊目錄、可能是下一條講的情況、也可能是被手動刪掉，光看目錄分不出來。
 - **search 當下如果計數湊不成紀錄**（計數器什麼都沒算到、次數跟 `verdicts.json` 的 answers 對不上、少了某個 replicate；照程式的走法不會發生，
-  發生就是這一側的 bug）：不停下 run、不丟掉已經付錢的搜尋——只是不寫這個檔，`search` 的最後一行（各臂與 oracle 都印完之後）印
-  `model use: not recorded — <原因>`、log 留一筆 WARNING，之後那個世界讀起來跟舊目錄一樣是「沒有紀錄」，目錄本身看不出差別。
+  發生就是這一側的 bug）：不停下 run、不丟掉已經付錢的搜尋——只是不寫這個檔，`search` 在各臂與 oracle 的行印完之後、列出紀錄路徑之前印
+  `model use: not recorded — <原因>`（之後不會有 `model use: <路徑>` 那一行）、log 留一筆 WARNING，之後那個世界讀起來跟舊目錄一樣是「沒有紀錄」，目錄本身看不出差別。
   工具組遇到同類問題會停下並保留 trace，是因為 trace 是可以查的證據；盲猜組只有計數器，沒有東西可留。
   紀錄已經湊成、但搬進目錄那一步失敗（磁碟滿、檔案被鎖）則跟其他紀錄一樣，run 會停下。
 
@@ -864,7 +864,7 @@ exit 規則，池不行）；每個 template 都有 gate（池裡沒有「只有
   arms/llm_tools/replicate-<k>.server.log      那個 replicate 的查詢伺服器的 stderr（正常是空的）
   verdicts.json              每臂每 replicate 的快照、最終判定、selected 的 holdout（search 寫）
   tool_use.json              工具組每個 replicate 每輪查了幾次與 token 數（search 寫；沒有工具組就沒有這個檔）
-  model_use.json             盲猜組每個 replicate 的模型呼叫次數與 token 數（search 寫；沒有盲猜組就沒有這個檔，#433 之前搜的世界也沒有）
+  model_use.json             盲猜組每個 replicate 的模型呼叫次數與 token 數（search 寫；沒有盲猜組就沒有這個檔，#433 之前搜的世界也沒有，search 當下計數湊不成紀錄時也沒有）
   oracle.json                各臂跑完後才寫：埋的規則三段數字＋餘裕判定、full-pool reference（search 寫）
   scores.json                每臂每 replicate 的三項指標與找回判定（score 寫，可重跑）
 ```

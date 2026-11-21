@@ -36,9 +36,10 @@ Breaking changes within the 0.x line are called out explicitly.
   record's path with the others, and searching such a world again needs
   `model_use.json` removed with them. If the counts of a search do not
   make a record — a defect on this side — the run is not stopped and no
-  paid search is thrown away: the record is left unwritten, the last line
-  `search` prints is `model use: not recorded` with the reason, and the
-  world then reads as one with no record. A token count above 10^12 is
+  paid search is thrown away: the record is left unwritten, `search` prints
+  `model use: not recorded` with the reason after the arms' and the
+  oracle's lines (just before the records' paths, where no `model use:`
+  path then appears), and the world then reads as one with no record. A token count above 10^12 is
   read as no count, for both model arms: one large enough stopped `report`
   on the cost. One pair of prices is still one model's and is put to
   every row that has counts; each row names its model. The note printed

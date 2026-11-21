@@ -134,7 +134,8 @@ def test_a_reply_with_no_usage_attribute_at_all_is_counted_and_unmetered():
 )
 def test_a_reply_that_is_not_text_is_handed_on_and_counted_nowhere(content):
     # The adapter refuses it as the seam's failure; the tool arm's trace
-    # has no line for such a reply either, so the two floors are one kind.
+    # has no model line for such a reply either, so the two floors are one
+    # kind.
     reply = SimpleNamespace(
         content=content, usage_metadata={"input_tokens": 900, "output_tokens": 40}
     )

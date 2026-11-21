@@ -48,7 +48,7 @@ with the verdicts. Unlike the tool arm's, that record may be absent: a
 directory searched before it existed has none, nor has one whose counts did
 not make a record, and either is read as it was.
 
-**The two sides of that arm's seam fail differently** (decided
+**The two sides of the tool arm's seam fail differently** (decided
 2026-11-19). The MODEL not answering is a failed seam like any arm's:
 recorded, counted apart, and the run goes on. The look-ups' SERVER not
 answering — it did not start, it died, a look-up timed out or could not be

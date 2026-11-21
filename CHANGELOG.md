@@ -10,6 +10,41 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **Discovery Lab: the blind model arm's token use is recorded, so `report`
+  can print its cost** (#433). The tool arm's row said what its searches
+  spent; the blind model arm (`arms.llm`) had no figure, because it is
+  asked through the research package's `ChatHypothesist`, which hands back
+  text only. `search` now puts a counter around that arm's client for each
+  replicate (`contrib/discovery/modeluse.py`; `ChatHypothesist` is not
+  changed) and writes `model_use.json` beside `verdicts.json`: per
+  replicate the model calls that came back and the input and output tokens
+  the provider reported. It is counted by the tool arm's rule — a reply
+  that came back and was text, a retried call once, a reply that was not
+  text not at all, a call short of a count set apart — so the two rows are
+  floors of the same kind, and `report` prints the tool arm's own tokens
+  sentence on the blind arm's row, with an estimated cost under
+  `--price-in`/`--price-out`. `verdicts.json` is unchanged, a world with
+  no blind model arm writes no such file, and the manifest's version is
+  not raised: a directory searched before this record existed is read as
+  it was, and its row says how many searches have no record (`tokens not
+  recorded for N search(es) of this row: no model_use.json beside their
+  verdicts`) instead of printing nothing. A
+  record that is not the verdicts' — another world, manifest or model, a
+  replicate missing, a count of calls that is not the search's answers, a
+  failed seam on one side only — is refused by name, and so is one found
+  where the manifest names no blind model arm. `search` prints the
+  record's path with the others, and searching such a world again needs
+  `model_use.json` removed with them. If the counts of a search do not
+  make a record — a defect on this side — the run is not stopped and no
+  paid search is thrown away: the record is left unwritten, `search` prints
+  `model use: not recorded` with the reason after the arms' and the
+  oracle's lines (just before the records' paths, where no `model use:`
+  path then appears), and the world then reads as one with no record. A token count above 10^12 is
+  read as no count, for both model arms: one large enough stopped `report`
+  on the cost. One pair of prices is still one model's and is put to
+  every row that has counts; each row names its model. The note printed
+  when prices priced nothing now reads "no row … holds a model arm's
+  token counts".
 - **Discovery Lab: the tool-using model arm runs in the benchmark (tools
   plan T4).** A manifest may now name `arms.llm_tools` — the model arm's
   five fields plus `lookups`, `backtests` (the two per-round limits) and

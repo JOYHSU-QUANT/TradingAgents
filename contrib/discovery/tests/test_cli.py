@@ -23,6 +23,7 @@ from contrib.discovery.landing import (
     world_dir,
 )
 from contrib.discovery.manifest import ManifestError, WorldKind
+from contrib.discovery.modeluse import MODEL_USE_FILENAME
 from contrib.discovery.oracle import OracleError
 from contrib.discovery.scoring import SCORES_FILENAME, ScoreError
 from contrib.discovery.verdict import VerdictError
@@ -232,6 +233,23 @@ def test_search_runs_the_world_reporting_as_it_goes_and_names_the_records(
         "grid-0: ended budget_spent",
         f"verdicts: {tmp_path / 'run' / VERDICTS_FILENAME}",
         f"oracle: {tmp_path / 'run' / ORACLE_FILENAME}",
+    ]
+
+
+def test_search_names_a_blind_model_arm_s_record_of_what_it_spent(tmp_path, capsys, monkeypatch):
+    run = tmp_path / "run"
+    run.mkdir()
+
+    def fake_run(run_dir, *, on_line):
+        (run_dir / MODEL_USE_FILENAME).write_text("{}", encoding="utf-8")
+        return None, None
+
+    monkeypatch.setattr(cli, "run_world", fake_run)
+    assert main(["search", "--run", str(run)]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        f"verdicts: {run / VERDICTS_FILENAME}",
+        f"model use: {run / MODEL_USE_FILENAME}",
+        f"oracle: {run / ORACLE_FILENAME}",
     ]
 
 

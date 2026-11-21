@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
@@ -42,6 +43,7 @@ from contrib.discovery.bench import (
     run_world,
     store_path,
 )
+from contrib.discovery.cli import main as cli_main
 from contrib.discovery.landing import (
     ARTIFACT_FILENAME,
     MANIFEST_FILENAME,
@@ -50,8 +52,10 @@ from contrib.discovery.landing import (
     world_dir,
 )
 from contrib.discovery.manifest import LlmArm, ManifestError, SeedSet, WorldKind
+from contrib.discovery.modeluse import MODEL_USE_FILENAME, MeteredModel, ModelSearch, ModelUse
 from contrib.discovery.oracle import GateBlocker, Oracle, OracleError, planted_figures
-from contrib.discovery.scoring import report_table, score_world
+from contrib.discovery.scoring import ScoreError, report_table, score_world
+from contrib.discovery.tooluse import Prices
 from contrib.discovery.verdict import Ended, VerdictError, final_verdict
 
 from .conftest import (
@@ -623,9 +627,357 @@ def test_the_model_arm_searches_last_in_its_own_store_and_may_answer_outside_the
     score_world(run)
     report = {row.arm: row for row in report_table([run])}
     assert (report[Arm.LLM].searches, report[Arm.LLM].failed) == (1, 1)
-    assert report[Arm.LLM].describe()[-1] == (
+    assert report[Arm.LLM].describe()[-2] == (
         "  answers median 2 (min 2), distinct rules median 1 (min 1)"
     )
+    # This client reports no counts, as a provider may not: its calls are
+    # counted, said to be short of a count, and no figure is made up.
+    assert report[Arm.LLM].describe()[-1] == (
+        f"  tokens reported by {llm.provider}/{llm.model} over 2 search(es), failed seams "
+        "included: 0 in, 0 out, in 2 model call(s) that came back, 2 of them short of a count "
+        "(a floor: a retried call counts once, a reply that was not read not at all)"
+    )
+
+
+# -- what the blind model arm spent (issue #433) ------------------------------------------------------
+
+
+class _ReportingModel(_ScriptedModel):
+    """The scripted client, each reply carrying the counts a provider reports with it."""
+
+    def invoke(self, messages):
+        reply = super().invoke(messages)
+        reply.usage_metadata = {"input_tokens": 1200, "output_tokens": 80, "total_tokens": 1280}
+        return reply
+
+
+@pytest.fixture(scope="module")
+def blind_searched(landed_world, tmp_path_factory):
+    """A world with a blind model arm of two replicates, searched and scored once.
+
+    The first replicate answers twice (a rule, then something refused); the
+    script then runs dry, so the second is a dead seam from its first round.
+    """
+    artifact, _landing = landed_world
+    llm = replace(LLM_ARM, replicates=2)
+    manifest = bench_manifest()
+    manifest = replace(manifest, arms=replace(manifest.arms, llm=llm))
+    run = land_run(tmp_path_factory.mktemp("blind"), artifact, manifest)
+    model = _ReportingModel([json.dumps(PLANTED), "not a rule"])
+
+    def build(provider, name, base_url=None, **kwargs):
+        return bench.ChatHypothesist(model=model, label=f"{provider}/{name}")
+
+    lines: list[str] = []
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(bench.ChatHypothesist, "build", build)
+        verdicts, _oracle = run_world(run, on_line=lines.append)
+    score_world(run)
+    return run, verdicts, lines
+
+
+_BLIND_LABEL = f"{LLM_ARM.provider}/{LLM_ARM.model}"
+_BLIND_SPENT = (
+    ModelSearch(
+        replicate=0,
+        seam_failed=False,
+        model_calls=2,
+        unmetered_calls=0,
+        input_tokens=2400,
+        output_tokens=160,
+    ),
+    ModelSearch(
+        replicate=1,
+        seam_failed=True,
+        model_calls=0,
+        unmetered_calls=0,
+        input_tokens=0,
+        output_tokens=0,
+    ),
+)
+_BLIND_TOKENS = (
+    f"  tokens reported by {_BLIND_LABEL} over 2 search(es), failed seams included: 2,400 in, "
+    "160 out, in 2 model call(s) that came back (a floor: a retried call counts once, a reply "
+    "that was not read not at all)"
+)
+_UNRECORDED = (
+    "  tokens not recorded for 2 search(es) of this row: no model_use.json beside their "
+    "verdicts (searched before that record existed, or their search did not record its counts)"
+)
+_PRICES = Prices(input=3, output=15)
+
+
+def _blind_use(verdicts: Verdicts) -> ModelUse:
+    return ModelUse(
+        world_id=verdicts.world_id,
+        manifest_digest=verdicts.manifest_digest,
+        model=_BLIND_LABEL,
+        searches=_BLIND_SPENT,
+    )
+
+
+def _records_of(run: Path, tmp_path: Path, name: str) -> Path:
+    """A copy of a searched directory's manifest and records — no artifact, no stores — named as the run is."""
+    target = tmp_path / name / run.name
+    target.mkdir(parents=True)
+    for path in run.iterdir():
+        if path.is_file() and path.name != ARTIFACT_FILENAME:
+            shutil.copyfile(path, target / path.name)
+    return target
+
+
+def test_a_blind_model_arm_s_search_writes_what_it_spent_beside_the_verdicts(blind_searched):
+    run, verdicts, lines = blind_searched
+    assert MODEL_USE_FILENAME in _listing(run)
+    written = ModelUse.loads((run / MODEL_USE_FILENAME).read_text(encoding="utf-8"))
+    assert written == _blind_use(verdicts)
+    # Read back with the other records, and held to them.
+    read = bench.read_searched(run)
+    assert read.model_use == written and read.tool_use is None
+    assert not any(line.startswith("model use:") for line in lines)
+    # A search is spent once, and this record is among what goes before another.
+    with pytest.raises(
+        BenchError, match=r"remove arms/, verdicts\.json, model_use\.json, oracle\.json by hand"
+    ):
+        run_world(run)
+
+
+def test_a_world_with_no_blind_model_arm_has_no_such_record(searched, tmp_path):
+    run, verdicts, *_ = searched
+    assert not (run / MODEL_USE_FILENAME).exists()
+    assert bench.read_searched(run).model_use is None
+    # And one found there was not left by this build's search.
+    stray = _records_of(run, tmp_path, "stray")
+    use = ModelUse(
+        world_id=verdicts.world_id,
+        manifest_digest=verdicts.manifest_digest,
+        model=_BLIND_LABEL,
+        searches=_BLIND_SPENT[:1],
+    )
+    (stray / MODEL_USE_FILENAME).write_text(use.dumps(), encoding="utf-8")
+    with pytest.raises(BenchError, match="names no blind model arm to have written it"):
+        bench.read_searched(stray)
+
+
+def test_the_report_says_what_the_blind_model_arm_spent_and_prices_it(blind_searched):
+    run, _verdicts, _lines = blind_searched
+    rows = {row.arm: row for row in report_table([run])}
+    blind = rows[Arm.LLM]
+    assert (blind.model_uses, blind.model, blind.unrecorded) == (_BLIND_SPENT, _BLIND_LABEL, 0)
+    assert blind.describe()[-2:] == [
+        "  answers median 2 (min 2), distinct rules median 1 (min 1)",
+        _BLIND_TOKENS,
+    ]
+    assert blind.describe(prices=_PRICES)[-1] == (
+        _BLIND_TOKENS + "; estimated cost US$0.01 on those counts, at US$3 in and US$15 out a "
+        "million tokens with no cache discount"
+    )
+    # The pool arms asked no model, and their rows say nothing of tokens.
+    for arm in (Arm.RANDOM, Arm.GRID):
+        assert (rows[arm].model_uses, rows[arm].model, rows[arm].unrecorded) == ((), None, 0)
+        assert not any("tokens" in line for line in rows[arm].describe(prices=_PRICES))
+
+
+def test_a_directory_searched_before_the_record_existed_reads_as_it_did(blind_searched, tmp_path):
+    run, verdicts, _lines = blind_searched
+    old = _records_of(run, tmp_path, "old")
+    (old / MODEL_USE_FILENAME).unlink()
+    read = bench.read_searched(old)
+    assert read.model_use is None and read.verdicts == verdicts
+    assert {row.arm for row in calibration_table([old])} == {Arm.RANDOM, Arm.GRID, Arm.LLM}
+    (blind,) = (row for row in report_table([old]) if row.arm is Arm.LLM)
+    assert (blind.model_uses, blind.model, blind.unrecorded) == ((), None, 2)
+    # Said, with or without prices: a blank would read as nothing spent.
+    assert blind.describe()[-1] == _UNRECORDED
+    assert blind.describe(prices=_PRICES)[-1] == _UNRECORDED
+    # A row over one world that has the record and one that has not says
+    # both: the sums are over the searches that left counts.
+    (mixed,) = (row for row in report_table([run, old]) if row.arm is Arm.LLM)
+    assert (mixed.model_uses, mixed.unrecorded) == (_BLIND_SPENT, 2)
+    assert mixed.describe()[-2:] == [
+        _BLIND_TOKENS,
+        _UNRECORDED.replace("2 search(es)", "2 more search(es)"),
+    ]
+
+
+_FIRST, _SECOND = (search.to_dict() for search in _BLIND_SPENT)
+
+
+@pytest.mark.parametrize(
+    ("changes", "sentence"),
+    [
+        ({"world_id": "another"}, "is for another under manifest"),
+        ({"manifest_digest": "0" * 8}, "under manifest 00000000; verdicts.json beside it"),
+        (
+            {"model": "openai/gpt"},
+            "are those of the model openai/gpt; the manifest's model arm names",
+        ),
+        (
+            {"searches": [_FIRST]},
+            r"holds the model arm's replicate\(s\) \[0\]; the manifest names 2, numbered from 0",
+        ),
+        (
+            {"searches": [{**_FIRST, "model_calls": 3}, _SECOND]},
+            r"3 model call\(s\) come back and its ledger holds 2 answer\(s\)",
+        ),
+        (
+            {"searches": [{**_FIRST, "seam_failed": True}, _SECOND]},
+            "ended budget_spent, and its record says it ended on a failed seam",
+        ),
+        (
+            {"searches": [_FIRST, {**_SECOND, "model_calls": 1, "seam_failed": False}]},
+            r"1 model call\(s\) come back and its ledger holds 0 answer\(s\)",
+        ),
+    ],
+    ids=["world", "manifest", "model", "replicates", "calls", "seam", "dead-seam"],
+)
+def test_a_model_use_record_that_is_not_the_searches_is_refused_by_name(
+    blind_searched, tmp_path, changes, sentence
+):
+    run, _verdicts, _lines = blind_searched
+    copy = _records_of(run, tmp_path, "edited")
+    path = copy / MODEL_USE_FILENAME
+    document = json.loads(path.read_text(encoding="utf-8"))
+    path.write_text(json.dumps({**document, **changes}), encoding="utf-8")
+    with pytest.raises(BenchError, match=sentence):
+        bench.read_searched(copy)
+    # Every reader of the records comes through that one.
+    with pytest.raises(BenchError, match=sentence):
+        report_table([copy])
+
+
+def _counters(*searches: ModelSearch):
+    """What ``run_world`` keeps of each blind search: its replicate, its ending, and a counter saying ``searches``."""
+
+    def counter(search: ModelSearch):
+        return SimpleNamespace(
+            spent=lambda replicate, *, seam_failed: replace(
+                search, replicate=replicate, seam_failed=seam_failed
+            )
+        )
+
+    return [(search.replicate, search.seam_failed, counter(search)) for search in searches]
+
+
+def test_counts_that_make_no_record_leave_none_and_the_operator_is_told(blind_searched, caplog):
+    # Whichever way they fail to be one. No trace is left to look into, as
+    # a tool arm leaves one, so a run is not stopped over a floor.
+    run, verdicts, _lines = blind_searched
+    manifest = read_manifest(run)
+    said: list[str] = []
+    made = bench._model_use(manifest, verdicts, _counters(*_BLIND_SPENT), said.append)
+    assert made == _blind_use(verdicts)
+    assert said == [] and caplog.text == ""
+    # More calls than the search's answers.
+    wrong = _counters(replace(_BLIND_SPENT[0], model_calls=3), _BLIND_SPENT[1])
+    with caplog.at_level("WARNING", logger=bench.logger.name):
+        assert bench._model_use(manifest, verdicts, wrong, said.append) is None
+    assert said[-1].startswith("model use: not recorded")
+    assert "3 model call(s) come back" in said[-1]
+    assert "what arms.llm spent is not recorded" in caplog.text
+    # A counter that counted nothing on a search that answered: it cannot
+    # even say a search's line, and that is refused in the same place.
+    empty = [(0, False, MeteredModel(None)), (1, True, MeteredModel(None))]
+    assert bench._model_use(manifest, verdicts, empty, said.append) is None
+    assert "ended on a failed seam, and this one is said not to have" in said[-1]
+    # A replicate with no counter, and no counter at all.
+    assert bench._model_use(manifest, verdicts, _counters(_BLIND_SPENT[0]), said.append) is None
+    assert "holds the model arm's replicate(s) [0]" in said[-1]
+    assert bench._model_use(manifest, verdicts, [], said.append) is None
+    assert len(said) == 4
+    # And a manifest with no blind model arm asks for none, and says nothing.
+    none = bench._model_use(bench_manifest(), verdicts, _counters(*_BLIND_SPENT), said.append)
+    assert none is None and len(said) == 4
+
+
+def _without_created_at(document):
+    if isinstance(document, dict):
+        return {
+            key: _without_created_at(value)
+            for key, value in document.items()
+            if key != "created_at"
+        }
+    if isinstance(document, list):
+        return [_without_created_at(item) for item in document]
+    return document
+
+
+def test_a_counter_that_counts_nothing_costs_the_record_and_never_the_searches(
+    blind_searched, landed_world, tmp_path, monkeypatch
+):
+    # The same world searched again beside the first, through a counter
+    # that hands every reply on and counts none. Two things at once: the
+    # searches are what they are with a counter that counts (the counter
+    # changes no verdict), and counts that make no record end no run.
+    _first, verdicts, _lines = blind_searched
+    artifact, _landing = landed_world
+    manifest = bench_manifest()
+    manifest = replace(manifest, arms=replace(manifest.arms, llm=replace(LLM_ARM, replicates=2)))
+    run = land_run(tmp_path, artifact, manifest)
+    model = _ReportingModel([json.dumps(PLANTED), "not a rule"])
+    monkeypatch.setattr(
+        bench.ChatHypothesist,
+        "build",
+        lambda provider, name, base_url=None, **kwargs: bench.ChatHypothesist(
+            model=model, label=f"{provider}/{name}"
+        ),
+    )
+    monkeypatch.setattr(
+        bench.MeteredModel, "invoke", lambda self, messages: self._model.invoke(messages)
+    )
+    lines: list[str] = []
+    again, _oracle = run_world(run, on_line=lines.append)
+    assert _without_created_at(json.loads(again.dumps())) == _without_created_at(
+        json.loads(verdicts.dumps())
+    )
+    listing = _listing(run)
+    assert VERDICTS_FILENAME in listing and ORACLE_FILENAME in listing
+    assert MODEL_USE_FILENAME not in listing
+    # Said last, where an operator reading the end of a run sees it.
+    assert lines[-1].startswith("model use: not recorded")
+    assert "ended on a failed seam, and this one is said not to have" in lines[-1]
+    assert bench.read_searched(run).model_use is None
+
+
+def test_a_report_row_holds_its_model_use_to_its_searches(blind_searched):
+    run, _verdicts, _lines = blind_searched
+    rows = {row.arm: row for row in report_table([run])}
+    blind, grid = rows[Arm.LLM], rows[Arm.GRID]
+    # Every search of the blind arm's row has a record or is counted as
+    # having none: two searches here, one finished and one failed seam.
+    assert replace(blind, model_uses=(), model=None, unrecorded=2).unrecorded == 2
+    with pytest.raises(
+        ScoreError, match=r"row.model_uses: 1 search\(es\)' model use and 0 with none, on a llm row"
+    ):
+        replace(blind, model_uses=blind.model_uses[:1])
+    with pytest.raises(ScoreError, match=r"2 search\(es\)' model use and 1 with none"):
+        replace(blind, unrecorded=1)
+    with pytest.raises(ScoreError, match="row.unrecorded"):
+        replace(blind, model_uses=(), model=None, unrecorded=-2)
+    with pytest.raises(ScoreError, match="row.model_uses: expected ModelSearches"):
+        replace(blind, model_uses=("a", "b"))
+    # The model they asked goes with them, and is a name.
+    with pytest.raises(ScoreError, match="row.model: the model the searches asked goes with"):
+        replace(blind, model=None)
+    with pytest.raises(ScoreError, match="row.model: the model the searches asked goes with"):
+        replace(blind, model_uses=(), unrecorded=2)
+    with pytest.raises(ScoreError, match="row.model"):
+        replace(blind, model=7)
+    # No other arm's row holds either.
+    with pytest.raises(ScoreError, match="with none, on a grid row"):
+        replace(grid, model_uses=blind.model_uses[:1], model=_BLIND_LABEL)
+    with pytest.raises(ScoreError, match="and 1 with none, on a grid row"):
+        replace(grid, unrecorded=1)
+
+
+def test_the_report_command_prices_a_blind_model_arm_s_row(blind_searched, capsys):
+    run, _verdicts, _lines = blind_searched
+    root = str(run.parent)
+    assert cli_main(["report", "--root", root, "--price-in", "3", "--price-out", "15"]) == 0
+    captured = capsys.readouterr()
+    assert _BLIND_TOKENS + "; estimated cost US$0.01 on those counts" in captured.out
+    # Prices that priced a row are not said to have priced nothing.
+    assert "priced nothing" not in captured.err
 
 
 @pytest.mark.parametrize(

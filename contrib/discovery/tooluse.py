@@ -51,7 +51,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from statistics import median
-from typing import Any, Final, TypeVar
+from typing import Any, Final, Protocol, TypeVar
 
 from .records import Reader, RecordError, dumps
 from .toolarm import (
@@ -71,10 +71,13 @@ __all__ = [
     "Prices",
     "RoundUse",
     "SearchUse",
+    "Spent",
     "ToolUse",
     "ToolUseError",
     "TracePack",
     "read_trace",
+    "reported_count",
+    "tokens_line",
     "trace_use",
     "usage_lines",
 ]
@@ -86,6 +89,12 @@ TOOL_USE_VERSION: Final = 1
 
 _PACK_DIGEST: Final = re.compile(r"[0-9a-f]{64}")
 _TOKENS_PER_PRICE: Final = 1_000_000
+
+# No call of a search spent more tokens than this, by orders of magnitude:
+# a figure past it is a provider's mistake and is read as no count. A
+# figure large enough would otherwise stop a table (a cost is a float) or a
+# record (an integer of thousands of digits is not written as JSON).
+_MAX_COUNT: Final = 10**12
 
 
 class ToolUseError(RecordError):
@@ -405,14 +414,16 @@ def read_trace(path: Path) -> list[dict[str, Any]]:
     return lines
 
 
-def _counted(value: object) -> int | None:
+def reported_count(value: object) -> int | None:
     """A token count as a provider reported one, or ``None``: no count, or nothing that is one.
 
-    A negative number is no count either. A provider that sent one would
-    otherwise have a finished search refused over a figure that is a floor
-    at best.
+    A negative number is no count either, nor is one past ``_MAX_COUNT``.
+    A provider that sent either would otherwise have a finished search
+    refused, or a table stopped, over a figure that is a floor at best. One
+    reader for both model arms — the blind arm's counter (:mod:`.modeluse`)
+    reads a reply's counts by it too — so the two sums are read by one rule.
     """
-    return value if type(value) is int and value >= 0 else None
+    return value if type(value) is int and 0 <= value <= _MAX_COUNT else None
 
 
 @dataclass
@@ -491,8 +502,8 @@ def trace_use(lines: Sequence[Mapping[str, Any]], replicate: int) -> tuple[Trace
         within.read(kind, line)
         if kind is TraceKind.MODEL:
             model_calls += 1
-            reported_in = _counted(line["input_tokens"])
-            reported_out = _counted(line["output_tokens"])
+            reported_in = reported_count(line["input_tokens"])
+            reported_out = reported_count(line["output_tokens"])
             # A call short of either count is unmetered; what it did
             # report is kept, the sums being a floor either way.
             unmetered += reported_in is None or reported_out is None
@@ -546,6 +557,22 @@ def trace_use(lines: Sequence[Mapping[str, Any]], replicate: int) -> tuple[Trace
 # -- what a table says of it ----------------------------------------------------------------------
 
 
+class Spent(Protocol):
+    """What one search's model calls cost, whichever model arm's: the figures a tokens line is made of."""
+
+    @property
+    def model_calls(self) -> int: ...
+
+    @property
+    def unmetered_calls(self) -> int: ...
+
+    @property
+    def input_tokens(self) -> int: ...
+
+    @property
+    def output_tokens(self) -> int: ...
+
+
 @dataclass(frozen=True)
 class Prices:
     """What a model's tokens cost, in US dollars per million: the operator's figures (the module docstring)."""
@@ -557,7 +584,7 @@ class Prices:
         object.__setattr__(self, "input", _read.amount(self.input, "prices.input"))
         object.__setattr__(self, "output", _read.amount(self.output, "prices.output"))
 
-    def cost(self, search: SearchUse) -> float:
+    def cost(self, search: Spent) -> float:
         return (
             search.input_tokens * self.input + search.output_tokens * self.output
         ) / _TOKENS_PER_PRICE
@@ -575,11 +602,8 @@ def usage_lines(
     without tools — kept in the row's result
     and printed beside it (decided 2026-11-19). A round answered without
     tools asked for one, so it is not among those that asked for none,
-    whatever it had counted by then. The second line is over every search,
-    failed seams included, because those were paid for too, and names the
-    ``model`` whose tokens they are when it is given; the cost is there
-    when ``prices`` are and some call reported both its counts — one pair
-    of prices is one model's, and a root may hold rows of several.
+    whatever it had counted by then. The second line is the tokens
+    (:func:`tokens_line`).
     """
     if not searches:
         return []
@@ -598,6 +622,24 @@ def usage_lines(
         )
     else:
         use = "  tool use: no finished search answered a round"
+    return [use, tokens_line(searches, prices, model=model)]
+
+
+def tokens_line(
+    searches: Sequence[Spent], prices: Prices | None = None, *, model: str | None = None
+) -> str:
+    """The tokens a row's model calls reported, as the one line a table prints for them.
+
+    One sentence for both model arms — the tool arm's searches
+    (:func:`usage_lines`) and the blind arm's (:mod:`.modeluse`) — because
+    they are counted by one rule and are there to be set side by side. It
+    is over every search given, failed seams included, because those were
+    paid for too, and names the ``model`` whose tokens they are when it is
+    given; the cost is there when ``prices`` are and some call reported
+    both its counts. One pair of prices is one model's, and a root may hold
+    rows of several: the pair is put to every row, and each line names its
+    model so that a figure priced at another model's rate can be told.
+    """
     model_calls = sum(search.model_calls for search in searches)
     unmetered = sum(search.unmetered_calls for search in searches)
     spent = (
@@ -610,7 +652,8 @@ def usage_lines(
     if unmetered:
         spent += f", {unmetered} of them short of a count"
     # Said on every row: what a retry cost, and a reply that could not be
-    # read, are in no line of a trace.
+    # read, are in no count — a trace has no model line for them, and the
+    # blind arm's counter does not see the one or count the other.
     spent += " (a floor: a retried call counts once, a reply that was not read not at all)"
     if prices is not None and unmetered < model_calls:
         spent += (
@@ -624,4 +667,4 @@ def usage_lines(
         spent += "; no cost is estimated: " + (
             "no call reported both its counts" if model_calls else "no call came back"
         )
-    return [use, spent]
+    return spent

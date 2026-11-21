@@ -46,8 +46,9 @@ Six in the order a world goes through them (plan §3):
   A model arm's rows also say what its searches spent; ``--price-in`` and
   ``--price-out`` (US dollars a million tokens, given together) add an
   estimated cost. One pair of prices is one model's and is put to every
-  such row, each of which names its model: a root holding rows of two
-  models is reported once for each, with that model's prices.
+  such row, each of which names its model: for a root holding rows of two
+  models, run ``report`` once with each model's prices and read that
+  model's rows.
 
 And one beside that order, for a person (tools plan §3.3):
 

@@ -275,7 +275,7 @@ manifest 的 `arms.llm` 有填時，`search` 在 Random／Grid 之後多跑模�
 API key 由 provider 從環境變數讀），用同一個 `search()`、同一份 split／成本／penalty／預算。
 
 模型看得到 prompt 與失敗回饋，可以提池外的門檻與結構（計畫 §4.3），所以「trial 都在池裡」「答案數不超過池大小」只對 Random／Grid 成立；預算照樣是
-`max_trials`，被拒絕的答案也扣預算；`calibrate`／`report` 每列印答案數與不同規則數的中位數和最小值，一條規則都沒 file 的搜尋看得出來，不會被讀成乾淨的「零誤判」。模型臂沒有池可走完，`exhausted` 對它不成立。模型呼叫失敗會重試 6 次（429 與 5xx），seam 失敗記 `seam_failed`，照 calibrate 的規則不進分母、另計。**作業規則：讀表之前，把所有 seam 失敗的世界全部重跑**（手動移除 `arms/`、`verdicts.json`、`oracle.json`、`scores.json`），不看結果一律重跑，三臂比的世界才對得齊、也不會挑結果；
+`max_trials`，被拒絕的答案也扣預算；`calibrate`／`report` 每列印答案數與不同規則數的中位數和最小值，一條規則都沒 file 的搜尋看得出來，不會被讀成乾淨的「零誤判」。模型臂沒有池可走完，`exhausted` 對它不成立。模型呼叫失敗會重試 6 次（429 與 5xx），seam 失敗記 `seam_failed`，照 calibrate 的規則不進分母、另計。**作業規則：讀表之前，把所有 seam 失敗的世界全部重跑**（手動移除 `arms/`、`verdicts.json`、`oracle.json`、`scores.json`；盲猜組的世界還有 `model_use.json`），不看結果一律重跑，三臂比的世界才對得齊、也不會挑結果；
 中斷或收尾前的任何失敗，整個 run 丟掉、已花的費用也白費（replicate 不 resume，計畫 §9 (14)）。provider 打錯，以及 OpenRouter 等 OpenAI 相容 provider 的 API key 沒設，在 `generate` 與 `search` 開始時就具名拒絕；Anthropic 直連與 Bedrock 要到第一次呼叫才發現，那次搜尋會以 seam 失敗收場。客戶端若丟掉 temperature 也拒絕，否則紀錄描述的是沒有發生的條件。
 
 **一個世界兩個目錄**（計畫 §8 #5）：Random／Grid 全量用 `arms.llm: null` 的 manifest；要三臂並欄的子集用另一份帶 `arms.llm` 的 manifest，**同 seed 重新落地**。
@@ -636,7 +636,7 @@ store 旁邊多兩個檔：`replicate-<k>.trace.jsonl`（trace，格式見上一
 的答案數、「以 seam 失敗結束」跟 `verdicts.json` 說的不一致。`report` 另外核對同一列的每個世界讀到的是同一包文字（`pack_digest` 相同）；
 同一個 `pack_version` 底下 digest 不同，代表是不同版本的程式跑的；這時 `report` 會具名拒絕、整張表不印，不會把兩者算進同一個比例。
 
-**`report` 在工具組那一列多印兩行**（其他臂的列不變）：
+**`report` 在工具組那一列多印兩行**（Random／Grid 的列不變；盲猜組的列見下面「盲猜組花了什麼」）：
 
 ```
   tool use over 2 round(s) of 1 finished search(es): calls a round median 1.5 (max 2), 0 round(s) asked for no tool; backtests 1; the model's mistakes 1 of 3 call(s); answered without tools 0/2 = 0.0%
@@ -698,15 +698,20 @@ replicate 開始時，把那個模型 client 外面包一層計數器（[`modelu
 
 - **算法跟工具組是同一條規則**，所以兩邊的數字是同一種下限、可以並排：只算「有回來、而且是文字」的回覆（文字才會被當成一次回答）；client 自己重試掉的
   只算一次；不是文字的回覆完全不算；沒回報完整用量的呼叫另外標出個數、有回報的那一半照樣加進總數；模型中途不回應而結束的 replicate 也記（錢已經花了）。
+  讀用量這一步本身出錯（回覆的用量欄位讀不出來）不會讓那次回答失敗，只是記成沒量到。大於 10^12 的數字不當成用量（工具組同一條）：
+  那是供應商的錯，數字夠大會讓 `report` 算花費時當掉或讓紀錄寫不出來。
 - **`report`** 在盲猜組那一列印跟工具組第二行同一句 token 行（同一段程式），`--price-in`／`--price-out` 一樣適用。它沒有第一行（沒有工具可查）。
 - **讀回來時會對照 `verdicts.json`**：世界與 manifest 的 digest、模型名稱（`provider/model`）、replicate 一個不多一個不少、每個 replicate 計到的呼叫次數
   等於它的 answers 數、是否以 seam 失敗結束兩邊一致。對不上就拒絕並指名哪一項。manifest 沒有盲猜組卻有這個檔，也拒絕。
 - **舊目錄照樣讀得進來**（2026-11-22 拍板：manifest 不升版）：在有這份紀錄之前搜的世界（2026-11-10 那批）沒有這個檔，讀取時當成「沒有紀錄」。
-  `report` 會在那一列寫出有幾個 search 沒有紀錄（`tokens not recorded for N search(es) of this row`），不會留白讓人以為沒花錢；同一列裡有的世界有紀錄、
-  有的沒有時，token 只加總有紀錄的，並另外寫出沒有紀錄的個數。
-- **search 當下如果計數對不上 `verdicts.json`**（理論上不會發生，發生就是這一側的 bug）：不停下 run、不丟掉已經付錢的搜尋——只是不寫這個檔，
-  console 印一行 `model use: not recorded`、log 留一筆 WARNING，之後那個世界讀起來就是「沒有紀錄」。工具組遇到同類問題會停下並保留 trace，
-  是因為 trace 是可以查的證據；盲猜組只有計數器，沒有東西可留。
+  `report` 會在那一列寫出有幾個 search 沒有紀錄（`tokens not recorded for N search(es) of this row: no model_use.json beside their verdicts (…)`），
+  不會留白讓人以為沒花錢；同一列裡有的世界有紀錄、有的沒有時，token 只加總有紀錄的，並另外寫出沒有紀錄的個數。那一行不說原因：
+  沒有檔可能是舊目錄、可能是下一條講的情況、也可能是被手動刪掉，光看目錄分不出來。
+- **search 當下如果計數湊不成紀錄**（計數器什麼都沒算到、次數跟 `verdicts.json` 的 answers 對不上、少了某個 replicate；照程式的走法不會發生，
+  發生就是這一側的 bug）：不停下 run、不丟掉已經付錢的搜尋——只是不寫這個檔，`search` 的最後一行（各臂與 oracle 都印完之後）印
+  `model use: not recorded — <原因>`、log 留一筆 WARNING，之後那個世界讀起來跟舊目錄一樣是「沒有紀錄」，目錄本身看不出差別。
+  工具組遇到同類問題會停下並保留 trace，是因為 trace 是可以查的證據；盲猜組只有計數器，沒有東西可留。
+  紀錄已經湊成、但搬進目錄那一步失敗（磁碟滿、檔案被鎖）則跟其他紀錄一樣，run 會停下。
 
 **還沒做的。** T5（不用 LLM 的對照組）。送不出去的呼叫在 trace 裡仍然分不出是哪一種原因（T3 留下的，試跑需要時再加欄位）。
 

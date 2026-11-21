@@ -27,13 +27,23 @@ Breaking changes within the 0.x line are called out explicitly.
   no blind model arm writes no such file, and the manifest's version is
   not raised: a directory searched before this record existed is read as
   it was, and its row says how many searches have no record (`tokens not
-  recorded for N search(es) of this row`) instead of printing nothing. A
+  recorded for N search(es) of this row: no model_use.json beside their
+  verdicts`) instead of printing nothing. A
   record that is not the verdicts' — another world, manifest or model, a
   replicate missing, a count of calls that is not the search's answers, a
-  failed seam on one side only — is refused by name. One pair of prices
-  is still one model's and is put to every row that has counts; each row
-  names its model. The note printed when prices priced nothing now reads
-  "no row … holds a model arm's token counts".
+  failed seam on one side only — is refused by name, and so is one found
+  where the manifest names no blind model arm. `search` prints the
+  record's path with the others, and searching such a world again needs
+  `model_use.json` removed with them. If the counts of a search do not
+  make a record — a defect on this side — the run is not stopped and no
+  paid search is thrown away: the record is left unwritten, the last line
+  `search` prints is `model use: not recorded` with the reason, and the
+  world then reads as one with no record. A token count above 10^12 is
+  read as no count, for both model arms: one large enough stopped `report`
+  on the cost. One pair of prices is still one model's and is put to
+  every row that has counts; each row names its model. The note printed
+  when prices priced nothing now reads "no row … holds a model arm's
+  token counts".
 - **Discovery Lab: the tool-using model arm runs in the benchmark (tools
   plan T4).** A manifest may now name `arms.llm_tools` — the model arm's
   five fields plus `lookups`, `backtests` (the two per-round limits) and

@@ -19,9 +19,11 @@ every arm, and what it SPENT is read here. A run with no blind model arm
 writes no such file. Neither did a search made before this record existed,
 and a directory of one is read as it always was: the record is taken where
 it is, and its absence means "not recorded" (decided 2026-11-22: the
-manifest's version is not raised for it). A table says how many of a row's
-searches that is (:func:`model_use_lines`), so a missing record is not a
-blank that reads as nothing spent.
+manifest's version is not raised for it). A search whose counts did not
+make a record leaves none either (``bench._model_use``). A table says how
+many of a row's searches have none (:func:`model_use_lines`), so a missing
+record is not a blank that reads as nothing spent — and it does not say
+why, which the absence of a file cannot tell it.
 
 **What is counted** is the tool arm's rule, so that the two arms' sums are
 floors of the same kind and one sentence says both
@@ -201,10 +203,16 @@ class MeteredModel:
     """A chat client's ``invoke``, with what its replies reported added up as they come back.
 
     Put around the client a ``ChatHypothesist`` holds for one search. The
-    reply is handed on as it came — the same object, nothing read out of it
-    but its counts — and a call that raises is let through untouched, so
-    the adapter sees what it would have seen. ``invoke`` is all the adapter
-    asks of a client, and all this passes on.
+    reply is handed on as it came — the same object; nothing is read out of
+    it but whether its content is text, and its counts — and a call that
+    raises is let through untouched. Reading the counts cannot fail the
+    call either: raised from here, a failure would reach the adapter as the
+    provider not answering, and an answer that was paid for would be lost.
+    So a reply whose counts cannot be read is counted as unmetered.
+
+    ``invoke`` is all the adapter asks of a client, and all this passes on.
+    A caller that needs anything else of the client asks the client itself,
+    before it is wrapped (the bench checks its temperature there).
     """
 
     def __init__(self, model: Any) -> None:
@@ -216,15 +224,23 @@ class MeteredModel:
 
     def invoke(self, messages: Any) -> Any:
         reply = self._model.invoke(messages)
-        if isinstance(getattr(reply, "content", None), str):
+        try:
+            text = isinstance(getattr(reply, "content", None), str)
+        except Exception:  # noqa: BLE001 - whatever reading it raises, the adapter meets next
+            text = False
+        if text:
             # A reply the adapter will take for an answer. One that is not
             # text it refuses as the seam's failure, and the tool arm's
-            # trace has no line for such a reply either: counted in neither.
-            usage = getattr(reply, "usage_metadata", None)
-            reported = usage if isinstance(usage, Mapping) else {}
-            tokens_in = reported_count(reported.get("input_tokens"))
-            tokens_out = reported_count(reported.get("output_tokens"))
+            # trace has no model line for such a reply either: counted in
+            # neither.
             self._calls += 1
+            try:
+                usage = getattr(reply, "usage_metadata", None)
+                reported = usage if isinstance(usage, Mapping) else {}
+                tokens_in = reported_count(reported.get("input_tokens"))
+                tokens_out = reported_count(reported.get("output_tokens"))
+            except Exception:  # noqa: BLE001 - the counts are a floor, and the call came back
+                tokens_in = tokens_out = None
             # Short of either count is unmetered; what it did report is
             # kept, the sums being a floor either way.
             self._unmetered += tokens_in is None or tokens_out is None
@@ -259,15 +275,18 @@ def model_use_lines(
     The tokens line is the tool arm's own sentence
     (:func:`~.tooluse.tokens_line`), over every search that has a record,
     failed seams included. ``unrecorded`` is how many searches of the row
-    have none — they were made before this record existed — and is said,
-    so the sums are not read as the whole row's when they are not, and a
-    row with no record at all is not read as one that spent nothing.
+    have none beside their verdicts — they were made before this record
+    existed, or by a search whose counts did not make one; the line names
+    both, since a missing file does not say which — and is said, so the
+    sums are not read as the whole row's when they are not, and a row with
+    no record at all is not read as one that spent nothing.
     """
     lines = [tokens_line(searches, prices, model=model)] if searches else []
     if unrecorded:
         lines.append(
             f"  tokens not recorded for {unrecorded} "
             + ("more " if searches else "")
-            + f"search(es) of this row: searched before {MODEL_USE_FILENAME} was written"
+            + f"search(es) of this row: no {MODEL_USE_FILENAME} beside their verdicts "
+            "(searched before that record existed, or their search did not record its counts)"
         )
     return lines

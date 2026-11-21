@@ -908,7 +908,8 @@ class ReportRow:
     ``model_uses`` is the same for the blind model arm's row
     (:mod:`.modeluse`): what each of its searches that has a record spent,
     under the ``model`` they asked; and ``unrecorded`` is how many of its
-    searches have no record, having been made before there was one.
+    searches have no record beside their verdicts. Every search of that
+    row is one or the other, and no other arm's row holds either.
     """
 
     kind: WorldKind
@@ -944,15 +945,12 @@ class ReportRow:
             raise ScoreError("row.model_uses: expected ModelSearches")
         object.__setattr__(self, "model_uses", model_uses)
         _read.whole(self.unrecorded, "row.unrecorded", minimum=0)
+        if self.model is not None:
+            _read.text(self.model, "row.model")
         if (self.model is None) != (not model_uses):
             raise ScoreError(
                 "row.model: the model the searches asked goes with the searches' model use, and "
                 "with nothing else"
-            )
-        if uses and (model_uses or self.unrecorded):
-            raise ScoreError(
-                "row: a row is one arm's, and holds the tool arm's use or the blind model "
-                "arm's, not both"
             )
         object.__setattr__(self, "kind", _read.enum(WorldKind, self.kind, "row.kind"))
         _read.text(self.null_definition_version, "row.null_definition_version")
@@ -986,6 +984,16 @@ class ReportRow:
                 f"row.uses: {len(uses)} search(es)' tool use, {finished} of them finished, on a "
                 f"{self.arm.value} row of {len(entries)} finished search(es) and {self.failed} "
                 f"failed seam(s)"
+            )
+        # The blind model arm's the same way: every search of its row has a
+        # record or is counted as having none, and no other arm's row holds
+        # either.
+        due = len(entries) + self.failed if self.arm is Arm.LLM else 0
+        if len(model_uses) + self.unrecorded != due:
+            raise ScoreError(
+                f"row.model_uses: {len(model_uses)} search(es)' model use and {self.unrecorded} "
+                f"with none, on a {self.arm.value} row of {len(entries)} finished search(es) and "
+                f"{self.failed} failed seam(s)"
             )
 
     @property
@@ -1154,8 +1162,10 @@ def report_table(run_dirs: Iterable[Path]) -> list[ReportRow]:
         if llm is not None:
             llm_key = row_key(searched.manifest, Arm.LLM)
             if searched.model_use is None:
-                # Searched before the record existed: said on the row, and
-                # not left as a blank that reads as nothing spent.
+                # No record beside the verdicts — searched before it
+                # existed, or by a search that could not make one: said on
+                # the row, and not left as a blank that reads as nothing
+                # spent.
                 unrecorded[llm_key] += llm.replicates
             else:
                 # A row's conditions name the arm's model, and the record

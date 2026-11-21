@@ -99,8 +99,20 @@ def test_a_reply_that_is_text_is_counted_with_what_it_reported_and_handed_on_as_
         ({"input_tokens": True, "output_tokens": 80}, (0, 80)),
         ({"input_tokens": -5, "output_tokens": 80}, (0, 80)),
         ({"input_tokens": 12.0, "output_tokens": 80}, (0, 80)),
+        ({"input_tokens": 10**13, "output_tokens": 80}, (0, 80)),
     ],
-    ids=["none", "not-a-mapping", "empty", "in-only", "out-only", "null", "bool", "negative", "float"],
+    ids=[
+        "none",
+        "not-a-mapping",
+        "empty",
+        "in-only",
+        "out-only",
+        "null",
+        "bool",
+        "negative",
+        "float",
+        "absurd",
+    ],
 )
 def test_a_call_short_of_a_count_is_unmetered_and_what_it_did_report_is_kept(usage, kept):
     meter = MeteredModel(_Client([SimpleNamespace(content="{}", usage_metadata=usage)]))
@@ -137,6 +149,68 @@ def test_a_call_that_raises_is_let_through_and_counted_nowhere():
         meter.invoke([])
     meter.invoke([])
     assert meter.spent(0, seam_failed=False).model_calls == 1
+
+
+def test_a_call_the_client_retried_is_counted_once():
+    class _Retrying(_Client):
+        """A client that, as the real ones do, retries inside one ``invoke``."""
+
+        def invoke(self, messages):
+            while True:
+                try:
+                    return super().invoke(messages)
+                except TimeoutError:
+                    continue
+
+    client = _Retrying(
+        [TimeoutError(), TimeoutError(), _reply(input_tokens=1200, output_tokens=80)]
+    )
+    meter = MeteredModel(client)
+    meter.invoke([])
+    assert len(client.asked) == 3  # the provider was asked three times, and paid for some of it
+    spent = meter.spent(0, seam_failed=False)
+    assert (spent.model_calls, spent.input_tokens, spent.output_tokens) == (1, 1200, 80)
+
+
+def test_counts_that_cannot_be_read_leave_the_call_unmetered_and_never_fail_it():
+    class _Usage(dict):
+        def get(self, key, default=None):
+            raise RuntimeError("usage is parsed lazily, and broke")
+
+    class _Lazy:
+        content = "{}"
+
+        @property
+        def usage_metadata(self):
+            raise RuntimeError("usage is parsed lazily, and broke")
+
+    for make in (lambda: SimpleNamespace(content="{}", usage_metadata=_Usage()), _Lazy):
+        reply = make()
+        meter = MeteredModel(_Client([reply]))
+        assert meter.invoke([]) is reply
+        spent = meter.spent(0, seam_failed=False)
+        assert (spent.model_calls, spent.unmetered_calls) == (1, 1)
+        assert (spent.input_tokens, spent.output_tokens) == (0, 0)
+        # Raised from the counter it would have reached the adapter as the
+        # provider not answering; the adapter has its answer.
+        chat = ChatHypothesist(model=MeteredModel(_Client([make()])), label=MODEL)
+        assert chat.propose("s", "u") == "{}"
+
+
+def test_a_reply_whose_content_cannot_be_read_is_counted_nowhere_and_fails_as_it_did():
+    class _Broken:
+        @property
+        def content(self):
+            raise RuntimeError("content broke")
+
+    reply = _Broken()
+    meter = MeteredModel(_Client([reply]))
+    assert meter.invoke([]) is reply
+    assert meter.spent(0, seam_failed=True).model_calls == 0
+    # With a counter and without one, the adapter meets the same error.
+    for model in (_Client([_Broken()]), MeteredModel(_Client([_Broken()]))):
+        with pytest.raises(RuntimeError, match="content broke"):
+            ChatHypothesist(model=model, label=MODEL).propose("s", "u")
 
 
 def test_the_adapter_answers_through_a_counter_as_it_does_without_one():
@@ -278,8 +352,9 @@ def test_the_row_s_tokens_are_said_in_the_tool_arm_s_own_sentence():
 
 def test_searches_with_no_record_are_said_and_a_row_with_nothing_to_say_says_nothing():
     unrecorded = (
-        "  tokens not recorded for 2 search(es) of this row: searched before model_use.json "
-        "was written"
+        "  tokens not recorded for 2 search(es) of this row: no model_use.json beside their "
+        "verdicts (searched before that record existed, or their search did not record its "
+        "counts)"
     )
     assert model_use_lines([], 2) == [unrecorded]
     # Prices do not conjure a cost for searches that left no counts.

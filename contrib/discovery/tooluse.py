@@ -90,6 +90,12 @@ TOOL_USE_VERSION: Final = 1
 _PACK_DIGEST: Final = re.compile(r"[0-9a-f]{64}")
 _TOKENS_PER_PRICE: Final = 1_000_000
 
+# No call of a search spent more tokens than this, by orders of magnitude:
+# a figure past it is a provider's mistake and is read as no count. A
+# figure large enough would otherwise stop a table (a cost is a float) or a
+# record (an integer of thousands of digits is not written as JSON).
+_MAX_COUNT: Final = 10**12
+
 
 class ToolUseError(RecordError):
     """A trace or a tool-use record cannot be read or built, and the sentence says why."""
@@ -411,13 +417,13 @@ def read_trace(path: Path) -> list[dict[str, Any]]:
 def reported_count(value: object) -> int | None:
     """A token count as a provider reported one, or ``None``: no count, or nothing that is one.
 
-    A negative number is no count either. A provider that sent one would
-    otherwise have a finished search refused over a figure that is a floor
-    at best. One reader for both model arms — the blind arm's counter
-    (:mod:`.modeluse`) reads a reply's counts by it too — so the two sums
-    cannot come to mean different things.
+    A negative number is no count either, nor is one past ``_MAX_COUNT``.
+    A provider that sent either would otherwise have a finished search
+    refused, or a table stopped, over a figure that is a floor at best. One
+    reader for both model arms — the blind arm's counter (:mod:`.modeluse`)
+    reads a reply's counts by it too — so the two sums are read by one rule.
     """
-    return value if type(value) is int and value >= 0 else None
+    return value if type(value) is int and 0 <= value <= _MAX_COUNT else None
 
 
 @dataclass
@@ -646,7 +652,8 @@ def tokens_line(
     if unmetered:
         spent += f", {unmetered} of them short of a count"
     # Said on every row: what a retry cost, and a reply that could not be
-    # read, are in no line of a trace.
+    # read, are in no count — a trace has no model line for them, and the
+    # blind arm's counter does not see the one or count the other.
     spent += " (a floor: a retried call counts once, a reply that was not read not at all)"
     if prices is not None and unmetered < model_calls:
         spent += (

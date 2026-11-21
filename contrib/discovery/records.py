@@ -2,11 +2,12 @@
 
 The manifest (:mod:`.manifest`), the verdict snapshot (:mod:`.verdict`),
 ``verdicts.json`` (:mod:`.bench`), ``oracle.json`` (:mod:`.oracle`),
-``scores.json`` (:mod:`.scoring`) and a tool arm's ``tool_use.json``
-(:mod:`.tooluse`) are frozen values written as JSON and read back EXACTLY — every key present
+``scores.json`` (:mod:`.scoring`), a tool arm's ``tool_use.json``
+(:mod:`.tooluse`) and a blind model arm's ``model_use.json``
+(:mod:`.modeluse`) are frozen values written as JSON and read back EXACTLY — every key present
 and no other, every value checked, a refusal naming the path inside the
 document. The research package's own records read theirs the same way,
-each with a private copy of these helpers; this package has six records,
+each with a private copy of these helpers; this package has seven records,
 so the helpers live here once, and each record module instantiates a
 :class:`Reader` with its own error class — every record's error but the
 manifest's sharing :class:`RecordError`.

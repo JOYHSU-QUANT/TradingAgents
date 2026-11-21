@@ -26,6 +26,7 @@ from contrib.discovery.tooluse import (
     ToolUseError,
     TracePack,
     read_trace,
+    reported_count,
     trace_use,
     usage_lines,
 )
@@ -277,6 +278,16 @@ def test_lines_that_are_no_trace_are_refused_by_name_and_not_by_an_index():
         TracePack.from_document({"model": MODEL})
     with pytest.raises(ToolUseError, match="pack: no model, pack_version, pack_digest, limits"):
         TracePack.from_document({})
+
+
+def test_a_count_no_search_could_have_spent_is_no_count():
+    # A figure past a million million tokens is a provider's mistake, and one
+    # large enough stops a table (a cost is a float) or a record (JSON does
+    # not write an integer of thousands of digits).
+    assert reported_count(10**12) == 10**12
+    assert reported_count(10**12 + 1) is None
+    assert reported_count(10**400) is None
+    assert reported_count(10**5000) is None
 
 
 def test_nothing_is_a_count_a_provider_may_report(tmp_path):

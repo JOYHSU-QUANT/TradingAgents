@@ -368,12 +368,17 @@ def test_the_report_command_prints_a_cost_when_it_is_given_both_prices(tooled, c
     assert main(["report", "--root", root, "--price-in", "0", "--price-out", "0"]) == 0
     assert "estimated cost US$0.00 on those counts, at US$0 in" in capsys.readouterr().out
     # Prices that priced nothing are said to have, beside the table and not in it.
-    plain_row = SimpleNamespace(uses=(), describe=lambda *, unseal, prices: ["a pool arm's row"])
+    plain_row = SimpleNamespace(
+        uses=(), model_uses=(), describe=lambda *, unseal, prices: ["a pool arm's row"]
+    )
     monkeypatch.setattr(cli, "report_table", lambda run_dirs: [plain_row])
     assert main(["report", "--root", root, "--price-in", "3", "--price-out", "15"]) == 0
     captured = capsys.readouterr()
     assert captured.out == "a pool arm's row\n"
-    assert "is a tool arm's, so --price-in and --price-out priced nothing" in captured.err
+    assert (
+        "holds a model arm's token counts, so --price-in and --price-out priced nothing"
+        in captured.err
+    )
 
 
 def test_the_search_command_names_the_tool_use_record_where_there_is_one(

@@ -45,6 +45,8 @@ JSON 層。定義見「訓練區間查詢（工具組 T1）」一節。
 都在這裡。定義見「會用工具的提問器（工具組 T3）」一節。
 **工具組 T4（接進 benchmark，已落地）**：manifest v4 的 `arms.llm_tools`、`search` 多跑會用工具的模型臂、`tool_use.json`（每輪查了幾次與 token 數）、
 `report` 多印查詢次數與估算花費。定義見「工具組接進 benchmark（工具組 T4）」一節。
+**盲猜組的用量（#433，已落地）**：`search` 跑 `arms.llm` 時把每個 replicate 的模型呼叫次數與 token 數記進 `model_use.json`，
+`report` 在那一列印跟工具組同一句 token 行。定義見同一節的「盲猜組花了什麼」。
 
 已經有的東西：
 
@@ -72,7 +74,9 @@ JSON 層。定義見「訓練區間查詢（工具組 T1）」一節。
   工具組的每個 replicate 在這裡各開一次提問器（`tool_arm()` 是開跑前的檢查），伺服器側失敗時停下整個 run。
 - [`tooluse.py`](./tooluse.py)：工具組的搜尋花了什麼。`read_trace`／`trace_use` 把一份 trace 讀回來整理成每輪的次數與 token 數，
   `ToolUse`＝`tool_use.json` 的紀錄，`usage_lines()`＝`report` 多印的那兩行，`Prices`＝估算花費用的單價。定義見「工具組接進 benchmark（工具組 T4）」一節。
-- [`records.py`](./records.py)：各份 JSON 紀錄（manifest、verdict 快照、`verdicts.json`、`oracle.json`、`scores.json`、`tool_use.json`）共用的嚴格讀取器
+- [`modeluse.py`](./modeluse.py)：盲猜組（`arms.llm`）的搜尋花了什麼。`MeteredModel`＝包在模型 client 外面的計數器（每個 replicate 一個），
+  `ModelUse`＝`model_use.json` 的紀錄，`model_use_lines()`＝`report` 在那一列多印的行。token 那一句與單價用的是 `tooluse.py` 的同一段程式。
+- [`records.py`](./records.py)：各份 JSON 紀錄（manifest、verdict 快照、`verdicts.json`、`oracle.json`、`scores.json`、`tool_use.json`、`model_use.json`）共用的嚴格讀取器
   （`Reader`，各模組帶自己的 error class；manifest 以外的紀錄錯誤共用 `RecordError` 基底、`Reader.version` 統一版本檢查，
   manifest 同時讀兩個版本所以用 `Reader.one_version_of`）；`from_dict` 管
   鍵集合與只有原始文件才能做的檢查（版本、寫出的 id／hash 對衍生值、parser），每個欄位自己的值一律在 `__post_init__`
@@ -204,7 +208,7 @@ parser 讀成 feature 名、regime 給數字會被 parser 拒絕，兩種都在�
    full-pool reference（整池 validation net sharpe、最佳者、過 `threshold(pool_size)` 的個數），不落 ledger。
 5. 全部先寫進 run 目錄下的 staging（`.search.partial-*`），最後先搬 `verdicts.json`／`oracle.json`，再把各臂 store 逐一搬進
    開頭就建好的 `arms/`（claim）；`manifest.json` 不動（`pool_size` 由 `generate` 回填）。紀錄搬好之前中途結束都把
-   staging 與 claim 移除，目錄回到落地狀態——只有兩個例外：停在搬檔之間會多留已經搬進去的紀錄（`verdicts.json`，工具組還有 `tool_use.json`；
+   staging 與 claim 移除，目錄回到落地狀態——只有兩個例外：停在搬檔之間會多留已經搬進去的紀錄（`verdicts.json`，模型臂還有 `tool_use.json` 或 `model_use.json`；
    `oracle.json` 一定最後搬），guard 與 calibrate 都會點名拒絕；工具組那一側停下時 staging 與 claim 刻意保留（見「工具組接進 benchmark（工具組 T4）」）；
    紀錄搬好之後搬 store 中途結束，**staging 保留**、不丟資料：搬檔失敗（例如 Windows 防毒鎖檔）時拒絕句子點名哪些臂已進
    `arms/`、其餘 store 在哪個 staging 路徑，手動搬完再刪 staging；剛好 Ctrl-C 時只印「interrupted」、staging 一樣保留。
@@ -647,16 +651,16 @@ store 旁邊多兩個檔：`replicate-<k>.trace.jsonl`（trace，格式見上一
   client 自己重試掉的呼叫只算到最後成功的那一次，讀不懂的回覆完全不在裡面（trace 沒有那一筆）；沒回報完整用量的呼叫另外標出個數。
 - 加 `--price-in <美元> --price-out <美元>`（每一百萬 token 的單價，兩個要一起給）就在第二行後面多印估算花費。
   單價不寫在 manifest、程式也不內建：它不是實驗條件，內建的表下次跑就過期了。估算用的就是上面那個下限，而且把每個輸入 token 都照原價算、
-  沒有扣 prompt caching 的折扣，所以兩個方向都可能偏，只能當量級看。一組單價是一個模型的；同一個 root 底下有兩個模型的工具組時，
-  兩列都會用這組單價算，要自己分開跑。沒有任何一次呼叫把輸入與輸出兩個數都回報時不印金額，改印「無法估算」（token 數照樣印有回報的那一半）。
-  單價不是 0 以上的有限數是用法錯誤（exit 2，訊息會指名是哪個旗標）；給了單價但表上沒有工具組的列，會在 stderr 說一句「沒有東西可以估」
+  沒有扣 prompt caching 的折扣，所以兩個方向都可能偏，只能當量級看。一組單價是一個模型的，而且會套用到每一個有 token 紀錄的列（工具組與盲猜組都是，
+  每一列的 token 行都寫出是哪個模型，2026-11-22 拍板維持這樣）；同一個 root 底下有兩個模型時，兩列都會用這組單價算，要自己分開跑。沒有任何一次呼叫把輸入與輸出兩個數都回報時不印金額，改印「無法估算」（token 數照樣印有回報的那一半）。
+  單價不是 0 以上的有限數是用法錯誤（exit 2，訊息會指名是哪個旗標）；給了單價但表上沒有任何一列有 token 紀錄，會在 stderr 說一句「沒有東西可以估」
   （root 底下一個搜過的世界都沒有時，只會印「no searched world」）。
 
 **兩種失敗分開處理**（2026-11-19 拍板）：
 
 | 哪一側 | 例子 | 怎麼算 |
 |---|---|---|
-| 模型 | 供應商斷線、重試 6 次仍失敗、回覆讀不懂 | 跟模型臂一樣：那個 replicate 記 `seam_failed`、不進分母，其他照跑。讀表前照舊把有 seam 失敗的世界整個重跑（除了模型臂那幾樣，還要移除 `tool_use.json`） |
+| 模型 | 供應商斷線、重試 6 次仍失敗、回覆讀不懂 | 跟模型臂一樣：那個 replicate 記 `seam_failed`、不進分母，其他照跑。讀表前照舊把有 seam 失敗的世界整個重跑（除了模型臂那幾樣，還要移除 `tool_use.json`；盲猜組的世界則是 `model_use.json`） |
 | 查詢伺服器 | 起不來、中途死掉、查詢逾時、某個查詢 store 答不出來 | **`search` 停下來**，**exit 3**，不寫任何紀錄 |
 
 **exit 3 是這種停法專用的**（2026-11-19 拍板）。其他具名拒絕（例如「這個世界搜過了」）是 exit 1。跑一批世界的腳本因此分得出來：
@@ -687,8 +691,24 @@ trace（伺服器起來、提問器也開成功之後才有）與伺服器的 lo
 沒裝 `discovery-tools` 選用安裝、模型建不起來或丟掉 temperature（同模型臂）、client 綁不上這一版的工具（這裡會真的綁一次，
 不連網；只看有沒有 `bind_tools` 這個方法不夠，langchain 的基底類別一定有，不支援時是呼叫了才丟錯）。
 
+**盲猜組花了什麼（#433）。** 盲猜組（`arms.llm`）沒有 trace：它經 autoresearch 的 `ChatHypothesist` 提問，那一層只回文字。所以 `search` 在每個
+replicate 開始時，把那個模型 client 外面包一層計數器（[`modeluse.py`](./modeluse.py) 的 `MeteredModel`；`ChatHypothesist` 本身不改、被問的內容也不變），
+整個世界搜完後把每個 replicate 的呼叫次數與 token 數寫進 `model_use.json`，放在 `verdicts.json` 旁邊。`verdicts.json` 的內容不因此改變；
+沒有盲猜組的世界不寫這個檔。
+
+- **算法跟工具組是同一條規則**，所以兩邊的數字是同一種下限、可以並排：只算「有回來、而且是文字」的回覆（文字才會被當成一次回答）；client 自己重試掉的
+  只算一次；不是文字的回覆完全不算；沒回報完整用量的呼叫另外標出個數、有回報的那一半照樣加進總數；模型中途不回應而結束的 replicate 也記（錢已經花了）。
+- **`report`** 在盲猜組那一列印跟工具組第二行同一句 token 行（同一段程式），`--price-in`／`--price-out` 一樣適用。它沒有第一行（沒有工具可查）。
+- **讀回來時會對照 `verdicts.json`**：世界與 manifest 的 digest、模型名稱（`provider/model`）、replicate 一個不多一個不少、每個 replicate 計到的呼叫次數
+  等於它的 answers 數、是否以 seam 失敗結束兩邊一致。對不上就拒絕並指名哪一項。manifest 沒有盲猜組卻有這個檔，也拒絕。
+- **舊目錄照樣讀得進來**（2026-11-22 拍板：manifest 不升版）：在有這份紀錄之前搜的世界（2026-11-10 那批）沒有這個檔，讀取時當成「沒有紀錄」。
+  `report` 會在那一列寫出有幾個 search 沒有紀錄（`tokens not recorded for N search(es) of this row`），不會留白讓人以為沒花錢；同一列裡有的世界有紀錄、
+  有的沒有時，token 只加總有紀錄的，並另外寫出沒有紀錄的個數。
+- **search 當下如果計數對不上 `verdicts.json`**（理論上不會發生，發生就是這一側的 bug）：不停下 run、不丟掉已經付錢的搜尋——只是不寫這個檔，
+  console 印一行 `model use: not recorded`、log 留一筆 WARNING，之後那個世界讀起來就是「沒有紀錄」。工具組遇到同類問題會停下並保留 trace，
+  是因為 trace 是可以查的證據；盲猜組只有計數器，沒有東西可留。
+
 **還沒做的。** T5（不用 LLM 的對照組）。送不出去的呼叫在 trace 裡仍然分不出是哪一種原因（T3 留下的，試跑需要時再加欄位）。
-盲猜組沒有 trace，所以它那一列不印 token 數。
 
 **已知的代價。** 每個 replicate 各啟動一次查詢伺服器，每次都要重新暖機（5000 根的世界約 12 秒），而各 replicate 讀到的訓練區間其實相同。
 這是照計畫「每組各建」做的，沒有改成一個世界共用一個伺服器；只多花時間，不多花 API 費用。
@@ -751,6 +771,8 @@ staging 開不起來時 claim 歸還；搬 store 失敗或中斷時保留 stagin
 | 會用工具的提問器：假模型查三次後回答，`propose()` 回那段文字、每個工具結果＝伺服器的回答＋剩餘額度、trace 筆數對得上；經真的 `search()` 兩輪照常寫 ledger；每輪從兩段 prompt 重新開始；第 6 次呼叫與第 3 次拿得到分數的試跑不執行、回固定句子（後者照算一次）；被解析器拒絕的試跑算一次呼叫、不算一次試跑；三個「不執行」的檢查有固定順序；一則訊息多個呼叫逐一計數、每個都有回覆；模型不停呼叫時改用不綁工具的模型、開新對話、只附伺服器回答過的查詢與模型寫的說明（去頭尾空白、最多 2000 字元），沒查到東西就不附；強制作答的回覆還帶工具呼叫＝接縫失敗、不交出空答案；模型的錯（指標打錯、工具不存在）回解析器原句並標成錯誤、計數；送不出去的呼叫（參數解析不了、不是物件、巢狀過深、過長、鍵不是文字；工具名稱過長）不送伺服器、回固定句子、不結束搜尋，剛好在界線上的照送；放不回對話的訊息（半個 surrogate 在參數／名稱／呼叫 id／文字裡，或參數帶 NaN）直接改成強制作答、同一則裡的呼叫都不執行、搜尋照常繼續；假模型跟真的 client 一樣拒絕編不出請求的對話；呼叫長度上限等於搜尋迴圈對回答的長度上限；`pack` 與 `label` 只能讀；store 答不出來（之後不再花模型呼叫；經真的 `search()` 不扣提案次數、不寫 refusal）、子程序中途死掉、查詢逾時、握手不回應、啟動不了、回答形狀不對、列不出工具，都是 `ToolServerError`；模型沒回應是 `HypothesistError`、下一輪可再問；回覆讀不懂（五種）也是；中斷原樣穿過；trace 每行是五種形狀之一且等於模組的 `TRACE_KEYS`、不合形狀的行拒寫且不佔序號、開頭一筆是整包文字與 schema、模型文字與工具結果過長會截斷並記原長、沒有任何一段 prompt、沒有日期、沒有失敗原句、沒有 `\r`；伺服器失敗的那一次查詢照樣寫一筆；把訓練區間之後的資料全部改掉，trace 除耗時外逐行相同；整包文字的雜湊釘在 `PACK_VERSION` 上，模組裡每個句子常數都在 `SENTENCES`；那段說明含計畫要的事實句、不含建議用字、不含世界類型／coin／日期；手建的 `Pack` 與 `Pack.of` 受同樣的檢查、交出去的工具是複本、兩張表不可改；上限不合法、client 不支援工具、`server` 是路徑、子程序沒給 log、trace 或 log 已存在（伺服器不會被啟動）或兩者同檔或資料夾不存在、伺服器名稱／版本／工具清單對不上、沒裝 SDK，都在問模型之前拒絕；真的 stdio 子程序回答與 view 相同、store 位元組不變、啟動失敗的原因寫進指定的 log；等待伺服器的方式（分段等、任務自己的逾時照樣丟出）、例外群組的拆解、關閉失敗只記 warning；模組在全新直譯器裡只載入 `research_tools`／`toolarm`／`tools_server`／`upstream`、不需要 SDK | `tests/test_toolarm.py` |
 | 提問器不 import langchain 所依賴的三種形狀，對著 langchain 本身驗：`AIMessage`（含解析失敗的呼叫與用量）讀得出來；tuple＋回覆物件＋`{"role": "tool"}` dict 組成的對話轉得成 langchain 的訊息（含錯誤標記）；工具定義已經是 langchain 會送出去的函式格式；langchain 自己的假 chat model 綁上工具後走得完一輪 | `contrib/tests/test_toolarm_wire.py` |
 | 工具組的 trace 讀得回來：每輪的次數與 token 數等於 trace 寫的；模型中途沒回應的搜尋保留已回答的輪次與已花的 token；兩個數缺一個（或不是 0 以上的整數）的呼叫另外計數、有回報的那一半照樣加進總數；輪次重複、跳號、沒結束、結束後還有行、伺服器側失敗、計數不合理，都拒絕；trace 檔逐行對照提問器的欄位表（不是 JSON、不是物件、種類不認得、欄位多或少、開頭不是 pack、pack 出現兩次、版本不對、讀不到檔）；`tool_use.json` 讀寫來回相等、每個欄位的拒絕、每輪不超過上限；`report` 的兩行只算跑完的搜尋的輪次、token 算全部、給了單價才印花費；單價必須是非負的有限數 | `tests/test_tooluse.py` |
+| 盲猜組的用量：計數器把回覆原樣交回、只算文字回覆、少報一個數的呼叫另外計數、丟例外的呼叫不算；經計數器提問的 `ChatHypothesist` 回的文字與拒絕跟沒包時一樣；`model_use.json` 讀寫來回相等、每個欄位的拒絕；token 行跟工具組同一句；沒有紀錄的 search 會寫出個數 | `tests/test_modeluse.py` |
+| 盲猜組經 `bench` 跑完一個世界（假模型）：`model_use.json` 的內容、讀回來對照 `verdicts.json`（世界、manifest、模型、replicate、呼叫次數、seam）的每一種拒絕；沒有盲猜組的世界沒有這個檔、有就拒絕；舊目錄（沒有這個檔）照樣讀、`report` 寫出沒有紀錄的個數、同一列新舊混在一起時兩者都寫；計數對不上時不寫檔並告知 | `tests/test_bench.py` |
 | 工具組經 `bench` 跑完一個世界（假模型、真的 stdio 伺服器子程序、搜尋迴圈同時開著同一顆 store）：排在 Random／Grid 之後、每個 replicate 有 store／trace／伺服器 log、landed artifact 不變、ledger 記模型自己的名字、模型讀到的上限是 manifest 寫的、對話裡沒有世界類型；`tool_use.json` 逐位元等於預期、`verdicts.json` 的鍵沒有變；`calibrate`／`report` 有工具組那一列、多印的兩行與花費只出現在那一列；`report` 的兩個單價要一起給；`search` 有這個檔才印它的路徑；`tool_use.json` 跟 manifest 或 `verdicts.json` 對不上的十二種情況每個讀取端都拒絕、該有而沒有與不該有而有也拒絕；同一個世界的 Random／Grid 結果與 oracle 跟沒有工具組的那次搜尋逐鍵相同（只差 experiment 的建立時間）；伺服器中途死掉、伺服器起不來、伺服器起來後提問器才開不起來、trace 讀不回來或跟 ledger／manifest／前一個 replicate 對不上、搜尋途中 trace 寫不進去，都讓 `search` 停下（`KeptForInquiry`，經指令是 exit 3）、不寫紀錄、留下空的 `arms/`（claim）與改名成 `.search.kept-*` 的暫存資料夾（這些測試裡伺服器 log 都在，trace 是提問器開成功才有）與說明檔（接得到例外時附那個例外自己的 traceback、不附它是在處理哪個例外時發生的），拒絕是從造成停下的那個例外 raise 出來的，之後的 `search`／`calibrate`／`score`／`report` 以一般的拒絕（exit 1）擋下並指向說明檔；只移掉 `arms/`、留著暫存資料夾一樣被擋（旁邊有整套紀錄也一樣），兩樣都移掉才回到落地時的樣子；說明檔寫不進去只記 warning、暫存照樣改名並被認出來；改名失敗時留在原名、靠說明檔認；標記途中被中斷，暫存資料夾與 claim 照樣留著；名字不是 `.search.kept-*` 又沒有說明檔的暫存資料夾（被強制結束的 run 留下的）不會被說成刻意保留；Random／Grid 自己的 `OSError` 照舊原樣丟出、不保留任何東西；trace 記的模型名稱用 autoresearch 真的 `build` 產生的寫法核對；`oracle.json` 最後才搬進去；工具組跑不起來時 `search` 在任何一臂開始之前就拒絕；`pack_version` 不對在 `generate` 與 `search` 開始前就拒絕、沒裝 SDK／client 沒有 `bind_tools`／模型建不起來都具名；v3 的 run 目錄名稱等於改動前的 digest、搜出來的結果與 v4 相同、沒有被改寫成別的版本 | `tests/test_bench_tools.py` |
 
 ## Manifest 格式（v4）
@@ -837,6 +859,7 @@ exit 規則，池不行）；每個 template 都有 gate（池裡沒有「只有
   arms/llm_tools/replicate-<k>.server.log      那個 replicate 的查詢伺服器的 stderr（正常是空的）
   verdicts.json              每臂每 replicate 的快照、最終判定、selected 的 holdout（search 寫）
   tool_use.json              工具組每個 replicate 每輪查了幾次與 token 數（search 寫；沒有工具組就沒有這個檔）
+  model_use.json             盲猜組每個 replicate 的模型呼叫次數與 token 數（search 寫；沒有盲猜組就沒有這個檔，#433 之前搜的世界也沒有）
   oracle.json                各臂跑完後才寫：埋的規則三段數字＋餘裕判定、full-pool reference（search 寫）
   scores.json                每臂每 replicate 的三項指標與找回判定（score 寫，可重跑）
 ```

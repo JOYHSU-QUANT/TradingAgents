@@ -23,10 +23,10 @@ Six in the order a world goes through them (plan §3):
   pool's reference (``oracle.json``), in that order (:mod:`.bench` keeps
   it). A world is searched once; a manifest that is not the directory's
   own is refused. A manifest that names a model arm runs it too, last: it
-  is the one arm that costs money. Where that arm is the one with tools,
-  what its searches spent is written beside the verdicts
-  (``tool_use.json``), and a failure of the look-ups' server stops the run
-  with a refusal that names what was kept.
+  is the one arm that costs money. What its searches spent is written
+  beside the verdicts (``model_use.json``; ``tool_use.json`` for the arm
+  with tools), and for the arm with tools a failure of the look-ups'
+  server stops the run with a refusal that names what was kept.
 - ``calibrate --root DIR`` — every searched run directory under the root
   tallied by world kind, seed set, set of conditions (a digest printed on
   each row, so two calibrations under one root are two rows) and arm: on
@@ -43,9 +43,11 @@ Six in the order a world goes through them (plan §3):
   oracle's pass rate and the recovery where it had room, the diagnostics
   (plan §3's last step). Reads no store. A test seed's rows keep everything
   read from the holdout sealed unless ``--unseal`` is given (plan §4.2).
-  A tool arm's rows also say what its searches spent; ``--price-in`` and
+  A model arm's rows also say what its searches spent; ``--price-in`` and
   ``--price-out`` (US dollars a million tokens, given together) add an
-  estimated cost.
+  estimated cost. One pair of prices is one model's and is put to every
+  such row, each of which names its model: a root holding rows of two
+  models is reported once for each, with that model's prices.
 
 And one beside that order, for a person (tools plan §3.3):
 
@@ -111,6 +113,7 @@ from .bench import (
 )
 from .landing import ARTIFACT_FILENAME, MANIFEST_FILENAME, default_root, land_world
 from .manifest import Manifest, ManifestError
+from .modeluse import MODEL_USE_FILENAME
 from .records import RecordError
 from .scoring import SCORES_FILENAME, report_table, require_this_scorer, score_world
 from .tools_server import IMPORT_ROOT, LaunchError, ServerParams, require_sdk
@@ -225,9 +228,10 @@ def _build_parser() -> argparse.ArgumentParser:
             default=None,
             metavar="USD",
             help=(
-                f"what a million {what} tokens of the tool arm's model cost, in US dollars; "
-                f"given with the other, the tool arm's rows print an estimated cost beside "
-                f"their token counts"
+                f"what a million {what} tokens of the model arm's model cost, in US dollars; "
+                f"given with the other, the model arms' rows print an estimated cost beside "
+                f"their token counts. One pair of prices is one model's: it is put to every "
+                f"such row, and each row names its model"
             ),
         )
 
@@ -306,6 +310,8 @@ def _cmd_search(args: argparse.Namespace) -> int:
     print(f"verdicts: {run_dir / VERDICTS_FILENAME}")
     if (run_dir / TOOL_USE_FILENAME).is_file():
         print(f"tool use: {run_dir / TOOL_USE_FILENAME}")
+    if (run_dir / MODEL_USE_FILENAME).is_file():
+        print(f"model use: {run_dir / MODEL_USE_FILENAME}")
     print(f"oracle: {run_dir / ORACLE_FILENAME}")
     return 0
 
@@ -352,12 +358,12 @@ def _cmd_report(args: argparse.Namespace) -> int:
     for row in rows:
         for line in row.describe(unseal=args.unseal, prices=prices):
             print(line)
-    if prices is not None and not any(row.uses for row in rows):
+    if prices is not None and not any(row.uses or row.model_uses for row in rows):
         # On stderr, beside the table and not in it: prices that priced
         # nothing are worth a word, and are no row.
         print(
-            f"note: no row under {root} is a tool arm's, so --price-in and --price-out priced "
-            f"nothing",
+            f"note: no row under {root} holds a model arm's token counts, so --price-in and "
+            f"--price-out priced nothing",
             file=sys.stderr,
         )
     return 0

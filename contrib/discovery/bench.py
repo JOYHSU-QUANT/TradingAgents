@@ -41,6 +41,12 @@ tools, tokens — is read off each trace once and written to a record of its
 own, ``tool_use.json`` (:mod:`.tooluse`), which a run with no tool arm
 does not have.
 
+**What the blind model arm spent** (issue #433) is counted by the same rule
+and kept the same way, in ``model_use.json`` (:mod:`.modeluse`): a counter
+is put around its client for each search, and the sums are written with the
+verdicts. A directory searched before that record existed has none and is
+read as it was.
+
 **The two sides of that arm's seam fail differently** (decided
 2026-11-19). The MODEL not answering is a failed seam like any arm's:
 recorded, counted apart, and the run goes on. The look-ups' SERVER not
@@ -65,8 +71,8 @@ Everything is built in a staging directory inside the run directory and
 moved into place at the end (the records, ``oracle.json`` last, then the
 arms' stores into ``arms/``), so a run that ends before the records are in
 leaves the directory as the landing left it but for at most the records
-that go in before the oracle's (``verdicts.json``, and a tool arm's
-``tool_use.json``, if it ends between the moves), which the guard and
+that go in before the oracle's (``verdicts.json``, and a model arm's
+``tool_use.json`` or ``model_use.json``, if it ends between the moves), which the guard and
 calibrate refuse by name; one that ends while the stores move in — a failed rename or an
 interrupt — leaves the records and keeps the staging that holds the rest,
 named in a failed rename's refusal and, after an interrupt, by the next
@@ -126,6 +132,7 @@ from .landing import (
     world_dir,
 )
 from .manifest import LlmArm, LlmToolsArm, Manifest, SeedSet, WorldKind
+from .modeluse import MODEL_USE_FILENAME, MeteredModel, ModelSearch, ModelUse
 from .oracle import Oracle, PlantedFigures, frame_for, planted_figures, pool_reference
 from .records import Reader, RecordError, dumps
 from .toolarm import (
@@ -536,10 +543,17 @@ def _give_back(claim: Path) -> None:
 def _search_left(run_dir: Path) -> list[str]:
     """What a search has left in ``run_dir``: the claim and the records, in the order they are made.
 
-    ``tool_use.json`` is a tool arm's alone, so on a world with no such arm
-    this lists what it always did.
+    ``tool_use.json`` is a tool arm's alone and ``model_use.json`` a blind
+    model arm's, so on a world with neither arm this lists what it always
+    did.
     """
-    names = (ARMS_DIRNAME, VERDICTS_FILENAME, TOOL_USE_FILENAME, ORACLE_FILENAME)
+    names = (
+        ARMS_DIRNAME,
+        VERDICTS_FILENAME,
+        TOOL_USE_FILENAME,
+        MODEL_USE_FILENAME,
+        ORACLE_FILENAME,
+    )
     return [name for name in names if (run_dir / name).exists()]
 
 
@@ -710,6 +724,40 @@ def _spent(
             f"what {result.experiment_id} spent could not be read back from its trace — {exc}"
         ) from exc
     return pack, use
+
+
+def _model_use(
+    manifest: Manifest,
+    verdicts: Verdicts,
+    searches: Sequence[ModelSearch],
+    say: Callable[[str], None],
+) -> ModelUse | None:
+    """The blind model arm's record for a world just searched, or ``None``: no such arm, or no record to trust.
+
+    Held to the verdicts as a reader will hold it (:func:`_hold_model_use`).
+    Counts that are not the searches' would be a defect on this side — and,
+    unlike a tool arm's trace, there is nothing left of them to look into:
+    the counter was all there was. So the run is not stopped over them,
+    which would throw away searches that were paid for to protect a figure
+    that is a floor; the record is left unwritten, the world reads as "not
+    recorded", and the operator is told why.
+    """
+    llm = manifest.arms.llm
+    if llm is None:
+        return None
+    try:
+        use = ModelUse(
+            world_id=verdicts.world_id,
+            manifest_digest=verdicts.manifest_digest,
+            model=f"{llm.provider}/{llm.model}",
+            searches=tuple(searches),
+        )
+        _hold_model_use(MODEL_USE_FILENAME, use, llm, verdicts)
+    except RecordError as exc:
+        logger.warning("what arms.llm spent is not recorded: %s", exc)
+        say(f"model use: not recorded — {exc}")
+        return None
+    return use
 
 
 def _kept_for_inquiry(
@@ -972,9 +1020,16 @@ def _arms(manifest: Manifest) -> list[tuple[Arm, int, _Opened]]:
     arms.append((Arm.GRID, 0, held(GridHypothesist(pool))))
     llm = manifest.arms.llm
     if llm is not None:
-        # One adapter: it holds a client and no state of a search.
-        asked = held(model_hypothesist(llm))
-        arms += [(Arm.LLM, k, asked) for k in range(llm.replicates)]
+        # One adapter, built once: it holds a client and no state of a
+        # search. What a search spent IS state of that search, so each is
+        # asked through a copy of the adapter whose client is counted
+        # (:mod:`.modeluse`); the client under every counter is the one.
+        blind = model_hypothesist(llm)
+
+        def metered(path: Path, experiment: Experiment) -> AbstractContextManager[_Asked]:
+            return nullcontext(replace(blind, model=MeteredModel(blind.model)))
+
+        arms += [(Arm.LLM, k, metered) for k in range(llm.replicates)]
     tools = manifest.arms.llm_tools
     if tools is not None:
         model, limits = tool_arm(tools)
@@ -1025,8 +1080,9 @@ def run_world(
         # not receive; it is named so it is not left behind by a re-search.
         kept = _kept_staging(run_dir)
         records = [VERDICTS_FILENAME, ORACLE_FILENAME]
-        if TOOL_USE_FILENAME in left:
-            records.insert(1, TOOL_USE_FILENAME)
+        for spent in (MODEL_USE_FILENAME, TOOL_USE_FILENAME):
+            if spent in left:
+                records.insert(1, spent)
         raise BenchError(
             f"{run_dir} holds {left + kept}: this world was searched before, and a search is "
             f"spent once — remove {ARMS_DIRNAME}/, {', '.join(records)}"
@@ -1070,6 +1126,7 @@ def run_world(
     try:
         results: list[ArmResult] = []
         uses: list[SearchUse] = []
+        blind_uses: list[ModelSearch] = []
         told: TracePack | None = None
         landing: Landing | None = None
         for arm, replicate, opened in _arms(manifest):
@@ -1163,6 +1220,14 @@ def run_world(
                     # after the trace is gone.
                     told, use = _spent(trace_of(path), result, told, tools)
                     uses.append(use)
+                meter = getattr(hypothesist, "model", None)
+                if arm is Arm.LLM and isinstance(meter, MeteredModel):
+                    # What came back through this search's counter, read
+                    # once its verdict is taken: nothing of the search
+                    # depended on it.
+                    blind_uses.append(
+                        meter.spent(replicate, seam_failed=snapshot.ended is Ended.SEAM_FAILED)
+                    )
         verdicts = Verdicts(
             world_id=world_id,
             pool_size=pool_size,
@@ -1183,6 +1248,7 @@ def run_world(
                 raise _ToolsSideStop(
                     f"what the tool arm's searches spent does not make a record — {exc}"
                 ) from exc
+        model_use = _model_use(manifest, verdicts, blind_uses, say)
         # The oracle last (plan §4.4): read on the Grid arm's store after
         # every arm has searched and chosen. The oracle path files nothing,
         # so the store is the arm's record still.
@@ -1220,6 +1286,8 @@ def run_world(
         written = {VERDICTS_FILENAME: verdicts.dumps()}
         if tool_use is not None:
             written[TOOL_USE_FILENAME] = tool_use.dumps()
+        if model_use is not None:
+            written[MODEL_USE_FILENAME] = model_use.dumps()
         written[ORACLE_FILENAME] = oracle.dumps()
         for name, text in written.items():
             (staging / name).write_bytes(text.encode("utf-8"))
@@ -1340,20 +1408,25 @@ class Searched:
     """A searched run directory read and held together: its manifest and its records.
 
     ``tool_use`` is what the tool arm's searches spent (:mod:`.tooluse`):
-    present exactly when the manifest names that arm.
+    present exactly when the manifest names that arm. ``model_use`` is what
+    the blind model arm's did (:mod:`.modeluse`): never present without
+    that arm, and absent with it where the world was searched before that
+    record existed.
     """
 
     manifest: Manifest
     verdicts: Verdicts
     oracle: Oracle
     tool_use: ToolUse | None = None
+    model_use: ModelUse | None = None
 
 
 def read_searched(run_dir: Path) -> Searched | None:
     """``run_dir``'s manifest and records, each held to the others; ``None`` if nothing searched it.
 
     A directory holding none of what a search leaves (``arms/``,
-    ``verdicts.json``, a tool arm's ``tool_use.json``, ``oracle.json``) is
+    ``verdicts.json``, a model arm's ``tool_use.json`` or ``model_use.json``,
+    ``oracle.json``) is
     a world not yet searched; one holding some of it but not both the
     verdicts and the oracle's record is a search in progress or one that
     did not finish, refused by name rather than dropped without a word.
@@ -1444,6 +1517,7 @@ def read_searched(run_dir: Path) -> Searched | None:
         verdicts=verdicts,
         oracle=oracle,
         tool_use=_read_tool_use(run_dir, manifest, verdicts),
+        model_use=_read_model_use(run_dir, manifest, verdicts),
     )
 
 
@@ -1477,6 +1551,77 @@ def _read_tool_use(run_dir: Path, manifest: Manifest, verdicts: Verdicts) -> Too
     for spent in use.searches:
         _hold_use_to_result(path, spent, by_replicate[spent.replicate])
     return use
+
+
+def _read_model_use(run_dir: Path, manifest: Manifest, verdicts: Verdicts) -> ModelUse | None:
+    """``model_use.json`` of a searched directory, held to the manifest and the verdicts beside it.
+
+    Written by a search whose manifest names the blind model arm, so one
+    present where no such arm is named is a directory this build's search
+    did not leave. One ABSENT where the arm is named is not refused: the
+    worlds searched before this record existed have none (issue #433), and
+    ``None`` is how a table is told so.
+    """
+    path = run_dir / MODEL_USE_FILENAME
+    llm = manifest.arms.llm
+    if llm is None:
+        if path.exists():
+            raise BenchError(
+                f"{path}: the manifest beside it names no blind model arm to have written it"
+            )
+        return None
+    if not path.exists():
+        return None
+    use = read_record(path, ModelUse.loads)
+    _hold_model_use(path, use, llm, verdicts)
+    return use
+
+
+def _hold_model_use(where: Path | str, use: ModelUse, llm: LlmArm, verdicts: Verdicts) -> None:
+    """Refuse a model-use record that is not of the blind model arm a manifest names, as its verdicts ran it.
+
+    The world and the manifest the verdicts were written under; the model,
+    by the label the research package builds one under and files its
+    answers by (``provider/model``); the replicates the arm has, each once;
+    and for each search what its verdict says of it — a call that was
+    counted is an answer of the search (the loop asks once a round, and a
+    reply that is text is a round spent), and the search ended on a failed
+    seam in the one exactly when it did in the other.
+    """
+    if (use.world_id, use.manifest_digest) != (verdicts.world_id, verdicts.manifest_digest):
+        raise BenchError(
+            f"{where} is for {use.world_id} under manifest {use.manifest_digest}; "
+            f"{VERDICTS_FILENAME} beside it is for {verdicts.world_id} under "
+            f"{verdicts.manifest_digest}"
+        )
+    label = f"{llm.provider}/{llm.model}"
+    if use.model != label:
+        raise BenchError(
+            f"{where}: the searches are those of the model {use.model}; the manifest's model "
+            f"arm names {label}"
+        )
+    replicates = sorted(search.replicate for search in use.searches)
+    if replicates != list(range(llm.replicates)):
+        raise BenchError(
+            f"{where} holds the model arm's replicate(s) {replicates}; the manifest names "
+            f"{llm.replicates}, numbered from 0"
+        )
+    by_replicate = {r.replicate: r for r in verdicts.results if r.arm is Arm.LLM}
+    for spent in use.searches:
+        result = by_replicate[spent.replicate]
+        snapshot = result.snapshot
+        if spent.model_calls != snapshot.answers:
+            raise BenchError(
+                f"{where}: {result.experiment_id} is said to have had {spent.model_calls} model "
+                f"call(s) come back and its ledger holds {snapshot.answers} answer(s); a call "
+                f"that came back is one answer"
+            )
+        if spent.seam_failed != (snapshot.ended is Ended.SEAM_FAILED):
+            raise BenchError(
+                f"{where}: {result.experiment_id} ended {snapshot.ended.value}, and its record "
+                + ("says it ended" if spent.seam_failed else "says it did not end")
+                + " on a failed seam"
+            )
 
 
 def _hold_use_to_manifest(where: Path | str, use: ToolUse, tools: LlmToolsArm) -> None:

@@ -80,6 +80,7 @@ from .bench import (
     store_path,
 )
 from .manifest import Manifest, ManifestError, Planted, Recovery, SeedSet, WorldKind
+from .modeluse import ModelSearch, model_use_lines
 from .oracle import evaluate_unfiled, frame_for
 from .records import Reader, RecordError, dumps
 from .tooluse import Prices, SearchUse, TracePack, usage_lines
@@ -903,6 +904,11 @@ class ReportRow:
     included; every other arm's row has none. A round answered without
     tools is in the row's rates like any other (decided 2026-11-19) and is
     counted on the lines these give.
+
+    ``model_uses`` is the same for the blind model arm's row
+    (:mod:`.modeluse`): what each of its searches that has a record spent,
+    under the ``model`` they asked; and ``unrecorded`` is how many of its
+    searches have no record, having been made before there was one.
     """
 
     kind: WorldKind
@@ -914,6 +920,9 @@ class ReportRow:
     failed: int
     uses: tuple[SearchUse, ...] = ()
     pack: TracePack | None = None
+    model_uses: tuple[ModelSearch, ...] = ()
+    model: str | None = None
+    unrecorded: int = 0
 
     def __post_init__(self) -> None:
         uses = tuple(_read.sequence(self.uses, "row.uses"))
@@ -929,6 +938,21 @@ class ReportRow:
             raise ScoreError(
                 "row.pack: what the searches were told goes with the searches' tool use, and "
                 "with nothing else"
+            )
+        model_uses = tuple(_read.sequence(self.model_uses, "row.model_uses"))
+        if any(not isinstance(use, ModelSearch) for use in model_uses):
+            raise ScoreError("row.model_uses: expected ModelSearches")
+        object.__setattr__(self, "model_uses", model_uses)
+        _read.whole(self.unrecorded, "row.unrecorded", minimum=0)
+        if (self.model is None) != (not model_uses):
+            raise ScoreError(
+                "row.model: the model the searches asked goes with the searches' model use, and "
+                "with nothing else"
+            )
+        if uses and (model_uses or self.unrecorded):
+            raise ScoreError(
+                "row: a row is one arm's, and holds the tool arm's use or the blind model "
+                "arm's, not both"
             )
         object.__setattr__(self, "kind", _read.enum(WorldKind, self.kind, "row.kind"))
         _read.text(self.null_definition_version, "row.null_definition_version")
@@ -1021,13 +1045,18 @@ class ReportRow:
         """The row as lines: the headline first, then the diagnostics; see the class docstring on sealing.
 
         The lines after those say what the row's searches actually spent —
-        answers and rules, and for the tool arm its look-ups and tokens,
-        with an estimated cost when ``prices`` are given — and are no
-        holdout figures, so a sealed row prints them too.
+        answers and rules, and for a model arm its tokens (with the tool
+        arm's look-ups), with an estimated cost when ``prices`` are given —
+        and are no holdout figures, so a sealed row prints them too.
         """
         effort = [f"  {effort_note([e.effort for e in self.entries])}"] if self.entries else []
         model = None if self.pack is None else self.pack.model
-        return [*self._lines(unseal=unseal), *effort, *usage_lines(self.uses, prices, model=model)]
+        return [
+            *self._lines(unseal=unseal),
+            *effort,
+            *usage_lines(self.uses, prices, model=model),
+            *model_use_lines(self.model_uses, self.unrecorded, prices, model=self.model),
+        ]
 
     def _lines(self, *, unseal: bool) -> list[str]:
         head = row_head(
@@ -1101,6 +1130,9 @@ def report_table(run_dirs: Iterable[Path]) -> list[ReportRow]:
     failed: Counter[RowKey] = Counter()
     uses: dict[RowKey, list[SearchUse]] = {}
     packs: dict[RowKey, TracePack] = {}
+    model_uses: dict[RowKey, list[ModelSearch]] = {}
+    models: dict[RowKey, str] = {}
+    unrecorded: Counter[RowKey] = Counter()
     for run_dir, searched in iter_searched(run_dirs):
         scores = read_scores(run_dir, searched)
         if searched.tool_use is not None:
@@ -1118,6 +1150,18 @@ def report_table(run_dirs: Iterable[Path]) -> list[ReportRow]:
                     f"that differs under one pack version is another build's wording"
                 )
             uses.setdefault(tools_key, []).extend(searched.tool_use.searches)
+        llm = searched.manifest.arms.llm
+        if llm is not None:
+            llm_key = row_key(searched.manifest, Arm.LLM)
+            if searched.model_use is None:
+                # Searched before the record existed: said on the row, and
+                # not left as a blank that reads as nothing spent.
+                unrecorded[llm_key] += llm.replicates
+            else:
+                # A row's conditions name the arm's model, and the record
+                # was held to the manifest's: one row, one label.
+                models[llm_key] = searched.model_use.model
+                model_uses.setdefault(llm_key, []).extend(searched.model_use.searches)
         oracle = searched.oracle
         by_arm = {(r.arm, r.replicate): r for r in searched.verdicts.results}
         for score in scores.results:
@@ -1148,6 +1192,9 @@ def report_table(run_dirs: Iterable[Path]) -> list[ReportRow]:
             failed=failed[key],
             uses=tuple(uses.get(key, ())),
             pack=packs.get(key),
+            model_uses=tuple(model_uses.get(key, ())),
+            model=models.get(key),
+            unrecorded=unrecorded[key],
         )
         for key in in_row_order(rows)
     ]

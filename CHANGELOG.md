@@ -432,6 +432,39 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **A judge's words that cannot be written as UTF-8 no longer end a
+  `uniswap_v3` verdict visit** (#429). A lone surrogate (half of a UTF-16
+  pair; a provider's JSON carrying half an escaped pair is enough) in the
+  decision, in any report or in the line that says why news was missing
+  raised `UnicodeEncodeError` at the digest or at the sidecar's dump: a
+  traceback, exit 1, that token not recorded, and the next visit asking
+  (and paying) again; in the schedule the AI run's chain stopped there.
+  The answer is now made storable once, before anything is digested or
+  written (`agent/record.storable_answer`): each such character becomes
+  U+FFFD, the sidecar's `decision`, its `decision_digest` and the row's
+  digest are of the same words, and `verdict` logs a WARNING saying how
+  many. The reason kept when a judge declines (`judge_declines.reason`)
+  is replaced where the store binds it; that write had turned "try again
+  later" (exit 3) into a traceback. The helper is the package's own
+  (`domain/text.py`): it imports no other contrib package. A sidecar that
+  could be written before is byte for byte what it was — which is why the
+  text is replaced rather than dumped with `ensure_ascii=True`, which
+  would also not have got past the digest. Not deployed.
+- **Text SQLite cannot take no longer ends a replay** (#428). The same
+  character in a direction probe's reply, in the sentence that says why a
+  reply was not read (which can hold it even when the reply is ASCII: it
+  is built from JSON keys after they are decoded), in a provider's refusal
+  or in the model name it reported raised from inside the store's write:
+  the question had been paid for, its row was not stored, and a resume
+  asked it again and stopped at the same place. `replay.sqlite` now
+  stores each as U+FFFD at its writes (`replay_store._storable`; the
+  helper is borrowed from `contrib/core`). A decision's reply (`replay`,
+  `backtest --ask`) was already replaced by the borrowed parse seam since
+  #427, so those two no longer failed; they are now pinned by this
+  package's own tests. The refusals were reproduced with a faked
+  provider error: the OpenAI SDK escapes such a character in its own
+  messages, so whether a real provider can produce one there was not
+  shown. How many characters were replaced is not recorded.
 - **A character the output encoding cannot carry no longer ends a research
   run** (#430). `print` raises when the stream's encoding has no bytes for
   a character and its error handler is one that raises, as `sys.stdout`'s

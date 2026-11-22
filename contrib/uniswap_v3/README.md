@@ -167,6 +167,11 @@ contrib/uniswap_v3/
 以設定的 `verdicts.source` 寫列，judge 的原文（最終決策、各分析師與辯論的報告、給它看的現貨脈絡、模型、耗時）另存成
 sidecar `verdicts/<source>/<代幣>-<bar 時間>.json`，放在 store 檔的同一個目錄下（列裡存相對路徑與檔案 digest，
 store 與 sidecar 要一起搬）。同一（source、代幣、bar）問過就不再問；`--fake-rating` 寫的列 `model=fake`、沒有 sidecar。
+judge 的文字（最終決策、任何一份報告、news 缺席的那一行）若帶「落單的 surrogate」（UTF-16 的半個字元，沒有 UTF-8 編碼，digest 與檔案都寫不出來），
+在算 digest 與寫 sidecar **之前**一次換成 U+FFFD（`agent/record.storable_answer`），所以 sidecar 的 `decision`、`decision_digest` 與列裡的 digest 是同一份文字；
+`verdict` 會寫一筆 WARNING 說換了幾個。judge 沒回應時記下的原因（`judge_declines.reason`）同樣在寫入時換掉。以前這兩種情況都讓那次 visit 以 traceback 結束、
+那個代幣沒存、下次再問一次（#429）。換字函式在 `domain/text.py`，是這個套件自己的一份（它不 import 其他 contrib 套件；2026-11-22 拍板）；
+今天寫得出來的 sidecar 位元組不變。
 `targets` 是外部目標：某個 source 要某代幣在某根 bar 持有的比例（0–1；**0 也是目標**——出場日或空手日，不是「沒有目標」）＋寫入時間與交接檔位元組的 sha256
 （schema v7；交接檔的 `action` 刻意不存，那是協調者自己的狀態，在 perp sidecar 與 `carry history` 裡）；形狀與規則同 `verdicts`：不屬於任何 run、同一（source、代幣、bar）寫一次不改。設定檔有 `targets.source` 的 run，
 策略拿到的 view 帶該 source 對交易代幣的目標（只到被決策的那根為止）。讀目標的策略是 `external_weights`；寫目標的是 `target` 指令：

@@ -47,7 +47,13 @@ from ..store.repository import Store, StoreError
 from .context import BARS_NEEDED, spot_context
 from .errors import AgentError, BarNotStored, JudgeUnavailable
 from .graph import FAKE_MODEL, Judge
-from .record import sidecar_path, sidecar_record, verdict_record, write_sidecar
+from .record import (
+    sidecar_path,
+    sidecar_record,
+    storable_answer,
+    verdict_record,
+    write_sidecar,
+)
 from .tickers import tickers_for
 
 logger = logging.getLogger(__name__)
@@ -269,6 +275,17 @@ def ask_verdicts(
                 f"{exc}; {len(done)} verdict(s) at {trade_date} stay recorded, and a later "
                 f"visit asks about the rest"
             ) from exc
+        # Before anything is digested or written: words that cannot be
+        # written as UTF-8 are made storable, once, and said (#429).
+        answer, replaced = storable_answer(answer)
+        if replaced:
+            logger.warning(
+                "the judge's words on %s at %s held %d lone surrogate(s), which cannot be "
+                "written as UTF-8; each is recorded as U+FFFD",
+                symbol,
+                trade_date,
+                replaced,
+            )
         # Another visit may have recorded this token while the judge was thinking.
         meanwhile = store.verdict(source, symbol, time)
         if meanwhile is not None:

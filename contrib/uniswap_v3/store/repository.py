@@ -51,6 +51,7 @@ from ..domain.records import (
     Valuation,
 )
 from ..domain.targets import Target, TargetRecord
+from ..domain.text import replace_lone_surrogates
 from ..domain.types import Fill, RunMode, TargetWeights
 from ..domain.verdicts import JudgeDecline, Rating, Verdict, VerdictRecord
 from .schema import SchemaError, migrate, transaction
@@ -294,7 +295,17 @@ def _verdict_record(row: Sequence[Any]) -> VerdictRecord:
 
 
 def _decline_row(record: JudgeDecline) -> tuple[Any, ...]:
-    return (record.source, record.symbol, record.time, record.asked_at, record.reason)
+    """The row for ``record``, its reason as SQLite will take it.
+
+    The reason is the words of whatever did not answer — a provider, a
+    news vendor. A lone surrogate in it cannot be bound: with a scripted
+    judge declining in such words the write raised past the caller, and a
+    visit that should have ended "try again later" ended in a traceback
+    (issue #429; whether a real provider's or vendor's words can carry one
+    this far was not shown). Each is stored as U+FFFD.
+    """
+    reason = replace_lone_surrogates(record.reason)[0]
+    return (record.source, record.symbol, record.time, record.asked_at, reason)
 
 
 def _decline_record(row: Sequence[Any]) -> JudgeDecline:

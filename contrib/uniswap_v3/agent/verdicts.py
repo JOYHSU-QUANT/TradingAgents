@@ -47,7 +47,13 @@ from ..store.repository import Store, StoreError
 from .context import BARS_NEEDED, spot_context
 from .errors import AgentError, BarNotStored, JudgeUnavailable
 from .graph import FAKE_MODEL, Judge
-from .record import sidecar_path, sidecar_record, verdict_record, write_sidecar
+from .record import (
+    sidecar_path,
+    sidecar_record,
+    storable_answer,
+    verdict_record,
+    write_sidecar,
+)
 from .tickers import tickers_for
 
 logger = logging.getLogger(__name__)
@@ -284,6 +290,19 @@ def ask_verdicts(
             )
             report(done[-1])
             continue
+        # This answer is the one to record. Before anything of it is
+        # digested or written, words that cannot be written as UTF-8 are
+        # made storable, once, and said (#429).
+        answer, replaced = storable_answer(answer)
+        if replaced:
+            logger.warning(
+                "%d lone surrogate(s) in the judge's words on %s at %s (its decision, and "
+                "each report that repeats it, counted where they stand) cannot be written "
+                "as UTF-8; each is replaced with U+FFFD",
+                replaced,
+                symbol,
+                trade_date,
+            )
         relative = digest = None
         if answer.reports is not None:
             relative = sidecar_path(source, symbol, time)

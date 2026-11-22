@@ -49,6 +49,10 @@ What is borrowed and why:
   anywhere; the prompt assembly (``inject_perp_context``), so the replayed
   message spells the context the way the engine did; and the decimal
   context the books are multiplied in (``contrib.core``);
+- for what a model or a provider said, on its way into the store: the
+  replacement of lone surrogates (``contrib.core``), so text SQLite
+  cannot take is stored the way the perp package's store keeps it
+  (issue #428);
 - for the direction probe (plan PR 2.1): the decision parser's JSON
   extraction (``extract_json_block``), so a probe answer's object is found
   the way a decision's block is;
@@ -97,6 +101,7 @@ from contrib.autoresearch.vocabulary import SpecError, require_number
 from contrib.core.decimal_context import DECIMAL_CONTEXT
 from contrib.core.digest import payload_digest
 from contrib.core.instants import epoch_ms, from_epoch_ms, parse_instant
+from contrib.core.surrogates import replace_lone_surrogates
 from contrib.hyperliquid_perp.common.constants import FILE_TARGET_MODEL
 from contrib.hyperliquid_perp.common.sidecar import sidecar_path
 from contrib.hyperliquid_perp.common.store_layout import payload_dir
@@ -201,6 +206,7 @@ __all__ = [
     "payload_digest",
     "payload_dir",
     "render_position_section",
+    "replace_lone_surrogates",
     "require_amount",
     "require_number",
     "sidecar_path",
@@ -247,6 +253,7 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.core.instants", "epoch_ms"),
     ("contrib.core.instants", "from_epoch_ms"),
     ("contrib.core.instants", "parse_instant"),
+    ("contrib.core.surrogates", "replace_lone_surrogates"),
     ("contrib.hyperliquid_perp.common.constants", "FILE_TARGET_MODEL"),
     ("contrib.hyperliquid_perp.common.sidecar", "sidecar_path"),
     ("contrib.hyperliquid_perp.common.store_layout", "payload_dir"),

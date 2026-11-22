@@ -203,6 +203,17 @@ mode、quick model、guardrail；simple variant 的 sha 與以前完全相同）
 paper 自己答案的 `score --holdout`、以及 `backtest` 開既有 store）升到 v5：在一個 transaction 裡補上
 缺的表，裡面原有的東西一概不動；其他指令照原樣讀它，當成沒有探針答案、沒有回測、沒有 graph variant。
 
+**存不進 SQLite 的字元（#428）。** 模型的回覆、說明回覆為什麼讀不懂的那一句（`invalid_detail`）、provider 的拒絕訊息（`failures.error`；探針是 `probe_answers.invalid_detail`。只用假的 provider 例外重現過）、
+provider 回報的模型名稱，都可能帶「落單的 surrogate」（UTF-16 的半個字元；provider 的 JSON 帶半個跳脫序列、client 解出來就會有）。
+這種字元沒有 UTF-8 編碼，綁進 SQLite 會丟 `UnicodeEncodeError`：以前那一列存不進去（是回答的話，錢已經付了），續跑會再問同一題，
+回來的文字又帶這種字元就停在同一個地方。
+store 在寫入這幾欄時把它一個換一個換成 U+FFFD（`replay_store._storable`，換字函式借自 `contrib/core`，跟 `hyperliquid_perp` 的 store 同一個做法；
+2026-11-22 拍板在 store 接縫換，不是記成 invalid）。換了幾個不記錄：沒有欄位可放，也沒有任何程式會把這幾欄讀回來重新計分
+（成績單讀的是 gate 欄位；`raw_response` 只有 `effect` 的字串搜尋會讀）。決策回覆（`replay`、`backtest --ask`）早一步就被借來的
+`parse_target_decision` 換過（#427），所以這次實際多蓋到的是方向探針的回覆與 `invalid_detail`、三個指令的拒絕訊息、以及模型名稱。
+探針的 `invalid_detail` 有一個不直覺的情況：回覆本身是純 ASCII（那個字元以六個 ASCII 字的 JSON 跳脫形式出現在某個 key 裡），
+原文存得進去，是解析之後組出來的那一句帶了這個字元。
+
 **`register --variant FILE [--replay-db PATH]`** 只登記 variant（或更正已登記同名 variant 的
 `model_cutoff`），不建 client、不問任何題。
 

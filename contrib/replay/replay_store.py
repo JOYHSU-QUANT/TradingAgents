@@ -104,6 +104,7 @@ from .upstream import (
     epoch_ms,
     from_epoch_ms,
     parse_instant,
+    replace_lone_surrogates,
 )
 from .variant import (
     GRAPH_MODE,
@@ -501,6 +502,27 @@ def _enum_text(value: object) -> str | None:
     return None if value is None else str(getattr(value, "value", value))
 
 
+def _storable(text: str | None) -> str | None:
+    """``text`` as SQLite will take it: each lone surrogate as U+FFFD (issue #428).
+
+    For the columns that hold what a model or a provider said: a raw reply,
+    the sentence that says why one was not read, a provider's error, the
+    model name it reported. A lone surrogate has no UTF-8 encoding, so the
+    bind raised from inside the write — the row was not stored (for an
+    answer, one that had been paid for), and a resume asked the question
+    again, stopping at the same place whenever what came back held one
+    again. Replaced here, where every such write passes, as the perp
+    package's store replaces it (issue #427). How many were replaced is not
+    kept: there is no column for it, and nothing reads these columns back to
+    score them. Text without one comes back as the same object.
+
+    The columns that hold tags rather than words (``invalid_reason``, the
+    gate's reasons) are not passed through: they are constants of the
+    parser, the gate and the probe, and no model writes them.
+    """
+    return None if text is None else replace_lone_surrogates(text)[0]
+
+
 def _insert_answer(conn: sqlite3.Connection, variant_sha: str, answer: StoredAnswer) -> None:
     gate = answer.gate
     conn.execute(
@@ -517,9 +539,9 @@ def _insert_answer(conn: sqlite3.Connection, variant_sha: str, answer: StoredAns
             answer.repeat,
             answer.asked_at.isoformat(),
             answer.segment,
-            answer.raw_response,
+            _storable(answer.raw_response),
             int(answer.truncated),
-            answer.model_reported,
+            _storable(answer.model_reported),
             answer.input_tokens,
             answer.output_tokens,
             answer.invalid_reason,
@@ -548,7 +570,7 @@ def _insert_failure(
     conn.execute(
         "INSERT INTO failures (variant_sha, run_id, input_id, repeat, failed_at, error) "
         "VALUES (?, ?, ?, ?, ?, ?)",
-        (variant_sha, run_id, input_id, repeat, now.isoformat(), error),
+        (variant_sha, run_id, input_id, repeat, now.isoformat(), _storable(error)),
     )
 
 
@@ -924,11 +946,12 @@ class ReplayStore:
         return by_repeat
 
     def responses(self, variant_sha: str, run_id: str) -> Mapping[int, Mapping[str, str]]:
-        """What the model said, word for word, for every stored answer: by repeat, then ``input_id``.
+        """What the model said, as it was stored, for every stored answer: by repeat, then ``input_id``.
 
         The text :meth:`answers` leaves behind: a scorecard reads what the
         gate made of an answer, the ``effect`` report also reads whether the
-        answer mentions what it was shown.
+        answer mentions what it was shown. It is the reply as stored: a lone
+        surrogate in it was replaced with U+FFFD on the way in.
         """
         by_repeat: dict[int, dict[str, str]] = {}
         for row in self.conn.execute(
@@ -1089,13 +1112,13 @@ class ReplayStore:
                     answer.repeat,
                     answer.asked_at.isoformat(),
                     answer.segment,
-                    answer.raw_response,
+                    _storable(answer.raw_response),
                     int(answer.truncated),
-                    answer.model_reported,
+                    _storable(answer.model_reported),
                     answer.input_tokens,
                     answer.output_tokens,
                     answer.invalid_reason,
-                    answer.invalid_detail,
+                    _storable(answer.invalid_detail),
                     forecast,
                 ),
             )

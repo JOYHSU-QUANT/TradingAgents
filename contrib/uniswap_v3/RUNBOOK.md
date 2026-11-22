@@ -400,6 +400,7 @@ cd ~/uniswap-paper
 | `verdict`：`failed: the bar at ... is not the latest whose boundary has passed` | 想補問舊的 bar | 不補：舊 bar 的判斷會看到未來；那天照「沒判斷」走 |
 | `verdict`：`failed: verdict writes under the source the config's verdicts section names, and the config has no verdicts section` | `CONFIG_AI` 指到沒打開 `verdicts` 的設定檔 | 對照 §1.2、§3.1 |
 | `verdict`：`failed: the store holds verdicts of '...' given by [...]` | 在有真判斷的 store 上用了 `--fake-rating` | 演練換 scratch store（§2.5） |
+| `verdict` 的 log：`N lone surrogate(s) in the judge's words on WETH at ... cannot be written as UTF-8; each is replaced with U+FFFD`（另一種：`... in the sidecar at verdicts/...`） | judge 的文字帶了寫不出 UTF-8 的字元（落單的 surrogate，UTF-16 的半個字元）；已換成 U+FFFD 後照常記錄，評等不受影響（#429）。N 是照位置算的：決策在報告裡還有兩份副本，一個字元會報 3。這一行是 logger 印的，沒有 `warning:` 前綴 | 沒事；常常出現就看是哪個模型／供應商 |
 | `verdict`：`warning: the judge gave no rating on WBTC (REVIEW)` | judge 答了但決策全文沒有結尾的 `Rating: <評等>` 行（答案被 `agent.max_tokens` 截斷、或沒照格式）；已寫成 `REVIEW`、不再問；前面會有一行 log 說是哪一種 | 沒事；`ai_gated_weights` 當沒判斷處理。常發生就看 sidecar 的 `decision`：斷在半句就是 cap，調高 `agent.max_tokens` |
 | `failed: paper needs the packages in contrib/uniswap_v3/requirements.txt` | `PYTHON` 不是裝了相依的那個 venv | 改 §3.1 的 `PYTHON` |
 | `==== there is no ".../python": fix PYTHON ...` 接 `==== exit 4` | §3.1 的 `PYTHON` 路徑打錯 | 改 `paper-visit.local.sh` |

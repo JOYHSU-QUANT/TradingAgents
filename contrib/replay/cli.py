@@ -704,12 +704,22 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _printable(text: str) -> str:
+    """``text`` with each lone surrogate as its escape, so that a strict UTF-8 stream prints it.
+
+    The interpreter's own ``sys.stderr`` escapes one by itself. A stream
+    that does not — a harness's — raised from the print, after the row the
+    line reports had been stored (issue #428).
+    """
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
 def _progress(line: str) -> None:
-    print(line, file=sys.stderr)
+    print(_printable(line), file=sys.stderr)
 
 
 def _fail(message: str) -> int:
-    print(f"error: {message}", file=sys.stderr)
+    print(_printable(f"error: {message}"), file=sys.stderr)
     return 1
 
 

@@ -705,7 +705,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _printable(text: str) -> str:
-    """``text`` as any stream prints it: a lone surrogate (in a provider's words, say) as its escape.
+    """``text`` with each lone surrogate as its escape, so that a strict UTF-8 stream prints it.
 
     The interpreter's own ``sys.stderr`` escapes one by itself. A stream
     that does not — a harness's — raised from the print, after the row the

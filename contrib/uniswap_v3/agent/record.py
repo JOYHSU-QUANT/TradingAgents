@@ -51,8 +51,8 @@ def storable_answer(answer: Answer) -> tuple[Answer, int]:
 
     The decision, the line that says why news was missing, and every string
     in the reports that is reached through mappings (their keys too), lists
-    and tuples. Done once, before
-    anything is digested or written, so that the sidecar's ``decision``,
+    and tuples. Done once, before anything is digested or written, so that
+    the sidecar's ``decision``,
     its ``decision_digest`` and the row's digest are of the same words and
     a reader who digests the sidecar's decision gets the row's. An answer
     with none comes back as the same object, and what it writes is byte for

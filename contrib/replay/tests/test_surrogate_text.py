@@ -371,6 +371,24 @@ def test_a_refusal_in_such_words_is_printed_by_a_stream_that_escapes_nothing(
     assert f"tripped on {FFFD}" in _target(work, "failures")["error"]
 
 
+def test_what_is_printed_escapes_a_lone_surrogate_and_nothing_else():
+    clean = f"plain, {chr(0x898F)}{chr(0x5247)}, {chr(0x1F600)}, a dash {chr(0x2014)} and {FFFD}"
+    assert cli._printable(clean) == clean
+    assert cli._printable(f"a{HIGH}b") == "a" + ESCAPED + "b"
+
+
+def test_an_error_that_stops_the_command_in_such_words_is_printed_too(work, monkeypatch, capsys):
+    # A 401 is the key's or the model's, not the question's: the command
+    # stops by name, through the other of the two prints.
+    class Unauthorised(papers.Echo):
+        def __call__(self, system, human):
+            raise _ProviderError(401, f"invalid key {HIGH}")
+
+    _model(monkeypatch, Unauthorised())
+    assert cli.main(_argv(work, "replay")) == 1
+    assert "invalid key " + ESCAPED in capsys.readouterr().err
+
+
 # -- a decision's reply (already storable through the borrowed parse seam) ------------------------
 
 

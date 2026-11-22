@@ -9,9 +9,9 @@ A decline in such words ended in a traceback where it should have been
 "try again later".
 
 These tests hand the visit such an answer through a scripted judge. With
-the real graph only the final decision gets this far: any other report is
-read by a later node first, whose request cannot be built with such a
-character in it (issue #441).
+the real graph, of the reports only the final decision gets this far: any
+other report is read by a later node first, whose request cannot be built
+with such a character in it (issue #441).
 
 Every such character here is built with ``chr``: a source file cannot hold
 one, and an escape for one is easy to get wrong without noticing.
@@ -266,11 +266,15 @@ class _Says(ScriptedJudge):
 
 
 def _in_the_decision(answer: Answer) -> Answer:
-    # As the real judge builds it: the decision is also the last report.
+    # As the real graph builds it: the portfolio manager's decision is also
+    # two of the reports, so one character is counted three times.
     decision = f"{answer.decision} Momentum {HIGH} holds."
-    return replace(
-        answer, decision=decision, reports={**answer.reports, "final_trade_decision": decision}
-    )
+    reports = {
+        **answer.reports,
+        "final_trade_decision": decision,
+        "risk_debate_state": {"judge_decision": decision, "count": 1},
+    }
+    return replace(answer, decision=decision, reports=reports)
 
 
 def _in_a_report(answer: Answer) -> Answer:
@@ -294,8 +298,8 @@ def _from_a_judge_that_keeps_no_words(answer: Answer) -> Answer:
 @pytest.mark.parametrize(
     ("ticker", "change", "replaced"),
     [
-        ("ETH-USD", _in_the_decision, 2),
-        ("BTC-USD", _in_the_decision, 2),
+        ("ETH-USD", _in_the_decision, 3),
+        ("BTC-USD", _in_the_decision, 3),
         ("ETH-USD", _in_a_report, 1),
         ("ETH-USD", _in_a_nested_report, 1),
         ("ETH-USD", _in_the_news_line, 1),

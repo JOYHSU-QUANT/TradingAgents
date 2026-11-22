@@ -471,9 +471,10 @@ Breaking changes within the 0.x line are called out explicitly.
   package's own tests. The refusals were reproduced with a faked
   provider error: the OpenAI SDK escapes such a character in its own
   messages, so whether a real provider can produce one there was not
-  shown. How many characters were replaced is not recorded. The lines
-  `replay` prints to stderr now escape such a character themselves rather
-  than rely on the stream to.
+  shown. How many characters were replaced is not recorded. The progress
+  and error lines `replay`, `replay --probe` and `backtest --ask` print to
+  stderr now escape such a character themselves rather than rely on the
+  stream to.
 - **A character the output encoding cannot carry no longer ends a research
   run** (#430). `print` raises when the stream's encoding has no bytes for
   a character and its error handler is one that raises, as `sys.stdout`'s

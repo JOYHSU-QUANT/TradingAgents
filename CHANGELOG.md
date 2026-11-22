@@ -449,14 +449,21 @@ Breaking changes within the 0.x line are called out explicitly.
   (`domain/text.py`): it imports no other contrib package. A sidecar that
   could be written before is byte for byte what it was — which is why the
   text is replaced rather than dumped with `ensure_ascii=True`, which
-  would also not have got past the digest. Not deployed.
+  would also not have got past the digest. With the real graph this
+  reaches the final decision only: every other report is read by a later
+  node first, and a lone surrogate there stops that node's request from
+  being built, which still fails the visit (#441). The decline and the
+  news line were reproduced with a scripted judge; whether a real
+  provider's or vendor's words can carry one that far was not shown. Not
+  deployed.
 - **Text SQLite cannot take no longer ends a replay** (#428). The same
   character in a direction probe's reply, in the sentence that says why a
   reply was not read (which can hold it even when the reply is ASCII: it
   is built from JSON keys after they are decoded), in a provider's refusal
   or in the model name it reported raised from inside the store's write:
-  the question had been paid for, its row was not stored, and a resume
-  asked it again and stopped at the same place. `replay.sqlite` now
+  the row was not stored (for an answer, one that had been paid for),
+  and a resume asked the question again, stopping at the same place
+  whenever what came back held one again. `replay.sqlite` now
   stores each as U+FFFD at its writes (`replay_store._storable`; the
   helper is borrowed from `contrib/core`). A decision's reply (`replay`,
   `backtest --ask`) was already replaced by the borrowed parse seam since
@@ -464,7 +471,9 @@ Breaking changes within the 0.x line are called out explicitly.
   package's own tests. The refusals were reproduced with a faked
   provider error: the OpenAI SDK escapes such a character in its own
   messages, so whether a real provider can produce one there was not
-  shown. How many characters were replaced is not recorded.
+  shown. How many characters were replaced is not recorded. The lines
+  `replay` prints to stderr now escape such a character themselves rather
+  than rely on the stream to.
 - **A character the output encoding cannot carry no longer ends a research
   run** (#430). `print` raises when the stream's encoding has no bytes for
   a character and its error handler is one that raises, as `sys.stdout`'s

@@ -508,15 +508,17 @@ def _storable(text: str | None) -> str | None:
     For the columns that hold what a model or a provider said: a raw reply,
     the sentence that says why one was not read, a provider's error, the
     model name it reported. A lone surrogate has no UTF-8 encoding, so the
-    bind raised from inside the write — the question had been paid for, its
-    row was not stored, and a resume asked it again and stopped at the same
-    place. Replaced here, where every such write passes, as the perp
+    bind raised from inside the write — the row was not stored (for an
+    answer, one that had been paid for), and a resume asked the question
+    again, stopping at the same place whenever what came back held one
+    again. Replaced here, where every such write passes, as the perp
     package's store replaces it (issue #427). How many were replaced is not
     kept: there is no column for it, and nothing reads these columns back to
     score them. Text without one comes back as the same object.
 
-    The columns that hold this package's own tags (``invalid_reason``, the
-    gate's reasons) are not passed through: no model writes them.
+    The columns that hold tags rather than words (``invalid_reason``, the
+    gate's reasons) are not passed through: they are constants of the
+    parser, the gate and the probe, and no model writes them.
     """
     return None if text is None else replace_lone_surrogates(text)[0]
 
@@ -944,11 +946,12 @@ class ReplayStore:
         return by_repeat
 
     def responses(self, variant_sha: str, run_id: str) -> Mapping[int, Mapping[str, str]]:
-        """What the model said, word for word, for every stored answer: by repeat, then ``input_id``.
+        """What the model said, as it was stored, for every stored answer: by repeat, then ``input_id``.
 
         The text :meth:`answers` leaves behind: a scorecard reads what the
         gate made of an answer, the ``effect`` report also reads whether the
-        answer mentions what it was shown.
+        answer mentions what it was shown. It is the reply as stored: a lone
+        surrogate in it was replaced with U+FFFD on the way in.
         """
         by_repeat: dict[int, dict[str, str]] = {}
         for row in self.conn.execute(

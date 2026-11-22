@@ -27,14 +27,15 @@ def replace_lone_surrogates(text: str) -> tuple[str, int]:
 
     One for one: writing an escape out instead would turn one character
     into six, which could not be told from a judge that wrote those six.
-    Every surrogate in a ``str`` is a lone one — a well-formed pair is a
-    single code point — so there is nothing to pair up first. Text without
-    one comes back as the same object.
+    A well-formed pair is a single code point in a ``str``, so every
+    surrogate met here stands alone and no pairing is attempted: two halves
+    that happen to be adjacent become two U+FFFD. Text without one comes
+    back as the same object.
 
     The shared floor has this function too (``contrib/core/surrogates.py``);
     this package imports no other contrib package
-    (``tests/test_isolation.py``), so it keeps its own, pinned to behave the
-    same (decided 2026-11-22).
+    (``tests/test_isolation.py``), so it keeps its own, with its own tests
+    (decided 2026-11-22).
     """
     replaced, count = _LONE_SURROGATE.subn(REPLACEMENT_CHARACTER, text)
     return (replaced, count) if count else (text, 0)

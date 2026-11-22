@@ -23,6 +23,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import logging
 import os
 from collections.abc import Mapping
 from dataclasses import replace
@@ -33,6 +34,8 @@ from ..domain.text import replace_lone_surrogates
 from ..domain.times import FILE_STAMP, utc_text
 from ..domain.verdicts import Verdict, VerdictRecord, text_digest
 from .graph import PROMPT_VERSION, Answer
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "sidecar_path",
@@ -47,16 +50,17 @@ def storable_answer(answer: Answer) -> tuple[Answer, int]:
     """``answer`` with every lone surrogate in its words as U+FFFD, and how many there were.
 
     The decision, the line that says why news was missing, and every string
-    inside the reports, keys included, however deep. Done once, before
+    in the reports that is reached through mappings (their keys too), lists
+    and tuples. Done once, before
     anything is digested or written, so that the sidecar's ``decision``,
     its ``decision_digest`` and the row's digest are of the same words and
     a reader who digests the sidecar's decision gets the row's. An answer
     with none comes back as the same object, and what it writes is byte for
     byte what it was.
 
-    An answer that held one used to end the visit in a traceback at the
-    digest: the judge had been paid, the token was not recorded, and the
-    next visit asked again.
+    An answer that held one used to end the visit in a traceback, at the
+    digest or at the sidecar's dump: the judge had been paid, the token was
+    not recorded, and the next visit asked again.
     """
     decision, count = replace_lone_surrogates(answer.decision)
     reason = answer.news_missing_reason
@@ -76,7 +80,7 @@ def storable_answer(answer: Answer) -> tuple[Answer, int]:
 
 
 def _storable(value: object) -> tuple[Any, int]:
-    """``value`` with the strings in it made storable — mappings (keys too) and sequences walked."""
+    """``value`` with the strings in it made storable — mappings (keys too), lists and tuples walked."""
     if isinstance(value, str):
         return replace_lone_surrogates(value)
     if isinstance(value, Mapping):
@@ -141,13 +145,24 @@ def write_sidecar(home: Path, relative: str, record: Mapping[str, Any]) -> str:
     engine's, and one odd value must not lose the record. Nor must a
     character UTF-8 cannot carry: a lone surrogate still in the text —
     in the ``str`` of such a value, or in a record whose answer was not
-    passed through :func:`storable_answer` — is written as U+FFFD. A write
-    that fails (:class:`OSError`) leaves no partial file behind.
+    passed through :func:`storable_answer` — is written as U+FFFD, and a
+    WARNING says how many. A write that fails (:class:`OSError`) leaves no
+    partial file behind.
     """
     path = home / relative
     path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(record, indent=2, sort_keys=True, ensure_ascii=False, default=str)
-    data = replace_lone_surrogates(text)[0].encode("utf-8")
+    text, replaced = replace_lone_surrogates(text)
+    if replaced:
+        # Not reached by an answer that was made storable first, unless a
+        # value of it was written through ``default=str``.
+        logger.warning(
+            "%d lone surrogate(s) in the sidecar at %s cannot be written as UTF-8; each is "
+            "written as U+FFFD",
+            replaced,
+            relative,
+        )
+    data = text.encode("utf-8")
     partial = path.with_name(f"{path.name}.{os.getpid()}.part")
     try:
         with open(partial, "wb") as handle:

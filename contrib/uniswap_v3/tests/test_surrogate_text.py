@@ -1,10 +1,17 @@
 """Words that cannot be written as UTF-8 (issue #429): recorded, where they used to end a visit.
 
-A judge's decision, any of its reports, the line that says why news was
-missing, or the words of whatever did not answer can hold a lone surrogate.
-Neither a digest, a UTF-8 file nor SQLite can take one, and each of these
-ended the ``verdict`` visit in a traceback: the judge had been paid, the
-token was not recorded, and the next visit asked again.
+A judge's answer — its decision, a report, the line that says why news was
+missing — or the words of whatever did not answer can hold a lone
+surrogate. Neither a digest, a UTF-8 file nor SQLite can take one. An
+answer holding one ended the ``verdict`` visit in a traceback: the judge
+had been paid, the token was not recorded, and the next visit asked again.
+A decline in such words ended in a traceback where it should have been
+"try again later".
+
+These tests hand the visit such an answer through a scripted judge. With
+the real graph only the final decision gets this far: any other report is
+read by a later node first, whose request cannot be built with such a
+character in it (issue #441).
 
 Every such character here is built with ``chr``: a source file cannot hold
 one, and an escape for one is easy to get wrong without noticing.
@@ -33,7 +40,11 @@ from contrib.uniswap_v3.domain.text import REPLACEMENT_CHARACTER, replace_lone_s
 from contrib.uniswap_v3.domain.verdicts import JudgeDecline, Rating, text_digest
 from contrib.uniswap_v3.store.repository import open_store
 from contrib.uniswap_v3.tests.fakes.node import DAY, DEFAULT_TICK, FIRST_DAY, put_day
-from contrib.uniswap_v3.tests.fakes.verdicts import ScriptedJudge, judged_config
+from contrib.uniswap_v3.tests.fakes.verdicts import (
+    ScriptedJudge,
+    judged_config,
+    record as _stored,
+)
 
 HIGH = chr(0xD83D)  # the first half of a UTF-16 pair, on its own
 LOW = chr(0xDE00)  # the second half, on its own
@@ -63,6 +74,18 @@ def test_each_lone_surrogate_becomes_the_replacement_character_and_is_counted():
     assert replace_lone_surrogates(HIGH) == (FFFD, 1)
     # What comes back can be written.
     replace_lone_surrogates(f"x{HIGH}")[0].encode("utf-8")
+
+
+def test_every_surrogate_code_point_is_replaced_and_its_neighbours_are_not():
+    # The shared floor's helper has a test of its two ends; this copy cannot
+    # be set beside it here (the package imports no other), so the whole
+    # range is walked.
+    for code in range(0xD800, 0xE000):
+        assert replace_lone_surrogates(chr(code)) == (FFFD, 1), hex(code)
+    for code in (0xD7FF, 0xE000):
+        assert replace_lone_surrogates(chr(code)) == (chr(code), 0)
+    # Two halves that happen to be adjacent are two characters, and become two.
+    assert replace_lone_surrogates(HIGH + LOW) == (FFFD + FFFD, 2)
 
 
 def test_text_without_one_comes_back_as_the_same_object():
@@ -122,6 +145,18 @@ def test_every_word_of_an_answer_is_made_storable_and_counted():
     assert HIGH in answer.decision and HIGH in answer.reports["market_report"]
 
 
+def test_reports_are_walked_through_lists_and_tuples_however_they_nest():
+    answer = _answer(
+        reports={"turns": [{"said": f"a {HIGH}"}, (f"b {LOW}", [f"c {HIGH}"])], "count": 3}
+    )
+    made, count = storable_answer(answer)
+    assert count == 3
+    assert made.reports == {
+        "turns": [{"said": f"a {FFFD}"}, [f"b {FFFD}", [f"c {FFFD}"]]],
+        "count": 3,
+    }
+
+
 def test_the_sidecar_the_row_and_a_reader_s_digest_are_of_the_same_words(tmp_path):
     decision = f"**Rating**: Buy\n\nMomentum {HIGH} holds."
     raw = _answer(decision=decision, reports={"final_trade_decision": decision})
@@ -153,26 +188,34 @@ def test_the_sidecar_the_row_and_a_reader_s_digest_are_of_the_same_words(tmp_pat
     assert written["reports"]["final_trade_decision"] == written["decision"]
 
 
-def test_write_sidecar_writes_a_record_that_was_handed_to_it_raw(tmp_path):
+def test_write_sidecar_writes_a_record_that_was_handed_to_it_raw(tmp_path, caplog):
     # One odd value must not lose the record (its docstring): what
     # ``default=str`` writes for one, a key, and a record whose answer was
-    # not made storable first, are all written.
+    # not made storable first, are all written — and said, since nothing
+    # upstream of the dump counted them.
     class Odd:
         def __str__(self) -> str:
             return f"odd {HIGH}"
 
     record = {"decision": f"raw {HIGH}", "odd": Odd(), f"key {LOW}": 1}
-    digest = write_sidecar(tmp_path, "verdicts/j/x.json", record)
+    with caplog.at_level("WARNING", logger="contrib.uniswap_v3.agent.record"):
+        digest = write_sidecar(tmp_path, "verdicts/j/x.json", record)
+    assert [r.getMessage() for r in caplog.records] == [
+        "3 lone surrogate(s) in the sidecar at verdicts/j/x.json cannot be written as UTF-8; "
+        "each is written as U+FFFD"
+    ]
     data = (tmp_path / "verdicts" / "j" / "x.json").read_bytes()
     assert digest == hashlib.sha256(data).hexdigest()
     assert json.loads(data) == {"decision": f"raw {FFFD}", "odd": f"odd {FFFD}", f"key {FFFD}": 1}
 
 
-def test_a_sidecar_that_could_be_written_before_is_byte_for_byte_what_it_was(tmp_path):
+def test_a_sidecar_that_could_be_written_before_is_byte_for_byte_what_it_was(tmp_path, caplog):
     # The other way to get past the encoding (``ensure_ascii=True``) would
     # have rewritten every non-ASCII character of every sidecar from here on.
     record = {"decision": f"a dash {chr(0x2014)} and {chr(0x898F)}{chr(0x5247)}", "n": 1}
-    write_sidecar(tmp_path, "verdicts/j/x.json", record)
+    with caplog.at_level("WARNING", logger="contrib.uniswap_v3.agent.record"):
+        write_sidecar(tmp_path, "verdicts/j/x.json", record)
+    assert caplog.records == []
     data = (tmp_path / "verdicts" / "j" / "x.json").read_bytes()
     assert data == json.dumps(record, indent=2, sort_keys=True, ensure_ascii=False).encode("utf-8")
     assert chr(0x2014).encode("utf-8") in data
@@ -284,13 +327,34 @@ def test_a_visit_records_a_judge_whose_words_hold_a_lone_surrogate(
     # Said once, of that token, with how many.
     (warning,) = (r.getMessage() for r in caplog.records if r.name == _LOGGER)
     assert warning == (
-        f"the judge's words on {symbol} at 2024-01-03 held {replaced} lone surrogate(s), which "
-        "cannot be written as UTF-8; each is recorded as U+FFFD"
+        f"{replaced} lone surrogate(s) in the judge's words on {symbol} at 2024-01-03 (its "
+        "decision, and each report that repeats it, counted where they stand) cannot be "
+        "written as UTF-8; each is replaced with U+FFFD"
     )
     # The next visit has nothing left to ask, so nothing is paid for twice.
     asked = len(judge.asked)
     assert _visit(config, db, now=_NOW + 60) == cli.EXIT_OK
     assert len(judge.asked) == asked == 2
+
+
+def test_an_answer_dropped_for_another_visit_s_is_not_said_to_be_replaced(
+    config, db, monkeypatch, caplog
+):
+    # Another visit recorded the token while this one's judge was thinking:
+    # nothing of this answer is recorded, so nothing of it is replaced.
+    class Overtaken(_Says):
+        def ask(self, ticker, trade_date, context, *, accept_news_less=False):
+            symbol = "WBTC" if ticker == "BTC-USD" else "WETH"
+            with open_store(db, create=False) as store:
+                store.insert_verdict(_stored(symbol, 2, source=_SOURCE))
+            return super().ask(ticker, trade_date, context, accept_news_less=accept_news_less)
+
+    _judging(monkeypatch, Overtaken("ETH-USD", _in_the_decision))
+    with caplog.at_level("WARNING", logger=_LOGGER):
+        assert _visit(config, db) == cli.EXIT_OK
+    assert [r for r in caplog.records if "surrogate" in r.getMessage()] == []
+    with open_store(db, create=False) as store:
+        assert store.verdict(_SOURCE, "WETH", _DAY2).model == "synthetic"
 
 
 def test_a_clean_visit_says_nothing_of_it(config, db, monkeypatch, caplog):

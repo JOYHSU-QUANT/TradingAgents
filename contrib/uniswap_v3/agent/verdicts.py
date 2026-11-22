@@ -275,17 +275,6 @@ def ask_verdicts(
                 f"{exc}; {len(done)} verdict(s) at {trade_date} stay recorded, and a later "
                 f"visit asks about the rest"
             ) from exc
-        # Before anything is digested or written: words that cannot be
-        # written as UTF-8 are made storable, once, and said (#429).
-        answer, replaced = storable_answer(answer)
-        if replaced:
-            logger.warning(
-                "the judge's words on %s at %s held %d lone surrogate(s), which cannot be "
-                "written as UTF-8; each is recorded as U+FFFD",
-                symbol,
-                trade_date,
-                replaced,
-            )
         # Another visit may have recorded this token while the judge was thinking.
         meanwhile = store.verdict(source, symbol, time)
         if meanwhile is not None:
@@ -301,6 +290,19 @@ def ask_verdicts(
             )
             report(done[-1])
             continue
+        # This answer is the one to record. Before anything of it is
+        # digested or written, words that cannot be written as UTF-8 are
+        # made storable, once, and said (#429).
+        answer, replaced = storable_answer(answer)
+        if replaced:
+            logger.warning(
+                "%d lone surrogate(s) in the judge's words on %s at %s (its decision, and "
+                "each report that repeats it, counted where they stand) cannot be written "
+                "as UTF-8; each is replaced with U+FFFD",
+                replaced,
+                symbol,
+                trade_date,
+            )
         relative = digest = None
         if answer.reports is not None:
             relative = sidecar_path(source, symbol, time)

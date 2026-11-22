@@ -2,8 +2,9 @@
 
 A model's reply, the sentence that says why one was not read, a provider's
 refusal or the model name it reported can hold a lone surrogate. The bind
-raised from inside the write: the question had been paid for, its row was
-not stored, and a resume asked it again and stopped at the same place.
+raised from inside the write: the row was not stored (for an answer, one
+that had been paid for), and a resume asked the question again, stopping at
+the same place whenever what came back held one again.
 
 Three commands write such text — ``replay``, ``replay --probe`` and
 ``backtest --ask`` — and each is run here through ``cli.main`` with the
@@ -21,15 +22,24 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import replace
+from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
 from contrib.replay import cli, replay_store
-from contrib.replay.replay_store import ReplayStore
+from contrib.replay.replay_store import ReplayStore, StoredAnswer, StoredBook
 from contrib.replay.tests import papers
 from contrib.replay.tests.test_backtest_cli import GATE_MARKS, write_research
 from contrib.replay.tests.test_probe import H4, Forecaster, forecast_text, write_probe
+from contrib.replay.upstream import (
+    CurrentPositionState,
+    DecisionConfig,
+    RiskConfig,
+    evaluate,
+    parse_target_decision,
+)
 
 HIGH = chr(0xD83D)  # the first half of a UTF-16 pair, on its own
 FFFD = chr(0xFFFD)
@@ -220,6 +230,39 @@ def test_the_store_replaces_one_for_one_and_hands_clean_text_back_as_it_is():
     assert replay_store._storable(None) is None
 
 
+def test_the_store_takes_a_decision_reply_that_is_handed_to_it_raw(tmp_path):
+    # The parse seam hands the store a reply it has already replaced in
+    # (the last section of this file); the store does not lean on that.
+    risk, decision = RiskConfig.from_dict(papers.RISK), DecisionConfig.from_dict(papers.DECISION)
+    gate = evaluate(
+        parse_target_decision(papers.decision_text("set_target", "long", 30, 0.8), decision),
+        account_equity=Decimal(1000),
+        current=CurrentPositionState.flat(),
+        risk=risk,
+        decision_cfg=decision,
+    )
+    now = datetime(2027, 2, 1, tzinfo=timezone.utc)
+    raw = f"words {HIGH} words"
+    answer = StoredAnswer("run", "q1", 0, now, "train", raw, False, None, gate, "m", 1, 1)
+    book = StoredBook(
+        mark=Decimal(100),
+        size=Decimal(0),
+        entry=None,
+        wallet=Decimal(1000),
+        equity=Decimal(1000),
+        last_fill_ms=None,
+        guardrail_side=None,
+    )
+    variant, graph_variant = papers.variant(), papers.graph_variant()
+    with ReplayStore(tmp_path / "replay.sqlite", create=True) as store:
+        store.register(variant, now=now)
+        store.register(graph_variant, now=now)
+        store.write_answer(variant.sha, answer)
+        store.write_graph_answer(graph_variant.sha, answer, book)
+        stored = [row[0] for row in store.conn.execute("SELECT raw_response FROM answers")]
+    assert stored == [raw.replace(HIGH, FFFD)] * 2
+
+
 # -- a probe's reply ------------------------------------------------------------------------------
 
 
@@ -314,6 +357,18 @@ def test_a_refusal_whose_words_hold_one_is_recorded_as_any_refusal_is(
         # Every other question was answered: the run went on past the refusal.
         answered = {row["input_id"] for row in _rows(work, "answers")}
         assert TARGET_ID not in answered and len(answered) > TARGET + 1
+
+
+def test_a_refusal_in_such_words_is_printed_by_a_stream_that_escapes_nothing(
+    work, monkeypatch, capsys
+):
+    # ``capsys`` stands a strict UTF-8 stream in for stderr. The real one
+    # escapes such a character by itself; this one raised from the progress
+    # line, after the refusal had been stored.
+    _model(monkeypatch, _Echo(refusal=f"content filter tripped on {HIGH}"))
+    cli.main(_argv(work, "replay"))
+    assert "tripped on " + ESCAPED in capsys.readouterr().err
+    assert f"tripped on {FFFD}" in _target(work, "failures")["error"]
 
 
 # -- a decision's reply (already storable through the borrowed parse seam) ------------------------

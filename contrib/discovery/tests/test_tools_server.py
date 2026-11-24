@@ -52,12 +52,18 @@ from contrib.autoresearch.vocabulary import (
     feature_names,
     parse_feature_name,
 )
-from contrib.discovery import cli, tools_server
+from contrib.discovery import cli, summaryarm, tools_server
 from contrib.discovery.bench import read_manifest, tools_experiment
 from contrib.discovery.cli import main as discovery_main
 from contrib.discovery.landing import ARTIFACT_FILENAME, artifact_digest, experiment_for, land
 from contrib.discovery.manifest import SeedSet, WorldKind
-from contrib.discovery.research_tools import TOOL_NAMES, ToolRefusal, TrainView, call
+from contrib.discovery.research_tools import (
+    QUANTILES,
+    TOOL_NAMES,
+    ToolRefusal,
+    TrainView,
+    call,
+)
 from contrib.discovery.tools_server import (
     IMPORT_ROOT,
     LOOKUP_FAILED,
@@ -68,6 +74,7 @@ from contrib.discovery.tools_server import (
     ServerParams,
     build_server,
     load_view,
+    stats_fields,
     tool_specs,
     warm,
 )
@@ -241,6 +248,36 @@ def test_the_server_lists_the_three_look_ups_and_answers_as_the_pure_functions_d
         assert answer.structured_content == expected
         (block,) = answer.content
         assert json.loads(block.text) == expected
+
+
+def test_a_line_of_the_summary_arm_s_block_is_the_text_this_server_answers_with(view, listed):
+    # The summary arm (tools plan T6) hands its model the ``feature_stats``
+    # answer for every feature without a server in between. What it prints
+    # is the text a model of the tool arm reads when it asks this server the
+    # same — every feature, character for character — so the two arms differ
+    # in who chose the look-up and not in the figures.
+    names = feature_names()
+    _info, _tools, answers = _ask(
+        build_server(view), [("feature_stats", {"feature": name}) for name in names]
+    )
+    assert not any(answer.is_error for answer in answers)
+    assert tuple(answer.content[0].text for answer in answers) == summaryarm.figures(view)
+    # And what a field means is said to that arm in this server's own
+    # lines: each is a line of the tool's description.
+    fields = stats_fields()
+    described = listed["feature_stats"].description.split("\n")
+    for line in (*fields.numeric, fields.regime_intro, *fields.regime, fields.rounding):
+        assert line in described
+    # Every numeric field but ``feature`` has a line (its meaning here is
+    # the tool's alone), and the keys are the ones the output schema
+    # requires of each shape of answer, in the order an answer carries them.
+    assert len(fields.numeric) == len(fields.numeric_keys) - 1 == len(QUANTILES) + 4
+    assert len(fields.regime) == 1
+    number, label = listed["feature_stats"].output_schema["oneOf"]
+    assert (tuple(number["required"]), tuple(label["required"])) == (
+        fields.numeric_keys,
+        fields.regime_keys,
+    )
 
 
 @pytest.mark.parametrize(("tool", "arguments"), MISSHAPEN + MISTAKEN)

@@ -274,7 +274,14 @@ def test_the_tables_give_the_pick_a_row_of_its_own_between_grid_and_a_model(pick
         replace(report[Arm.TRAIN_PICK], scored_a_round=None)
     # A table's rows come in the enum's order, and the pool's bounds hold
     # the arms that propose from it.
-    assert list(Arm) == [Arm.RANDOM, Arm.GRID, Arm.TRAIN_PICK, Arm.LLM, Arm.LLM_TOOLS]
+    assert list(Arm) == [
+        Arm.RANDOM,
+        Arm.GRID,
+        Arm.TRAIN_PICK,
+        Arm.LLM,
+        Arm.LLM_SUMMARY,
+        Arm.LLM_TOOLS,
+    ]
     assert [arm for arm in Arm if arm.walks_pool] == [Arm.RANDOM, Arm.GRID, Arm.TRAIN_PICK]
     # ... and of those, the two that take one rule an answer are held to
     # running out after as many answers as the pool holds rules.

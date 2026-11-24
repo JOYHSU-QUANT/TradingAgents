@@ -10,6 +10,44 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **Discovery Lab: a model arm handed a fixed summary of the training
+  window and no tools** (tools plan T6). The tool-using model arm differs
+  from the blind one in two things at once — its model can see figures of
+  the training window, and it chooses which to look at. This arm has the
+  first and not the second: named by a manifest's new `arms.llm_summary`
+  (the model arm's five fields and `summary_version`), it is searched last,
+  as a model arm is, and asks its model once a round with a block of
+  figures appended to the research package's system prompt
+  (`contrib/discovery/summaryarm.py`; neither prompt function of the
+  research package is changed). The block was fixed before any tool-arm
+  result was read (2026-11-24): one line for every feature of the
+  vocabulary, in its order, each the `feature_stats` look-up's answer in
+  the text the look-ups' server sends it as, and nothing of the other two
+  look-ups — no feature is picked or dropped, and no return or backtest is
+  computed for the model. The paragraph that opens it states facts and
+  gives no advice, and describes a field in the server's own sentence. The
+  figures are read from the arm's own copy of the artifact, no further
+  than the last training bar, by the function the tool arm's server and
+  the pick by training score read it with; a feature the store cannot
+  answer is a named refusal before the model is asked anything, not a line
+  left out. `SUMMARY_VERSION` versions everything the arm's model reads
+  beyond the two prompts, with a digest pinned in the suite; a manifest of
+  another version is refused by `generate` and by `search`. Unlike the tool
+  arm's pack, that digest is written to no record — the arm keeps no
+  trace, and a block is recomputed from the arm's store. What the arm
+  spent is counted and recorded as the blind arm's is (`model_use.json`),
+  and it has a row of its own in `calibrate` and `report`, between the
+  blind arm's and the tool arm's. **Nothing has been run with a real model:**
+  whether this arm is run at all is decided after the tool arm's first
+  trial. Against the blind arm it would read as what the sight of the
+  figures is worth; the tool arm against it as what choosing the look-ups
+  adds *together with* the two look-ups the block leaves out.
+  **Manifest version 6.** `arms` gains the `llm_summary` key, so the
+  version is raised; versions 3, 4 and 5 are still read, each by its own
+  key set and written back as it was read (tests pin the digests of all
+  three). A manifest names at most one of `llm`, `llm_tools` and
+  `llm_summary`, and the refusal now says which it named.
+
 - **Discovery Lab: an arm that picks by training score with no model, the
   tool arm's control** (tools plan T5). If the tool-using model arm beats
   the blind one, that could be the model reasoning or merely the sight of

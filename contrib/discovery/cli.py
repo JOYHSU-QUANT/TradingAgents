@@ -24,10 +24,11 @@ Six in the order a world goes through them (plan §3):
   it). A world is searched once; a manifest that is not the directory's
   own is refused. A manifest that names the pick by training score runs
   it after Grid; one that names a model arm runs it too, last: it is the
-  one arm that costs money. What its searches spent is written
-  beside the verdicts (``model_use.json``; ``tool_use.json`` for the arm
-  with tools), and for the arm with tools a failure of the look-ups'
-  server stops the run with a refusal that names what was kept.
+  one arm that costs money (the blind one, the one handed a summary of
+  the training window, or the one with tools). What its searches spent is
+  written beside the verdicts (``model_use.json``; ``tool_use.json`` for
+  the arm with tools), and for the arm with tools a failure of the
+  look-ups' server stops the run with a refusal that names what was kept.
 - ``calibrate --root DIR`` — every searched run directory under the root
   tallied by world kind, seed set, set of conditions (a digest printed on
   each row, so two calibrations under one root are two rows) and arm: on
@@ -110,6 +111,7 @@ from .bench import (
     model_hypothesist,
     preview_oracle,
     run_world,
+    summary_arm,
     tool_arm,
     tools_experiment,
 )
@@ -270,6 +272,10 @@ def _cmd_generate(args: argparse.Namespace) -> int:
         # And the tool arm's: its model, the SDK its client is built on,
         # and a pack version that is this build's.
         tool_arm(manifest.arms.llm_tools)
+    if manifest.arms.llm_summary is not None:
+        # And the summary arm's: its model, and a summary version that is
+        # this build's.
+        summary_arm(manifest.arms.llm_summary)
     space = manifest.search_space
     manifest = replace(manifest, search_space=replace(space, pool_size=len(space.candidates)))
     root = Path(args.root) if args.root else default_root()

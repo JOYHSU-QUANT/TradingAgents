@@ -86,9 +86,11 @@ __all__ = [
     "Difficulty",
     "FundingModel",
     "LlmArm",
+    "LlmSummaryArm",
     "LlmToolsArm",
     "Manifest",
     "ManifestError",
+    "ModelArm",
     "Planted",
     "PriceModel",
     "RandomArm",
@@ -113,19 +115,22 @@ __all__ = [
 # landed ``world.sqlite`` the measuring verbs check before they copy it.
 # Version 4 adds ``arms.llm_tools``, the model arm that may look things up
 # (tools plan T4). Version 5 adds ``arms.train_pick``, the arm that reads
-# the training window with no model (tools plan T5).
+# the training window with no model (tools plan T5). Version 6 adds
+# ``arms.llm_summary``, the model arm handed a fixed summary of the training
+# window and no tools (tools plan T6).
 #
 # Version 3 is still READ (decided 2026-11-12): the worlds searched under it
-# are what a later run is set beside. So is version 4 (decided 2026-11-24).
+# are what a later run is set beside. So is version 4 (decided 2026-11-24),
+# and version 5 by the same rule.
 # A manifest keeps the version it was read at and is written back key for
 # key as that version wrote it, because a run directory is named by a digest
 # of that text (:meth:`Manifest.identity`) and the records beside it carry
 # the digest: read as a later version, every directory landed before would
 # be named for another manifest.
-MANIFEST_VERSION: Final = 5
+MANIFEST_VERSION: Final = 6
 # Written out, not derived from the line above: at the next version this
 # has to be decided again, and the build's own version is always read.
-READ_VERSIONS: Final = (3, 4, 5)
+READ_VERSIONS: Final = (3, 4, 5, 6)
 if MANIFEST_VERSION not in READ_VERSIONS:  # pragma: no cover - a bump that forgot this line
     raise RuntimeError(f"this build writes manifest version {MANIFEST_VERSION} and does not read it")
 # The arms a later version added: the key, the version it is first written
@@ -134,6 +139,7 @@ if MANIFEST_VERSION not in READ_VERSIONS:  # pragma: no cover - a bump that forg
 _LATER_ARMS: Final = (
     ("llm_tools", 4, "tool arm"),
     ("train_pick", 5, "train-pick arm"),
+    ("llm_summary", 6, "summary arm"),
 )
 
 
@@ -1070,12 +1076,59 @@ class LlmToolsArm:
         )
 
 
-# What the two model arms share: which model, how it is asked, how many
-# times, and the worlds it is run on.
+@dataclass(frozen=True)
+class LlmSummaryArm:
+    """The model arm handed a fixed summary of the training window, and no tools (tools plan §3.7, T6).
+
+    The model arm's five fields, read as that arm's are, and the version of
+    everything this arm's model reads beyond the research package's two
+    prompts (``summary_version``: the summary arm's ``SUMMARY_VERSION`` —
+    the paragraph that introduces the figures, which features are listed
+    and how a line is spelled). It is in the manifest's identity, so two
+    runs are one condition exactly when they agree on it.
+
+    It is set between the other two model arms: against the blind one it
+    asks what the plain sight of the training window's figures is worth,
+    and against the one with tools what choosing the look-ups adds to
+    being handed them. Whether ``summary_version`` is THIS build's is not
+    asked here, as the tool arm's pack version is not: the bench asks
+    before it builds the arm.
+    """
+
+    provider: str
+    model: str
+    temperature: float
+    replicates: int
+    world_subset: tuple[str, ...]
+    summary_version: int
+
+    def __post_init__(self) -> None:
+        _hold_model_arm(self, "arms.llm_summary")
+        _read.whole(self.summary_version, "arms.llm_summary.summary_version", minimum=1)
+
+    def to_dict(self) -> dict[str, object]:
+        return {**_model_arm_document(self), "summary_version": self.summary_version}
+
+    @classmethod
+    def from_dict(cls, payload: object) -> LlmSummaryArm:
+        return cls(
+            **_read.exact(payload, (*_MODEL_ARM_KEYS, "summary_version"), "arms.llm_summary")
+        )
+
+
+# What the model arms share: which model, how it is asked, how many times,
+# and the worlds it is run on.
 _MODEL_ARM_KEYS: Final = ("provider", "model", "temperature", "replicates", "world_subset")
 
+# The model arms, by the key each is written under in ``arms``, in the
+# order a table lists them: nothing of the training window, its figures
+# handed over, its figures looked up. A manifest names one at most
+# (:attr:`Arms.model_arm`), and this is the one list of them.
+_MODEL_ARMS: Final = ("llm", "llm_summary", "llm_tools")
+ModelArm = LlmArm | LlmSummaryArm | LlmToolsArm
 
-def _hold_model_arm(arm: LlmArm | LlmToolsArm, path: str) -> None:
+
+def _hold_model_arm(arm: ModelArm, path: str) -> None:
     """The shared fields of a model arm, each checked under ``path``."""
     _read.text(arm.provider, f"{path}.provider")
     _read.text(arm.model, f"{path}.model")
@@ -1086,7 +1139,7 @@ def _hold_model_arm(arm: LlmArm | LlmToolsArm, path: str) -> None:
     )
 
 
-def _model_arm_document(arm: LlmArm | LlmToolsArm) -> dict[str, object]:
+def _model_arm_document(arm: ModelArm) -> dict[str, object]:
     return {
         "provider": arm.provider,
         "model": arm.model,
@@ -1143,11 +1196,12 @@ class Arms:
     ``llm`` is optional because the null calibration runs Random and Grid
     first, without a model (plan §4.3); a manifest with no model arm is a
     complete run of those two. ``llm_tools`` is the model arm with the
-    training-window look-ups at hand (tools plan §3.5). A manifest names
-    one of the two at most: they are set side by side across two landings
-    of one seed, as the model arm and the full Random and Grid run already
-    are (plan §8 #5), so a row of a table is one arm under one set of
-    conditions.
+    training-window look-ups at hand (tools plan §3.5), and ``llm_summary``
+    the one handed a fixed summary of that window and no tools (tools plan
+    §3.7). A manifest names one of the three at most: they are set side by
+    side across landings of one seed, as the model arm and the full Random
+    and Grid run already are (plan §8 #5), so a row of a table is one arm
+    under one set of conditions.
 
     ``train_pick`` is the arm that picks by training score with no model
     (tools plan §3.6). It asks no provider anything and may stand in any
@@ -1160,6 +1214,7 @@ class Arms:
     llm: LlmArm | None = None
     llm_tools: LlmToolsArm | None = None
     train_pick: TrainPickArm | None = None
+    llm_summary: LlmSummaryArm | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.random, RandomArm):
@@ -1174,10 +1229,16 @@ class Arms:
             raise ManifestError(
                 f"arms.train_pick: expected a TrainPickArm or None, got {self.train_pick!r}"
             )
-        if self.llm is not None and self.llm_tools is not None:
+        if self.llm_summary is not None and not isinstance(self.llm_summary, LlmSummaryArm):
             raise ManifestError(
-                "arms: a manifest names one model arm, llm or llm_tools; the two are compared "
-                "across two landings of one seed"
+                f"arms.llm_summary: expected an LlmSummaryArm or None, got {self.llm_summary!r}"
+            )
+        named = [name for name in _MODEL_ARMS if getattr(self, name) is not None]
+        if len(named) > 1:
+            raise ManifestError(
+                f"arms: a manifest names one model arm — {', '.join(_MODEL_ARMS[:-1])} or "
+                f"{_MODEL_ARMS[-1]} — and this one names {' and '.join(named)}; they are "
+                f"compared across landings of one seed"
             )
         if (
             self.llm_tools is not None
@@ -1197,6 +1258,21 @@ class Arms:
                 f"scores as many rules a round as the tool arm may"
             )
 
+    @property
+    def model_arm(self) -> tuple[str, ModelArm] | None:
+        """The model arm these arms name, with the key it is written under; ``None`` where they name none.
+
+        One at most (``__post_init__``). The key is also the arm's name
+        wherever a search of it is filed — its results, its stores, its
+        row of a table — so whoever needs "which model arm, if any" asks
+        here and does not look under each key in turn.
+        """
+        for name in _MODEL_ARMS:
+            arm: ModelArm | None = getattr(self, name)
+            if arm is not None:
+                return name, arm
+        return None
+
     def to_dict(self, *, version: int) -> dict[str, object]:
         """The arms as a manifest of ``version`` writes them: the keys that version has, no others.
 
@@ -1209,6 +1285,7 @@ class Arms:
             "llm": None if self.llm is None else self.llm.to_dict(),
             "llm_tools": None if self.llm_tools is None else self.llm_tools.to_dict(),
             "train_pick": None if self.train_pick is None else self.train_pick.to_dict(),
+            "llm_summary": None if self.llm_summary is None else self.llm_summary.to_dict(),
         }
         keys = _arm_keys(version)
         for name, since, noun in _LATER_ARMS:
@@ -1225,11 +1302,13 @@ class Arms:
         body = _read.exact(payload, _arm_keys(version), "arms")
         tools = body.get("llm_tools")
         pick = body.get("train_pick")
+        summary = body.get("llm_summary")
         return cls(
             random=RandomArm.from_dict(body["random"]),
             llm=None if body["llm"] is None else LlmArm.from_dict(body["llm"]),
             llm_tools=None if tools is None else LlmToolsArm.from_dict(tools),
             train_pick=None if pick is None else TrainPickArm.from_dict(pick),
+            llm_summary=None if summary is None else LlmSummaryArm.from_dict(summary),
         )
 
 
@@ -1308,8 +1387,9 @@ class Manifest:
     ``manifest_version`` is the version the manifest was written at: this
     build's for one built in code, the file's own for one read — and it is
     written back as that version wrote it (``READ_VERSIONS``' comment says
-    why). A version-3 manifest has no tool arm to name, and neither it
-    nor a version-4 one the pick by training score.
+    why). A version-3 manifest has no tool arm to name, neither it nor a
+    version-4 one the pick by training score, and none before version 6
+    the summary arm.
     """
 
     world: World
@@ -1361,12 +1441,10 @@ class Manifest:
                 )
         # A model arm runs the subset's worlds; a manifest is one world,
         # and one naming a subset it is not in has an arm it will not run.
-        model_arms: tuple[tuple[str, LlmArm | LlmToolsArm | None], ...] = (
-            ("llm", self.arms.llm),
-            ("llm_tools", self.arms.llm_tools),
-        )
-        for name, arm in model_arms:
-            if arm is not None and self.world.id not in arm.world_subset:
+        named = self.arms.model_arm
+        if named is not None:
+            name, arm = named
+            if self.world.id not in arm.world_subset:
                 raise ManifestError(
                     f"arms.{name}.world_subset: {self.world.id} is not in it, and this manifest "
                     f"is that world; a world outside the subset is run from a manifest with "

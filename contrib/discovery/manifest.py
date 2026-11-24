@@ -1102,11 +1102,11 @@ class TrainPickArm:
 
     Each round it draws ``backtests`` rules from the pool, scores every one
     on the training window, and proposes the one that scored best there
-    (:class:`~contrib.discovery.hypothesists.TrainPickHypothesist` holds the
-    ranking). It is what the tool arm is set beside to tell a model's
-    reasoning from the plain sight of training figures, so ``backtests`` is
-    that arm's limit on scored backtests a round — and where one manifest
-    names both arms, :class:`Arms` holds the two numbers equal.
+    (:func:`~contrib.discovery.hypothesists.train_rank` is the ranking). It
+    is set beside the tool arm so that a gain of that arm's is not put down
+    to the plain sight of training figures, so ``backtests`` is that arm's
+    limit on scored backtests a round — and where one manifest names both
+    arms, :class:`Arms` holds the two numbers equal.
 
     One search seed per replicate, as the Random arm has: the order the
     pool is drawn in. Both fields are in the manifest's identity.
@@ -1151,8 +1151,9 @@ class Arms:
 
     ``train_pick`` is the arm that picks by training score with no model
     (tools plan §3.6). It asks no provider anything and may stand in any
-    manifest; beside ``llm_tools`` it scores as many rules a round as that
-    arm may, or it is not that arm's control.
+    manifest of a version that has its key, with a model arm or without;
+    beside ``llm_tools`` it scores as many rules a round as that arm may,
+    or it is not that arm's control.
     """
 
     random: RandomArm

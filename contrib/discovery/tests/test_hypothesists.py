@@ -1,19 +1,25 @@
-"""The pool and the two arms over it (plan §4.3; PR 3's acceptance: Random without replacement, Grid in order, exhausted flagged).
+"""The pool and the arms over it (plan §4.3; PR 3's acceptance: Random without replacement, Grid in order, exhausted flagged).
 
-The pool tests are on the manifest alone — enumeration is pure. The last
-test runs an arm through the research package's real ``search()`` on the
+The pool tests are on the manifest alone — enumeration is pure. Random and
+Grid are then run through the research package's real ``search()`` on the
 hand-written history, because what the exhausted protocol promises is a
 fact about that loop: a pool walked to its end stops the run without
 spending a round, every candidate having been filed once.
+
+The second half is the pick by training score (tools plan T5): what it
+draws, scores and proposes, the ranking it proposes by, the line it reads
+behind, and the same loop.
 """
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 
 import pytest
 
 from contrib.autoresearch.dsl import Family, Op, Side, load_spec, parse_spec, spec_hash
+from contrib.autoresearch.evaluator import EvaluationError
 from contrib.autoresearch.hypothesis import search
 from contrib.autoresearch.ledger import ProposalOutcome
 from contrib.autoresearch.metrics import SegmentMetrics
@@ -46,7 +52,7 @@ from contrib.discovery.research_tools import TrainView, ViewError, backtest_trai
 from contrib.discovery.tools_server import LaunchError
 from contrib.discovery.verdict import Ended, classify_ending
 
-from .conftest import BUY_12, COIN, arm_store, example_manifest, open_arm
+from .conftest import BUY_12, COIN, STEP_MS, arm_store, example_manifest, open_arm
 from .test_research_tools import _rewrite
 
 GATE = Clause("realized_vol_20", Op.GT)
@@ -230,7 +236,12 @@ def test_a_pool_walked_to_its_end_raises_the_seam_error_and_flags_itself(pool):
     for _ in range(pool.size):
         arm.propose("s", "u")
     assert not arm.exhausted
-    with pytest.raises(CandidatesExhausted, match="every one of the pool's 16 candidate"):
+    # The stop says what became of the rules, which for these two arms is
+    # that each was proposed: the sentence ``search()`` prints as its reason.
+    with pytest.raises(
+        CandidatesExhausted,
+        match=r"^grid: every one of the pool's 16 candidate\(s\) has been proposed$",
+    ):
         arm.propose("s", "u")
     assert arm.exhausted
     # The family ``search()`` stops on, and it stays raised — the flag is
@@ -290,11 +301,14 @@ def _pick(pool, view, *, seed=0, backtests=2, world=COIN) -> TrainPickHypothesis
 def _walked(arm: TrainPickHypothesist) -> list[str]:
     """Every answer the arm gives before its pool is out."""
     answers = []
-    while True:
+    # One ask more than the pool holds rules: an arm whose pool never ends
+    # fails here, where it would otherwise hang the suite.
+    for _ in range(arm.pool.size + 1):
         try:
             answers.append(arm.propose("ignored", "ignored"))
         except CandidatesExhausted:
             return answers
+    raise AssertionError(f"{arm.label}: asked {arm.pool.size + 1} times and the pool is not out")
 
 
 @pytest.mark.parametrize("backtests", [1, 2, 3, 5, 16, 20])
@@ -344,7 +358,9 @@ def test_one_world_and_seed_is_one_search_and_the_pick_s_stream_is_its_own(pool,
     assert _walked(first) == _walked(again)
     assert first.rounds == again.rounds
     # Another seed and another world are other orders, and so is the Random
-    # arm of the same seed: the two arms do not walk one permutation.
+    # arm of the same seed: its order is drawn on another stream. (Two
+    # streams are independent, not bound to differ — on a pool of three
+    # rules two orders coincide one time in six; on these sixteen they do not.)
     others = (
         _pick(pool, view, seed=1),
         _pick(pool, view, world="SYN-00000000"),
@@ -409,6 +425,8 @@ def test_the_ranking_reads_ruin_first_then_whether_it_traded_then_the_net_sharpe
     assert train_rank(lost) < train_rank(idle) == train_rank(idle_high)
     assert train_rank(idle) < train_rank(ruined)
     assert train_rank(ruined) == train_rank(ruined_high) == train_rank(ruined_idle)
+    # One trade is a trade: the second tier is for none at all.
+    assert train_rank(scoring(-4.0, trades=1)) == train_rank(lost) < train_rank(idle)
 
     def picked(*figures: SegmentMetrics) -> int:
         return PickRound(tuple(Scored(10 + i, train) for i, train in enumerate(figures))).picked
@@ -422,26 +440,99 @@ def test_the_ranking_reads_ruin_first_then_whether_it_traded_then_the_net_sharpe
     assert picked(lost) == 10
     with pytest.raises(ValueError, match="a round scores at least one rule"):
         PickRound(())
-    with pytest.raises(ValueError, match="a round scores at least one rule"):
+    with pytest.raises(ValueError, match="a round holds Scored rules"):
         PickRound((gained,))
     with pytest.raises(ValueError, match="a round draws each rule once"):
         PickRound((Scored(3, gained), Scored(3, lost)))
+    # A scored rule built by hand says no less than the arm's own: a number
+    # of a pool, and figures of the window the field is named for.
+    for number in (-1, True, 1.5, "3"):
+        with pytest.raises(ValueError, match="a scored rule is numbered from 0 in its pool"):
+            Scored(number, gained)
+    with pytest.raises(ValueError, match="a scored rule carries its training figures"):
+        Scored(0, None)
+    with pytest.raises(ValueError, match="a rule is scored on the training window"):
+        Scored(0, replace(gained, segment=view.split.validation))
 
 
+def test_a_round_that_cannot_be_scored_leaves_the_arm_as_it_found_it(pool, view, monkeypatch):
+    real = hypothesists.backtest_train
+    asked: list[str] = []
+
+    def failing(read, spec):
+        asked.append(spec_hash(spec))
+        if len(asked) == 4:  # the second rule of the second round
+            raise EvaluationError("the store cannot answer")
+        return real(read, spec)
+
+    monkeypatch.setattr(hypothesists, "backtest_train", failing)
+    arm = _pick(pool, view)
+    arm.propose("s", "u")
+    before = (arm.drawn, arm.proposed, arm.rounds, arm.exhausted)
+    assert before[:2] == (2, 1) and len(before[2]) == 1
+    # What the store cannot answer is the store's error, not a seam's: it
+    # leaves the arm, and nothing of the round it broke is counted.
+    with pytest.raises(EvaluationError, match="the store cannot answer"):
+        arm.propose("s", "u")
+    assert (arm.drawn, arm.proposed, arm.rounds, arm.exhausted) == before
+    # Asked again, the arm draws that round again: no rule left the pool.
+    arm.propose("s", "u")
+    assert [one.number for one in arm.rounds[1].scored] == list(arm.order[2:4])
+    assert asked[4:] == asked[2:4]
+    assert (arm.drawn, arm.proposed) == (4, 2)
+    # What a search has done is read, not set.
+    assert isinstance(arm.rounds, tuple) and arm.backtests == 2
+    for name, value in (("rounds", ()), ("backtests", 3)):
+        with pytest.raises(AttributeError):
+            setattr(arm, name, value)
+
+
+@pytest.mark.parametrize("earlier", [0, 1], ids=["ends at midnight", "ends a bar before"])
 def test_rewriting_everything_after_training_changes_no_pick(
-    opened_arm, view, pool, history, tmp_path
+    opened_arm, pool, history, tmp_path, earlier
 ):
     # The line the look-ups read behind (tools plan §2.2), held on what
     # this arm does with them: everything after the last training bar's
     # close replaced, and every round draws, scores and proposes as before.
-    _path, experiment = opened_arm
+    # On the experiment's own split, whose training window ends at a UTC
+    # midnight, and on one ending a bar earlier, so that a daily bar opens
+    # inside training and closes after it; and over a pool that also holds
+    # rules reading the daily series, where a look ahead would hide.
+    path, experiment = opened_arm
+    split = experiment.split
+    cut = split.train.end_ms - earlier * STEP_MS
+    experiment = replace(
+        experiment,
+        split=replace(
+            split,
+            train=replace(split.train, end_ms=cut),
+            validation=replace(split.validation, start_ms=cut),
+        ),
+    )
+    daily = Template(Side.LONG, Clause("close_1d", Op.GT), Clause("sma_1d_20", Op.GT), 12)
+    pool = Pool(
+        pool.candidates
+        + enumerate_pool(
+            _space(daily, close_1d=(22000.0, 24000.0, 26000.0), sma_1d_20=(0.0, 23000.0))
+        ).candidates
+    )
+    view = _train_view(path, experiment)
+    assert view.train.end_ms == cut
     bars = view.frame.bundle.bars
-    before = _pick(pool, view)
+    before = _pick(pool, view, backtests=3)
     answers = _walked(before)
+    # The rules reading the daily series are not all idle: some of what is
+    # compared below was scored on it.
+    assert any(
+        one.train.trades
+        for round_ in before.rounds
+        for one in round_.scored
+        if one.number >= 16
+    )
     rewritten = tmp_path / "rewritten.sqlite"
     with arm_store(history, rewritten) as store:
         assert _rewrite(store, since_ms=bars[-1].close_time + 1) > 0
-    after = _pick(pool, _train_view(rewritten, experiment))
+    after = _pick(pool, _train_view(rewritten, experiment), backtests=3)
     assert _walked(after) == answers
     assert after.rounds == before.rounds
     # The control: the same rewrite reaching back INSIDE training moves the
@@ -449,7 +540,7 @@ def test_rewriting_everything_after_training_changes_no_pick(
     control = tmp_path / "control.sqlite"
     with arm_store(history, control) as store:
         assert _rewrite(store, since_ms=bars[-60].close_time, series=("4h",)) > 0
-    moved = _pick(pool, _train_view(control, experiment))
+    moved = _pick(pool, _train_view(control, experiment), backtests=3)
     _walked(moved)
     assert moved.rounds != before.rounds
 
@@ -464,8 +555,21 @@ def test_the_pick_through_the_real_loop_files_what_it_picked_and_ends_exhausted(
     )
     assert pool.size == 3
     experiment = open_arm(arm)
+
+    def held() -> dict[str, str]:
+        # The store and its write-ahead log; the shared-memory index beside
+        # them is a reader's bookkeeping and holds nothing of the store.
+        return {
+            file.name: hashlib.sha256(file.read_bytes()).hexdigest()
+            for file in sorted(tmp_path.glob("arm.sqlite*"))
+            if not file.name.endswith("-shm")
+        }
+
     # Read as the bench reads it: beside the handle the search holds open.
+    # Looking is not filing — the read writes nothing to the arm's store.
+    before = held()
     pick = _pick(pool, _train_view(tmp_path / "arm.sqlite", experiment))
+    assert held() == before and "arm.sqlite" in before
     report = search(arm, experiment, pick, model="train_pick", max_trials=5)
     assert [len(round_.scored) for round_ in pick.rounds] == [2, 1]
     assert report.spent == 2 == pick.proposed

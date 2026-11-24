@@ -3,8 +3,9 @@
 The arm itself — what it draws, scores and proposes, round after round —
 is held in ``test_hypothesists.py`` on the hand-written history. Here it
 is one arm of a world: the example world landed under a manifest that
-names it and searched ONCE (``picked``), since every arm of a run costs a
-landing check, a promotion and the oracle's frame beside its rounds.
+names it and searched ONCE (``picked``): a run costs a landing check and
+the oracle's frame whatever its arms do, and each arm a frame a round and
+one more where a trial is selected.
 
 That one run is chosen for the case the records had none of before this
 arm: a pool of three rules and a budget of three, two rules drawn a
@@ -23,6 +24,7 @@ import pytest
 from contrib.discovery import bench
 from contrib.discovery.bench import (
     ARMS_DIRNAME,
+    VERDICTS_FILENAME,
     Arm,
     ArmResult,
     BenchError,
@@ -214,6 +216,20 @@ def test_the_tables_give_the_pick_a_row_of_its_own_between_grid_and_a_model(pick
     # A pool drawn dry is a search that finished, not a seam that failed.
     assert (pick.searches, pick.failed, pick.effort) == (1, 0, ((ROUNDS, ROUNDS),))
     assert " train_pick: " in pick.describe()
+    # Its row says how many rules each answer was picked among: the two
+    # distinct rules it counts are the ones proposed, of three it scored.
+    looked = "; each answer the best of up to 2 rule(s) scored on the training window"
+    assert pick.scored == BACKTESTS and pick.describe().endswith(
+        f"answers median 2 (min 2), distinct rules median 2 (min 2){looked}"
+    )
+    for row in rows[:-1]:
+        assert row.scored is None and "scored on the training window" not in row.describe()
+    # The number goes with that arm's row and no other.
+    with pytest.raises(BenchError, match=r"row\.scored: 2 on a random row"):
+        replace(rows[0], scored=2)
+    for missing in (None, 0, True):
+        with pytest.raises(BenchError, match=r"row\.scored: expected a whole number"):
+            replace(pick, scored=missing)
     # Scored and reported as any arm is; it asked no model, and its row
     # says nothing of tokens.
     scores = score_world(run)
@@ -226,10 +242,23 @@ def test_the_tables_give_the_pick_a_row_of_its_own_between_grid_and_a_model(pick
     assert list(report) == [Arm.RANDOM, Arm.GRID, Arm.TRAIN_PICK]
     assert (report[Arm.TRAIN_PICK].model_uses, report[Arm.TRAIN_PICK].model) == ((), None)
     assert not any("tokens" in line for line in report[Arm.TRAIN_PICK].describe())
+    # The report's row says the same of what was looked at, on its effort line.
+    assert report[Arm.TRAIN_PICK].scored == BACKTESTS
+    assert [line for line in report[Arm.TRAIN_PICK].describe() if looked in line] == [
+        f"  answers median 2 (min 2), distinct rules median 2 (min 2){looked}"
+    ]
+    for arm in (Arm.RANDOM, Arm.GRID):
+        assert report[arm].scored is None
+        assert not any("scored on the training window" in line for line in report[arm].describe())
+    with pytest.raises(BenchError, match=r"row\.scored: 2 on a grid row"):
+        replace(report[Arm.GRID], scored=2)
     # A table's rows come in the enum's order, and the pool's bounds hold
     # the arms that propose from it.
     assert list(Arm) == [Arm.RANDOM, Arm.GRID, Arm.TRAIN_PICK, Arm.LLM, Arm.LLM_TOOLS]
     assert [arm for arm in Arm if arm.walks_pool] == [Arm.RANDOM, Arm.GRID, Arm.TRAIN_PICK]
+    # ... and of those, the two that take one rule an answer are held to
+    # running out after as many answers as the pool holds rules.
+    assert [arm for arm in Arm if arm.one_rule_an_answer] == [Arm.RANDOM, Arm.GRID]
 
 
 def test_records_and_a_manifest_that_disagree_about_the_pick_are_refused(picked, tmp_path):
@@ -249,6 +278,13 @@ def test_records_and_a_manifest_that_disagree_about_the_pick_are_refused(picked,
         BenchError, match=rf"holds the arms .*train_pick-{SEED}.* the manifest beside"
     ):
         read_searched(bare)
+    # And held to that manifest by hand, past the check above, the pick's
+    # result is refused for what it is, not passed over unheld.
+    with pytest.raises(
+        BenchError,
+        match=rf"train_pick-{SEED} is a pick by training score, and the manifest beside it names none",
+    ):
+        bench._hold_to_manifest(bare / VERDICTS_FILENAME, verdicts, without)
     # A rule of the pick's that is no rule of the pool: it proposes from
     # the pool and nowhere else, as Random and Grid do.
     pick = _result(verdicts, Arm.TRAIN_PICK, SEED)
@@ -268,11 +304,14 @@ def test_the_pick_s_pool_is_out_in_the_rounds_its_draws_make_and_no_other_number
     # itself holds only that the answers do not outnumber the pool.
     run, verdicts, oracle, _lines = picked
     pick = _result(verdicts, Arm.TRAIN_PICK, SEED)
+    # Round 1 as the first round to pass the gate: a snapshot may say so
+    # of a trial that no longer passes at the final count, and has to say
+    # a round if one still does — so this holds whatever the trial scored.
     after_one = replace(
         pick.snapshot,
         answers=1,
         distinct_rules=1,
-        first_eligible_round=None,
+        first_eligible_round=1,
         trials=pick.snapshot.trials[:1],
     )
     # A result carries a holdout figure exactly when its snapshot selects a trial.

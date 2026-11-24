@@ -23,13 +23,21 @@ Breaking changes within the 0.x line are called out explicitly.
   server, no provider — and proposes the best. Every rule drawn leaves the
   pool, proposed or not. The ranking was fixed before any tool-arm result
   was read (2026-11-24): rules that traded and were not ruined first, by
-  training net Sharpe; then rules that never traded; ruined rules last,
-  with no ratio of theirs read; the first drawn among equals. Scoring a
+  training net Sharpe; then rules that made no trade in training (which
+  says nothing of them — they may trade in validation, the window the
+  promote gate reads); ruined rules last, with no ratio of theirs read;
+  the first drawn among equals. Scoring a
   rule files nothing and is not counted against the budget, as the tool
   arm's backtests are not. Its results are in `verdicts.json` with the
-  other arms' and it gets a row of its own in `calibrate` and `report`; it
-  writes no record of its own. Beside `arms.llm_tools` its `backtests` must
-  equal that arm's.
+  other arms' and it gets a row of its own in `calibrate` and `report`,
+  which says after the answers and rules it counts how many rules each
+  answer was picked among (the rules a row counts are the ones proposed);
+  it writes no record of its own. Beside `arms.llm_tools` its `backtests`
+  must equal that arm's. What the arm is matched to the tool arm on is that
+  number alone: it chooses from the pool, which in the worlds run so far
+  holds the planted rule itself, where the model writes any rule of the
+  language — so the tool arm beating it is strong evidence, and the tool
+  arm not beating it is not evidence against the model.
   **Manifest version 5.** `arms` gains the `train_pick` key, so the
   version is raised; versions 3 and 4 are still read, each by its own key
   set and written back as it was read, so every run directory landed

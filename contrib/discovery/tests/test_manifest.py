@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 import re
-from dataclasses import replace
+from dataclasses import fields, replace
 
 import pytest
 
@@ -15,12 +15,14 @@ from contrib.discovery.landing import conditions_digest, manifest_digest
 from contrib.discovery.manifest import (
     MANIFEST_VERSION,
     POOL_SIZING,
+    Arms,
     Candidate,
     Manifest,
     ManifestError,
     SeedSet,
     TrainPickArm,
     WorldKind,
+    _arm_keys,
     opaque_world_id,
 )
 from contrib.discovery.records import Reader
@@ -196,7 +198,9 @@ def test_the_arms_hold_each_arm_to_its_own_record_and_write_no_arm_a_shape_has_n
 
 # -- the pick by training score (tools plan T5) -----------------------------------------------------
 
-PICK = {"search_seeds": [0, 3], "backtests": 2}
+# Seeds not in ascending order: a replicate is numbered by its seed and
+# the arm runs them as listed, so the order written is the order kept.
+PICK = {"search_seeds": [3, 0], "backtests": 2}
 
 
 def _with_pick(**changes):
@@ -207,14 +211,15 @@ def _with_pick(**changes):
 def test_a_manifest_may_name_the_arm_that_picks_by_training_score():
     manifest = Manifest.from_dict(_with_pick())
     pick = manifest.arms.train_pick
-    assert (pick.search_seeds, pick.backtests) == ((0, 3), 2)
+    assert (pick.search_seeds, pick.backtests) == ((3, 0), 2)
     assert Manifest.loads(manifest.dumps()) == manifest
     assert manifest.to_dict()["arms"]["train_pick"] == PICK
     # It stands beside a model arm or without one, and is a condition of
     # the run either way: its seeds and the number it scores a round are in
     # the identity, so another of either is another directory and another row.
     assert manifest.arms.llm is not None
-    assert Manifest.from_dict(_edited(**{"arms.llm": None, "arms.train_pick": PICK}))
+    alone = Manifest.from_dict(_edited(**{"arms.llm": None, "arms.train_pick": PICK})).arms
+    assert (alone.llm, alone.llm_tools, alone.train_pick) == (None, None, pick)
     unnamed = example_manifest()
     assert unnamed.arms.train_pick is None
     for changed in ({}, {"search_seeds": [0]}, {"backtests": 3}):
@@ -272,6 +277,15 @@ def test_beside_the_tool_arm_the_pick_scores_as_many_rules_a_round_as_that_arm_m
         Manifest.from_dict(unmatched)
     # The blind model arm has no such number, and holds the pick to none.
     assert Manifest.from_dict(_with_pick(backtests=3)).arms.llm is not None
+
+
+def test_every_arm_a_manifest_names_has_a_key_at_this_build_s_version():
+    # An arm added to ``Arms`` and not to the table of the versions
+    # that write it would be left out of every manifest written, with
+    # no refusal: the keys written at this version are the arms there are.
+    assert set(_arm_keys(MANIFEST_VERSION)) == {field.name for field in fields(Arms)}
+    assert _arm_keys(3) == ("random", "llm")
+    assert _arm_keys(4) == ("random", "llm", "llm_tools")
 
 
 # -- the versions before an arm was added, still read -----------------------------------------------

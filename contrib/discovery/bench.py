@@ -193,6 +193,7 @@ __all__ = [
     "Verdicts",
     "calibration_table",
     "effort_note",
+    "hold_scored",
     "experiment_id",
     "in_row_order",
     "iter_searched",
@@ -206,6 +207,7 @@ __all__ = [
     "row_head",
     "row_key",
     "run_world",
+    "scored_a_round",
     "seam_note",
     "server_log_of",
     "store_path",
@@ -257,10 +259,11 @@ class Arm(VocabEnum, noun="arm"):
     def one_rule_an_answer(self) -> bool:
         """Whether every rule this arm takes from the pool is one answer, so its pool is out after as many answers as it holds rules.
 
-        Random and Grid. The pick by training score takes several rules an
-        answer, and how many is its manifest's to say.
+        Random and Grid: every arm of the pool but the pick by training
+        score, which may take several rules an answer — how many is its
+        manifest's to say.
         """
-        return self in (Arm.RANDOM, Arm.GRID)
+        return self.walks_pool and self is not Arm.TRAIN_PICK
 
 
 # -- the records ------------------------------------------------------------------------------
@@ -459,10 +462,11 @@ class Verdicts:
             # A pool arm proposes each candidate at most once and runs out
             # exactly when it has proposed them all; the model answers
             # outside the pool (plan §4.3) and has no pool to run out of.
-            # The pick by training score draws several rules an answer, so
-            # its pool is out in fewer answers than it holds rules: how
-            # many is its manifest's to say (``_hold_to_manifest``), since
-            # the number drawn a round is not in this record.
+            # The pick by training score may draw several rules an answer,
+            # and its pool is then out in fewer answers than it holds
+            # rules: how many is its manifest's to say
+            # (``_hold_to_manifest``), since the number drawn a round is
+            # not in this record.
             answers = result.snapshot.answers
             if not result.arm.walks_pool and result.snapshot.ended is Ended.EXHAUSTED:
                 raise BenchError(f"{result.experiment_id}: a model arm has no pool to walk to its end")
@@ -1465,6 +1469,7 @@ class CalibrationRow:
     found: int
     failed: int
     effort: tuple[tuple[int, int], ...] = ()
+    scored: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "kind", _read.enum(WorldKind, self.kind, "row.kind"))
@@ -1479,6 +1484,7 @@ class CalibrationRow:
             raise BenchError(f"row: {self.found} found in {self.searches} search(es)")
         if self.searches + self.failed == 0:
             raise BenchError("row: a row tallies at least one result")
+        hold_scored(self.arm, self.scored)
 
     @property
     def rate(self) -> float | None:
@@ -1494,7 +1500,7 @@ class CalibrationRow:
         return (
             f"{head}{self.found} {what} in {self.searches} search(es) = {rate}"
             f"{seam_note(self.failed)}"
-        ) + (f"; {effort_note(self.effort)}" if self.effort else "")
+        ) + (f"; {effort_note(self.effort, scored=self.scored)}" if self.effort else "")
 
 
 @dataclass(frozen=True)
@@ -1825,19 +1831,51 @@ def seam_note(failed: int) -> str:
     return f"; {failed} seam failure(s) not counted" if failed else ""
 
 
-def effort_note(effort: Sequence[tuple[int, int]]) -> str:
+def effort_note(effort: Sequence[tuple[int, int]], *, scored: int | None = None) -> str:
     """The answers and the distinct rules each search spent: what a clean row actually searched.
 
     A search whose every answer was refused files no rule and cannot call
     anything, so on a null world it reads as no false call; this is what
     tells that from a search of thirty rules.
+
+    ``scored`` is the pick by training score's row's (:func:`scored_a_round`):
+    how many rules each of its answers was picked among. The distinct
+    rules are the ones it PROPOSED, each the best of up to that many it
+    scored on the training window — which the count alone would hide, and
+    two rows that differ in it would show only as two digests.
     """
     answers = [pair[0] for pair in effort]
     rules = [pair[1] for pair in effort]
-    return (
+    note = (
         f"answers median {median(answers):g} (min {min(answers)}), distinct rules median "
         f"{median(rules):g} (min {min(rules)})"
     )
+    if scored is not None:
+        note += f"; each answer the best of up to {scored} rule(s) scored on the training window"
+    return note
+
+
+def scored_a_round(manifest: Manifest, arm: Arm) -> int | None:
+    """How many rules an answer of ``arm`` is picked among on the training window; ``None`` for an arm that scores none there.
+
+    The pick by training score's ``backtests``, for its row of a table.
+    It is in the conditions a row is keyed by, so every world of a row
+    gives the one number.
+    """
+    pick = manifest.arms.train_pick
+    return pick.backtests if arm is Arm.TRAIN_PICK and pick is not None else None
+
+
+def hold_scored(arm: Arm, scored: object) -> None:
+    """A row of a table carries that number exactly when it is the pick by training score's."""
+    if arm is not Arm.TRAIN_PICK:
+        if scored is not None:
+            raise BenchError(
+                f"row.scored: {scored!r} on a {arm.value} row; the pick by training score's "
+                f"alone scores rules on the training window to choose its answer"
+            )
+        return
+    _read.whole(scored, "row.scored", minimum=1)
 
 
 def in_row_order(keys: Iterable[RowKey]) -> list[RowKey]:
@@ -1861,10 +1899,12 @@ def calibration_table(run_dirs: Iterable[Path]) -> list[CalibrationRow]:
     """
     tally: dict[RowKey, list[int]] = {}
     effort: dict[RowKey, list[tuple[int, int]]] = {}
+    scored: dict[RowKey, int | None] = {}
     for _run_dir, searched in iter_searched(run_dirs):
         for result in searched.verdicts.results:
             key = row_key(searched.manifest, result.arm)
             counts = tally.setdefault(key, [0, 0, 0])
+            scored[key] = scored_a_round(searched.manifest, result.arm)
             if result.snapshot.ended is Ended.SEAM_FAILED:
                 counts[2] += 1
             else:
@@ -1876,7 +1916,11 @@ def calibration_table(run_dirs: Iterable[Path]) -> list[CalibrationRow]:
     rows: list[CalibrationRow] = []
     for key in in_row_order(tally):
         searches, found, failed = tally[key]
-        rows.append(CalibrationRow(*key, searches, found, failed, tuple(effort.get(key, ()))))
+        rows.append(
+            CalibrationRow(
+                *key, searches, found, failed, tuple(effort.get(key, ())), scored=scored[key]
+            )
+        )
     return rows
 
 
@@ -1920,6 +1964,14 @@ def _hold_to_manifest(path: Path, verdicts: Verdicts, manifest: Manifest) -> Non
             raise BenchError(
                 f"{path}: {result.experiment_id} filed trial(s) {outside} that are not rules of "
                 f"the pool"
+            )
+        if result.arm is Arm.TRAIN_PICK and pick is None:
+            # ``read_searched`` has refused this already (the arms a record
+            # holds are the manifest's); said again here so that no other
+            # caller can pass a pick's result unheld.
+            raise BenchError(
+                f"{path}: {result.experiment_id} is a pick by training score, and the manifest "
+                f"beside it names none"
             )
         if result.arm is Arm.TRAIN_PICK and pick is not None:
             # The pool is out after this many answers and no other number,

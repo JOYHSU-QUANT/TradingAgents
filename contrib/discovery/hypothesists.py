@@ -33,11 +33,16 @@ with the look-up the tool arm's model has
 (:func:`~contrib.discovery.research_tools.backtest_train`, called as a
 function: no server, no model), and proposes the one that scored best
 there (:func:`train_rank`). It sees what a model with the tools may see of
-a rule's training figures, as many times a round, and does no reasoning
-about them — so what the tool arm does beyond it is the model's, and what
-it does beyond Random is what the sight of training figures buys by
-itself. Every rule it draws leaves the pool, proposed or not, and the pool
-runs out as the other arms' does.
+a rule's training figures, at most as many times a round, and does no
+reasoning about them. What it is matched to the tool arm on is that number
+and nothing else: it chooses among the pool's rules, where the model
+writes any rule of the language, has two other look-ups, and reads the
+validation feedback. So the tool arm doing better than it is evidence of
+more than the sight of training figures, and the tool arm doing no better
+says little, the pool being a short list to pick from; what this arm does
+beyond Random is what that sight buys a picker with no judgement. Every
+rule it draws leaves the pool, proposed or not, and the pool runs out as
+the other arms' does.
 """
 
 from __future__ import annotations
@@ -47,7 +52,7 @@ from dataclasses import dataclass
 
 from .manifest import Candidate, SearchSpace
 from .research_tools import TrainView, backtest_train
-from .upstream import HypothesistError, SegmentMetrics
+from .upstream import HypothesistError, SegmentMetrics, SegmentName
 
 __all__ = [
     "CandidatesExhausted",
@@ -113,8 +118,15 @@ class PoolHypothesist:
     every rule it takes, as this class does; ``exhausted`` is set the
     moment an arm is asked with nothing left in the pool, and stays set.
     The prompts are read by no arm (the module docstring).
+
+    A round is this class's to count, whatever arm it is: :meth:`propose`
+    takes the round's rules, asks :meth:`_choose` for the answer, and only
+    then counts them — so an arm is a way of choosing, and none can forget
+    to move the pool on or to end it.
     """
 
+    # How many of the pool's rules one answer takes.
+    _a_round = 1
     # What the stop says became of every rule: an arm that takes more than
     # it proposes says another word.
     _taken = "proposed"
@@ -129,28 +141,30 @@ class PoolHypothesist:
         self.proposed = 0
         self.exhausted = False
 
-    def _next(self, count: int) -> tuple[int, ...]:
-        """The next ``count`` numbers of the order, or the ones left if fewer; none left is the pool's end.
+    def _choose(self, numbers: tuple[int, ...]) -> str:
+        """The answer of a round that took ``numbers`` from the pool: here, the one rule taken."""
+        (number,) = numbers
+        return self.pool.candidates[number].answer()
 
-        The one place the exhausted protocol is kept: the flag first, then
-        the seam error (the verdict reads the flag off an arm whose search
-        the error stopped). Nothing is counted here — the caller counts
-        what it took (``drawn``) once it has an answer to give.
-        """
+    def propose(self, system: str, user: str) -> str:
+        del system, user  # unread by design
         if self.drawn == len(self.order):
+            # The exhausted protocol, kept in this one place: the flag
+            # first, then the seam error (the verdict reads the flag off an
+            # arm whose search the error stopped).
             self.exhausted = True
             raise CandidatesExhausted(
                 f"{self.label}: every one of the pool's {self.pool.size} candidate(s) has been "
                 f"{self._taken}"
             )
-        return self.order[self.drawn : self.drawn + count]
-
-    def propose(self, system: str, user: str) -> str:
-        del system, user  # unread by design
-        (number,) = self._next(1)
-        self.drawn += 1
+        # The round's rules, or the ones left if fewer. Chosen among before
+        # anything is counted: a round that cannot be answered (a rule the
+        # store cannot measure ends the search) leaves the arm as it found it.
+        numbers = self.order[self.drawn : self.drawn + self._a_round]
+        answer = self._choose(numbers)
+        self.drawn += len(numbers)
         self.proposed += 1
-        return self.pool.candidates[number].answer()
+        return answer
 
 
 class GridHypothesist(PoolHypothesist):
@@ -182,12 +196,16 @@ def train_rank(metrics: SegmentMetrics) -> tuple[int, float]:
     Decided 2026-11-24, before any result of the tool arm was read. Three
     tiers, and the net Sharpe read in the first alone:
 
-    0. the rule traded and was not ruined — the higher net Sharpe first;
-    1. it made no trade — a Sharpe of 0 that says nothing, and a rule the
-       promote gate refuses whatever else it scores, so it is proposed
-       only when nothing drawn beside it traded;
+    0. the rule traded and was not ruined — the higher net Sharpe first,
+       a rule that lost in training included: it has a figure to compare;
+    1. it made no trade in training — a Sharpe of 0 that says nothing of
+       the rule, so it is proposed only when nothing drawn beside it
+       traded. (It may yet trade in validation, which is the window the
+       promote gate reads; the tier is about what training shows, not
+       about what the gate will say.)
     2. it was ruined — last whatever its ratios, since no ratio of a
-       ruined run is read (the research package ranks its trials so).
+       ruined run is read (the research package puts a ruined trial last
+       for the same reason).
 
     Within the second and third tiers every rule ranks alike, and among
     equals the one drawn first is proposed (:attr:`PickRound.picked`).
@@ -206,6 +224,19 @@ class Scored:
     number: int
     train: SegmentMetrics
 
+    def __post_init__(self) -> None:
+        # A record built by hand must not say less than the arm's own do:
+        # a number of a pool, and figures of the window the field names.
+        if isinstance(self.number, bool) or not isinstance(self.number, int) or self.number < 0:
+            raise ValueError(f"a scored rule is numbered from 0 in its pool, got {self.number!r}")
+        if not isinstance(self.train, SegmentMetrics):
+            raise ValueError(f"a scored rule carries its training figures, got {self.train!r}")
+        if self.train.segment.name is not SegmentName.TRAIN:
+            raise ValueError(
+                f"a rule is scored on the training window, and these figures are for "
+                f"{self.train.segment}"
+            )
+
 
 @dataclass(frozen=True)
 class PickRound:
@@ -215,8 +246,10 @@ class PickRound:
 
     def __post_init__(self) -> None:
         scored = tuple(self.scored)
-        if not scored or any(not isinstance(one, Scored) for one in scored):
+        if not scored:
             raise ValueError("a round scores at least one rule")
+        if any(not isinstance(one, Scored) for one in scored):
+            raise ValueError("a round holds Scored rules")
         if len({one.number for one in scored}) != len(scored):
             raise ValueError("a round draws each rule once")
         object.__setattr__(self, "scored", scored)
@@ -247,11 +280,14 @@ class TrainPickHypothesist(PoolHypothesist):
     """Each round: draw ``backtests`` rules, score each on the training window, propose the best there.
 
     The pool is drawn in a permutation of its own — from the world's id
-    and the search seed, as the Random arm's is, on another stream, so the
-    two arms of one seed do not walk one order — and without replacement:
-    a round takes the next ``backtests`` numbers of it, and all of them
-    leave the pool, the ones not proposed too. A last round finding fewer
-    left scores those; one finding none raises
+    and the search seed, as the Random arm's is, on a stream of its own, so
+    the two arms' orders are drawn independently (decided 2026-11-24: one
+    shared order would tie the two arms' luck together) — and without
+    replacement: a round takes the next ``backtests`` numbers of it, and
+    all of them leave the pool for good, the ones not proposed too
+    (decided the same day: the arm then sees the most rules a walk of the
+    pool can, which makes it the strongest control of its kind). A last
+    round finding fewer left scores those; one finding none raises
     :class:`CandidatesExhausted`, as the other pool arms do — after
     :func:`rounds_to_draw` answers.
 
@@ -261,9 +297,10 @@ class TrainPickHypothesist(PoolHypothesist):
     cannot answer (``EvaluationError``) is left to propagate, as it is
     from the search's own measurement of the same rule.
 
-    ``rounds`` keeps what each round drew and scored, so the arm's use of
-    the training window can be counted: never more than ``backtests``
-    scored rules a round, which is the tool arm's own limit.
+    ``rounds`` is what each round drew and scored, so the arm's use of the
+    training window can be counted: never more than ``backtests`` scored
+    rules a round, which is the tool arm's own limit. Read-only, as
+    ``backtests`` is: they describe a search that has been made.
     """
 
     # Not every rule this arm takes is proposed.
@@ -288,20 +325,26 @@ class TrainPickHypothesist(PoolHypothesist):
         random.Random(f"{world_id}/train_pick/{search_seed}").shuffle(order)
         super().__init__(pool, tuple(order), f"train_pick seed {search_seed}")
         self.view = view
-        self.backtests = backtests
-        self.rounds: list[PickRound] = []
+        self._a_round = backtests
+        self._rounds: list[PickRound] = []
 
-    def propose(self, system: str, user: str) -> str:
-        del system, user  # unread by design
-        # Scored before anything is counted: a rule the store cannot
-        # measure ends the search, and leaves this arm as the round found it.
+    @property
+    def backtests(self) -> int:
+        """How many rules a round scores, the last round's fewer if fewer are left."""
+        return self._a_round
+
+    @property
+    def rounds(self) -> tuple[PickRound, ...]:
+        """Every round answered so far, in order."""
+        return tuple(self._rounds)
+
+    def _choose(self, numbers: tuple[int, ...]) -> str:
         round_ = PickRound(
             tuple(
                 Scored(number, backtest_train(self.view, self.pool.candidates[number].spec))
-                for number in self._next(self.backtests)
+                for number in numbers
             )
         )
-        self.rounds.append(round_)
-        self.drawn += len(round_.scored)
-        self.proposed += 1
-        return self.pool.candidates[round_.picked].answer()
+        answer = self.pool.candidates[round_.picked].answer()
+        self._rounds.append(round_)
+        return answer

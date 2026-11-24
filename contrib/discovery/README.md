@@ -68,7 +68,7 @@ JSON 層。定義見「訓練區間查詢（工具組 T1）」一節。
   autoresearch 的閘門（`verdict.gate_at`：`threshold(max_trials)`、餘裕 ≥ `oracle_margin` 才算 oracle 有餘裕，計畫 §4.4）；
   `pool_reference()`＝整池每個候選的 validation net sharpe（一個 frame 算完，不計預算、不落 ledger）；`Oracle`＝`oracle.json`
   的紀錄。什麼時候可以讀 holdout 是 protocol（`bench.py`），不是這些函式管的。
-- [`hypothesists.py`](./hypothesists.py)：`RandomHypothesist`／`GridHypothesist` 實作 autoresearch 的 `Hypothesist` port、
+- [`hypothesists.py`](./hypothesists.py)：`RandomHypothesist`／`GridHypothesist`，以及工具組 T5 的對照組 `TrainPickHypothesist`，實作 autoresearch 的 `Hypothesist` port、
   **不讀 prompt**；池走完 raise `CandidatesExhausted`（`HypothesistError` 的子類）並自標 `exhausted`。候選池本身由 manifest 寫出
   （`SearchSpace.candidates`，讀 manifest 時就枚舉、parser 拒絕就 manifest 拒絕）；定義見「三臂與判定」一節。
 - [`bench.py`](./bench.py)：`run_world(run_dir)` 把一個落地世界按計畫 §3 的順序跑到底；`preview_oracle(run_dir)`＝搜尋前的
@@ -201,7 +201,7 @@ parser 讀成 feature 名、regime 給數字會被 parser 拒絕，兩種都在�
    第一顆先跑 `verify()`（落地時的驗收再跑一次：artifact 真的是 manifest 描述的世界）；每臂以 `experiment_for()`＋
    `ledger.create_experiment()` 開自己的 experiment（id＝`random-<seed>`／`grid-0`）——同 coin、同 split／costs／window／
    penalty，`Verdicts` 的建構子守住這件事（也守住：必有 `grid-0`、各臂 distinct rules＝自己的 trials 數；Random／Grid 另外不超過
-   `pool_size`、答案數不超過 `pool_size`、`exhausted` 的答案數＝`pool_size`；模型臂不得 `exhausted`）；grid 只有 replicate 0、`interrupted` 的快照不收，
+   `pool_size`、答案數不超過 `pool_size`、`exhausted` 的答案數＝`pool_size`（對照組每輪抽好幾條，它的數另計，見「不用模型的對照組（工具組 T5）」）；模型臂不得 `exhausted`）；grid 只有 replicate 0、`interrupted` 的快照不收，
    由 `ArmResult` 守。
 3. 每臂跑 autoresearch 的 `search(ledger, experiment, hypothesist, max_trials=budget)`；跑完立刻 `snapshot_arm`（晉升前）→
    `final_verdict`；`selected` 非空就用 autoresearch 的 `promote()` 晉升那一筆（holdout 數字由它讀）。中斷＝整個 run 丟掉
@@ -235,7 +235,7 @@ verdicts 一致、`planted` 有無要對得上世界的 kind、`pool.size` 要�
 `threshold`、池的 `threshold`）要等於 manifest 的 budget 與 penalty 算出的值；`verdicts.json` 裡各臂 experiment 的條件
 （split／costs／window／penalty）要等於 `experiment_for(manifest)`、`budget_spent` 的答案數＝預算、任何臂（含 `seam_failed`）
 的答案數不超過預算、Random／Grid 的每筆 trial 都是池裡的規則；`oracle.json` 埋的規則三段數字的視窗要等於 manifest 的 split
-（`exhausted` 的答案數＝池大小是紀錄本身的閘門、每次讀都檢查）；同一個目錄被走到兩次（root 裡有連到它的連結）只算一次；壞掉的紀錄（含 manifest）拒絕句子帶檔案路徑；兩份紀錄沒有都在的目錄（只有 `arms/`＝搜尋進行中或沒跑完、
+（Random／Grid 的 `exhausted` 答案數＝池大小是紀錄本身的閘門、每次讀都檢查；對照組的在這裡對照 manifest 的 `backtests` 核對）；同一個目錄被走到兩次（root 裡有連到它的連結）只算一次；壞掉的紀錄（含 manifest）拒絕句子帶檔案路徑；兩份紀錄沒有都在的目錄（只有 `arms/`＝搜尋進行中或沒跑完、
 只有 `verdicts.json`＝停在兩次搬檔之間）拒絕而不是跳過，句子只說「等沒有搜尋在跑再手動移除」；不要求 `world.sqlite`（artifact 可裁掉省空間）。
 
 **兩份紀錄**：`verdicts.json`＝`{verdicts_version, world_id, pool_size, manifest_digest, results: [{arm, replicate, snapshot,
@@ -243,7 +243,7 @@ verdict, holdout}]}`（`manifest_digest`＝跑的時候 run 目錄的 digest，�
 雙胞胎 id 相同、池相同，只差 digest），
 `verdict` 寫在 `snapshot` 旁邊給人讀，讀回時重算 `final_verdict(snapshot)` 不相等就拒絕（紀錄永遠可由快照重判，計畫 §4.5）；
 `holdout` 有值 ⇔ `selected` 非空；grid 只有 replicate 0、必有 `grid-0`；`interrupted` 的快照不收；各臂 distinct rules＝trials 數；Random／Grid 另外
-不超過 `pool_size`、答案數不超過 `pool_size`、`exhausted` 的答案數＝`pool_size`；模型臂不得 `exhausted`。`oracle.json`＝
+不超過 `pool_size`、答案數不超過 `pool_size`、`exhausted` 的答案數＝`pool_size`（對照組每輪抽好幾條，它的數另計，見「不用模型的對照組（工具組 T5）」）；模型臂不得 `exhausted`。`oracle.json`＝
 `{oracle_version, world_id, manifest_digest, planted: {train, validation, holdout, budget, threshold, oracle_margin, blockers[],
 eligible, margin, passed} | null, pool: {size, validation_sharpes[], best, threshold, clearing}}`：`blockers` 是 autoresearch
 閘門在 `threshold(max_trials)` 失敗的判斷式名稱（`GateBlocker`：`ruined`／`no_trades`／`no_gain`／`under_threshold`，按閘門順序，
@@ -722,8 +722,19 @@ replicate 開始時，把那個模型 client 外面包一層計數器（[`modelu
 
 ## 不用模型的對照組（工具組 T5）
 
-工具組如果比盲猜組好，有兩種可能：模型會推理，或者「看得到訓練區間的分數」本身就有用。這一組用來分開兩者：它看得到工具組的
-`backtest_train` 看得到的東西，每輪看的次數也一樣，但完全不推理。
+工具組如果比盲猜組好，有兩種可能：模型會推理，或者「看得到訓練區間的分數」本身就有用。這一組是為了分開兩者而設的：它用工具組的
+`backtest_train` 看規則的訓練分數，每輪最多看的次數等於工具組的上限，但完全不推理。
+
+**它跟工具組只對齊一件事：每輪試跑的上限。其他都不一樣，所以這個比較是單向的。**
+
+- 對照組只能從候選池的名單裡挑。2026-11 的 dev 世界名單是 128 條，埋入的規則本身就在名單上（20 份 conditional manifest 都是）。
+  模型面對的是整個規則語言，另外還有兩種查詢，也讀得到驗證分數的回饋。
+- **工具組贏過對照組**是強的證據：它贏過了一個「答案就在名單上」的機械挑選者。
+- **工具組打平或輸給對照組**不能讀成「模型不會推理」：名單本身就可能解釋這個結果。
+- 工具組的上限是「最多」，模型可以少用（實際用了幾次在 `tool_use.json`）；對照組每輪一定用滿。
+- 對照組比 Random 多做到的部分，才是「只看訓練分數、不加判斷」買到的。
+
+這個讀法、以及雜訊世界的誤判該拿誰當基準，要在 12 月開跑前寫進判定規則（工具組計畫 §0.4）；寫這一節時還沒定。
 
 manifest 的 `arms.train_pick` 有填時，`search` 在 Grid 之後、任何模型臂之前跑它：
 
@@ -739,22 +750,27 @@ manifest 的 `arms.train_pick` 有填時，`search` 在 Grid 之後、任何模�
 **每一輪做什麼**（`hypothesists.TrainPickHypothesist`）：
 
 1. 從候選池**不放回**抽 `backtests` 條。抽的順序是一份排列，由 `random.Random(f"{world_id}/train_pick/{seed}")` 決定：做法跟 Random 臂相同、
-   亂數流不同，所以同一個 seed 的兩臂走的不是同一份順序。
+   亂數流是它自己的，所以兩臂的順序各抽各的、互相獨立（2026-11-24 拍板；共用同一份順序會把兩臂的運氣綁在一起。獨立不等於保證不同：
+   池很小時兩份順序可能剛好一樣）。
 2. 每一條都用 `research_tools.backtest_train` 在訓練區間試跑。直接呼叫純函式：不經 MCP、不啟動伺服器、不問任何模型。view 是從這個
    replicate 自己的 store 讀的，只讀到訓練區間最後一根；讀它的就是工具組伺服器啟動時用的同一個函式（`tools_server.load_view`），
    所以兩組讀訓練區間的方式不會走岔。
-3. 交訓練分數最好的那一條。**抽到的每一條都離開池子，沒被交出去的也是。**
+3. 交訓練分數最好的那一條。**抽到的每一條都離開池子，沒被交出去的也是**（2026-11-24 拍板；這樣它看過的不同規則最多，
+   是這一類對照組裡最強的，「工具組贏過它」的結論也就最保守）。
 4. 最後一輪剩不到 `backtests` 條就試剩下的；一條都不剩，就跟其他走池的臂一樣以 `exhausted` 結束。
 
 **怎麼排「最好」**（`hypothesists.train_rank`；2026-11-24 拍板，在看到任何工具組結果之前寫死）：
 
 | 層 | 條件 | 層內怎麼比 |
 |---|---|---|
-| 1（最先） | 有交易、沒爆倉 | 訓練區間的淨 Sharpe 高的先 |
-| 2 | 零交易 | 不比。Sharpe 是 0、沒有資訊，promote 閘門也一定不過；同一輪沒有任何一條有交易時才會交出去 |
-| 3（最後） | 爆倉（`ruined`） | 不比。爆倉的比率不讀，autoresearch 自己也這樣排 |
+| 1（最先） | 有交易、沒爆倉 | 訓練區間的淨 Sharpe 高的先。訓練賠錢的也在這一層：它有一個可比的分數 |
+| 2 | 訓練區間零交易 | 不比。Sharpe 是 0，訓練區間對這條規則什麼都沒說；同一輪沒有任何一條有交易時才會交出去 |
+| 3（最後） | 爆倉（`ruined`） | 不比。爆倉的比率不讀；autoresearch 排 trial 時也把爆倉的放最後 |
 
 同分時交先抽到的那一條。訓練賠錢但有交易的規則，排在零交易的前面。
+
+第 2 層說的是「訓練區間看不出東西」，不是「閘門一定不過」：promote 閘門讀的是**驗證區間**，訓練區間零交易的規則在驗證區間可能有交易、
+也可能過門檻。（這一節第一版把閘門寫成第 2 層的理由，是錯的；2026-11-24 更正後使用者確認排序不變。）
 
 **試跑不算提案。** 試跑不寫 ledger、不計入 `rules_tried`、不扣預算（跟工具組的 `backtest_train` 一樣）；每輪只有交出去的那一條會被正式量測。
 所以預算 30、`backtests` 2 的一次搜尋看過 60 條規則的訓練分數，正式提案 30 條。
@@ -766,6 +782,8 @@ store 重算出來（`tests/test_bench_pick.py` 就是這樣核對的）。
 `ceil(pool_size / backtests)` 個答案之後就空了，不是 `pool_size` 個。這個數由讀取端對照 manifest 核對，因為 `verdicts.json` 本身不記每輪抽幾條。
 
 **在表上。** `calibrate`／`report` 多一列 `train_pick`，排在 Grid 之後、模型臂之前，欄位跟 Random 那一列相同；它沒問任何模型，所以沒有 token 行。
+它那一列的答案數與規則數後面多一句 `each answer the best of up to N rule(s) scored on the training window`（N＝`backtests`）：
+表上的「distinct rules 30」只算正式提案的規則，這一句說明每個答案是從幾條裡挑出來的，兩列的 N 不同時也看得出來。其他臂的列沒有這一句。
 
 **已知的代價。** 每個 replicate 開始前多讀一次訓練區間，第一次試跑要付整趟指標計算，之後每次試跑是毫秒級。在一個 5000 根、池 128 條、預算 30 的
 dev 世界上量過一次（本機 Windows，2026-11-24）：讀訓練區間 0.1 秒、第一輪 13.6 秒、其餘 29 輪共 1.8 秒，一個 replicate 大約多 15 秒，只花 CPU。
@@ -821,8 +839,8 @@ structural_distance, agreement, bars_compared, holdout_sharpe, holdout_ruined, r
 | store 的三條序列逐筆等於生成結果；`first_measurable_index ≤ warmup`；tail 通過；三段長度＝manifest；walk 沒走到頭拒絕 | `tests/test_landing.py` |
 | `generate` 寫出 canonical manifest、第二次拒絕、失敗不留半成品；`generate` 拒絕這一版沒有的 scorer；`search`／`oracle`／`calibrate`／`score`／`report` 的輸出與各錯誤家族的 exit code | `tests/test_cli.py` |
 | 池＝templates × grids 按 `candidate_order`、去重後編號、每個候選寫法正規（gate 在 `filters`、`max_bars`、`POOL_SIZING`、family）、parser 拒絕就 manifest 拒絕；Random 是 seed＋world 決定的排列、不放回；Grid 按編號；池走完 raise `CandidatesExhausted`＋旗標；經真的 `search()` 每個候選只 file 一次、以 `exhausted` 結束 | `tests/test_hypothesists.py` |
-| 不用模型的對照組：每輪試跑的條數不超過上限、最後一輪試剩下的；抽到的規則剛好是整個池、每條一次、每條只試跑一次（沒被交出去的也離開池子）；同世界同 seed 的抽法、分數、答案都相同，換 seed、換世界、Random 臂同 seed 都是別的順序；每輪交的是訓練分數最好的那一條（手寫歷史上 seed 0 的八輪逐輪釘住：兩條都有交易取淨 Sharpe 高的、訓練賠錢但有交易的贏過零交易的、兩條都零交易取先抽到的）；排序三層（有交易沒爆倉→零交易→爆倉），後兩層不讀 Sharpe，同分取先抽到的；把訓練區間之後的資料全部改掉，每輪抽的、分數、答案都不變（對照組：改到訓練區間內就會變）；經真的 `search()`：三條規則每輪兩條，兩輪抽完（2＋1）、第三次被問時以 `exhausted` 結束，ledger 只有交出去的兩條、`rules_tried` 是 2、trial 的訓練數字等於當初排序用的那一組；store 不含 split 指名的訓練區間時是具名拒絕（`BenchError`），不是 traceback | `tests/test_hypothesists.py` |
-| 對照組經 `bench` 跑完一個世界（池 3 條、預算 3、每輪 2 條）：排在 Grid 之後、自己一顆 store、沒有 trace／`tool_use.json`／`model_use.json`；Random／Grid 用完預算，對照組在 2 個答案後池空（`exhausted`，答案數既不是池大小也不是預算）而紀錄照樣讀得回來；它的 trial 等於用同一個 seed 從它自己的 store 重算出來的選擇；`calibrate`／`score`／`report` 有它那一列、沒有 token 行；紀錄少了它、manifest 沒指名它、它的 trial 不在池裡、池空時的答案數不對、答案數超過池子抽得出來的輪數，都拒絕；manifest 同時指名對照組與模型臂時，執行順序是 Random → Grid → 對照組 → 模型臂（不跑搜尋，直接讀 `_arms()` 排出來的清單） | `tests/test_bench_pick.py` |
+| 不用模型的對照組：每輪試跑的條數不超過上限、最後一輪試剩下的；抽到的規則剛好是整個池、每條一次、每條只試跑一次（沒被交出去的也離開池子）；同世界同 seed 的抽法、分數、答案都相同，換 seed、換世界、Random 臂同 seed 都是別的順序；每輪交的是訓練分數最好的那一條（手寫歷史上 seed 0 的八輪逐輪釘住：兩條都有交易取淨 Sharpe 高的、訓練賠錢但有交易的贏過零交易的、兩條都零交易取先抽到的）；排序三層（有交易沒爆倉→零交易→爆倉），後兩層不讀 Sharpe，同分取先抽到的，只有一筆交易也算有交易；手建的 `Scored`／`PickRound` 不合法就拒絕（編號、不是訓練區間的數字、同一輪重複）；評分途中 store 答不出來時那一輪什麼都不算，再問一次會重抽同一輪；`rounds` 與 `backtests` 只能讀；把訓練區間之後的資料全部改掉，每輪抽的、分數、答案都不變——訓練區間結束在午夜、結束在午夜前一根（有一根日線跨過界線）各一次，池裡加了讀日線的規則（對照組：改到訓練區間內就會變）；`_train_view` 在搜尋的 handle 還開著時讀 view，前後 store 與它的 WAL 逐位元相同；經真的 `search()`：三條規則每輪兩條，兩輪抽完（2＋1）、第三次被問時以 `exhausted` 結束，ledger 只有交出去的兩條、`rules_tried` 是 2、trial 的訓練數字等於當初排序用的那一組；store 不含 split 指名的訓練區間時是具名拒絕（`BenchError`），不是 traceback | `tests/test_hypothesists.py` |
+| 對照組經 `bench` 跑完一個世界（池 3 條、預算 3、每輪 2 條）：排在 Grid 之後、自己一顆 store、沒有 trace／`tool_use.json`／`model_use.json`；Random／Grid 用完預算，對照組在 2 個答案後池空（`exhausted`，答案數既不是池大小也不是預算）而紀錄照樣讀得回來；它的 trial 等於用同一個 seed 從它自己的 store 重算出來的選擇；`calibrate`／`score`／`report` 有它那一列、沒有 token 行，兩張表都在那一列說每個答案是從最多幾條裡挑的、其他列沒有這一句、這個數放到別的臂的列上或從它的列上拿掉都被拒絕；紀錄少了它、manifest 沒指名它、它的 trial 不在池裡、池空時的答案數不對、答案數超過池子抽得出來的輪數，都拒絕；manifest 同時指名對照組與模型臂時，執行順序是 Random → Grid → 對照組 → 模型臂（不跑搜尋，直接讀 `_arms()` 排出來的清單） | `tests/test_bench_pick.py` |
 | 一次真的 `search`：`arms/` 兩顆 store、`verdicts.json`／`oracle.json` 讀回相等、`manifest.json` 不動且目錄名不變、artifact 位元組不變；各臂同條件、各自 store 裡只晉升 selected；oracle 在各臂之後印、holdout 有值、整池 16 個；再搜拒絕；模型臂最後跑、各自一顆 store、可答池外規則、seam 失敗另計；落地後改過的 manifest（digest 對不上目錄名）拒絕；calibrate 表（一列＝一組條件〔條件 digest〕、seam 失敗不進分母、artifact 裁掉仍可算、同一目錄只算一次、world_id／pool_size／臂集合不符與
 null 雙胞胎 digest 拒絕、紀錄對 manifest 的條件／預算／池／oracle 門檻與視窗）；搜尋進行中（只有 `arms/`）拒絕且點名 staging；
 staging 開不起來時 claim 歸還；搬 store 失敗或中斷時保留 staging 並點名；紀錄閘門（verdict 對不上快照、selected 非首位、holdout 段位、`eligible`／`margin`／`passed`／段名／`clearing`、`best`／`size`、版本、grid replicate、trials ≤ pool_size、row 的計數）；holdout 旗標可關；dev-only／null 的 oracle 預覽拒絕；中斷＝目錄回到落地狀態；seam 失敗記錄後下一臂照跑 | `tests/test_bench.py` |
@@ -890,7 +908,7 @@ staging 開不起來時 claim 歸還；搬 store 失敗或中斷時保留 stagin
 **v3 與 v4 的 manifest 照樣讀。** 2026-11-10 那批世界是在 v3 底下搜的，之後的結果要拿來跟它們並排。run 目錄是用 manifest 文字的 digest 命名的，
 旁邊的紀錄也寫著那個 digest，所以舊版不能被「當成新版讀」：讀進來的 manifest 記得自己是第幾版（`Manifest.manifest_version`），
 寫回去時鍵跟那一版寫的一模一樣（v3 的 `arms` 底下沒有 `llm_tools` 與 `train_pick`，v4 沒有 `train_pick`），digest 因此不變，目錄名、`verdicts.json`、
-表上的列都跟以前對得上（測試釘住 v3 的兩個、v4 的三個實際 digest）。v3 的 manifest 不能指名工具組，v3 與 v4 都不能指名對照組；每一版各用自己的
+表上的列都跟以前對得上（測試釘住實際的 digest：v3 兩份 manifest、v4 三份，每份各兩個）。v3 的 manifest 不能指名工具組，v3 與 v4 都不能指名對照組；每一版各用自己的
 鍵集合讀，寫錯版本的鍵會被拒絕。其他版本一律拒絕。
 
 **不同版本的世界不會併成同一列。** 版本號在 manifest 的身分裡（這正是舊目錄名不變的前提），所以就算其他條件完全相同，

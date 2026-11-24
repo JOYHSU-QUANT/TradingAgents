@@ -201,7 +201,7 @@ parser 讀成 feature 名、regime 給數字會被 parser 拒絕，兩種都在�
    第一顆先跑 `verify()`（落地時的驗收再跑一次：artifact 真的是 manifest 描述的世界）；每臂以 `experiment_for()`＋
    `ledger.create_experiment()` 開自己的 experiment（id＝`random-<seed>`／`grid-0`）——同 coin、同 split／costs／window／
    penalty，`Verdicts` 的建構子守住這件事（也守住：必有 `grid-0`、各臂 distinct rules＝自己的 trials 數；走池的臂（Random／Grid／對照組）另外不超過
-   `pool_size`、答案數不超過 `pool_size`；Random／Grid 的 `exhausted` 答案數＝`pool_size`（對照組每輪抽好幾條，它的數另計，見「不用模型的對照組（工具組 T5）」）；模型臂不得 `exhausted`）；grid 只有 replicate 0、`interrupted` 的快照不收，
+   `pool_size`、答案數不超過 `pool_size`；Random／Grid 的 `exhausted` 答案數＝`pool_size`（對照組每輪可以抽好幾條，它的數另計，見「不用模型的對照組（工具組 T5）」）；模型臂不得 `exhausted`）；grid 只有 replicate 0、`interrupted` 的快照不收，
    由 `ArmResult` 守。
 3. 每臂跑 autoresearch 的 `search(ledger, experiment, hypothesist, max_trials=budget)`；跑完立刻 `snapshot_arm`（晉升前）→
    `final_verdict`；`selected` 非空就用 autoresearch 的 `promote()` 晉升那一筆（holdout 數字由它讀）。中斷＝整個 run 丟掉
@@ -243,7 +243,7 @@ verdict, holdout}]}`（`manifest_digest`＝跑的時候 run 目錄的 digest，�
 雙胞胎 id 相同、池相同，只差 digest），
 `verdict` 寫在 `snapshot` 旁邊給人讀，讀回時重算 `final_verdict(snapshot)` 不相等就拒絕（紀錄永遠可由快照重判，計畫 §4.5）；
 `holdout` 有值 ⇔ `selected` 非空；grid 只有 replicate 0、必有 `grid-0`；`interrupted` 的快照不收；各臂 distinct rules＝trials 數；走池的臂（Random／Grid／對照組）另外
-不超過 `pool_size`、答案數不超過 `pool_size`；Random／Grid 的 `exhausted` 答案數＝`pool_size`（對照組每輪抽好幾條，它的數另計，見「不用模型的對照組（工具組 T5）」）；模型臂不得 `exhausted`。`oracle.json`＝
+不超過 `pool_size`、答案數不超過 `pool_size`；Random／Grid 的 `exhausted` 答案數＝`pool_size`（對照組每輪可以抽好幾條，它的數另計，見「不用模型的對照組（工具組 T5）」）；模型臂不得 `exhausted`。`oracle.json`＝
 `{oracle_version, world_id, manifest_digest, planted: {train, validation, holdout, budget, threshold, oracle_margin, blockers[],
 eligible, margin, passed} | null, pool: {size, validation_sharpes[], best, threshold, clearing}}`：`blockers` 是 autoresearch
 閘門在 `threshold(max_trials)` 失敗的判斷式名稱（`GateBlocker`：`ruined`／`no_trades`／`no_gain`／`under_threshold`，按閘門順序，
@@ -780,11 +780,11 @@ manifest 的 `arms.train_pick` 有填時，`search` 在 Grid 之後、任何模�
 **它不留自己的紀錄檔。** 沒有 trace、沒有 `tool_use.json`；結果跟其他臂一起在 `verdicts.json`。每輪抽到哪幾條、各自的訓練分數，可以由 seed 與那顆
 store 重算出來（`tests/test_bench_pick.py` 就是這樣核對的）。
 
-**紀錄的閘門。** 它是走池的臂：每筆 trial 都要是池裡的規則、答案數不超過 `pool_size`。跟 Random／Grid 不同的一點：它每輪抽好幾條，所以池子在
+**紀錄的閘門。** 它是走池的臂：每筆 trial 都要是池裡的規則、答案數不超過 `pool_size`。跟 Random／Grid 不同的一點：它每輪可以抽好幾條（`backtests` 大於 1 時），所以池子在
 `ceil(pool_size / backtests)` 個答案之後就空了，不是 `pool_size` 個。這個數由讀取端對照 manifest 核對，因為 `verdicts.json` 本身不記每輪抽幾條。
 
-**在表上。** `calibrate`／`report` 多一列 `train_pick`，排在 Grid 之後、模型臂之前，欄位跟 Random 那一列相同；它沒問任何模型，所以沒有 token 行。
-它那一列的答案數與規則數後面多一句 `each answer the best of up to N rule(s) scored on the training window`（N＝`backtests`）：
+**在表上。** `calibrate`／`report` 多一列 `train_pick`，排在 Grid 之後、模型臂之前；它沒問任何模型，所以沒有 token 行。
+欄位跟 Random 那一列相同，只在答案數與規則數後面多一句 `each answer the best of up to N rule(s) scored on the training window`（N＝`backtests`）：
 表上的 `distinct rules median 30 (min 30)` 只算正式提案的規則，這一句說明每個答案是從幾條裡挑出來的，兩列的 N 不同時也看得出來。其他臂的列沒有這一句。
 
 **已知的代價。** 每個 replicate 開始前多讀一次訓練區間，第一次試跑要付整趟指標計算，之後每次試跑是毫秒級。在一個 5000 根、池 128 條、預算 30 的

@@ -459,6 +459,11 @@ def test_the_ranking_reads_ruin_first_then_whether_it_traded_then_the_net_sharpe
         Scored(0, None)
     with pytest.raises(ValueError, match="a rule is scored on the training window"):
         Scored(0, replace(gained, segment=view.split.validation))
+    # ... nor figures that carry no window at all.
+    with pytest.raises(ValueError, match="a rule is scored on the training window"):
+        Scored(0, replace(gained, segment=None))
+    # A round keeps what it was given as a tuple, whatever sequence that was.
+    assert isinstance(PickRound([Scored(0, gained)]).scored, tuple)
 
 
 def test_a_round_that_cannot_be_scored_leaves_the_arm_as_it_found_it(pool, view, monkeypatch):

@@ -44,7 +44,7 @@ Breaking changes within the 0.x line are called out explicitly.
   before keeps its name (tests pin the digests of both). As between 3 and
   4, worlds of different manifest versions are separate rows of a table.
   The records' own check that a pool arm runs out after exactly
-  `pool_size` answers does not hold for this arm, which draws several
+  `pool_size` answers does not hold for this arm, which may draw several
   rules an answer: its pool is out after `ceil(pool_size / backtests)`
   answers, checked where the manifest is read beside the record.
 

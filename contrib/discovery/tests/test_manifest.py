@@ -267,6 +267,15 @@ def test_beside_the_tool_arm_the_pick_scores_as_many_rules_a_round_as_that_arm_m
             match=rf"arms.train_pick.backtests: {other} a round, beside a tool arm allowed 2",
         ):
             Manifest.from_dict(both(other))
+    # Beside a tool arm allowed one, it is still the two numbers that are
+    # told: the sentence below is for a tool arm allowed none, and no other.
+    one = _with_tools(backtests=1)
+    one["arms"]["train_pick"] = {**PICK, "backtests": 2}
+    with pytest.raises(
+        ManifestError,
+        match=r"arms.train_pick.backtests: 2 a round, beside a tool arm allowed 1",
+    ):
+        Manifest.from_dict(one)
     # A tool arm allowed no scored backtest has no number the pick could
     # match (it scores at least one), and the refusal says that, not two numbers.
     unmatched = _with_tools(backtests=0)

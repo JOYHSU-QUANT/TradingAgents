@@ -1308,7 +1308,8 @@ class Manifest:
     ``manifest_version`` is the version the manifest was written at: this
     build's for one built in code, the file's own for one read — and it is
     written back as that version wrote it (``READ_VERSIONS``' comment says
-    why). A version-3 manifest has no tool arm to name.
+    why). A version-3 manifest has no tool arm to name, and neither it
+    nor a version-4 one the pick by training score.
     """
 
     world: World

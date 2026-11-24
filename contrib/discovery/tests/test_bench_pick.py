@@ -17,6 +17,7 @@ pool's size nor the budget.
 
 from __future__ import annotations
 
+import random
 from dataclasses import replace
 
 import pytest
@@ -152,7 +153,7 @@ def test_the_pick_is_searched_after_grid_in_a_store_of_its_own_and_recorded_with
     assert (searched.tool_use, searched.model_use) == (None, None)
 
 
-def test_the_pick_is_run_after_grid_and_before_the_arm_that_costs_money(monkeypatch):
+def test_the_pick_is_run_after_grid_and_before_the_arm_that_costs_money(monkeypatch, opened_arm):
     # Read off the list a run walks, with nothing searched: a manifest
     # naming the pick beside a model arm runs every arm that asks no
     # provider first, so a world whose pool arms cannot run has spent
@@ -177,6 +178,21 @@ def test_the_pick_is_run_after_grid_and_before_the_arm_that_costs_money(monkeypa
         (Arm.TRAIN_PICK, 2),
         (Arm.LLM, 0),
     ]
+    # And each replicate of the pick is OPENED on its own seed — the one
+    # search above has a single seed, where every replicate opened on the
+    # last seed listed (or the first) would look the same. Opened for real,
+    # over the hand-written store: the experiment there is this world's coin.
+    path, experiment = opened_arm
+    pool_size = len(manifest.search_space.candidates)
+    for arm, replicate, open_ in bench._arms(manifest):
+        if arm is not Arm.TRAIN_PICK:
+            continue
+        with open_(path, experiment) as hypothesist:
+            order = list(range(pool_size))
+            random.Random(f"{manifest.world.id}/train_pick/{replicate}").shuffle(order)
+            assert hypothesist.label == f"train_pick seed {replicate}"
+            assert hypothesist.order == tuple(order)
+            assert hypothesist.backtests == BACKTESTS
 
 
 def test_the_pick_s_trials_are_the_rules_that_score_best_on_its_own_training_window(picked):

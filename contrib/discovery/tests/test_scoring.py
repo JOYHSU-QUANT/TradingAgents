@@ -1040,3 +1040,25 @@ def test_read_scores_holds_the_record_to_the_manifest_s_scorer_and_recovery_rule
     )
     with pytest.raises(ScoreError, match="is not the one the manifest and oracle"):
         read_scores(run, other_rule)
+
+
+def test_the_pick_s_row_says_what_each_answer_was_picked_among_sealed_or_not():
+    # What a pick's row adds to its effort line is the manifest's own
+    # number, no figure of any window: it is printed on a test seed's
+    # sealed row as on an unsealed one, and nothing of the holdout with it.
+    row = _row(
+        _entry(_score(arm=Arm.TRAIN_PICK, agreement=0.9, holdout_sharpe=1.0), first=3),
+        arm=Arm.TRAIN_PICK,
+        seed_set=SeedSet.TEST,
+        scored_a_round=2,
+    )
+    looked = (
+        "  answers median 30 (min 30), distinct rules median 28 (min 28); each answer the best "
+        "of up to 2 rule(s) scored on the training window"
+    )
+    sealed, opened = row.describe(), row.describe(unseal=True)
+    assert [line for line in sealed if "scored on the training window" in line] == [looked]
+    assert [line for line in opened if "scored on the training window" in line] == [looked]
+    assert any(SEALED in line for line in sealed)
+    assert not any("holdout net sharpe" in line for line in sealed)
+    assert any("holdout net sharpe" in line for line in opened)

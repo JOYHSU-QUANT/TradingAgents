@@ -223,6 +223,19 @@ def arm(history, tmp_path):
         yield Ledger(store)
 
 
+@pytest.fixture(scope="module")
+def opened_arm(history, tmp_path_factory):
+    """One arm's store with its experiment opened, nothing filed: the path and the experiment.
+
+    One for each module that asks: what reads a training window reads it
+    off this store, and no test here files a trial in it.
+    """
+    path = tmp_path_factory.mktemp("opened") / "arm.sqlite"
+    with arm_store(history, path) as store:
+        experiment = open_arm(Ledger(store))
+    return path, experiment
+
+
 # -- the generated world ----------------------------------------------------------------------
 
 

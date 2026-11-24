@@ -19,6 +19,7 @@ from contrib.discovery.manifest import (
     Manifest,
     ManifestError,
     SeedSet,
+    TrainPickArm,
     WorldKind,
     opaque_world_id,
 )
@@ -176,20 +177,119 @@ def test_the_arms_hold_each_arm_to_its_own_record_and_write_no_arm_a_shape_has_n
     # Written in the shape of a version before the tool arm, an arm that is
     # there is refused — not left out without a word.
     with_tools = replace(arms, llm=None, llm_tools=tools)
-    assert sorted(with_tools.to_dict(tool_arm=True)) == ["llm", "llm_tools", "random"]
+    assert sorted(with_tools.to_dict(version=4)) == ["llm", "llm_tools", "random"]
     with pytest.raises(ManifestError, match="before version 4 have no tool arm to write"):
-        with_tools.to_dict(tool_arm=False)
-    assert sorted(arms.to_dict(tool_arm=False)) == ["llm", "random"]
+        with_tools.to_dict(version=3)
+    assert sorted(arms.to_dict(version=3)) == ["llm", "random"]
+    # The same of the arm version 5 added, at either version before it.
+    picking = replace(arms, train_pick=TrainPickArm(search_seeds=(0,), backtests=2))
+    assert sorted(picking.to_dict(version=5)) == ["llm", "llm_tools", "random", "train_pick"]
+    for version in (3, 4):
+        with pytest.raises(
+            ManifestError, match="arms.train_pick: .* before version 5 have no train-pick arm"
+        ):
+            picking.to_dict(version=version)
+    assert sorted(arms.to_dict(version=4)) == ["llm", "llm_tools", "random"]
+    with pytest.raises(ManifestError, match="arms.train_pick: expected a TrainPickArm or None"):
+        replace(arms, train_pick=arms.random)
 
 
-# -- the version before the tool arm, still read ----------------------------------------------------
+# -- the pick by training score (tools plan T5) -----------------------------------------------------
+
+PICK = {"search_seeds": [0, 3], "backtests": 2}
+
+
+def _with_pick(**changes):
+    """The example manifest's record naming the arm that picks by training score."""
+    return _edited(**{"arms.train_pick": {**PICK, **changes}})
+
+
+def test_a_manifest_may_name_the_arm_that_picks_by_training_score():
+    manifest = Manifest.from_dict(_with_pick())
+    pick = manifest.arms.train_pick
+    assert (pick.search_seeds, pick.backtests) == ((0, 3), 2)
+    assert Manifest.loads(manifest.dumps()) == manifest
+    assert manifest.to_dict()["arms"]["train_pick"] == PICK
+    # It stands beside a model arm or without one, and is a condition of
+    # the run either way: its seeds and the number it scores a round are in
+    # the identity, so another of either is another directory and another row.
+    assert manifest.arms.llm is not None
+    assert Manifest.from_dict(_edited(**{"arms.llm": None, "arms.train_pick": PICK}))
+    unnamed = example_manifest()
+    assert unnamed.arms.train_pick is None
+    for changed in ({}, {"search_seeds": [0]}, {"backtests": 3}):
+        other = Manifest.from_dict(_with_pick(**changed))
+        assert (other == manifest) == (not changed)
+        against = manifest if changed else unnamed
+        assert other.identity() != against.identity()
+        assert other.conditions() != against.conditions()
+    # One rule a round is a pick among one: allowed, and the Random arm on another stream.
+    assert Manifest.from_dict(_with_pick(backtests=1)).arms.train_pick.backtests == 1
+
+
+@pytest.mark.parametrize(
+    ("changes", "fragment"),
+    [
+        ({"search_seeds": []}, "arms.train_pick.search_seeds"),
+        ({"search_seeds": [1, 1]}, "arms.train_pick.search_seeds: each value once"),
+        ({"search_seeds": [-1]}, r"arms.train_pick.search_seeds\[0\]"),
+        ({"search_seeds": [2**63]}, "a search seed is at most"),
+        ({"backtests": 0}, "arms.train_pick.backtests"),
+        ({"backtests": True}, "arms.train_pick.backtests"),
+        ({"backtests": 2.0}, "arms.train_pick.backtests"),
+        ({"extra": 1}, "arms.train_pick: expected exactly the keys"),
+    ],
+)
+def test_a_pick_arm_the_benchmark_cannot_run_is_refused_naming_the_path(changes, fragment):
+    with pytest.raises(ManifestError, match=fragment):
+        Manifest.from_dict(_with_pick(**changes))
+
+
+def test_beside_the_tool_arm_the_pick_scores_as_many_rules_a_round_as_that_arm_may():
+    # The pick is that arm's control (tools plan §3.6): one manifest naming
+    # both with two numbers would set a model allowed two scored backtests
+    # a round beside a pick that had three.
+    def both(backtests: int) -> dict:
+        record = _with_tools()
+        record["arms"]["train_pick"] = {**PICK, "backtests": backtests}
+        return record
+
+    manifest = Manifest.from_dict(both(TOOLS["backtests"]))
+    assert manifest.arms.train_pick.backtests == manifest.arms.llm_tools.backtests == 2
+    for other in (1, 3):
+        with pytest.raises(
+            ManifestError,
+            match=rf"arms.train_pick.backtests: {other} a round, beside a tool arm allowed 2",
+        ):
+            Manifest.from_dict(both(other))
+    # A tool arm allowed no scored backtest has no number the pick could
+    # match (it scores at least one), and the refusal says that, not two numbers.
+    unmatched = _with_tools(backtests=0)
+    unmatched["arms"]["train_pick"] = {**PICK, "backtests": 1}
+    with pytest.raises(
+        ManifestError, match=r"arms.train_pick: the tool arm beside it is allowed no scored backtest"
+    ):
+        Manifest.from_dict(unmatched)
+    # The blind model arm has no such number, and holds the pick to none.
+    assert Manifest.from_dict(_with_pick(backtests=3)).arms.llm is not None
+
+
+# -- the versions before an arm was added, still read -----------------------------------------------
 
 
 def _version_3(manifest: Manifest) -> dict:
-    """``manifest``'s record as a version-3 build wrote it: that version, and no ``llm_tools`` key."""
-    record = manifest.to_dict()
+    """``manifest``'s record as a version-3 build wrote it: that version, and no later arm's key."""
+    record = _version_4(manifest)
     record["manifest_version"] = 3
     del record["arms"]["llm_tools"]
+    return record
+
+
+def _version_4(manifest: Manifest) -> dict:
+    """``manifest``'s record as a version-4 build wrote it: that version, and no ``train_pick`` key."""
+    record = manifest.to_dict()
+    record["manifest_version"] = 4
+    del record["arms"]["train_pick"]
     return record
 
 
@@ -213,9 +313,54 @@ def test_a_version_3_manifest_is_read_and_written_back_as_version_3():
     # And a version with no tool arm cannot be made to name one.
     with pytest.raises(ManifestError, match="a version-3 manifest names no tool arm"):
         replace(Manifest.from_dict(_with_tools()), manifest_version=3)
-    for version in (2, 5, True, 4.0):
-        with pytest.raises(ManifestError, match="this build reads versions 3, 4, got"):
+    for version in (2, 6, True, 4.0):
+        with pytest.raises(ManifestError, match="this build reads versions 3, 4, 5, got"):
             replace(current, manifest_version=version)
+
+
+def test_a_version_4_manifest_is_read_and_written_back_as_version_4():
+    # Version 4 as version 3 above, one arm later: it has the tool arm's
+    # key and not the pick's, and names a tool arm and no pick.
+    current = Manifest.from_dict(_with_tools())
+    record = _version_4(current)
+    old = Manifest.from_dict(record)
+    assert (old.manifest_version, old.arms.train_pick) == (4, None)
+    assert old.arms.llm_tools == current.arms.llm_tools
+    assert old.to_dict() == record
+    assert Manifest.loads(old.dumps()) == old and old.dumps() == Manifest.loads(old.dumps()).dumps()
+    assert old != current and replace(old, manifest_version=MANIFEST_VERSION) == current
+    assert old.identity() != current.identity()
+    assert old.conditions() != current.conditions()
+    with pytest.raises(ManifestError, match="arms: expected exactly the keys"):
+        Manifest.from_dict({**record, "arms": {**record["arms"], "train_pick": None}})
+    with pytest.raises(ManifestError, match="arms: expected exactly the keys"):
+        Manifest.from_dict(_version_3(example_manifest()) | {"manifest_version": 4})
+    for version in (3, 4):
+        with pytest.raises(
+            ManifestError, match=f"a version-{version} manifest names no train-pick arm"
+        ):
+            replace(Manifest.from_dict(_with_pick()), manifest_version=version)
+
+
+@pytest.mark.parametrize(
+    ("record", "identity", "conditions"),
+    [
+        (lambda: example_manifest().to_dict(), "1790869d", "df4b254d"),
+        (lambda: example_manifest(kind=WorldKind.NULL_V1).to_dict(), "e433a673", "1a57ec5c"),
+        (lambda: _with_tools(), "9fdaa1c0", "b614c29c"),
+    ],
+    ids=["conditional-v1", "null-v1", "tool arm"],
+)
+def test_a_version_4_manifest_names_the_directory_it_named_before_the_pick(
+    record, identity, conditions
+):
+    # The digests the build BEFORE the pick by training score gave the
+    # example manifest and the one naming the tool arm (develop at
+    # 9480e1b5, measured 2026-11-24, where version 4 was the build's own).
+    # As for version 3 below: they move if the example manifest is edited,
+    # and for no other reason.
+    old = Manifest.from_dict(_version_4(Manifest.from_dict(record())))
+    assert (manifest_digest(old), conditions_digest(old)) == (identity, conditions)
 
 
 def test_a_record_s_version_is_one_the_build_reads_and_is_read_by_type():
@@ -301,9 +446,10 @@ def test_a_version_3_manifest_names_the_directory_it_named_before_the_tool_arm(
         ),
         ({"manifest_version": True}, "manifest_version"),
         ({"manifest_version": 1.0}, "manifest_version"),
-        ({"manifest_version": 5, "later": 1}, "this build reads versions 3, 4, got 5"),
-        ({"manifest_version": 2}, "this build reads versions 3, 4, got 2"),
+        ({"manifest_version": 6, "later": 1}, "this build reads versions 3, 4, 5, got 6"),
+        ({"manifest_version": 2}, "this build reads versions 3, 4, 5, got 2"),
         ({"arms.llm_tools": _DROP}, "arms: expected exactly the keys"),
+        ({"arms.train_pick": _DROP}, "arms: expected exactly the keys"),
         ({"artifact_sha256": "abc"}, "artifact_sha256: a SHA-256 is 64"),
         ({"artifact_sha256": "A" * 64}, "artifact_sha256: a SHA-256 is 64"),
         ({"artifact_sha256": 7}, "artifact_sha256: a SHA-256 is 64"),

@@ -169,7 +169,7 @@ def _build_parser() -> argparse.ArgumentParser:
     generate_cmd.add_argument(
         "--manifest",
         required=True,
-        help="path to the world's manifest (JSON, version 4; version 3 is still read)",
+        help="path to the world's manifest (JSON, version 5; versions 3 and 4 are still read)",
     )
     generate_cmd.add_argument(
         "--root",

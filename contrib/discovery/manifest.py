@@ -98,6 +98,7 @@ __all__ = [
     "SeedSet",
     "Shares",
     "Template",
+    "TrainPickArm",
     "World",
     "WorldKind",
     "family_for",
@@ -111,21 +112,29 @@ __all__ = [
 # runner could walk. Version 3 adds ``artifact_sha256``, the digest of the
 # landed ``world.sqlite`` the measuring verbs check before they copy it.
 # Version 4 adds ``arms.llm_tools``, the model arm that may look things up
-# (tools plan T4).
+# (tools plan T4). Version 5 adds ``arms.train_pick``, the arm that reads
+# the training window with no model (tools plan T5).
 #
 # Version 3 is still READ (decided 2026-11-12): the worlds searched under it
-# are what a later run is set beside. A manifest keeps the version it was
-# read at and is written back key for key as that version wrote it, because
-# a run directory is named by a digest of that text (:meth:`Manifest.identity`)
-# and the records beside it carry the digest: read as version 4, every
-# directory landed before would be named for another manifest.
-MANIFEST_VERSION: Final = 4
+# are what a later run is set beside. So is version 4 (decided 2026-11-24).
+# A manifest keeps the version it was read at and is written back key for
+# key as that version wrote it, because a run directory is named by a digest
+# of that text (:meth:`Manifest.identity`) and the records beside it carry
+# the digest: read as a later version, every directory landed before would
+# be named for another manifest.
+MANIFEST_VERSION: Final = 5
 # Written out, not derived from the line above: at the next version this
 # has to be decided again, and the build's own version is always read.
-READ_VERSIONS: Final = (3, 4)
+READ_VERSIONS: Final = (3, 4, 5)
 if MANIFEST_VERSION not in READ_VERSIONS:  # pragma: no cover - a bump that forgot this line
     raise RuntimeError(f"this build writes manifest version {MANIFEST_VERSION} and does not read it")
-_TOOL_ARM_SINCE: Final = 4
+# The arms a later version added: the key, the version it is first written
+# at, and what a refusal calls the arm. The arms of a manifest are read and
+# written by the key set of its version (``_arm_keys``).
+_LATER_ARMS: Final = (
+    ("llm_tools", 4, "tool arm"),
+    ("train_pick", 5, "train-pick arm"),
+)
 
 
 class ManifestError(ValueError):
@@ -1088,6 +1097,46 @@ def _model_arm_document(arm: LlmArm | LlmToolsArm) -> dict[str, object]:
 
 
 @dataclass(frozen=True)
+class TrainPickArm:
+    """The arm that reads the training window with no model (tools plan §3.6, T5).
+
+    Each round it draws ``backtests`` rules from the pool, scores every one
+    on the training window, and proposes the one that scored best there
+    (:class:`~contrib.discovery.hypothesists.TrainPickHypothesist` holds the
+    ranking). It is what the tool arm is set beside to tell a model's
+    reasoning from the plain sight of training figures, so ``backtests`` is
+    that arm's limit on scored backtests a round — and where one manifest
+    names both arms, :class:`Arms` holds the two numbers equal.
+
+    One search seed per replicate, as the Random arm has: the order the
+    pool is drawn in. Both fields are in the manifest's identity.
+    """
+
+    search_seeds: tuple[int, ...]
+    backtests: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "search_seeds",
+            _read.distinct(self.search_seeds, "arms.train_pick.search_seeds", _search_seed),
+        )
+        _read.whole(self.backtests, "arms.train_pick.backtests", minimum=1)
+
+    def to_dict(self) -> dict[str, object]:
+        return {"search_seeds": list(self.search_seeds), "backtests": self.backtests}
+
+    @classmethod
+    def from_dict(cls, payload: object) -> TrainPickArm:
+        return cls(**_read.exact(payload, ("search_seeds", "backtests"), "arms.train_pick"))
+
+
+def _arm_keys(version: int) -> tuple[str, ...]:
+    """The keys ``arms`` is written with at manifest ``version``: each arm from the version that added it."""
+    return ("random", "llm", *(name for name, since, _noun in _LATER_ARMS if version >= since))
+
+
+@dataclass(frozen=True)
 class Arms:
     """The arms of this run. Grid has no record: it walks ``search_space`` in ``candidate_order``.
 
@@ -1099,11 +1148,17 @@ class Arms:
     of one seed, as the model arm and the full Random and Grid run already
     are (plan §8 #5), so a row of a table is one arm under one set of
     conditions.
+
+    ``train_pick`` is the arm that picks by training score with no model
+    (tools plan §3.6). It asks no provider anything and may stand in any
+    manifest; beside ``llm_tools`` it scores as many rules a round as that
+    arm may, or it is not that arm's control.
     """
 
     random: RandomArm
     llm: LlmArm | None = None
     llm_tools: LlmToolsArm | None = None
+    train_pick: TrainPickArm | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.random, RandomArm):
@@ -1114,41 +1169,66 @@ class Arms:
             raise ManifestError(
                 f"arms.llm_tools: expected an LlmToolsArm or None, got {self.llm_tools!r}"
             )
+        if self.train_pick is not None and not isinstance(self.train_pick, TrainPickArm):
+            raise ManifestError(
+                f"arms.train_pick: expected a TrainPickArm or None, got {self.train_pick!r}"
+            )
         if self.llm is not None and self.llm_tools is not None:
             raise ManifestError(
                 "arms: a manifest names one model arm, llm or llm_tools; the two are compared "
                 "across two landings of one seed"
             )
+        if (
+            self.llm_tools is not None
+            and self.train_pick is not None
+            and self.train_pick.backtests != self.llm_tools.backtests
+        ):
+            if self.llm_tools.backtests == 0:
+                # No number of the pick's would agree: it scores at least one.
+                raise ManifestError(
+                    "arms.train_pick: the tool arm beside it is allowed no scored backtest "
+                    "(arms.llm_tools.backtests is 0), and an arm that picks by training score "
+                    "scores at least one rule a round; such a tool arm has no such control"
+                )
+            raise ManifestError(
+                f"arms.train_pick.backtests: {self.train_pick.backtests} a round, beside a tool "
+                f"arm allowed {self.llm_tools.backtests}; the arm that picks by training score "
+                f"scores as many rules a round as the tool arm may"
+            )
 
-    def to_dict(self, *, tool_arm: bool) -> dict[str, object]:
-        """The arms as a manifest writes them; ``tool_arm`` False is the shape before version 4.
+    def to_dict(self, *, version: int) -> dict[str, object]:
+        """The arms as a manifest of ``version`` writes them: the keys that version has, no others.
 
-        That shape has no ``llm_tools`` key, and nothing to put under one:
-        a manifest of such a version names no tool arm (``Manifest``'s rule).
+        An arm named here that the version has no key for is refused, not
+        left out without a word: the shape has nowhere to put it, and a
+        manifest of such a version names no such arm (``Manifest``'s rule).
         """
         document: dict[str, object] = {
             "random": self.random.to_dict(),
             "llm": None if self.llm is None else self.llm.to_dict(),
+            "llm_tools": None if self.llm_tools is None else self.llm_tools.to_dict(),
+            "train_pick": None if self.train_pick is None else self.train_pick.to_dict(),
         }
-        if tool_arm:
-            document["llm_tools"] = None if self.llm_tools is None else self.llm_tools.to_dict()
-        elif self.llm_tools is not None:
-            # Not dropped without a word: the shape has nowhere to put it.
-            raise ManifestError(
-                "arms.llm_tools: the arms of a manifest before version 4 have no tool arm to write"
-            )
-        return document
+        keys = _arm_keys(version)
+        for name, since, noun in _LATER_ARMS:
+            if name not in keys and document[name] is not None:
+                raise ManifestError(
+                    f"arms.{name}: the arms of a manifest before version {since} have no {noun} "
+                    f"to write"
+                )
+        return {name: document[name] for name in keys}
 
     @classmethod
-    def from_dict(cls, payload: object, *, tool_arm: bool) -> Arms:
-        """The arms as written, read by the key set :meth:`to_dict` writes for the same ``tool_arm``."""
-        keys = ("random", "llm", "llm_tools") if tool_arm else ("random", "llm")
-        body = _read.exact(payload, keys, "arms")
+    def from_dict(cls, payload: object, *, version: int) -> Arms:
+        """The arms as written, read by the key set :meth:`to_dict` writes for the same ``version``."""
+        body = _read.exact(payload, _arm_keys(version), "arms")
         tools = body.get("llm_tools")
+        pick = body.get("train_pick")
         return cls(
             random=RandomArm.from_dict(body["random"]),
             llm=None if body["llm"] is None else LlmArm.from_dict(body["llm"]),
             llm_tools=None if tools is None else LlmToolsArm.from_dict(tools),
+            train_pick=None if pick is None else TrainPickArm.from_dict(pick),
         )
 
 
@@ -1271,11 +1351,12 @@ class Manifest:
                 f"artifact_sha256: a SHA-256 is 64 lower-case hex digits, or null until the world "
                 f"is landed, got {self.artifact_sha256!r}"
             )
-        if self.arms.llm_tools is not None and self.manifest_version < _TOOL_ARM_SINCE:
-            raise ManifestError(
-                f"arms.llm_tools: a version-{self.manifest_version} manifest names no tool arm; "
-                f"the arm is written in a manifest of version {_TOOL_ARM_SINCE}"
-            )
+        for name, since, noun in _LATER_ARMS:
+            if getattr(self.arms, name) is not None and self.manifest_version < since:
+                raise ManifestError(
+                    f"arms.{name}: a version-{self.manifest_version} manifest names no {noun}; "
+                    f"the arm is written in a manifest of version {since} or later"
+                )
         # A model arm runs the subset's worlds; a manifest is one world,
         # and one naming a subset it is not in has an arm it will not run.
         model_arms: tuple[tuple[str, LlmArm | LlmToolsArm | None], ...] = (
@@ -1300,9 +1381,9 @@ class Manifest:
             "penalty": self.penalty.to_dict(),
             "budget": self.budget.to_dict(),
             "search_space": self.search_space.to_dict(),
-            # A version before the tool arm did not write its key, and is
-            # written back as it was read (``READ_VERSIONS``' comment).
-            "arms": self.arms.to_dict(tool_arm=self.manifest_version >= _TOOL_ARM_SINCE),
+            # A version before an arm did not write its key, and is written
+            # back as it was read (``READ_VERSIONS``' comment).
+            "arms": self.arms.to_dict(version=self.manifest_version),
             "scoring": self.scoring.to_dict(),
             "null_definition_version": self.null_definition_version,
             "artifact_sha256": self.artifact_sha256,
@@ -1342,7 +1423,7 @@ class Manifest:
             penalty=penalty,
             budget=Budget.from_dict(body["budget"]),
             search_space=SearchSpace.from_dict(body["search_space"]),
-            arms=Arms.from_dict(body["arms"], tool_arm=version >= _TOOL_ARM_SINCE),
+            arms=Arms.from_dict(body["arms"], version=version),
             scoring=Scoring.from_dict(body["scoring"]),
             null_definition_version=body["null_definition_version"],
             artifact_sha256=body["artifact_sha256"],

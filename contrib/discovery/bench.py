@@ -27,6 +27,16 @@ is the point of this module:
    the whole pool's validation figures are read off the Grid arm's store
    after every arm has searched and chosen, and written to ``oracle.json``.
 
+**The pick by training score** (tools plan §3.6, T5) is a pool arm a
+manifest may name, run after Grid and before any model: each round it
+scores a few of the pool's rules on the training window of its own store
+and proposes the best there (:class:`~contrib.discovery.hypothesists.TrainPickHypothesist`).
+It is the tool arm's control — the sight of training figures with no
+model reading them — and is opened for each search as that arm is,
+because it reads that search's own copy of the artifact; it starts no
+server and asks no provider anything. Its results are in ``verdicts.json``
+with the others', and it leaves no record of its own.
+
 **The tool arm** (tools plan §3.5, T4) is a model arm with the
 training-window look-ups at hand (:mod:`.toolarm`): a manifest names it in
 the model arm's place, and it is searched last, as that arm is. Its
@@ -118,7 +128,14 @@ from pathlib import Path
 from statistics import median
 from typing import TypeVar
 
-from .hypothesists import GridHypothesist, PoolHypothesist, RandomHypothesist, enumerate_pool
+from .hypothesists import (
+    GridHypothesist,
+    PoolHypothesist,
+    RandomHypothesist,
+    TrainPickHypothesist,
+    enumerate_pool,
+    rounds_to_draw,
+)
 from .landing import (
     ARTIFACT_FILENAME,
     MANIFEST_FILENAME,
@@ -136,6 +153,7 @@ from .manifest import LlmArm, LlmToolsArm, Manifest, SeedSet, WorldKind
 from .modeluse import MODEL_USE_FILENAME, MeteredModel, ModelUse
 from .oracle import Oracle, PlantedFigures, frame_for, planted_figures, pool_reference
 from .records import Reader, RecordError, dumps
+from .research_tools import TrainView
 from .toolarm import (
     PACK_VERSION,
     Limits,
@@ -145,7 +163,7 @@ from .toolarm import (
     ToolServerError,
     require_client_sdk,
 )
-from .tools_server import ServerParams, tool_specs
+from .tools_server import LaunchError, ServerParams, load_view, tool_specs
 from .tooluse import TOOL_USE_FILENAME, SearchUse, ToolUse, TracePack, read_trace, trace_use
 from .upstream import (
     ChatHypothesist,
@@ -215,20 +233,33 @@ logger = logging.getLogger(__name__)
 
 
 class Arm(VocabEnum, noun="arm"):
-    """The arms this runner runs: the two that walk the pool, and a model arm where one is named.
+    """The arms this runner runs: the ones that propose from the pool, and a model arm where one is named.
 
-    The model arm answers from the two prompts alone; the tool arm is the
-    same model with the training-window look-ups at hand (tools plan T4).
+    Random and Grid walk the pool a rule a round. The pick by training
+    score, where a manifest names it, draws a few a round and proposes the
+    one that scored best on the training window (tools plan T5). The model
+    arm answers from the two prompts alone; the tool arm is the same model
+    with the training-window look-ups at hand (tools plan T4).
     """
 
     RANDOM = "random"
     GRID = "grid"
+    TRAIN_PICK = "train_pick"
     LLM = "llm"
     LLM_TOOLS = "llm_tools"
 
     @property
     def walks_pool(self) -> bool:
         """Whether this arm proposes from the candidate pool; a model may answer outside it."""
+        return self in (Arm.RANDOM, Arm.GRID, Arm.TRAIN_PICK)
+
+    @property
+    def one_rule_an_answer(self) -> bool:
+        """Whether every rule this arm takes from the pool is one answer, so its pool is out after as many answers as it holds rules.
+
+        Random and Grid. The pick by training score takes several rules an
+        answer, and how many is its manifest's to say.
+        """
         return self in (Arm.RANDOM, Arm.GRID)
 
 
@@ -239,9 +270,9 @@ class Arm(VocabEnum, noun="arm"):
 class ArmResult:
     """One arm's one search: its snapshot, the selected trial's holdout, and the verdict read off it.
 
-    ``replicate`` numbers the search: the search seed for the Random arm,
-    0 for the Grid arm (deterministic, one search), the replicate's index
-    for the model arm. ``holdout`` is the
+    ``replicate`` numbers the search: the search seed for the Random arm
+    and for the pick by training score, 0 for the Grid arm (deterministic,
+    one search), the replicate's index for a model arm. ``holdout`` is the
     selected trial's figure from its promotion, present exactly when a
     trial was selected. The verdict is DERIVED — :func:`final_verdict` of
     the snapshot, as the package's other records derive what a reader
@@ -428,6 +459,10 @@ class Verdicts:
             # A pool arm proposes each candidate at most once and runs out
             # exactly when it has proposed them all; the model answers
             # outside the pool (plan §4.3) and has no pool to run out of.
+            # The pick by training score draws several rules an answer, so
+            # its pool is out in fewer answers than it holds rules: how
+            # many is its manifest's to say (``_hold_to_manifest``), since
+            # the number drawn a round is not in this record.
             answers = result.snapshot.answers
             if not result.arm.walks_pool and result.snapshot.ended is Ended.EXHAUSTED:
                 raise BenchError(f"{result.experiment_id}: a model arm has no pool to walk to its end")
@@ -436,7 +471,11 @@ class Verdicts:
                     f"{result.experiment_id} answered {answers} time(s) from a pool of "
                     f"{self.pool_size}"
                 )
-            if result.snapshot.ended is Ended.EXHAUSTED and answers != self.pool_size:
+            if (
+                result.arm.one_rule_an_answer
+                and result.snapshot.ended is Ended.EXHAUSTED
+                and answers != self.pool_size
+            ):
                 raise BenchError(
                     f"{result.experiment_id} walked its pool to the end in {answers} answer(s); "
                     f"the pool holds {self.pool_size}"
@@ -1004,14 +1043,38 @@ _Asked = PoolHypothesist | ChatHypothesist | ToolHypothesist
 _Opened = Callable[[Path, Experiment], AbstractContextManager[_Asked]]
 
 
+def _train_view(path: Path, experiment: Experiment) -> TrainView:
+    """The training window of the arm's store at ``path``, as ``experiment`` splits it: read once, and the store closed.
+
+    The read the look-ups' server makes for the tool arm — the same
+    function, handed the parameters that arm's server is started on
+    (:func:`~contrib.discovery.tools_server.load_view`): the coin, the
+    split, the costs and the indicator window are the stored experiment's,
+    and no bar after the training window is read. So the two arms cannot
+    come to read the window differently. The store is opened beside the
+    search's own handle on it and closed again before the search writes a
+    trial.
+
+    What that read refuses as a fact about the store — one whose bars do
+    not run over the window the split names — is a named refusal here too.
+    A landed world that passed its check does not meet it.
+    """
+    try:
+        return load_view(ServerParams.for_experiment(path, experiment))
+    except LaunchError as exc:
+        raise BenchError(f"{experiment.experiment_id}: {exc}") from exc
+
+
 def _arms(manifest: Manifest) -> list[tuple[Arm, int, _Opened]]:
-    """The arms to run, in order: the Random replicates as listed, Grid, then a model arm's replicates.
+    """The arms to run, in order: the Random replicates as listed, Grid, the pick by training score's, then a model arm's.
 
     Each as the way its hypothesist is OPENED for its search, not as a
     hypothesist: the tool arm's is opened over a server that reads the
     arm's own copy of the artifact under the experiment stored in it
-    (tools plan §1 #8), and neither exists until the loop makes it. The
-    other arms' hypothesists hold nothing of a store and are built here.
+    (tools plan §1 #8), the pick by training score's over the training
+    window of its own copy, read the same way, and neither exists until
+    the loop makes it. The other arms' hypothesists hold nothing of a
+    store and are built here.
 
     A model arm last: it is the only arm that costs money, so a world
     whose pool arms cannot run has spent nothing.
@@ -1027,6 +1090,22 @@ def _arms(manifest: Manifest) -> list[tuple[Arm, int, _Opened]]:
         for seed in manifest.arms.random.search_seeds
     ]
     arms.append((Arm.GRID, 0, held(GridHypothesist(pool))))
+    pick = manifest.arms.train_pick
+    if pick is not None:
+        backtests = pick.backtests
+
+        def picking(seed: int) -> _Opened:
+            return lambda path, experiment: nullcontext(
+                TrainPickHypothesist(
+                    pool,
+                    _train_view(path, experiment),
+                    world_id=world_id,
+                    search_seed=seed,
+                    backtests=backtests,
+                )
+            )
+
+        arms += [(Arm.TRAIN_PICK, seed, picking(seed)) for seed in pick.search_seeds]
     llm = manifest.arms.llm
     if llm is not None:
         # One adapter, built once: it holds a client and no state of a
@@ -1481,6 +1560,8 @@ def read_searched(run_dir: Path) -> Searched | None:
     # missing one was not written by this build's search.
     expected = {(Arm.RANDOM, seed) for seed in manifest.arms.random.search_seeds}
     expected.add((Arm.GRID, 0))
+    if manifest.arms.train_pick is not None:
+        expected |= {(Arm.TRAIN_PICK, seed) for seed in manifest.arms.train_pick.search_seeds}
     if manifest.arms.llm is not None:
         expected |= {(Arm.LLM, k) for k in range(manifest.arms.llm.replicates)}
     if manifest.arms.llm_tools is not None:
@@ -1807,9 +1888,11 @@ def _hold_to_manifest(path: Path, verdicts: Verdicts, manifest: Manifest) -> Non
     another penalty, split or cost model would be judged by them, since the
     verdict is re-derived from the snapshot. Each arm's answers are bounded
     by the manifest's budget and a spent budget is exactly it (the pool's
-    half of those bounds is the record's own, held in ``Verdicts``), and
-    every rule a pool arm filed is a rule of the pool (the model may
-    propose outside it, plan §4.3).
+    half of those bounds is the record's own, held in ``Verdicts`` — but
+    for the pick by training score's pool running out, which is counted
+    here, where the number it draws a round is known), and every rule a
+    pool arm filed is a rule of the pool (the model may propose outside
+    it, plan §4.3).
     """
     first = verdicts.results[0].snapshot.experiment
     if _conditions(first) != _conditions(experiment_for(manifest, "arm")):
@@ -1819,6 +1902,7 @@ def _hold_to_manifest(path: Path, verdicts: Verdicts, manifest: Manifest) -> Non
         )
     budget = manifest.budget.max_trials
     pool = {candidate.spec_hash for candidate in manifest.search_space.candidates}
+    pick = manifest.arms.train_pick
     for result in verdicts.results:
         snapshot = result.snapshot
         if snapshot.ended is Ended.BUDGET_SPENT and snapshot.answers != budget:
@@ -1837,6 +1921,22 @@ def _hold_to_manifest(path: Path, verdicts: Verdicts, manifest: Manifest) -> Non
                 f"{path}: {result.experiment_id} filed trial(s) {outside} that are not rules of "
                 f"the pool"
             )
+        if result.arm is Arm.TRAIN_PICK and pick is not None:
+            # The pool is out after this many answers and no other number,
+            # and the arm never gives more.
+            rounds = rounds_to_draw(len(pool), pick.backtests)
+            if snapshot.ended is Ended.EXHAUSTED and snapshot.answers != rounds:
+                raise BenchError(
+                    f"{path}: {result.experiment_id} walked its pool to the end in "
+                    f"{snapshot.answers} answer(s); drawing {pick.backtests} a round from a pool "
+                    f"of {len(pool)} ends it in {rounds}"
+                )
+            if snapshot.answers > rounds:
+                raise BenchError(
+                    f"{path}: {result.experiment_id} answered {snapshot.answers} time(s); "
+                    f"drawing {pick.backtests} a round from a pool of {len(pool)} gives "
+                    f"{rounds} answer(s) at most"
+                )
 
 
 def _hold_oracle_to_manifest(path: Path, oracle: Oracle, manifest: Manifest) -> None:

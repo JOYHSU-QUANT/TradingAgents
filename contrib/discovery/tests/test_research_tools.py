@@ -73,7 +73,6 @@ from .conftest import (
     START_MS,
     STEP_MS,
     arm_store,
-    open_arm,
 )
 
 _ANY_BAR = [{"left": "close", "op": ">", "right": 0}]
@@ -136,15 +135,6 @@ def _load(path: Path, experiment, split: Split | None = None) -> TrainView:
 
 def _answers(view: TrainView, calls=CALLS) -> str:
     return json.dumps([call(view, tool, arguments) for tool, arguments in calls], sort_keys=True)
-
-
-@pytest.fixture(scope="module")
-def opened_arm(history, tmp_path_factory):
-    """One arm's store with its experiment opened, nothing filed: the path and the experiment."""
-    path = tmp_path_factory.mktemp("tools") / "arm.sqlite"
-    with arm_store(history, path) as store:
-        experiment = open_arm(Ledger(store))
-    return path, experiment
 
 
 @pytest.fixture(scope="module")

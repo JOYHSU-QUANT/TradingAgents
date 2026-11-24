@@ -22,7 +22,7 @@ from contrib.discovery.landing import (
     conditions_digest,
     world_dir,
 )
-from contrib.discovery.manifest import ManifestError, WorldKind
+from contrib.discovery.manifest import MANIFEST_VERSION, ManifestError, WorldKind
 from contrib.discovery.modeluse import MODEL_USE_FILENAME
 from contrib.discovery.oracle import OracleError
 from contrib.discovery.scoring import SCORES_FILENAME, ScoreError
@@ -126,10 +126,12 @@ def test_a_manifest_that_cannot_be_read_is_a_named_refusal(tmp_path, capsys):
     assert main(["generate", "--manifest", str(binary), "--root", root]) == 1
     assert "cannot read the manifest" in capsys.readouterr().err
     other = tmp_path / "other.json"
-    other.write_text(
-        example_manifest().dumps().replace('"manifest_version": 4', '"manifest_version": 5'),
-        encoding="utf-8",
+    written = example_manifest().dumps()
+    later = written.replace(
+        f'"manifest_version": {MANIFEST_VERSION}', f'"manifest_version": {MANIFEST_VERSION + 1}'
     )
+    assert later != written  # the version after this build's, which it does not read
+    other.write_text(later, encoding="utf-8")
     assert main(["generate", "--manifest", str(other), "--root", root]) == 1
     assert "manifest_version" in capsys.readouterr().err
     assert not Path(root).exists()  # nothing was written for any of them

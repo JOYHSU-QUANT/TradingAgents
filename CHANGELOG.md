@@ -10,6 +10,36 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **Discovery Lab: an arm that picks by training score with no model, the
+  tool arm's control** (tools plan T5). If the tool-using model arm beats
+  the blind one, that could be the model reasoning or merely the sight of
+  training-window figures; this arm has the sight and none of the
+  reasoning. Named by a manifest's new `arms.train_pick`
+  (`{"search_seeds", "backtests"}`), it is searched after Grid and before
+  any model arm: each round it draws `backtests` rules from the candidate
+  pool without replacement (a permutation from the world's id and the
+  search seed, on a stream of its own), scores each on the training window
+  with the tool arm's own `backtest_train` called as a function — no MCP
+  server, no provider — and proposes the best. Every rule drawn leaves the
+  pool, proposed or not. The ranking was fixed before any tool-arm result
+  was read (2026-11-24): rules that traded and were not ruined first, by
+  training net Sharpe; then rules that never traded; ruined rules last,
+  with no ratio of theirs read; the first drawn among equals. Scoring a
+  rule files nothing and is not counted against the budget, as the tool
+  arm's backtests are not. Its results are in `verdicts.json` with the
+  other arms' and it gets a row of its own in `calibrate` and `report`; it
+  writes no record of its own. Beside `arms.llm_tools` its `backtests` must
+  equal that arm's.
+  **Manifest version 5.** `arms` gains the `train_pick` key, so the
+  version is raised; versions 3 and 4 are still read, each by its own key
+  set and written back as it was read, so every run directory landed
+  before keeps its name (tests pin the digests of both). As between 3 and
+  4, worlds of different manifest versions are separate rows of a table.
+  The records' own check that a pool arm runs out after exactly
+  `pool_size` answers does not hold for this arm, which draws several
+  rules an answer: its pool is out after `ceil(pool_size / backtests)`
+  answers, checked where the manifest is read beside the record.
+
 - **Discovery Lab: the blind model arm's token use is recorded, so `report`
   can print its cost** (#433). The tool arm's row said what its searches
   spent; the blind model arm (`arms.llm`) had no figure, because it is

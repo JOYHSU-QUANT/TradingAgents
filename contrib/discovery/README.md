@@ -70,7 +70,7 @@ JSON 層。定義見「訓練區間查詢（工具組 T1）」一節。
   的紀錄。什麼時候可以讀 holdout 是 protocol（`bench.py`），不是這些函式管的。
 - [`hypothesists.py`](./hypothesists.py)：`RandomHypothesist`／`GridHypothesist`，以及工具組 T5 的對照組 `TrainPickHypothesist`，實作 autoresearch 的 `Hypothesist` port、
   **不讀 prompt**；池走完 raise `CandidatesExhausted`（`HypothesistError` 的子類）並自標 `exhausted`。候選池本身由 manifest 寫出
-  （`SearchSpace.candidates`，讀 manifest 時就枚舉、parser 拒絕就 manifest 拒絕）；定義見「三臂與判定」一節。
+  （`SearchSpace.candidates`，讀 manifest 時就枚舉、parser 拒絕就 manifest 拒絕）；Random／Grid 的定義見「三臂與判定」一節，對照組的見「不用模型的對照組（工具組 T5）」一節。
 - [`bench.py`](./bench.py)：`run_world(run_dir)` 把一個落地世界按計畫 §3 的順序跑到底；`preview_oracle(run_dir)`＝搜尋前的
   oracle 讀數（只准 dev seed）；`calibration_table(run_dirs)`＝誤判率表；`Verdicts`／`ArmResult`＝`verdicts.json` 的紀錄。
   工具組的每個 replicate 在這裡各開一次提問器（`tool_arm()` 是開跑前的檢查），伺服器側失敗時停下整個 run。
@@ -200,8 +200,8 @@ parser 讀成 feature 名、regime 給數字會被 parser 拒絕，兩種都在�
 2. 先核對 `world.sqlite` 的 SHA-256 等於 manifest 的 `artifact_sha256`（對不上拒絕：同 seed 的 null 雙胞胎 artifact 複製錯目錄，形狀檢查全部會過）；每臂把 `world.sqlite` 複製到自己的 store（`arms/random/replicate-<search seed>.sqlite`、`arms/grid/replicate-0.sqlite`），
    第一顆先跑 `verify()`（落地時的驗收再跑一次：artifact 真的是 manifest 描述的世界）；每臂以 `experiment_for()`＋
    `ledger.create_experiment()` 開自己的 experiment（id＝`random-<seed>`／`grid-0`）——同 coin、同 split／costs／window／
-   penalty，`Verdicts` 的建構子守住這件事（也守住：必有 `grid-0`、各臂 distinct rules＝自己的 trials 數；Random／Grid 另外不超過
-   `pool_size`、答案數不超過 `pool_size`、`exhausted` 的答案數＝`pool_size`（對照組每輪抽好幾條，它的數另計，見「不用模型的對照組（工具組 T5）」）；模型臂不得 `exhausted`）；grid 只有 replicate 0、`interrupted` 的快照不收，
+   penalty，`Verdicts` 的建構子守住這件事（也守住：必有 `grid-0`、各臂 distinct rules＝自己的 trials 數；走池的臂（Random／Grid／對照組）另外不超過
+   `pool_size`、答案數不超過 `pool_size`；Random／Grid 的 `exhausted` 答案數＝`pool_size`（對照組每輪抽好幾條，它的數另計，見「不用模型的對照組（工具組 T5）」）；模型臂不得 `exhausted`）；grid 只有 replicate 0、`interrupted` 的快照不收，
    由 `ArmResult` 守。
 3. 每臂跑 autoresearch 的 `search(ledger, experiment, hypothesist, max_trials=budget)`；跑完立刻 `snapshot_arm`（晉升前）→
    `final_verdict`；`selected` 非空就用 autoresearch 的 `promote()` 晉升那一筆（holdout 數字由它讀）。中斷＝整個 run 丟掉
@@ -234,7 +234,7 @@ null 世界沒有東西可看。holdout 在任何 seed 上都不在這裡讀。
 verdicts 一致、`planted` 有無要對得上世界的 kind、`pool.size` 要等於 `len(candidates)`、門檻（`budget`／`oracle_margin`／
 `threshold`、池的 `threshold`）要等於 manifest 的 budget 與 penalty 算出的值；`verdicts.json` 裡各臂 experiment 的條件
 （split／costs／window／penalty）要等於 `experiment_for(manifest)`、`budget_spent` 的答案數＝預算、任何臂（含 `seam_failed`）
-的答案數不超過預算、Random／Grid 的每筆 trial 都是池裡的規則；`oracle.json` 埋的規則三段數字的視窗要等於 manifest 的 split
+的答案數不超過預算、走池的臂（Random／Grid／對照組）的每筆 trial 都是池裡的規則；`oracle.json` 埋的規則三段數字的視窗要等於 manifest 的 split
 （Random／Grid 的 `exhausted` 答案數＝池大小是紀錄本身的閘門、每次讀都檢查；對照組的在這裡對照 manifest 的 `backtests` 核對）；同一個目錄被走到兩次（root 裡有連到它的連結）只算一次；壞掉的紀錄（含 manifest）拒絕句子帶檔案路徑；兩份紀錄沒有都在的目錄（只有 `arms/`＝搜尋進行中或沒跑完、
 只有 `verdicts.json`＝停在兩次搬檔之間）拒絕而不是跳過，句子只說「等沒有搜尋在跑再手動移除」；不要求 `world.sqlite`（artifact 可裁掉省空間）。
 
@@ -242,8 +242,8 @@ verdicts 一致、`planted` 有無要對得上世界的 kind、`pool.size` 要�
 verdict, holdout}]}`（`manifest_digest`＝跑的時候 run 目錄的 digest，把紀錄綁在它的條件上、不只綁 world id——同 seed 的 null
 雙胞胎 id 相同、池相同，只差 digest），
 `verdict` 寫在 `snapshot` 旁邊給人讀，讀回時重算 `final_verdict(snapshot)` 不相等就拒絕（紀錄永遠可由快照重判，計畫 §4.5）；
-`holdout` 有值 ⇔ `selected` 非空；grid 只有 replicate 0、必有 `grid-0`；`interrupted` 的快照不收；各臂 distinct rules＝trials 數；Random／Grid 另外
-不超過 `pool_size`、答案數不超過 `pool_size`、`exhausted` 的答案數＝`pool_size`（對照組每輪抽好幾條，它的數另計，見「不用模型的對照組（工具組 T5）」）；模型臂不得 `exhausted`。`oracle.json`＝
+`holdout` 有值 ⇔ `selected` 非空；grid 只有 replicate 0、必有 `grid-0`；`interrupted` 的快照不收；各臂 distinct rules＝trials 數；走池的臂（Random／Grid／對照組）另外
+不超過 `pool_size`、答案數不超過 `pool_size`；Random／Grid 的 `exhausted` 答案數＝`pool_size`（對照組每輪抽好幾條，它的數另計，見「不用模型的對照組（工具組 T5）」）；模型臂不得 `exhausted`。`oracle.json`＝
 `{oracle_version, world_id, manifest_digest, planted: {train, validation, holdout, budget, threshold, oracle_margin, blockers[],
 eligible, margin, passed} | null, pool: {size, validation_sharpes[], best, threshold, clearing}}`：`blockers` 是 autoresearch
 閘門在 `threshold(max_trials)` 失敗的判斷式名稱（`GateBlocker`：`ruined`／`no_trades`／`no_gain`／`under_threshold`，按閘門順序，
@@ -725,13 +725,15 @@ replicate 開始時，把那個模型 client 外面包一層計數器（[`modelu
 工具組如果比盲猜組好，有兩種可能：模型會推理，或者「看得到訓練區間的分數」本身就有用。這一組是為了分開兩者而設的：它用工具組的
 `backtest_train` 看規則的訓練分數，每輪最多看的次數等於工具組的上限，但完全不推理。
 
-**它跟工具組只對齊一件事：每輪試跑的上限。其他都不一樣，所以這個比較是單向的。**
+**在「看得到什麼、能提什麼」上，它跟工具組只對齊一件事：每輪試跑的上限。下面幾點都不一樣，所以這個比較是單向的。**
+（兩組用同一個 `backtest_train`、同一個讀訓練區間的函式；放在同一份 manifest 時 split、成本、預算、penalty 也相同。）
 
-- 對照組只能從候選池的名單裡挑。2026-11 的 dev 世界名單是 128 條，埋入的規則本身就在名單上（20 份 conditional manifest 都是）。
+- 對照組只能從候選池的名單裡挑。2026-11 搜過的那批 dev 世界（`worlds-20261110`）名單是 128 條，埋入的規則本身就在名單上（那一批 20 份 conditional manifest 都是）。
+  manifest 本身不保證這件事：當時另一批沒搜過的試作世界埋的是兩邊都進場的規則，就不在名單上。12 月的世界要再核對一次。
   模型面對的是整個規則語言，另外還有兩種查詢，也讀得到驗證分數的回饋。
 - **工具組贏過對照組**是強的證據：它贏過了一個「答案就在名單上」的機械挑選者。
 - **工具組打平或輸給對照組**不能讀成「模型不會推理」：名單本身就可能解釋這個結果。
-- 工具組的上限是「最多」，模型可以少用（實際用了幾次在 `tool_use.json`）；對照組每輪一定用滿。
+- 工具組的上限是「最多」，模型可以少用（實際用了幾次在 `tool_use.json`）；對照組每輪都用滿，只有池子快空的最後一輪例外。
 - 對照組比 Random 多做到的部分，才是「只看訓練分數、不加判斷」買到的。
 
 這個讀法、以及雜訊世界的誤判該拿誰當基準，要在 12 月開跑前寫進判定規則（工具組計畫 §0.4）；寫這一節時還沒定。
@@ -783,7 +785,7 @@ store 重算出來（`tests/test_bench_pick.py` 就是這樣核對的）。
 
 **在表上。** `calibrate`／`report` 多一列 `train_pick`，排在 Grid 之後、模型臂之前，欄位跟 Random 那一列相同；它沒問任何模型，所以沒有 token 行。
 它那一列的答案數與規則數後面多一句 `each answer the best of up to N rule(s) scored on the training window`（N＝`backtests`）：
-表上的「distinct rules 30」只算正式提案的規則，這一句說明每個答案是從幾條裡挑出來的，兩列的 N 不同時也看得出來。其他臂的列沒有這一句。
+表上的 `distinct rules median 30 (min 30)` 只算正式提案的規則，這一句說明每個答案是從幾條裡挑出來的，兩列的 N 不同時也看得出來。其他臂的列沒有這一句。
 
 **已知的代價。** 每個 replicate 開始前多讀一次訓練區間，第一次試跑要付整趟指標計算，之後每次試跑是毫秒級。在一個 5000 根、池 128 條、預算 30 的
 dev 世界上量過一次（本機 Windows，2026-11-24）：讀訓練區間 0.1 秒、第一輪 13.6 秒、其餘 29 輪共 1.8 秒，一個 replicate 大約多 15 秒，只花 CPU。

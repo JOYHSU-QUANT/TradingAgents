@@ -231,7 +231,8 @@ class Scored:
             raise ValueError(f"a scored rule is numbered from 0 in its pool, got {self.number!r}")
         if not isinstance(self.train, SegmentMetrics):
             raise ValueError(f"a scored rule carries its training figures, got {self.train!r}")
-        if self.train.segment.name is not SegmentName.TRAIN:
+        # ``getattr``: figures built by hand may carry no window at all.
+        if getattr(self.train.segment, "name", None) is not SegmentName.TRAIN:
             raise ValueError(
                 f"a rule is scored on the training window, and these figures are for "
                 f"{self.train.segment}"

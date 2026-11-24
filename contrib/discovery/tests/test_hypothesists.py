@@ -1,7 +1,7 @@
 """The pool and the arms over it (plan §4.3; PR 3's acceptance: Random without replacement, Grid in order, exhausted flagged).
 
-The pool tests are on the manifest alone — enumeration is pure. Random and
-Grid are then run through the research package's real ``search()`` on the
+The pool tests are on the manifest alone — enumeration is pure. A pool arm
+(Grid) is then run through the research package's real ``search()`` on the
 hand-written history, because what the exhausted protocol promises is a
 fact about that loop: a pool walked to its end stops the run without
 spending a round, every candidate having been filed once.
@@ -13,7 +13,6 @@ behind, and the same loop.
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import replace
 
 import pytest
@@ -39,6 +38,7 @@ from contrib.discovery.hypothesists import (
     rounds_to_draw,
     train_rank,
 )
+from contrib.discovery.landing import artifact_digest
 from contrib.discovery.manifest import (
     POOL_SIZING,
     CandidateOrder,
@@ -325,6 +325,7 @@ def test_the_pick_scores_no_more_than_its_limit_a_round_and_draws_no_rule_twice(
 
     monkeypatch.setattr(hypothesists, "backtest_train", counted)
     arm = _pick(pool, view, backtests=backtests)
+    assert arm.backtests == backtests
     answers = _walked(arm)
     # (b) Never more than the limit: every round scores the limit, and a
     # last round finding fewer left scores those.
@@ -370,6 +371,11 @@ def test_one_world_and_seed_is_one_search_and_the_pick_s_stream_is_its_own(pool,
         assert sorted(other.order) == list(range(pool.size))
         assert other.order != first.order
     assert first.label == "train_pick seed 0"
+    # What a search has done is read, not set.
+    assert isinstance(first.rounds, tuple) and first.backtests == 2
+    for name, value in (("rounds", ()), ("backtests", 3)):
+        with pytest.raises(AttributeError):
+            setattr(first, name, value)
 
 
 def test_each_round_proposes_the_rule_that_scored_best_on_the_training_window(pool, view):
@@ -480,11 +486,6 @@ def test_a_round_that_cannot_be_scored_leaves_the_arm_as_it_found_it(pool, view,
     assert [one.number for one in arm.rounds[1].scored] == list(arm.order[2:4])
     assert asked[4:] == asked[2:4]
     assert (arm.drawn, arm.proposed) == (4, 2)
-    # What a search has done is read, not set.
-    assert isinstance(arm.rounds, tuple) and arm.backtests == 2
-    for name, value in (("rounds", ()), ("backtests", 3)):
-        with pytest.raises(AttributeError):
-            setattr(arm, name, value)
 
 
 @pytest.mark.parametrize("earlier", [0, 1], ids=["ends at midnight", "ends a bar before"])
@@ -510,7 +511,7 @@ def test_rewriting_everything_after_training_changes_no_pick(
         ),
     )
     daily = Template(Side.LONG, Clause("close_1d", Op.GT), Clause("sma_1d_20", Op.GT), 12)
-    pool = Pool(
+    wider = Pool(
         pool.candidates
         + enumerate_pool(
             _space(daily, close_1d=(22000.0, 24000.0, 26000.0), sma_1d_20=(0.0, 23000.0))
@@ -519,7 +520,7 @@ def test_rewriting_everything_after_training_changes_no_pick(
     view = _train_view(path, experiment)
     assert view.train.end_ms == cut
     bars = view.frame.bundle.bars
-    before = _pick(pool, view, backtests=3)
+    before = _pick(wider, view, backtests=3)
     answers = _walked(before)
     # The rules reading the daily series are not all idle: some of what is
     # compared below was scored on it.
@@ -527,12 +528,12 @@ def test_rewriting_everything_after_training_changes_no_pick(
         one.train.trades
         for round_ in before.rounds
         for one in round_.scored
-        if one.number >= 16
+        if one.number >= pool.size
     )
     rewritten = tmp_path / "rewritten.sqlite"
     with arm_store(history, rewritten) as store:
         assert _rewrite(store, since_ms=bars[-1].close_time + 1) > 0
-    after = _pick(pool, _train_view(rewritten, experiment), backtests=3)
+    after = _pick(wider, _train_view(rewritten, experiment), backtests=3)
     assert _walked(after) == answers
     assert after.rounds == before.rounds
     # The control: the same rewrite reaching back INSIDE training moves the
@@ -540,7 +541,7 @@ def test_rewriting_everything_after_training_changes_no_pick(
     control = tmp_path / "control.sqlite"
     with arm_store(history, control) as store:
         assert _rewrite(store, since_ms=bars[-60].close_time, series=("4h",)) > 0
-    moved = _pick(pool, _train_view(control, experiment), backtests=3)
+    moved = _pick(wider, _train_view(control, experiment), backtests=3)
     _walked(moved)
     assert moved.rounds != before.rounds
 
@@ -560,13 +561,15 @@ def test_the_pick_through_the_real_loop_files_what_it_picked_and_ends_exhausted(
         # The store and its write-ahead log; the shared-memory index beside
         # them is a reader's bookkeeping and holds nothing of the store.
         return {
-            file.name: hashlib.sha256(file.read_bytes()).hexdigest()
+            file.name: artifact_digest(file)
             for file in sorted(tmp_path.glob("arm.sqlite*"))
             if not file.name.endswith("-shm")
         }
 
     # Read as the bench reads it: beside the handle the search holds open.
-    # Looking is not filing — the read writes nothing to the arm's store.
+    # Looking is not filing. That a view's read writes nothing is held where
+    # the look-ups are tested, with no other handle open; what is held here
+    # is the bench's case — a second handle beside an open one, log included.
     before = held()
     pick = _pick(pool, _train_view(tmp_path / "arm.sqlite", experiment))
     assert held() == before and "arm.sqlite" in before

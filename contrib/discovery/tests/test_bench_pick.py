@@ -45,7 +45,7 @@ from contrib.discovery.hypothesists import (
 from contrib.discovery.landing import MANIFEST_FILENAME, world_dir
 from contrib.discovery.manifest import Budget, Manifest, TrainPickArm
 from contrib.discovery.modeluse import MODEL_USE_FILENAME
-from contrib.discovery.scoring import report_table, score_world
+from contrib.discovery.scoring import ScoreError, report_table, score_world
 from contrib.discovery.tooluse import TOOL_USE_FILENAME
 from contrib.discovery.verdict import Ended, final_verdict
 
@@ -219,17 +219,18 @@ def test_the_tables_give_the_pick_a_row_of_its_own_between_grid_and_a_model(pick
     # Its row says how many rules each answer was picked among: the two
     # distinct rules it counts are the ones proposed, of three it scored.
     looked = "; each answer the best of up to 2 rule(s) scored on the training window"
-    assert pick.scored == BACKTESTS and pick.describe().endswith(
+    assert pick.scored_a_round == BACKTESTS and pick.describe().endswith(
         f"answers median 2 (min 2), distinct rules median 2 (min 2){looked}"
     )
     for row in rows[:-1]:
-        assert row.scored is None and "scored on the training window" not in row.describe()
+        assert row.scored_a_round is None
+        assert "scored on the training window" not in row.describe()
     # The number goes with that arm's row and no other.
-    with pytest.raises(BenchError, match=r"row\.scored: 2 on a random row"):
-        replace(rows[0], scored=2)
+    with pytest.raises(BenchError, match=r"row\.scored_a_round: 2 on a random row"):
+        replace(rows[0], scored_a_round=2)
     for missing in (None, 0, True):
-        with pytest.raises(BenchError, match=r"row\.scored: expected a whole number"):
-            replace(pick, scored=missing)
+        with pytest.raises(BenchError, match=r"row\.scored_a_round: expected a whole number"):
+            replace(pick, scored_a_round=missing)
     # Scored and reported as any arm is; it asked no model, and its row
     # says nothing of tokens.
     scores = score_world(run)
@@ -243,15 +244,18 @@ def test_the_tables_give_the_pick_a_row_of_its_own_between_grid_and_a_model(pick
     assert (report[Arm.TRAIN_PICK].model_uses, report[Arm.TRAIN_PICK].model) == ((), None)
     assert not any("tokens" in line for line in report[Arm.TRAIN_PICK].describe())
     # The report's row says the same of what was looked at, on its effort line.
-    assert report[Arm.TRAIN_PICK].scored == BACKTESTS
+    assert report[Arm.TRAIN_PICK].scored_a_round == BACKTESTS
     assert [line for line in report[Arm.TRAIN_PICK].describe() if looked in line] == [
         f"  answers median 2 (min 2), distinct rules median 2 (min 2){looked}"
     ]
     for arm in (Arm.RANDOM, Arm.GRID):
-        assert report[arm].scored is None
+        assert report[arm].scored_a_round is None
         assert not any("scored on the training window" in line for line in report[arm].describe())
-    with pytest.raises(BenchError, match=r"row\.scored: 2 on a grid row"):
-        replace(report[Arm.GRID], scored=2)
+    # Refused as the report's rows refuse their other fields, both ways.
+    with pytest.raises(ScoreError, match=r"row\.scored_a_round: 2 on a grid row"):
+        replace(report[Arm.GRID], scored_a_round=2)
+    with pytest.raises(ScoreError, match=r"row\.scored_a_round: expected a whole number"):
+        replace(report[Arm.TRAIN_PICK], scored_a_round=None)
     # A table's rows come in the enum's order, and the pool's bounds hold
     # the arms that propose from it.
     assert list(Arm) == [Arm.RANDOM, Arm.GRID, Arm.TRAIN_PICK, Arm.LLM, Arm.LLM_TOOLS]

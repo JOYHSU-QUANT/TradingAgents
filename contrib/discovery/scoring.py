@@ -70,12 +70,15 @@ from .bench import (
     Searched,
     effort_note,
     experiment_id,
+    hold_scored,
     in_row_order,
     iter_searched,
     read_record,
     read_searched,
     row_head,
     row_key,
+    scored_a_round,
+    scored_note,
     seam_note,
     store_path,
 )
@@ -910,6 +913,11 @@ class ReportRow:
     under the ``model`` they asked; and ``unrecorded`` is how many of its
     searches have no record beside their verdicts. Every search of that
     row is one or the other, and no other arm's row holds either.
+
+    ``scored_a_round`` is the pick by training score's row's: how many
+    rules each of its answers was picked among on the training window
+    (:func:`~contrib.discovery.bench.scored_a_round`), printed on the
+    effort line, since the rules the row counts are only the ones proposed.
     """
 
     kind: WorldKind
@@ -924,6 +932,7 @@ class ReportRow:
     model_uses: tuple[ModelSearch, ...] = ()
     model: str | None = None
     unrecorded: int = 0
+    scored_a_round: int | None = None
 
     def __post_init__(self) -> None:
         uses = tuple(_read.sequence(self.uses, "row.uses"))
@@ -957,6 +966,7 @@ class ReportRow:
         object.__setattr__(self, "seed_set", _read.enum(SeedSet, self.seed_set, "row.seed_set"))
         _read.digest(self.conditions, "row.conditions")
         object.__setattr__(self, "arm", _read.enum(Arm, self.arm, "row.arm"))
+        hold_scored(_read, self.arm, self.scored_a_round)
         _read.whole(self.failed, "row.failed", minimum=0)
         entries = tuple(_read.sequence(self.entries, "row.entries"))
         if any(not isinstance(entry, ReportEntry) for entry in entries):
@@ -1057,7 +1067,14 @@ class ReportRow:
         arm's look-ups), with an estimated cost when ``prices`` are given —
         and are no holdout figures, so a sealed row prints them too.
         """
-        effort = [f"  {effort_note([e.effort for e in self.entries])}"] if self.entries else []
+        effort = (
+            [
+                f"  {effort_note([e.effort for e in self.entries])}"
+                f"{scored_note(self.scored_a_round)}"
+            ]
+            if self.entries
+            else []
+        )
         model = None if self.pack is None else self.pack.model
         return [
             *self._lines(unseal=unseal),
@@ -1141,6 +1158,7 @@ def report_table(run_dirs: Iterable[Path]) -> list[ReportRow]:
     model_uses: dict[RowKey, list[ModelSearch]] = {}
     models: dict[RowKey, str] = {}
     unrecorded: Counter[RowKey] = Counter()
+    among: dict[RowKey, int | None] = {}
     for run_dir, searched in iter_searched(run_dirs):
         scores = read_scores(run_dir, searched)
         if searched.tool_use is not None:
@@ -1177,6 +1195,7 @@ def report_table(run_dirs: Iterable[Path]) -> list[ReportRow]:
         for score in scores.results:
             key = row_key(searched.manifest, score.arm)
             entries = rows.setdefault(key, [])
+            among[key] = scored_a_round(searched.manifest, score.arm)
             if score.ended is Ended.SEAM_FAILED:
                 failed[key] += 1
                 continue
@@ -1205,6 +1224,7 @@ def report_table(run_dirs: Iterable[Path]) -> list[ReportRow]:
             model_uses=tuple(model_uses.get(key, ())),
             model=models.get(key),
             unrecorded=unrecorded[key],
+            scored_a_round=among[key],
         )
         for key in in_row_order(rows)
     ]

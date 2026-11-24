@@ -1,10 +1,14 @@
-"""The pool and the two arms over it (plan §4.3; PR 3's acceptance: Random without replacement, Grid in order, exhausted flagged).
+"""The pool and the arms over it (plan §4.3; PR 3's acceptance: Random without replacement, Grid in order, exhausted flagged).
 
-The pool tests are on the manifest alone — enumeration is pure. The last
-test runs an arm through the research package's real ``search()`` on the
+The pool tests are on the manifest alone — enumeration is pure. A pool arm
+(Grid) is then run through the research package's real ``search()`` on the
 hand-written history, because what the exhausted protocol promises is a
 fact about that loop: a pool walked to its end stops the run without
 spending a round, every candidate having been filed once.
+
+The second half is the pick by training score (tools plan T5): what it
+draws, scores and proposes, the ranking it proposes by, the line it reads
+behind, and the same loop.
 """
 
 from __future__ import annotations
@@ -13,18 +17,28 @@ from dataclasses import replace
 
 import pytest
 
-from contrib.autoresearch.dsl import Family, Op, Side, load_spec, spec_hash
+from contrib.autoresearch.dsl import Family, Op, Side, load_spec, parse_spec, spec_hash
+from contrib.autoresearch.evaluator import EvaluationError
 from contrib.autoresearch.hypothesis import search
 from contrib.autoresearch.ledger import ProposalOutcome
+from contrib.autoresearch.metrics import SegmentMetrics
 from contrib.autoresearch.ports import HypothesistError
+from contrib.discovery import hypothesists
+from contrib.discovery.bench import BenchError, _train_view
 from contrib.discovery.hypothesists import (
     CandidatesExhausted,
     GridHypothesist,
+    PickRound,
     Pool,
     PoolHypothesist,
     RandomHypothesist,
+    Scored,
+    TrainPickHypothesist,
     enumerate_pool,
+    rounds_to_draw,
+    train_rank,
 )
+from contrib.discovery.landing import artifact_digest
 from contrib.discovery.manifest import (
     POOL_SIZING,
     CandidateOrder,
@@ -34,9 +48,12 @@ from contrib.discovery.manifest import (
     Template,
     family_for,
 )
+from contrib.discovery.research_tools import TrainView, ViewError, backtest_train
+from contrib.discovery.tools_server import LaunchError
 from contrib.discovery.verdict import Ended, classify_ending
 
-from .conftest import COIN, example_manifest, open_arm
+from .conftest import BUY_12, COIN, STEP_MS, arm_store, example_manifest, open_arm
+from .test_research_tools import _rewrite
 
 GATE = Clause("realized_vol_20", Op.GT)
 
@@ -219,7 +236,12 @@ def test_a_pool_walked_to_its_end_raises_the_seam_error_and_flags_itself(pool):
     for _ in range(pool.size):
         arm.propose("s", "u")
     assert not arm.exhausted
-    with pytest.raises(CandidatesExhausted, match="every one of the pool's 16 candidate"):
+    # The stop says what became of the rules, which for these two arms is
+    # that each was proposed: the sentence ``search()`` prints as its reason.
+    with pytest.raises(
+        CandidatesExhausted,
+        match=r"^grid: every one of the pool's 16 candidate\(s\) has been proposed$",
+    ):
         arm.propose("s", "u")
     assert arm.exhausted
     # The family ``search()`` stops on, and it stays raised — the flag is
@@ -255,3 +277,358 @@ def test_an_arm_through_the_real_loop_files_each_candidate_once_and_ends_exhaust
     assert sorted(t.spec_hash for t in arm.trials(experiment.experiment_id)) == sorted(
         c.spec_hash for c in pool.candidates
     )
+
+
+# -- the pick by training score (tools plan §4, T5 a–c) ---------------------------------------------
+#
+# Over the suite's hand-written history, through an experiment opened on
+# it, as the look-ups' own tests are: the view is read the way the bench
+# reads it for the arm (``bench._train_view``), and the pool is the example
+# manifest's sixteen rules. On that history the pool holds rules that gain
+# in training, rules that lose, and rules that never trade — every tier of
+# the ranking but ruin, which is built by hand below.
+
+
+@pytest.fixture(scope="module")
+def view(opened_arm) -> TrainView:
+    return _train_view(*opened_arm)
+
+
+def _pick(pool, view, *, seed=0, backtests=2, world=COIN) -> TrainPickHypothesist:
+    return TrainPickHypothesist(pool, view, world_id=world, search_seed=seed, backtests=backtests)
+
+
+def _walked(arm: TrainPickHypothesist) -> list[str]:
+    """Every answer the arm gives before its pool is out."""
+    answers = []
+    # One ask more than the pool holds rules: an arm whose pool never ends
+    # fails here, where it would otherwise hang the suite.
+    for _ in range(arm.pool.size + 1):
+        try:
+            answers.append(arm.propose("ignored", "ignored"))
+        except CandidatesExhausted:
+            return answers
+    raise AssertionError(f"{arm.label}: asked {arm.pool.size + 1} times and the pool is not out")
+
+
+@pytest.mark.parametrize("backtests", [1, 2, 3, 5, 16, 20])
+def test_the_pick_scores_no_more_than_its_limit_a_round_and_draws_no_rule_twice(
+    pool, view, monkeypatch, backtests
+):
+    scored: list[str] = []
+    real = hypothesists.backtest_train
+
+    def counted(read, spec):
+        assert read is view
+        scored.append(spec_hash(spec))
+        return real(read, spec)
+
+    monkeypatch.setattr(hypothesists, "backtest_train", counted)
+    arm = _pick(pool, view, backtests=backtests)
+    assert arm.backtests == backtests
+    answers = _walked(arm)
+    # (b) Never more than the limit: every round scores the limit, and a
+    # last round finding fewer left scores those.
+    full, left = divmod(pool.size, backtests)
+    assert [len(round_.scored) for round_ in arm.rounds] == [backtests] * full + (
+        [left] if left else []
+    )
+    assert len(answers) == arm.proposed == len(arm.rounds)
+    # (c) Without replacement: what was drawn is the pool in the arm's
+    # order, each rule once — the ones not proposed have left it too — and
+    # one backtest was run for each rule drawn, none besides.
+    drawn = [one.number for round_ in arm.rounds for one in round_.scored]
+    assert drawn == list(arm.order)
+    assert scored == [pool.candidates[number].spec_hash for number in drawn]
+    assert arm.drawn == pool.size
+    assert len(arm.rounds) == rounds_to_draw(pool.size, backtests)
+    # An answer is its round's pick, and no rule is answered twice.
+    assert answers == [pool.candidates[round_.picked].answer() for round_ in arm.rounds]
+    assert len(set(answers)) == len(answers)
+    # The pool out, the flag is set and stays; asking again scores nothing.
+    assert arm.exhausted
+    with pytest.raises(CandidatesExhausted, match="every one of the pool's 16 candidate"):
+        arm.propose("s", "u")
+    assert arm.exhausted and len(scored) == pool.size and arm.proposed == len(answers)
+
+
+def test_one_world_and_seed_is_one_search_and_the_pick_s_stream_is_its_own(pool, view):
+    # (a) The same seed on the same world draws, scores and proposes the same.
+    first, again = _pick(pool, view), _pick(pool, view)
+    assert first.order == again.order
+    assert _walked(first) == _walked(again)
+    assert first.rounds == again.rounds
+    # Another seed and another world are other orders, and so is the Random
+    # arm of the same seed: its order is drawn on another stream. (Two
+    # streams are independent, not bound to differ — on a pool of three
+    # rules two orders coincide one time in six; on these sixteen they do not.)
+    others = (
+        _pick(pool, view, seed=1),
+        _pick(pool, view, world="SYN-00000000"),
+        RandomHypothesist(pool, world_id=COIN, search_seed=0),
+    )
+    for other in others:
+        assert sorted(other.order) == list(range(pool.size))
+        assert other.order != first.order
+    assert first.label == "train_pick seed 0"
+    # What a search has done is read, not set.
+    assert isinstance(first.rounds, tuple) and first.backtests == 2
+    for name, value in (("rounds", ()), ("backtests", 3)):
+        with pytest.raises(AttributeError):
+            setattr(first, name, value)
+
+
+def test_each_round_proposes_the_rule_that_scored_best_on_the_training_window(pool, view):
+    arm = _pick(pool, view)
+    _walked(arm)
+    for round_ in arm.rounds:
+        for one in round_.scored:
+            # The look-up's own figures for the rule, on the view's window.
+            assert one.train == backtest_train(view, pool.candidates[one.number].spec)
+            assert one.train.segment == view.train
+        best = min(train_rank(one.train) for one in round_.scored)
+        assert round_.picked == next(
+            one.number for one in round_.scored if train_rank(one.train) == best
+        )
+    summary = [
+        [(one.train.trades > 0, round(one.train.net.sharpe, 3)) for one in round_.scored]
+        for round_ in arm.rounds
+    ]
+    picks = [
+        [one.number for one in round_.scored].index(round_.picked) for round_ in arm.rounds
+    ]
+    # Seed 0 on this history, pinned because each line is a case of the
+    # ranking met on real figures: the higher net Sharpe of two rules that
+    # traded, whichever was drawn first; a rule that LOST in training over
+    # one that never traded (the fourth round); and of two that never
+    # traded, the one drawn first (the last).
+    assert summary == [
+        [(True, -9.301), (True, 10.261)],
+        [(True, 6.949), (True, -9.301)],
+        [(True, 9.488), (True, -12.215)],
+        [(True, -11.568), (False, 0.0)],
+        [(True, 6.949), (True, -12.215)],
+        [(False, 0.0), (True, 10.261)],
+        [(True, -11.568), (True, 9.488)],
+        [(False, 0.0), (False, 0.0)],
+    ]
+    assert picks == [1, 0, 0, 0, 0, 1, 1, 0]
+
+
+def test_the_ranking_reads_ruin_first_then_whether_it_traded_then_the_net_sharpe(view):
+    traded = backtest_train(view, parse_spec(BUY_12))
+    assert traded.trades > 0 and not traded.ruined
+
+    def scoring(sharpe: float, **changes) -> SegmentMetrics:
+        return replace(traded, net=replace(traded.net, sharpe=sharpe), **changes)
+
+    gained, lost = scoring(1.5), scoring(-4.0)
+    idle, idle_high = scoring(0.0, trades=0), scoring(9.0, trades=0)
+    ruined, ruined_high = scoring(-2.0, ruined=True), scoring(50.0, ruined=True)
+    ruined_idle = scoring(0.0, trades=0, ruined=True)
+    # The tiers, best first, and the net Sharpe read in the first alone.
+    assert train_rank(scoring(1.6)) < train_rank(gained) < train_rank(lost)
+    assert train_rank(lost) < train_rank(idle) == train_rank(idle_high)
+    assert train_rank(idle) < train_rank(ruined)
+    assert train_rank(ruined) == train_rank(ruined_high) == train_rank(ruined_idle)
+    # One trade is a trade: the second tier is for none at all.
+    assert train_rank(scoring(-4.0, trades=1)) == train_rank(lost) < train_rank(idle)
+
+    def picked(*figures: SegmentMetrics) -> int:
+        return PickRound(tuple(Scored(10 + i, train) for i, train in enumerate(figures))).picked
+
+    assert picked(lost, gained, idle, ruined_high) == 11
+    assert picked(idle, lost) == 11  # a rule that traded, though it lost, over one that did not
+    assert picked(ruined_high, idle) == 11  # no ratio of a ruined run is read
+    assert picked(ruined, ruined_high) == 10  # ... not even to order two of them
+    # Among equals, the one drawn first.
+    assert picked(idle_high, idle) == picked(gained, scoring(1.5)) == 10
+    assert picked(lost) == 10
+    with pytest.raises(ValueError, match="a round scores at least one rule"):
+        PickRound(())
+    with pytest.raises(ValueError, match="a round holds Scored rules"):
+        PickRound((gained,))
+    with pytest.raises(ValueError, match="a round draws each rule once"):
+        PickRound((Scored(3, gained), Scored(3, lost)))
+    # A scored rule built by hand says no less than the arm's own: a number
+    # of a pool, and figures of the window the field is named for.
+    for number in (-1, True, 1.5, "3"):
+        with pytest.raises(ValueError, match="a scored rule is numbered from 0 in its pool"):
+            Scored(number, gained)
+    with pytest.raises(ValueError, match="a scored rule carries its training figures"):
+        Scored(0, None)
+    with pytest.raises(ValueError, match="a rule is scored on the training window"):
+        Scored(0, replace(gained, segment=view.split.validation))
+    # ... nor figures that carry no window at all.
+    with pytest.raises(ValueError, match="a rule is scored on the training window"):
+        Scored(0, replace(gained, segment=None))
+    # A round keeps what it was given as a tuple, whatever sequence that was.
+    assert isinstance(PickRound([Scored(0, gained)]).scored, tuple)
+
+
+def test_a_round_that_cannot_be_scored_leaves_the_arm_as_it_found_it(pool, view, monkeypatch):
+    real = hypothesists.backtest_train
+    asked: list[str] = []
+
+    def failing(read, spec):
+        asked.append(spec_hash(spec))
+        if len(asked) == 4:  # the second rule of the second round
+            raise EvaluationError("the store cannot answer")
+        return real(read, spec)
+
+    monkeypatch.setattr(hypothesists, "backtest_train", failing)
+    arm = _pick(pool, view)
+    arm.propose("s", "u")
+    before = (arm.drawn, arm.proposed, arm.rounds, arm.exhausted)
+    assert before[:2] == (2, 1) and len(before[2]) == 1
+    # What the store cannot answer is the store's error, not a seam's: it
+    # leaves the arm, and nothing of the round it broke is counted.
+    with pytest.raises(EvaluationError, match="the store cannot answer"):
+        arm.propose("s", "u")
+    assert (arm.drawn, arm.proposed, arm.rounds, arm.exhausted) == before
+    # Asked again, the arm draws that round again: no rule left the pool.
+    arm.propose("s", "u")
+    assert [one.number for one in arm.rounds[1].scored] == list(arm.order[2:4])
+    assert asked[4:] == asked[2:4]
+    assert (arm.drawn, arm.proposed) == (4, 2)
+
+
+@pytest.mark.parametrize("earlier", [0, 1], ids=["ends at midnight", "ends a bar before"])
+def test_rewriting_everything_after_training_changes_no_pick(
+    opened_arm, pool, history, tmp_path, earlier
+):
+    # The line the look-ups read behind (tools plan §2.2), held on what
+    # this arm does with them: everything after the last training bar's
+    # close replaced, and every round draws, scores and proposes as before.
+    # On the experiment's own split, whose training window ends at a UTC
+    # midnight, and on one ending a bar earlier, so that a daily bar opens
+    # inside training and closes after it; and over a pool that also holds
+    # rules reading the daily series, where a look ahead would hide.
+    path, experiment = opened_arm
+    split = experiment.split
+    cut = split.train.end_ms - earlier * STEP_MS
+    experiment = replace(
+        experiment,
+        split=replace(
+            split,
+            train=replace(split.train, end_ms=cut),
+            validation=replace(split.validation, start_ms=cut),
+        ),
+    )
+    daily = Template(Side.LONG, Clause("close_1d", Op.GT), Clause("sma_1d_20", Op.GT), 12)
+    wider = Pool(
+        pool.candidates
+        + enumerate_pool(
+            _space(daily, close_1d=(22000.0, 24000.0, 26000.0), sma_1d_20=(0.0, 23000.0))
+        ).candidates
+    )
+    view = _train_view(path, experiment)
+    assert view.train.end_ms == cut
+    bars = view.frame.bundle.bars
+    before = _pick(wider, view, backtests=3)
+    answers = _walked(before)
+    # The rules reading the daily series are not all idle: some of what is
+    # compared below was scored on it.
+    assert any(
+        one.train.trades
+        for round_ in before.rounds
+        for one in round_.scored
+        if one.number >= pool.size
+    )
+    rewritten = tmp_path / "rewritten.sqlite"
+    with arm_store(history, rewritten) as store:
+        assert _rewrite(store, since_ms=bars[-1].close_time + 1) > 0
+    after = _pick(wider, _train_view(rewritten, experiment), backtests=3)
+    assert _walked(after) == answers
+    assert after.rounds == before.rounds
+    # The control: the same rewrite reaching back INSIDE training moves the
+    # scores, so the equality above is not an arm that read no bars.
+    control = tmp_path / "control.sqlite"
+    with arm_store(history, control) as store:
+        assert _rewrite(store, since_ms=bars[-60].close_time, series=("4h",)) > 0
+    moved = _pick(wider, _train_view(control, experiment), backtests=3)
+    _walked(moved)
+    assert moved.rounds != before.rounds
+
+
+def test_the_pick_through_the_real_loop_files_what_it_picked_and_ends_exhausted(arm, tmp_path):
+    # Three rules, two a round, a budget of five: two rounds draw the pool
+    # dry (2 + 1), the loop files the two picks, and the third round asks
+    # and is told the pool is out — a stop that spends no round.
+    template = Template(Side.LONG, Clause("funding_zscore_14", Op.LT), GATE, 12)
+    pool = enumerate_pool(
+        _space(template, funding_zscore_14=(-1.0, 0.0, 1.0), realized_vol_20=(0.002,))
+    )
+    assert pool.size == 3
+    experiment = open_arm(arm)
+
+    def held() -> dict[str, str]:
+        # The store and its write-ahead log; the shared-memory index beside
+        # them is a reader's bookkeeping and holds nothing of the store.
+        return {
+            file.name: artifact_digest(file)
+            for file in sorted(tmp_path.glob("arm.sqlite*"))
+            if not file.name.endswith("-shm")
+        }
+
+    # Read as the bench reads it: beside the handle the search holds open.
+    # Looking is not filing. That a view's read writes nothing is held where
+    # the look-ups are tested, with no other handle open; what is held here
+    # is the bench's case — a second handle beside an open one, log included.
+    before = held()
+    pick = _pick(pool, _train_view(tmp_path / "arm.sqlite", experiment))
+    assert held() == before and "arm.sqlite" in before
+    report = search(arm, experiment, pick, model="train_pick", max_trials=5)
+    assert [len(round_.scored) for round_ in pick.rounds] == [2, 1]
+    assert report.spent == 2 == pick.proposed
+    assert report.stopped is not None
+    assert "every one of the pool's 3 candidate(s) has been drawn" in report.stopped
+    assert report.counts()[ProposalOutcome.MEASURED] == 2
+    assert classify_ending(report, exhausted=pick.exhausted) is Ended.EXHAUSTED
+    # What the loop filed is what each round picked, and no rule the arm
+    # only scored: looking is not counted against the search.
+    assert arm.rules_tried(COIN) == 2
+    trials = sorted(arm.trials(experiment.experiment_id), key=lambda trial: trial.trial_id)
+    assert [trial.spec_hash for trial in trials] == [
+        pool.candidates[round_.picked].spec_hash for round_ in pick.rounds
+    ]
+    # And the figures a rule was picked on are the ones its trial carries
+    # for the training window.
+    for trial, round_ in zip(trials, pick.rounds, strict=True):
+        assert trial.train == round_.best.train
+
+
+def test_a_store_that_does_not_hold_the_split_s_training_window_is_a_named_refusal(opened_arm):
+    # The view's own refusal, told as the bench tells a run that cannot be
+    # made — not a traceback. Here: the three windows moved past the last
+    # bar the store holds, so no bar of the training window is there.
+    path, experiment = opened_arm
+    split = experiment.split
+    span = split.holdout.end_ms - split.train.start_ms
+    moved = {
+        name: replace(window, start_ms=window.start_ms + span, end_ms=window.end_ms + span)
+        for name, window in (
+            ("train", split.train),
+            ("validation", split.validation),
+            ("holdout", split.holdout),
+        )
+    }
+    with pytest.raises(
+        BenchError,
+        match=(
+            rf"^arm: .*arm\.sqlite does not hold the training window the split names for {COIN}: "
+            r".*the frame's bars do not run from the window's first bar to its last"
+        ),
+    ) as refused:
+        _train_view(path, replace(experiment, split=replace(split, **moved)))
+    # The read is the server's, and the refusal the view's own under it.
+    assert isinstance(refused.value.__cause__, LaunchError)
+    assert isinstance(refused.value.__cause__.__cause__, ViewError)
+
+
+def test_a_pick_that_cannot_be_built_is_refused(pool, view):
+    for backtests in (0, -1, True, 2.0, "2"):
+        with pytest.raises(ValueError, match="scores at least one rule a round"):
+            _pick(pool, view, backtests=backtests)
+    with pytest.raises(ValueError, match="reads a train view"):
+        _pick(pool, view.frame)

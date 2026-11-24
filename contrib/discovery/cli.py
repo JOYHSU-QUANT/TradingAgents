@@ -22,8 +22,9 @@ Six in the order a world goes through them (plan §3):
   its budget (``verdicts.json``), then the oracle's figures and the whole
   pool's reference (``oracle.json``), in that order (:mod:`.bench` keeps
   it). A world is searched once; a manifest that is not the directory's
-  own is refused. A manifest that names a model arm runs it too, last: it
-  is the one arm that costs money. What its searches spent is written
+  own is refused. A manifest that names the pick by training score runs
+  it after Grid; one that names a model arm runs it too, last: it is the
+  one arm that costs money. What its searches spent is written
   beside the verdicts (``model_use.json``; ``tool_use.json`` for the arm
   with tools), and for the arm with tools a failure of the look-ups'
   server stops the run with a refusal that names what was kept.
@@ -169,7 +170,7 @@ def _build_parser() -> argparse.ArgumentParser:
     generate_cmd.add_argument(
         "--manifest",
         required=True,
-        help="path to the world's manifest (JSON, version 4; version 3 is still read)",
+        help="path to the world's manifest (JSON, version 5; versions 3 and 4 are still read)",
     )
     generate_cmd.add_argument(
         "--root",

@@ -3,12 +3,16 @@
     python .github/constraints/drift.py .github/constraints/py3.13.txt
 
 Run by CI's ``test-latest`` job, which installs without the constraints
-file, after its suite and whatever the suite did: the list is what an index
-has moved since the file was written, and so where to look when that job's
-suite is red and the required one's is green.
-A report and never a verdict: it exits 0 whatever it lists. What it cannot
-read (no file, a line that is no pin) is the one thing it exits non-zero on,
-since a list drawn from half a file would read as "nothing moved".
+file, after its suite and whatever the suite did: the list is where to look
+when that job's suite is red and the required one's is green. Most of it is
+what an index has published since the file was written. Not all: the file is
+resolved for every job's requirements together, and a package another job
+needs can hold one back that this job alone resolves newer (the README names
+those; they are listed on every run).
+A report and never a verdict: it exits 0 whatever it lists. It exits 2 where
+there is no comparison to report — a file it cannot read (none, or a line
+that is no pin), or an environment the project is not installed in (the
+job's install step failed) — since "nothing moved" would be read off either.
 
 A package installed and not pinned is listed too: a release that gains a
 dependency installs something the file has never named.
@@ -97,14 +101,15 @@ def drift(pinned: dict[str, str], installed: dict[str, str], *, project: str) ->
 def installed_versions() -> dict[str, str]:
     """Every distribution this interpreter can import, by normalized name.
 
-    A metadata directory with no name in it (what an interrupted uninstall
-    leaves behind) is no installed package and is passed.
+    A metadata directory with no name or no version in it (what an
+    interrupted uninstall leaves behind) is no installed package and is passed.
     """
     found = {}
     for distribution in metadata.distributions():
-        name = distribution.metadata["Name"]
-        if name is not None:
-            found[normalized(name)] = distribution.version
+        name = distribution.metadata.get("Name")
+        version = distribution.metadata.get("Version")
+        if name is not None and version is not None:
+            found[normalized(name)] = version
     return found
 
 
@@ -118,7 +123,13 @@ def main(argv: list[str]) -> int:
     except (OSError, ValueError) as exc:
         print(f"{path} cannot be read as a constraints file: {exc}")
         return 2
-    lines = drift(pinned, installed_versions(), project=PROJECT)
+    installed = installed_versions()
+    if PROJECT not in installed:
+        # The job's install step failed, or this is another interpreter:
+        # "nothing differs" about an environment that holds nothing is no answer.
+        print(f"{PROJECT} is not installed here, so there is nothing to compare with {path}")
+        return 2
+    lines = drift(pinned, installed, project=PROJECT)
     if not lines:
         print(f"every installed package is at the version {path} pins")
         return 0

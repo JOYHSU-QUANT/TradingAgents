@@ -82,8 +82,12 @@ jobs:
           pip install . -c .github/constraints/py3.12.txt
           # Catches undeclared runtime deps (e.g. #994 python-dotenv): a bare
           # install must import the package and the CLI module. The
-          # constraints file names versions and installs nothing, so a
-          # dependency the project does not declare is still missing here.
+          # constraints file asks for no package, so one the project does
+          # not declare is still not asked for here. It does pick the
+          # versions, and with a version what that version requires: this
+          # is the bare install at the pinned versions, not at today's
+          # (.github/constraints/README.md names what a bare install alone
+          # would resolve newer).
           python -c "import tradingagents, cli.main; print('clean-install import OK')"
 
   lint:

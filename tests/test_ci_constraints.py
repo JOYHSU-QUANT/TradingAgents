@@ -68,9 +68,33 @@ drift = _load("drift")
 MATRIX = "${{ matrix.python-version }}"
 # Any way a step could put packages into the job's environment, not only the
 # spelling in use: a line this matches and UNCONSTRAINED does not list has to
-# carry the constraints flag.
-_INSTALLER = re.compile(r"\b(?:pip3?|uv|pipx|poetry|conda)\b.*\b(?:install|sync|add)\b")
+# carry the constraints flag. pip by what it is asked to do; the tools that
+# build an environment of their own, and read no -c, by being named at all.
+_INSTALLER = re.compile(
+    r"\bpip3?\b.*\b(?:install|sync|download|wheel)\b"
+    r"|\b(?:pipx|uvx?|poetry|conda|mamba|tox|nox|hatch|pdm|pre-commit)\b"
+)
 _ROOT_REQUIREMENTS_ON_STDIN = "grep -v '^\\.$' requirements.txt | "
+# The extras a declared requirement may carry: each was resolved by compile.py
+# with what it brings, so those packages are in the files. An extra added to a
+# requirement brings packages no file names, which a job then installs at the
+# index's newest: run compile.py, see them appear in the files, record it here.
+EXTRAS_RESOLVED = {"python-dotenv": {"cli"}}
+# What stands above ``jobs:``, comments aside. A path or branch filter on the
+# pull-request trigger leaves a filtered pull request waiting on every
+# required check; a workflow-level ``env`` can constrain or redirect every
+# install below it.
+ABOVE_THE_JOBS = [
+    "name: CI",
+    "on:",
+    "  push:",
+    "    branches: [main, develop]",
+    "  pull_request:",
+    "concurrency:",
+    "  group: ci-${{ github.ref }}",
+    "  cancel-in-progress: true",
+]
+ACTIONS = ["- uses: actions/checkout@v4", "- uses: actions/setup-python@v5"]
 
 
 def _jobs() -> dict[str, list[str]]:
@@ -120,12 +144,18 @@ def _sources(line: str) -> tuple[set[str], set[str], set[str]]:
                 assert line.startswith(_ROOT_REQUIREMENTS_ON_STDIN), line
                 word = "requirements.txt"
             files.add(word)
-        elif after_option == "-c" or word.startswith("-"):
+        elif after_option == "-c":
             pass
+        elif word.startswith("-"):
+            # -rFILE, --requirement=FILE, --group and the like would name a
+            # source this reading passes over.
+            assert word in ("-e", "-r", "-c"), f"an option this file does not read: {line}"
         elif word == "." or word.startswith(".["):
             extras.update(extra for extra in word[2:-1].split(",") if extra)
         else:
-            named.add(drift.normalized(Requirement(word).name))
+            requirement = Requirement(word)
+            assert not requirement.extras, f"an extra brings packages no file names: {line}"
+            named.add(drift.normalized(requirement.name))
         after_option = word if word in ("-r", "-c") else ""
     return extras, files, named
 
@@ -188,6 +218,26 @@ def test_the_required_jobs_keep_the_names_branch_protection_waits_on():
     assert latest.removeprefix("name: ") not in REQUIRED_NAMES.values()
 
 
+def test_no_job_can_pass_without_running_stop_reporting_or_install_another_way():
+    text = CI.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    above = [line for line in lines[: lines.index("jobs:")] if line and not line.startswith("#")]
+    assert above == ABOVE_THE_JOBS
+    # -c on a line is what the other tests read; the variable would constrain
+    # (or, in the latest job, quietly pin) with no line saying so.
+    assert not [line for line in lines if "PIP_CONSTRAINT" in line and "#" not in line]
+    for name, job in _jobs().items():
+        # The files are resolved for Linux: another runner installs packages they do not name.
+        assert "runs-on: ubuntu-latest" in job, name
+        # An action can install too; these two do not.
+        assert [line for line in job if line.startswith("- uses:")] == ACTIONS, name
+        # A job allowed to fail reports green whatever it did, and GitHub
+        # reports a job its own ``if:`` skipped as passed.
+        assert not [line for line in job if line.startswith("continue-on-error")], name
+        conditions = [line for line in job if line.startswith("if:")]
+        assert conditions == (["if: always()"] if name == LATEST else []), name
+
+
 def test_every_install_line_of_a_required_job_names_its_python_s_constraints_file():
     unconstrained = set()
     for name, job in _jobs().items():
@@ -215,8 +265,6 @@ def test_the_latest_job_installs_without_a_constraints_file_and_lists_what_moved
     # the report then cannot keep the suite from running.
     report = f"run: python .github/constraints/drift.py .github/constraints/py{_python(latest)}.txt"
     assert latest.index("run: pytest -q") < latest.index("if: always()") < latest.index(report)
-    # Red must show: a job allowed to fail reports green whatever its suite did.
-    assert not [line for line in latest if line.startswith("continue-on-error")]
 
 
 @pytest.mark.parametrize("version", compile_files.PYTHON_VERSIONS)
@@ -227,6 +275,18 @@ def test_a_file_is_what_compile_writes_and_holds_only_pins(version):
     pinned = drift.pins(text)
     assert len(pinned) > 100
     assert compile_files.PROJECT not in pinned
+
+
+def _runner(version: str) -> dict[str, str]:
+    """The marker environment the files are resolved for, not the one running this suite."""
+    return {
+        "python_version": version,
+        "python_full_version": f"{version}.0",
+        "sys_platform": "linux",
+        "platform_system": "Linux",
+        "os_name": "posix",
+        "platform_machine": "x86_64",
+    }
 
 
 def test_the_project_is_named_as_the_two_scripts_name_it():
@@ -241,12 +301,14 @@ def test_every_declared_requirement_is_pinned_in_every_file_inside_its_range():
     for version, text in _files().items():
         pinned = drift.pins(text)
         for requirement in declared:
-            if requirement.marker and not requirement.marker.evaluate(
-                {"python_version": version, "sys_platform": "linux", "platform_system": "Linux"}
-            ):
+            if requirement.marker and not requirement.marker.evaluate(_runner(version)):
                 continue
             name = drift.normalized(requirement.name)
             again = f"py{version}.txt: run compile.py"
+            assert requirement.extras <= EXTRAS_RESOLVED.get(name, set()), (
+                f"{name} is declared with {sorted(requirement.extras)}: run compile.py, see "
+                "what the extra brings appear in the files, then record it in EXTRAS_RESOLVED"
+            )
             assert name in pinned, f"no pin for {name} in {again}"
             assert requirement.specifier.contains(pinned[name], prereleases=True), (
                 f"{name}=={pinned[name]} is outside the declared {requirement.specifier} in {again}"
@@ -285,22 +347,52 @@ def test_a_required_job_installs_only_from_what_compile_resolved_and_from_all_of
         assert name in seen_named, f"ci.in names {name}, which no step installs by name"
 
 
-def test_compile_asks_uv_for_an_upgrade_from_the_repo_root_and_stops_at_a_refusal(
-    monkeypatch, capsys
-):
+@pytest.mark.parametrize(
+    ("argv", "moved"),
+    [
+        # No option: uv reads each existing file back and keeps what still fits.
+        ([], []),
+        (["--upgrade"], ["--upgrade"]),
+        (
+            ["--upgrade-package", "ruff", "--upgrade-package", "httpx"],
+            ["--upgrade-package", "ruff", "--upgrade-package", "httpx"],
+        ),
+    ],
+)
+def test_compile_keeps_what_the_files_hold_unless_asked_to_move_it(monkeypatch, argv, moved):
     calls = []
 
-    def run(command, *, cwd, check):
-        calls.append((command, cwd, check))
+    def run(command, *, cwd, check, stdout):
+        calls.append((command, cwd, check, stdout))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(compile_files.subprocess, "run", run)
+    assert compile_files.main(argv) == 0
+    # stdout dropped and nothing asked to be quiet: uv's warnings come on stderr.
+    assert calls == [
+        ([*compile_files.command(version), *moved], ROOT, False, subprocess.DEVNULL)
+        for version in compile_files.PYTHON_VERSIONS
+    ]
+
+
+def test_compile_refuses_everything_and_one_package_asked_for_together(capsys):
+    with pytest.raises(SystemExit) as stopped:
+        compile_files.main(["--upgrade", "--upgrade-package", "ruff"])
+    assert stopped.value.code == 2
+    assert "not allowed with argument" in capsys.readouterr().err
+
+
+def test_compile_stops_at_a_refusal_and_says_which_files_it_had_rewritten(monkeypatch, capsys):
+    calls = []
+
+    def run(command, *, cwd, check, stdout):
+        calls.append(command)
         return subprocess.CompletedProcess(command, 3 if len(calls) == 2 else 0)
 
     monkeypatch.setattr(compile_files.subprocess, "run", run)
-    assert compile_files.main() == 3
+    assert compile_files.main([]) == 3
     first, second = compile_files.PYTHON_VERSIONS[:2]
-    assert calls == [
-        ([*compile_files.command(first), "--upgrade", "--quiet"], ROOT, False),
-        ([*compile_files.command(second), "--upgrade", "--quiet"], ROOT, False),
-    ]
+    assert calls == [compile_files.command(first), compile_files.command(second)]
     # Which files of the set a stopped run has already moved is said, not left to find.
     assert capsys.readouterr().out.splitlines()[-1] == (
         f"uv refused Python {second} (.github/constraints/py{first}.txt already rewritten); "
@@ -310,11 +402,11 @@ def test_compile_asks_uv_for_an_upgrade_from_the_repo_root_and_stops_at_a_refusa
 
 
 def test_compile_without_uv_says_so_and_writes_nothing(monkeypatch, capsys):
-    def run(command, *, cwd, check):
+    def run(command, *, cwd, check, stdout):
         raise FileNotFoundError(command[0])
 
     monkeypatch.setattr(compile_files.subprocess, "run", run)
-    assert compile_files.main() == 1
+    assert compile_files.main([]) == 1
     assert capsys.readouterr().out.splitlines()[-1] == (
         "uv is not on PATH (pip install uv); nothing was written"
     )
@@ -366,22 +458,37 @@ def test_one_release_spelled_two_ways_is_not_listed_as_moved():
     ]
 
 
-def test_a_metadata_directory_with_no_name_is_passed(monkeypatch):
+def test_a_metadata_directory_with_no_name_or_no_version_is_passed(monkeypatch):
     class Found:
-        def __init__(self, name, version):
-            self.metadata = {"Name": name}
-            self.version = version
+        def __init__(self, **metadata):
+            self.metadata = metadata
 
-    monkeypatch.setattr(
-        drift.metadata, "distributions", lambda: [Found(None, None), Found("Some_Package", "1.0")]
-    )
+    found = [Found(), Found(Name="half-removed"), Found(Name="Some_Package", Version="1.0")]
+    monkeypatch.setattr(drift.metadata, "distributions", lambda: found)
     assert drift.installed_versions() == {"some-package": "1.0"}
+
+
+def test_the_report_has_nothing_to_say_where_the_project_is_not_installed(
+    tmp_path, monkeypatch, capsys
+):
+    # What a failed install step leaves: the job's suite never ran, this step
+    # still does, and "every package is at its pin" would be read off it.
+    path = tmp_path / "constraints.txt"
+    path.write_text("a==1\n", encoding="utf-8")
+    for left in ({}, {"pip": "26.0", "setuptools": "80.0"}):
+        monkeypatch.setattr(drift, "installed_versions", lambda left=left: left)
+        assert drift.main([str(path)]) == 2
+        assert capsys.readouterr().out == (
+            f"tradingagents is not installed here, so there is nothing to compare with {path}\n"
+        )
 
 
 def test_the_report_exits_zero_whatever_it_lists_and_two_on_a_file_it_cannot_read(
     tmp_path, monkeypatch, capsys
 ):
-    monkeypatch.setattr(drift, "installed_versions", lambda: {"a": "2", "b": "1"})
+    monkeypatch.setattr(
+        drift, "installed_versions", lambda: {"a": "2", "b": "1", "tradingagents": "0.4.0"}
+    )
     path = tmp_path / "constraints.txt"
 
     path.write_text("a==1\nb==1\n", encoding="utf-8")

@@ -20,10 +20,12 @@ who knows what the benchmark plants. And each line is the answer the
 server sends it as: the same fields, the same rounding, the same spelling.
 So for any one feature the two arms read the same text. They do not read
 the same AMOUNT of it: this arm has every line before every answer, where
-the tool arm makes as many look-ups a round as its manifest allows (the
-plan starts from five, of any tool) and keeps none for the next — at any
-limit short of the vocabulary's size, this arm is shown more of where the
-features' values lie than that arm can ask for. Nothing of the other two
+the tool arm may make up to as many look-ups a round as its manifest
+allows (the plan starts from five, of any tool) and keeps none for the
+next — at any limit short of the vocabulary's size, this arm is shown
+where MORE FEATURES' values lie than that arm can ask about in a round.
+(More features, not more of everything: that arm's other look-ups answer
+what no line here does.) Nothing of the other two
 look-ups is in the block — no return after a signal, no backtest of a
 rule: computing those for the model is searching for it (plan §3.7).
 
@@ -61,8 +63,8 @@ to its digits, which keys an answer in fact carries: those are the
 look-up's (:mod:`.research_tools`), held by its own tests and by the test
 that a line here is the text the server answers with, and a change to them
 is a change to the tool arm's pack as well. (What the paragraph SAYS of
-them — the fields it lists, the number of digits — is the server's
-sentences, and so is under the digest.) A manifest names the version
+them — the fields it lists, the number of digits — is in the paragraph,
+and so is under the digest.) A manifest names the version
 (``arms.llm_summary.summary_version``) and the bench refuses one that is
 not this build's. Unlike the tool arm's pack, the digest is written to no
 record: this arm leaves no trace, and a block is recomputed from the arm's
@@ -93,11 +95,13 @@ you choose a threshold…"), where this arm's paragraph gives no advice
 (decided 2026-11-25: not added here, so that "summary above blind" stays
 the figures alone). (It is also told other words than this arm is: its
 own paragraph on the tools, and a line after each result saying how many
-calls are left.) And at any limit a manifest is likely to set it has LESS
-of the marginal figures than this arm, so the tool arm coming out below
-this one is a possible outcome, not a contradiction — and the two coming
-out level may be gains and losses cancelling, not a sign that nothing in
-the list matters.
+calls are left.) And at any limit short of the vocabulary's size it sees
+fewer features' figures a round than this arm, so the tool arm coming out
+below this one is a possible outcome, not a contradiction — and the two
+coming out level may be gains and losses cancelling, not a sign that
+nothing in the list matters. Whichever way it comes out, what is measured
+is the net of every difference between the two arms, this arm's length
+and position among them; the sign of no one of them is known beforehand.
 """
 
 from __future__ import annotations

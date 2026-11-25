@@ -75,8 +75,10 @@ MATRIX = "${{ matrix.python-version }}"
 # channel to conda and nothing to most of them.
 _PIP = re.compile(r"\bpip3?\b.*\b(?:install|sync|download|wheel)\b")
 _OWN_ENVIRONMENT = re.compile(
-    r"(?<![\w./-])"
-    r"(?:pipx|pipenv|uvx?|poetry|conda|mamba|micromamba|tox|nox|hatch|pdm|pre-commit)"
+    # At the start of a word, or called by its path (``~/.local/bin/pipx``);
+    # not a directory or a file of that name (``~/.cache/uv``, ``uv.lock``).
+    r"(?:(?<![\w./-])|(?<=/bin/))"
+    r"(?:pipx|pipenv|uvx?|poetry|conda|mamba|micromamba|tox|nox|hatch|pdm|pre[-_]commit)"
     r"(?![\w.-])"
 )
 _ROOT_REQUIREMENTS_ON_STDIN = "grep -v '^\\.$' requirements.txt | "
@@ -131,6 +133,19 @@ def _keys(job: list[str]) -> list[str]:
     return [line.removeprefix("- ") for line in job]
 
 
+def _uncommented(line: str) -> str:
+    """``line`` without a trailing comment.
+
+    Cut at the first `` #`` with no quote left open before it; a ``#`` inside
+    quotes is the command's own, and what follows it is still read.
+    """
+    for mark in re.finditer(r"\s+#", line):
+        before = line[: mark.start()]
+        if before.count('"') % 2 == 0 and before.count("'") % 2 == 0:
+            return before
+    return line
+
+
 def _installs(job: list[str]) -> list[str]:
     """The commands of a job that install packages: no ``run:``, no trailing comment.
 
@@ -140,7 +155,7 @@ def _installs(job: list[str]) -> list[str]:
     for line in _keys(job):
         if line.startswith(("#", "name:")):
             continue
-        command = re.sub(r"\s+#.*$", "", line).removeprefix("run: ")
+        command = _uncommented(line).removeprefix("run: ")
         if _PIP.search(command) or _OWN_ENVIRONMENT.search(command):
             found.append(command)
     return found
@@ -256,6 +271,9 @@ def test_the_known_ways_a_check_passes_without_running_or_stops_reporting_are_re
     ]
     for name, job in _jobs().items():
         keys = _keys(job)
+        # A step written on one line (``- {run: x, if: y}``) holds its keys
+        # where none of the checks below reads them.
+        assert not [line for line in keys if line.startswith("{")], name
         # The files are resolved for Linux: another runner installs packages they do not name.
         assert "runs-on: ubuntu-latest" in keys, name
         # An action can install too; these two do not.

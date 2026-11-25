@@ -63,9 +63,9 @@ CI 必過的 job 不再每次都裝「當下最新版」的相依套件，而是
 | `python .github/constraints/compile.py --upgrade-package 套件名` | 只把指名的套件升到範圍內最新（可以給多次）；它的相依需要跟著動的也會動 |
 | `python .github/constraints/compile.py --upgrade` | 整份重解，每個套件都升到範圍內最新 |
 
-預設不升級是 2026-11-25 的決定：加一個相依的 PR 不應該順便吃進上游當天所有的新版。因此檔頭記錄的那條指令不是清單的全部來歷，要看 git 歷史。要壓住某個套件不讓它升，只能在宣告相依的地方加上限：`pyproject.toml`，或那兩個 requirements 檔（那會連帶影響 CI 以外的安裝）。
+預設不升級是 2026-11-25 的決定：加一個相依的 PR 不應該順便吃進上游當天所有的新版。因此檔頭記錄的那條指令不是清單的全部來歷，要看 git 歷史。要壓住某個套件不讓它升，只能在宣告相依的地方加上限：`pyproject.toml`，或那兩個 requirements 檔（那會連帶影響 CI 以外的安裝）；`httpx` 是在 `ci.in` 宣告的，壓它只影響 CI。
 
-`--upgrade-package` 的套件名打錯時 uv 不會報錯，清單也不會變：跑完 `git diff` 是空的，代表名稱不對，或那個套件已經是最新。
+`--upgrade-package` 的套件名打錯時 uv 不會報錯，清單也不會變：跑完 `git diff` 是空的，代表名稱不對，或那個套件已經是範圍內最新——包括被別的套件壓住的（例如 `websockets`，見「已知的限制」）。
 
 `--upgrade` 也會動到 `ruff`：新版多一條規則時，那張 PR 的 lint job 會變紅，在那張 PR 裡修。本機的 ruff 版本不受這些清單管。
 
@@ -93,9 +93,9 @@ CI 必過的 job 不再每次都裝「當下最新版」的相依套件，而是
 - 測試矩陣加減 Python 版本：`compile.py` 的 `PYTHON_VERSIONS` 與這裡的清單檔要一起改。**分支保護也要改**：`tests (py3.x)` 是照版本展開的名稱，拿掉一個版本而沒改保護設定，每張 PR 都會卡住。
 - 改 job 的 `name:`：`develop` 的分支保護是照名稱等檢查結果的，名稱改了、保護設定沒改，每張 PR 都會卡在等一個不會出現的檢查。要改就兩邊一起改，並更新測試檔的 `REQUIRED_NAMES`。
 - 新增任何 job：測試檔列出了 `ci.yml` 的全部 job，多一個就會失敗，要把它加進 `REQUIRED_NAMES`（會被當成必過、每條安裝指令都要帶 `-c`）。
-- 讓必過的檢查「沒跑也算過」或「永遠不回報」的改法：在 job 或步驟加 `if:`、`continue-on-error`、`needs:`、`container:`，改 `runs-on`，改檔案開頭 `jobs:` 之上的任何設定（例如替觸發條件加 `paths-ignore`、加全域 `env:`；加註解不算），用 `PIP_CONSTRAINT` 環境變數，用 `actions/checkout` 與 `actions/setup-python` 以外的 action（這兩個換版本不受影響）。測試擋的是列在這裡的這幾種，不是所有可能。
+- 讓必過的檢查「沒跑也算過」或「永遠不回報」的改法：在 job 或步驟加 `if:`、`continue-on-error`、`needs:`、`container:`，改 `runs-on`，改檔案開頭 `jobs:` 之上的任何設定（例如替觸發條件加 `paths-ignore`、加全域 `env:`；加整行的註解不算，寫在行尾的註解會失敗），用 `PIP_CONSTRAINT` 環境變數，用 `actions/checkout` 與 `actions/setup-python` 以外的 action（這兩個換版本不受影響），把步驟寫成一行的 `- {…}`。測試擋的是列在這裡的這幾種，不是所有可能。
 - 用 `uv`、`uvx`、`pipx`、`pipenv`、`poetry`、`conda`、`mamba`、`tox`、`nox`、`hatch`、`pdm`、`pre-commit` 當指令：這些工具大多自己建環境、不讀 `-c`，測試一律把它們當成沒帶清單（即使 `uv pip install -c` 其實會讀）。真的要用，得先改測試檔。
-- 在帶 `-c` 的安裝行加 `-e`、`-r`、`-c` 以外的選項（`-q`、`--no-cache-dir`、`--pre` 等）：測試只讀得懂那三個，其餘一律失敗，要先在測試檔的 `_sources` 寫明新選項的意思。
+- 在帶 `-c` 的安裝行、`install` 後面加 `-e`、`-r`、`-c` 以外的選項（`-q`、`--no-cache-dir`、`--pre` 等）：測試只讀得懂那三個，寫在 `install` 後面的其餘選項一律失敗，要先在測試檔的 `_sources` 寫明新選項的意思。
 
 新增的 job 不會自動變成必過；要不要加進保護設定是另一個決定。
 

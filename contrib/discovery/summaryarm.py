@@ -23,9 +23,9 @@ the same AMOUNT of it: this arm has every line before every answer, where
 the tool arm may make up to as many look-ups a round as its manifest
 allows (the plan starts from five, of any tool) and keeps none for the
 next — at any limit short of the vocabulary's size, this arm is shown
-where MORE FEATURES' values lie than that arm can ask about in a round.
-(More features, not more of everything: that arm's other look-ups answer
-what no line here does.) Nothing of the other two
+where MORE FEATURES' values lie than that arm can have this look-up answer
+in a round. (More features, not more of everything: that arm's other
+look-ups answer what no line here does.) Nothing of the other two
 look-ups is in the block — no return after a signal, no backtest of a
 rule: computing those for the model is searching for it (plan §3.7).
 

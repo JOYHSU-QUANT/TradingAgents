@@ -25,23 +25,37 @@ Breaking changes within the 0.x line are called out explicitly.
   the text the look-ups' server sends it as, and nothing of the other two
   look-ups — no feature is picked or dropped, and no return or backtest is
   computed for the model. The paragraph that opens it states facts and
-  gives no advice, and describes a field in the server's own sentence. The
-  figures are read from the arm's own copy of the artifact, no further
-  than the last training bar, by the function the tool arm's server and
-  the pick by training score read it with; a feature the store cannot
-  answer is a named refusal before the model is asked anything, not a line
-  left out. `SUMMARY_VERSION` versions everything the arm's model reads
-  beyond the two prompts, with a digest pinned in the suite; a manifest of
-  another version is refused by `generate` and by `search`. Unlike the tool
-  arm's pack, that digest is written to no record — the arm keeps no
-  trace, and a block is recomputed from the arm's store. What the arm
-  spent is counted and recorded as the blind arm's is (`model_use.json`),
-  and it has a row of its own in `calibrate` and `report`, between the
-  blind arm's and the tool arm's. **Nothing has been run with a real model:**
-  whether this arm is run at all is decided after the tool arm's first
-  trial. Against the blind arm it would read as what the sight of the
-  figures is worth; the tool arm against it as what choosing the look-ups
-  adds *together with* the two look-ups the block leaves out.
+  gives no advice, and describes every field but `feature` in the server's
+  own sentence. The figures are read from the arm's own copy of the
+  artifact, no further than the last training bar, by the function the
+  tool arm's server and the pick by training score read it with; a feature
+  the store cannot answer is a named refusal before the model is asked
+  anything, not a line left out. `SUMMARY_VERSION` versions what the arm's
+  own module decides of what its model reads beyond the two prompts — the
+  paragraph, the features listed, how a line is written, what stands
+  before the block — with a digest of that pinned in the suite; how the
+  look-up makes a figure is not under it. A manifest of another version is
+  refused by `generate` and by `search`. Unlike the tool arm's pack, that
+  digest is written to no record — the arm keeps no trace, and a block is
+  recomputed from the arm's store. The field sentences are the look-ups'
+  server's, which are frozen only after the tool arm's first trial: if
+  that freeze edits one, this arm's version is raised with it, and that is
+  the only edit of its wording allowed once a tool-arm result has been
+  seen. What the arm spent is counted and recorded as the blind arm's is
+  (`model_use.json`), and it has a row of its own in `calibrate` and
+  `report`, after the rows of its manifest's pool arms (the three model
+  arms are never in one manifest, so their rows have no fixed order among
+  themselves). **Nothing has been run with a real model:** whether this
+  arm is run at all is decided after the tool arm's first trial. Against
+  the blind arm it would read as what the sight of the figures is worth —
+  understated, if a block that makes the system prompt about three times
+  as long costs a model anything. The tool arm against it differs in four
+  things that cannot be told apart: it chooses what to look up, it has the
+  two look-ups the block leaves out, it may write a line before each call,
+  and its tool is described with a sentence on what the figures are for,
+  which this arm's paragraph leaves out. It also sees fewer of the marginal
+  figures than this arm, which has every line every round, so the tool arm
+  coming out below it is a possible outcome.
   **Manifest version 6.** `arms` gains the `llm_summary` key, so the
   version is raised; versions 3, 4 and 5 are still read, each by its own
   key set and written back as it was read (tests pin the digests of all

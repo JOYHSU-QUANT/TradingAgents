@@ -19,11 +19,13 @@ is held in ``test_tools_server.py``, which has the client.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
 from contrib.autoresearch.evaluator import EvaluationError
 from contrib.autoresearch.ports import HypothesistError
+from contrib.autoresearch.store import ResearchStore
 from contrib.autoresearch.vocabulary import feature_names
 from contrib.discovery import summaryarm
 from contrib.discovery.bench import _train_view
@@ -43,7 +45,7 @@ from contrib.discovery.summaryarm import (
 from contrib.discovery.tools_server import stats_fields
 from contrib.discovery.upstream import ChatHypothesist
 
-from .conftest import STEP_MS, ScriptedHypothesist, arm_store
+from .conftest import COIN, STEP_MS, ScriptedHypothesist, arm_store
 from .test_bench import _ScriptedModel
 from .test_research_tools import _rewrite
 
@@ -74,6 +76,13 @@ def _lines(block: str) -> list[str]:
     opening = preamble() + "\n"
     assert block.startswith(opening)
     return block[len(opening) :].split("\n")
+
+
+def _retokened(line: str, key: str, token: str) -> str:
+    """A figure line with ``token`` written where ``key``'s value is spelled: what ``json.dumps`` would not write."""
+    spelled = f'"{key}": ' + json.dumps(json.loads(line)[key])
+    assert line.count(spelled) == 1
+    return line.replace(spelled, f'"{key}": {token}')
 
 
 # -- the wording ---------------------------------------------------------------------------------
@@ -193,6 +202,39 @@ def test_nothing_after_the_training_window_reaches_the_block(
         assert moved != call(view, STATS_TOOL, asked), series
 
 
+def test_a_day_that_straddles_the_end_of_training_does_not_reach_the_block(
+    opened_arm, history, tmp_path
+):
+    # The fixture's training window ends on a UTC midnight, where no daily
+    # bar straddles the line. Ended one bar earlier one does: the day that
+    # holds the last training bar closes four hours after it, and a
+    # feature of the daily series must not have read it.
+    path, experiment = opened_arm
+    split = experiment.split
+    cut = split.train.end_ms - STEP_MS
+    earlier = replace(
+        experiment,
+        split=replace(
+            split,
+            train=replace(split.train, end_ms=cut),
+            validation=replace(split.validation, start_ms=cut),
+        ),
+    )
+    view = _train_view(path, earlier)
+    last = view.frame.bundle.bars[-1]
+    with ResearchStore(path) as store:
+        straddling = [
+            day
+            for day in store.iter_candles(COIN, "1d")
+            if day.open_time <= last.open_time and day.close_time > last.close_time
+        ]
+    assert len(straddling) == 1
+    rewritten = tmp_path / "days.sqlite"
+    with arm_store(history, rewritten) as store:
+        assert _rewrite(store, since_ms=last.close_time + 1) > 0
+    assert summary(_train_view(rewritten, earlier)) == summary(view)
+
+
 def test_the_block_names_nothing_of_the_world_s_kind_or_of_what_is_planted(block):
     # The paragraph does say "validation": that those bars stay hidden. No
     # line of figures does, and nothing in the block names a kind of world.
@@ -277,9 +319,57 @@ def test_a_block_that_is_not_this_build_s_cannot_be_put_in_front_of_a_model(bloc
             "\n".join([preamble(), json.dumps({**json.loads(lines[0]), "hint": 1}), *lines[1:]]),
             "is not a feature's figures",
         ),
+        # A real answer's keys in another order: a line is the look-up's
+        # answer as it is written, not a bag of its fields.
+        (
+            "\n".join(
+                [preamble(), json.dumps(dict(reversed(json.loads(lines[0]).items()))), *lines[1:]]
+            ),
+            "is not a feature's figures",
+        ),
+        # A token JSON has no number for, where a figure goes.
+        (
+            "\n".join([preamble(), _retokened(lines[0], "min", "NaN"), *lines[1:]]),
+            "is not a feature's figures",
+        ),
     ):
         with pytest.raises(ValueError, match=sentence):
             SummaryHypothesist(asked=asked, block=wrong)
+    # The shape is the FEATURE's: the regime's answer has its own, and a
+    # line in the other's shape says nothing the look-up would of that
+    # feature. And under a key goes a value of its kind — words where a
+    # figure goes, a count that is no count, a number too large to be one.
+    names = list(feature_names())
+    regime = names.index("regime")
+    assert regime != 0 and FIELDS.regime_keys != FIELDS.numeric_keys
+
+    def with_line(index: int, answer: dict) -> str:
+        changed = [*lines]
+        changed[index] = json.dumps(answer)
+        return "\n".join([preamble(), *changed])
+
+    close = json.loads(lines[0])
+    labelled = json.loads(lines[regime])
+    for index, answer in (
+        (0, {**labelled, "feature": names[0]}),
+        (regime, {**close, "feature": "regime"}),
+        (0, {**close, "min": "go long"}),
+        (0, {**close, "bars": "many"}),
+        (0, {**close, "bars_with_value": -1}),
+        (0, {**close, "bars": True}),
+        (regime, {**labelled, "counts": "mostly trending"}),
+        (regime, {**labelled, "counts": {"trending": "often"}}),
+    ):
+        with pytest.raises(
+            ValueError, match=rf"line for {names[index]} is not that feature's figures"
+        ):
+            SummaryHypothesist(asked=asked, block=with_line(index, answer))
+    too_large = "\n".join([preamble(), _retokened(lines[0], "max", "1e999"), *lines[1:]])
+    with pytest.raises(ValueError, match=rf"line for {names[0]} is not that feature's figures"):
+        SummaryHypothesist(asked=asked, block=too_large)
+    # A line is written with no such token in the first place.
+    with pytest.raises(ValueError):
+        summaryarm._line({"feature": "close", "min": float("nan")})
     # And what it asks is the research package's adapter, nothing that
     # merely answers ``propose``.
     with pytest.raises(TypeError, match="asks a ChatHypothesist, got ScriptedHypothesist"):

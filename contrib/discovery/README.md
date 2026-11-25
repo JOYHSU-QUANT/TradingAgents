@@ -808,26 +808,45 @@ dev 世界上量過一次（本機 Windows，2026-11-24）：讀訓練區間 0.1
 
 | 比較 | 讀到的是什麼 |
 |---|---|
-| 摘要組 − 盲猜組 | 「看得到每個指標在訓練區間的分布」本身值多少 |
-| 工具組 − 摘要組 | 「自己選要查什麼」**加上**摘要裡沒有的兩種查詢（條件成立後的報酬、整條規則的訓練區間回測）值多少。這兩樣在這個比較裡分不開 |
+| 摘要組 − 盲猜組 | 「看得到每個指標在訓練區間的分布」值多少。兩組只差這一樣（但見下面「長度與位置」） |
+| 工具組 − 摘要組 | 四樣混在一起、分不開：(1) 自己選要查什麼；(2) 摘要裡沒有的兩種查詢（條件成立後的報酬、整條規則的訓練區間回測）；(3) 每次呼叫前可以寫一行字，等於有打草稿的空間，摘要組跟盲猜組一樣只回一條 JSON；(4) 工具說明裡有一句用途提示，摘要的開頭沒有（見下） |
 
-還有一件事這一組沒有對照：工具組每次呼叫前可以寫一行字，等於有打草稿的空間；摘要組跟盲猜組一樣只回一條 JSON。寫結果時要註明。
+**工具組可能輸給摘要組。** 對任何一個指標，兩組讀到的文字相同；但**量**不同：摘要組每一輪都看得到全部 42 行，工具組每輪的查詢有上限（起點是 5 次）、查到的不留到下一輪。
+在「指標分布」這件事上，摘要組拿到的比工具組多。所以「工具組 − 摘要組」可以是負的，那不代表工具沒用，只代表「一次給全」贏過「自己挑幾個看」。
+
+**長度與位置都對摘要組不利。** 摘要連開頭約 9,100 字元，接在 4,385 字元的 system prompt 後面、排在一份會越來越長的「已評分規則」之前；工具組查到的東西則是它自己問完之後緊接著出現的。
+42 行裡有 20 行是價格水位。如果長度或位置會讓模型分心，這一組會**低估**「看得到資料」的價值。沒有做長度相同的對照（例如放別的世界的摘要）。
+
+**四種結果各自容易被讀錯成什麼。** 下面是讀法上的提醒，「比較可能是」的部分是推測、沒有驗證過；正式的判定規則要在開跑前寫進工具組計畫 §0.4。
+
+| 結果 | 容易讀成 | 其實只能說 |
+|---|---|---|
+| 摘要組 ≈ 盲猜組 | 看資料沒用 | **各指標自己的分布**沒用。條件式的規則本來就不太能從邊際分布看出來 |
+| 摘要組 > 盲猜組 | 模型用資料找到了規律 | 比較可能是門檻設在指標到得了的地方、「從未成交」的輪次變少。雜訊世界裡，會成交的規則變多也可能讓誤判變多 |
+| 工具組 > 摘要組 | 自己選要查什麼很重要 | 上表那四樣之一或全部；比較可能是另外兩種查詢 |
+| 工具組 ≈ 摘要組 > 盲猜組 | — | 四種裡最有資訊的一種：工具組多出來的主要是門檻校準 |
 
 **摘要放什麼**（2026-11-24 拍板）：詞彙表裡**每一個**指標各一行（目前 42 行），照詞彙表的順序，沒有別的。
 
 - **不挑指標。** 挑哪些值得給，等於替模型做了一部分搜尋，而且挑的人知道 benchmark 埋的是哪一類規則。沒選的做法：拿掉 20 個價格水位的指標
   （省將近一半的字）、另外加幾個 horizon 的基準報酬。
 - **每一行就是 `feature_stats` 查詢對那個指標的回答**，跟工具伺服器回給模型的文字逐字相同（`tests/test_tools_server.py` 經 MCP 核對全部指標）：
-  `feature`、`bars`、`bars_with_value`、`min`、五個分位數、`max`；`regime` 是各 label 的根數。數字取 6 位有效數字。所以工具組如果把每個指標都查一次
-  `feature_stats`，讀到的就是這份摘要；兩組的差不會是「給的數字不一樣」。
+  `feature`、`bars`、`bars_with_value`、`min`、五個分位數、`max`；`regime` 是各 label 的根數。數字取 6 位有效數字。所以同一個指標，兩組讀到的是同一段文字；差別在看得到幾個（上面「工具組可能輸給摘要組」）。
 - **沒有條件報酬、沒有任何一條規則的回測。** 那些是搜尋的產物，替模型算就是替它搜（計畫 §3.7）。
 
 **接在哪裡**（2026-11-24 拍板）：autoresearch 的 system prompt 後面，跟工具組的工具說明同一個位置；不是 user prompt 後面（計畫 §3.7 第一版寫的是 user prompt）。
 摘要每輪都一樣，所以放在不變的那一段；user prompt 的最後一句仍然是「只回一條規則」。autoresearch 的兩個 prompt 函式都沒有改。
 
 **開頭那一段只講事實、不給建議**（沿用工具組 2026-11-19 的拍板）：這些數字是訓練區間的、驗證區間仍然看不到而且正式分數在那裡量、
-每輪都一樣、每個欄位是什麼意思。欄位的解釋用的是工具伺服器說明裡的同一句（`tools_server.stats_fields()`），所以兩組讀到的欄位定義是同一份。
-它也回應 system prompt 那句「history you cannot see」：看得到的是訓練區間的統計，不是驗證區間。模型讀到的樣子（數字是示意）：
+每輪都一樣、每個欄位是什麼意思。除了 `feature` 以外，每個欄位的解釋用的是工具伺服器說明裡的同一句（`tools_server.stats_fields()`），所以兩組讀到的欄位定義是同一份；
+`feature` 那一行是摘要組自己的（伺服器寫的是「the feature asked about」，摘要裡沒有人問）。
+它也回應 system prompt 那句「history you cannot see」：看得到的是訓練區間的統計，不是驗證區間。
+
+**工具說明裡有一句用途提示，摘要的開頭沒有**（2026-11-25 拍板：不加）。`feature_stats` 的工具說明寫著「Use it before you choose a threshold: a condition only fires if the feature actually
+reaches the number you compare it with.」。摘要組沒被告知這些數字拿來做什麼，所以「摘要組 − 盲猜組」可能偏小、「工具組 − 摘要組」可能偏大。
+不加的理由：加了之後「摘要組 − 盲猜組」就變成「數字＋提示」，分不出是哪一個的功勞。
+
+模型讀到的樣子（數字是示意）：
 
 ```
 TRAINING-BAR FIGURES you are given before you answer:
@@ -854,6 +873,10 @@ Figures are rounded to 6 significant digits.
 **跟工具組不同的一點：這個雜湊不寫進任何紀錄**（這一組沒有 trace）。所以版本號相同、字卻不同的兩個 build 跑出來的世界，`report` 分不出來；守住這件事的只有測試裡釘的雜湊。
 模型實際讀到的摘要可以由那個 replicate 的 store 重算，`tests/test_bench_summary.py` 就是這樣核對送出去的 prompt 的。
 
+**試跑之後這一組的字還能怎麼動**（2026-11-25 拍板）。欄位解釋借的是工具伺服器的句子，而工具說明要等真模型試跑後才凍結。規則：試跑後如果凍結時改了那幾句，
+摘要組的版本號跟著升、雜湊重釘，**而且這是看過工具組結果之後唯一允許的改動**；摘要自己寫的句子、列哪些指標、接在哪裡，都不准跟著改。
+沒選的做法：現在就把那幾句抄一份進來（摘要組的字從此不動，但試跑後兩組對同一個欄位讀到的解釋可能不一樣）；現在就凍結 `feature_stats` 的說明（等於放棄用試跑檢查模型有沒有誤解欄位）。
+
 manifest 的 `arms.llm_summary` 有填時，`search` 在最後跑它（它是會花錢的臂）：
 
 ```json
@@ -861,17 +884,19 @@ manifest 的 `arms.llm_summary` 有填時，`search` 在最後跑它（它是會
                 "replicates": 1, "world_subset": ["SYN-EB3BC030"], "summary_version": 1}
 ```
 
-前五個欄位跟 `arms.llm` 相同。`llm`、`llm_tools`、`llm_summary` 一份 manifest 最多填一個：三組的比較是同一個 seed 各落地一次（「一世界多目錄」），
-所以表上的一列永遠是一個臂、一組條件。store 在 `arms/llm_summary/replicate-<k>.sqlite`，experiment 叫 `llm_summary-<k>`；那個資料夾裡只有 store，沒有 trace、沒有 log。
+前五個欄位跟 `arms.llm` 相同。`llm`、`llm_tools`、`llm_summary` 一份 manifest 最多填一個：三組的比較是同一個 seed 各落地一次（跟「LLM 臂（PR 5）」一節
+「一個世界兩個目錄」是同一條規則，只是現在最多三個目錄），所以表上的一列永遠是一個臂、一組條件。store 在 `arms/llm_summary/replicate-<k>.sqlite`，experiment 叫 `llm_summary-<k>`；那個資料夾裡只有 store，沒有 trace、沒有 log。
 
 **花了什麼。** 跟盲猜組一樣每輪問模型一次，client 外面包的是同一個計數器，寫進同一個 `model_use.json`，`report` 在 `llm_summary` 那一列印同一句 token 行
 （規則見「工具組接進 benchmark（工具組 T4）」的「盲猜組花了什麼」）。一份 manifest 只有一個模型臂，所以一個目錄裡的 `model_use.json` 只會是其中一組的。
 
 **大小與代價**（一個 5000 根的 dev 世界、本機 Windows、2026-11-24 量一次）：42 行共約 7,800 字元，開頭那一段 1,311 字元；autoresearch 的 system prompt 是 4,385 字元。
-所以每次呼叫的輸入大約是盲猜組的兩倍。這是用字元數粗估的，沒有實際 token 數，供應商有沒有 prompt caching 也還沒確認。
+所以 system prompt 從 4,385 字元變成約 13,500 字元，**約 3.1 倍**。第一輪的 user prompt 只有幾百字元，整個輸入也接近 3 倍；之後 user prompt 隨已評分的規則變長，
+倍數往下掉，30 輪平均大概在 2 倍上下（這個平均是估的，沒有量）。全部是字元數，不是 token 數：帶很多數字的 JSON 換成 token 可能更不划算。供應商有沒有 prompt caching 也還沒確認。
 每個 replicate 開始前要讀一次訓練區間、把整個詞彙表的指標算一遍，那個世界上是 24 秒，只花 CPU。
 
-**在表上。** `calibrate`／`report` 多一列 `llm_summary`，排在 `llm` 之後、`llm_tools` 之前（什麼都沒看 → 數字交到手上 → 自己去查）。
+**在表上。** `calibrate`／`report` 多一列 `llm_summary`。表是先照條件 digest 排、同一組條件裡才照臂排，所以它排在**同一份 manifest**的 Random／Grid／對照組後面。
+它跟 `llm`、`llm_tools` 兩列之間沒有固定的先後：三個模型臂一定在不同的 manifest、digest 不同，誰先誰後看的是 digest 的字母順序。
 
 **還沒定的事。** 這一組要不要跑、跟其他組怎麼比、多大的差才算數，都是 12 月開跑前寫進判定規則的內容（工具組計畫 §0.4、§3.7）；寫這一節時還沒定。
 
@@ -925,8 +950,8 @@ structural_distance, agreement, bars_compared, holdout_sharpe, holdout_ruined, r
 | 池＝templates × grids 按 `candidate_order`、去重後編號、每個候選寫法正規（gate 在 `filters`、`max_bars`、`POOL_SIZING`、family）、parser 拒絕就 manifest 拒絕；Random 是 seed＋world 決定的排列、不放回；Grid 按編號；池走完 raise `CandidatesExhausted`＋旗標；經真的 `search()` 每個候選只 file 一次、以 `exhausted` 結束 | `tests/test_hypothesists.py` |
 | 不用模型的對照組：每輪試跑的條數不超過上限、最後一輪試剩下的；抽到的規則剛好是整個池、每條一次、每條只試跑一次（沒被交出去的也離開池子）；同世界同 seed 的抽法、分數、答案都相同，換 seed、換世界、Random 臂同 seed 都是別的順序；每輪交的是訓練分數最好的那一條（手寫歷史上 seed 0 的八輪逐輪釘住：兩條都有交易取淨 Sharpe 高的、訓練賠錢但有交易的贏過零交易的、兩條都零交易取先抽到的）；排序三層（有交易沒爆倉→零交易→爆倉），後兩層不讀 Sharpe，同分取先抽到的，只有一筆交易也算有交易；手建的 `Scored`／`PickRound` 不合法就拒絕（編號、不是訓練區間的數字、同一輪重複）；評分途中 store 答不出來時那一輪什麼都不算，再問一次會重抽同一輪；`rounds` 與 `backtests` 只能讀；把訓練區間之後的資料全部改掉，每輪抽的、分數、答案都不變——訓練區間結束在午夜、結束在午夜前一根（有一根日線跨過界線）各一次，池裡加了讀日線的規則（對照組：改到訓練區間內就會變）；`_train_view` 在搜尋的 handle 還開著時讀 view，前後 store 與它的 WAL 逐位元相同；經真的 `search()`：三條規則每輪兩條，兩輪抽完（2＋1）、第三次被問時以 `exhausted` 結束，ledger 只有交出去的兩條、`rules_tried` 是 2、trial 的訓練數字等於當初排序用的那一組；store 不含 split 指名的訓練區間時是具名拒絕（`BenchError`），不是 traceback | `tests/test_hypothesists.py` |
 | 對照組經 `bench` 跑完一個世界（池 3 條、預算 3、每輪 2 條）：排在 Grid 之後、自己一顆 store、沒有 trace／`tool_use.json`／`model_use.json`；Random／Grid 用完預算，對照組在 2 個答案後池空（`exhausted`，答案數既不是池大小也不是預算）而紀錄照樣讀得回來；它的 trial 等於用同一個 seed 從它自己的 store 重算出來的選擇；`calibrate`／`score`／`report` 有它那一列、沒有 token 行，兩張表都在那一列說每個答案是從最多幾條裡挑的、其他列沒有這一句、這個數放到別的臂的列上或從它的列上拿掉都被拒絕；紀錄少了它、manifest 沒指名它、它的 trial 不在池裡、池空時的答案數不對、答案數超過池子抽得出來的輪數，都拒絕；manifest 同時指名對照組與模型臂時，執行順序是 Random → Grid → 對照組 → 模型臂（不跑搜尋，直接讀 `_arms()` 排出來的清單） | `tests/test_bench_pick.py` |
-| 摘要組的那一段文字與提問器：整段文字（開頭說明＋指標清單）的雜湊釘在 `SUMMARY_VERSION` 上，改一句、少一個指標、換版本號、換掉伺服器那幾句、換一行的寫法、換 system prompt 與摘要之間的空行都會變；每個欄位的解釋是工具伺服器說明裡的同一句、一行帶的每個鍵都有解釋、沒有多的；摘要＝詞彙表每個指標各一行、照順序、每行等於 `feature_stats` 的回答（鍵的順序也是）、`bars` 都是訓練區間的根數；把訓練區間之後的 bar／日線／funding 全部改掉，摘要逐字不變（對照組：三條序列各自改到訓練區間內就會變）；摘要裡沒有世界類型／planted／holdout 字樣，數字那幾行沒有 validation；有指標算不出來時不跳過、錯誤照樣丟出；提問器把摘要接在 system prompt 後面（中間空一行）、user prompt 原樣交出、每輪同一份、回的是 adapter 的文字、模型沒回應是 adapter 的 `HypothesistError`、`label` 與 `model` 是 adapter 的；手建的提問器帶的不是這一版的那段文字（沒有開頭、開頭被改、少一行、多一行、順序不對、混進別的字、某一行的鍵不是 `feature_stats` 的那一組）或問的不是 `ChatHypothesist` 都拒絕 | `tests/test_summaryarm.py` |
-| 摘要組經 `bench` 跑完一個世界（假模型，兩個 replicate：一個回答兩次、一個第一輪就沒回應）：排在 Random／Grid 之後、每個 replicate 一顆 store、`arms/llm_summary/` 底下沒有別的檔、沒有 `tool_use.json`；可答池外規則、seam 失敗另計、ledger 記模型自己的名字；**模型實際收到的 system prompt＝autoresearch 的 system prompt＋空一行＋從那個 replicate 自己的 store 重算出來的摘要**，三次呼叫都是、user prompt 以「只回一條規則」結尾、第二輪才列出已評分的規則、對話裡沒有世界類型；`model_use.json` 的內容與盲猜組同形、讀回相等、`calibrate`／`report` 有 `llm_summary` 那一列與 token 行、給單價才印花費；紀錄跟這一組自己的搜尋對不上（呼叫次數、seam、模型、replicate）都拒絕，沒有這個檔時照樣讀並在那一列寫出沒紀錄的個數；紀錄是摘要組的而 manifest 寫的是盲猜組／沒有模型臂／replicate 較少，都拒絕；`summary_version` 不是這一版時 `summary_arm()`、`_arms()`、`generate` 都拒絕且什麼都沒落地、模型沒被問；模型建不起來時拒絕句寫的是 `arms.llm_summary`；執行順序是 Random → Grid → 對照組 → 摘要組，每個 replicate 各有自己的計數器、拿到的是它被開在的那顆 store 的摘要，開提問器不問模型；哪兩個臂走 `model_use.json`，以及指名摘要組／盲猜組／工具組／沒有模型臂的四種 manifest 各算不算；不是模型臂的東西拿去建模型＝具名拒絕；store 答不出某個指標（兩種錯誤）＝具名拒絕、模型沒被問 | `tests/test_bench_summary.py` |
+| 摘要組的那一段文字與提問器：整段文字（開頭說明＋指標清單）的雜湊釘在 `SUMMARY_VERSION` 上，改一句、少一個指標、換版本號、換掉伺服器那幾句、換一行的寫法、換 system prompt 與摘要之間的空行都會變；除了 `feature` 以外每個欄位的解釋是工具伺服器說明裡的同一句、一行帶的每個鍵都有解釋、沒有多的；摘要＝詞彙表每個指標各一行、照順序、每行等於 `feature_stats` 的回答（鍵的順序也是）、`bars` 都是訓練區間的根數；把訓練區間之後的 bar／日線／funding 全部改掉，摘要逐字不變（對照組：三條序列各自改到訓練區間內就會變），訓練區間結束在午夜前一根、有一根日線跨過界線時也一樣；摘要裡沒有世界類型／planted／holdout 字樣，數字那幾行沒有 validation；有指標算不出來時不跳過、錯誤照樣丟出；提問器把摘要接在 system prompt 後面（中間空一行）、user prompt 原樣交出、每輪同一份、回的是 adapter 的文字、模型沒回應是 adapter 的 `HypothesistError`、`label` 與 `model` 是 adapter 的；手建的提問器帶的不是這一版的那段文字（沒有開頭、開頭被改、少一行、多一行、順序不對、混進別的字、某一行的鍵不是 `feature_stats` 的那一組或順序不同、regime 的格式套在數字指標上或反過來、該放數字的地方放了字／NaN／大到不是數的數、根數不是非負整數）或問的不是 `ChatHypothesist` 都拒絕；寫一行時遇到 NaN 直接丟錯 | `tests/test_summaryarm.py` |
+| 摘要組經 `bench` 跑完一個世界（假模型，兩個 replicate：一個回答兩次、一個第一輪就沒回應）：排在 Random／Grid 之後、每個 replicate 一顆 store、`arms/llm_summary/` 底下沒有別的檔、沒有 `tool_use.json`；可答池外規則、seam 失敗另計、ledger 記模型自己的名字；**模型實際收到的 system prompt＝autoresearch 的 system prompt＋空一行＋從這一組的 store 重算出來的摘要**（兩個 replicate 的 store 是同一份 artifact 的複本，各自重算出來的摘要相同），三次呼叫都是、user prompt 以「只回一條規則」結尾、第二輪才列出已評分的規則、對話裡沒有世界類型；`model_use.json` 的內容與盲猜組同形、讀回相等、`calibrate`／`report` 有 `llm_summary` 那一列與 token 行、給單價才印花費；紀錄跟這一組自己的搜尋對不上（呼叫次數、seam、模型、replicate）都拒絕，沒有這個檔時照樣讀並在那一列寫出沒紀錄的個數；紀錄是摘要組的而 manifest 寫的是盲猜組／沒有模型臂／replicate 較少，都拒絕；`summary_version` 不是這一版時（比這一版新或舊都算）`summary_arm()`、`_arms()`、`generate` 都拒絕且什麼都沒落地，已經落地的世界由 `search` 在任何一臂開始前拒絕、目錄維持落地時的樣子，模型都沒被問；模型建不起來時拒絕句寫的是 `arms.llm_summary`；執行順序是 Random → Grid → 對照組 → 摘要組，每個 replicate 各有自己的計數器；把兩個 replicate 開在兩顆訓練區間內容不同的 store 上，各自拿到的是自己那顆的摘要；開提問器不問模型；三張「哪些是模型臂」的清單（manifest 的鍵、bench 的臂、建模型時認的紀錄類別）互相對得上；`model_use.json` 拿去對不是這類臂的搜尋會被拒絕；哪兩個臂走 `model_use.json`，以及指名摘要組／盲猜組／工具組／沒有模型臂的四種 manifest 各算不算；不是模型臂的東西拿去建模型＝具名拒絕；store 答不出某個指標（兩種錯誤）＝具名拒絕、模型沒被問 | `tests/test_bench_summary.py` |
 | 一次真的 `search`：`arms/` 兩顆 store、`verdicts.json`／`oracle.json` 讀回相等、`manifest.json` 不動且目錄名不變、artifact 位元組不變；各臂同條件、各自 store 裡只晉升 selected；oracle 在各臂之後印、holdout 有值、整池 16 個；再搜拒絕；模型臂最後跑、各自一顆 store、可答池外規則、seam 失敗另計；落地後改過的 manifest（digest 對不上目錄名）拒絕；calibrate 表（一列＝一組條件〔條件 digest〕、seam 失敗不進分母、artifact 裁掉仍可算、同一目錄只算一次、world_id／pool_size／臂集合不符與
 null 雙胞胎 digest 拒絕、紀錄對 manifest 的條件／預算／池／oracle 門檻與視窗）；搜尋進行中（只有 `arms/`）拒絕且點名 staging；
 staging 開不起來時 claim 歸還；搬 store 失敗或中斷時保留 staging 並點名；紀錄閘門（verdict 對不上快照、selected 非首位、holdout 段位、`eligible`／`margin`／`passed`／段名／`clearing`、`best`／`size`、版本、grid replicate、trials ≤ pool_size、row 的計數）；holdout 旗標可關；dev-only／null 的 oracle 預覽拒絕；中斷＝目錄回到落地狀態；seam 失敗記錄後下一臂照跑 | `tests/test_bench.py` |

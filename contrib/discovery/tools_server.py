@@ -564,9 +564,9 @@ class StatsFields(NamedTuple):
 
     numeric_keys: tuple[str, ...]  # a numeric feature's answer, in the order it carries them
     regime_keys: tuple[str, ...]  # the regime's
-    numeric: list[str]  # a line for each numeric field after ``feature``
-    regime_intro: str  # what is said before the regime's own field
-    regime: list[str]  # the line of that field
+    numeric: tuple[str, ...]  # a line for each numeric field but ``feature``
+    regime_intro: str  # what is said before the fields the regime's answer alone carries
+    regime: tuple[str, ...]  # a line for each of those
     rounding: str  # the sentence on rounding
 
 
@@ -579,14 +579,18 @@ def stats_fields() -> StatsFields:
     not two, and the keys a line is held to are the ones described. The
     lines leave out ``feature``, whose meaning here ("the feature asked
     about") is the tool's alone: nobody asked for a line of a summary.
+    The fields are picked by NAME — every numeric field but that one, and
+    the fields a regime's answer has that a number's has not — so the
+    lines do not depend on where the table puts them.
     """
     numeric, labelled = _stats_fields()
+    shared = {field.name for field in numeric}
     return StatsFields(
         numeric_keys=tuple(field.name for field in numeric),
         regime_keys=tuple(field.name for field in labelled),
-        numeric=_listed(numeric[1:]),
+        numeric=tuple(_listed([field for field in numeric if field.name != "feature"])),
         regime_intro=_REGIME_INTRO,
-        regime=_listed(labelled[-1:]),
+        regime=tuple(_listed([field for field in labelled if field.name not in shared])),
         rounding=_ROUNDING,
     )
 

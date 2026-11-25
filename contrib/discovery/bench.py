@@ -267,9 +267,16 @@ class Arm(VocabEnum, noun="arm"):
     arm answers from the two prompts alone; the summary arm is the same
     model handed a fixed summary of the training window (tools plan T6);
     the tool arm is the same model with the training-window look-ups at
-    hand (tools plan T4). The three model arms are listed in that order —
+    hand (tools plan T4). The three model arms are listed in that order:
     nothing of the training window, its figures handed over, its figures
-    looked up — and a table's rows come in the order listed here.
+    looked up.
+
+    The order listed here is the order of the rows of ONE set of
+    conditions (:func:`in_row_order` sorts by the conditions' digest before
+    the arm): a manifest's model arm comes after its pool arms. It is not
+    an order among the three model arms' rows — a manifest names one of
+    them, so they are never under one digest, and their rows fall where
+    their digests do.
     """
 
     RANDOM = "random"
@@ -1830,6 +1837,14 @@ def _hold_model_use(
     reply that is text is a round spent), and the search ended on a failed
     seam in the one exactly when it did in the other.
     """
+    if not arm.metered:
+        # Not a pair ``metered_arm`` gives: the record is of an arm counted
+        # around its client, and holding it to another arm's searches would
+        # refuse (or pass) it for what those did.
+        raise BenchError(
+            f"{where}: a model-use record is of an arm whose model calls are counted around "
+            f"its client, and {arm.value} is not one"
+        )
     if (use.world_id, use.manifest_digest) != (verdicts.world_id, verdicts.manifest_digest):
         raise BenchError(
             f"{where} is for {use.world_id} under manifest {use.manifest_digest}; "

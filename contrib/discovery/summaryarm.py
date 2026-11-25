@@ -16,11 +16,13 @@ would be a piece of the search done for the model, and one made by someone
 who knows what the benchmark plants. And each line is the answer the
 ``feature_stats`` look-up gives for that feature, in the text the look-ups'
 server sends it as: the same fields, the same rounding, the same spelling.
-So what this arm is handed is what the tool arm would read had it asked
-that one tool about every feature, and a difference between the two arms
-is not a difference in the figures. Nothing of the other two look-ups is in
-it — no return after a signal, no backtest of a rule: computing those for
-the model is searching for it (plan §3.7).
+So for any one feature the two arms read the same text. They do not read
+the same AMOUNT of it: this arm has every line before every answer, where
+the tool arm may make a few look-ups a round and keeps none for the next —
+on where a feature's values lie, this arm is shown more than that arm can
+ask for. Nothing of the other two look-ups is in the block — no return
+after a signal, no backtest of a rule: computing those for the model is
+searching for it (plan §3.7).
 
 **Where it goes** (decided 2026-11-24): appended to the research package's
 system prompt, where the tool arm's paragraph goes, and not to the user
@@ -59,22 +61,51 @@ not this build's. Unlike the tool arm's pack, the digest is written to no
 record: this arm leaves no trace, and a block is recomputed from the arm's
 own store.
 
-What this arm does NOT control for is said where results are written up:
-the tool arm also has the two look-ups that are not in the block, and room
-to write between calls, so "tools above summary" is the worth of choosing
-AND of those two; "summary above blind" is the worth of the figures alone.
+**The definition is tied to the tools' wording, by a rule** (decided
+2026-11-25). The field sentences are the server's, and the server's
+wording is frozen only after the tool arm's first trial with a real model
+(plan §5). If that freeze edits one of those sentences, this arm's version
+is raised with it and its digest re-pinned — and that is the ONLY edit of
+this arm's wording allowed once a tool-arm result has been seen: the
+paragraph's own sentences, the features listed and where the block goes
+are not moved with it. The alternative, a copy of the sentences here,
+would keep this text still and let the two arms describe one field in two
+ways.
+
+**What a comparison with this arm can and cannot say** is said where
+results are written up, and comes to this. Against the blind arm, this arm
+adds the figures and nothing else — but a long block of them, 42 lines of
+which about half are price levels, placed before a list of scored rules
+that grows: if length or position costs a model anything, this arm
+understates what sight of the window is worth. Against this arm, the tool
+arm differs in four things at once and they cannot be told apart: it
+chooses what to look up; it has the two look-ups that are not in the
+block; it may write a line before each call; and its tool is described
+with a sentence on what the figures are for ("use it before you choose a
+threshold…"), where this arm's paragraph gives no advice (decided
+2026-11-25: not added here, so that "summary above blind" stays the
+figures alone). And it has LESS of the marginal figures than this arm, so
+the tool arm coming out below this one is a possible outcome, not a
+contradiction.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from typing import Final
 
 from .research_tools import TrainView, call
-from .tools_server import stats_fields
-from .upstream import ChatHypothesist, feature_names
+from .tools_server import StatsFields, stats_fields
+from .upstream import (
+    ChatHypothesist,
+    FeatureRef,
+    FeatureUnit,
+    feature_names,
+    parse_feature_name,
+)
 
 __all__ = [
     "AFTER_SYSTEM_PROMPT",
@@ -88,12 +119,15 @@ __all__ = [
     "wording_digest",
 ]
 
-# The version of everything a model of this arm reads beyond the research
-# package's two prompts: the paragraph below, the features listed and the
-# fields of a line. One number for the whole of it, as the tool arm's pack
-# has; the suite pins a digest beside it, so an edit without a bump is red.
-# Settled before any result of the tool arm is seen (plan §3.7) and not
-# moved while results of the two are set side by side.
+# The version of what THIS MODULE decides of what the arm's model reads
+# beyond the research package's two prompts: the paragraph below, the
+# features listed, how an answer is written out as a line, what stands
+# before the block (:func:`wording`; the figures' own making is the
+# look-up's, and is not under this number). The suite pins a digest beside
+# it, so an edit without a bump is red. Settled before any result of the
+# tool arm is seen (plan §3.7); after one is, it moves only with the
+# server's field sentences when those are frozen (the module docstring's
+# rule), and for no other reason.
 SUMMARY_VERSION: Final = 1
 
 # The look-up each line of the block is an answer of.
@@ -199,6 +233,47 @@ def wording_digest() -> str:
     return hashlib.sha256(written.encode("utf-8")).hexdigest()
 
 
+def _no_constant(token: str) -> object:
+    """Refuse ``NaN`` and the infinities where a line is read back: a line is written with none of them."""
+    raise ValueError(f"{token} is not a figure")
+
+
+def _count(value: object) -> bool:
+    return type(value) is int and value >= 0
+
+
+def _figure(value: object) -> bool:
+    """A finite number, and no ``bool`` (which is an ``int`` to ``isinstance``)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _reads_as_figures(name: str, answer: dict[str, object], fields: StatsFields) -> bool:
+    """Whether ``answer`` has the shape ``feature_stats`` answers ``name`` in: its keys, and a value of each key's kind.
+
+    The regime's keys for the regime and a number's for every other
+    feature — a line in the other's shape describes nothing the look-up
+    would say of that feature. Counts are whole and not negative, a figure
+    is a finite number, and the regime's counts are whole numbers by label.
+    The values themselves are a world's and are not judged.
+    """
+    labelled = FeatureRef(*parse_feature_name(name)).unit is FeatureUnit.REGIME
+    if tuple(answer) != (fields.regime_keys if labelled else fields.numeric_keys):
+        return False
+    counted = ("bars", "bars_with_value")
+    if not all(_count(answer[key]) for key in counted):
+        return False
+    if labelled:
+        counts = answer["counts"]
+        return isinstance(counts, dict) and all(
+            isinstance(label, str) and _count(count) for label, count in counts.items()
+        )
+    return all(
+        _figure(answer[key])
+        for key in fields.numeric_keys
+        if key != "feature" and key not in counted
+    )
+
+
 @dataclass(frozen=True)
 class SummaryHypothesist:
     """A model asked once a round, with the training window's figures appended to its system prompt.
@@ -213,11 +288,13 @@ class SummaryHypothesist:
 
     The block is held to this build's shape at construction: the
     paragraph, then one line for each feature of the vocabulary in its
-    order, each a JSON object carrying exactly a ``feature_stats`` answer's
-    keys. So a hypothesist built by hand cannot put another paragraph, a
-    feature more or fewer, or a line with anything but those fields in
-    front of a model. The VALUES are not checked here — they are a world's,
-    and :meth:`over` is how a block of real ones is made.
+    order, each a JSON object carrying exactly the keys ``feature_stats``
+    answers THAT feature with, under each a value of its kind (a count, a
+    finite number, the regime's counts by label). So a hypothesist built by
+    hand cannot put another paragraph, a feature more or fewer, a line with
+    anything but those fields, or words where a figure goes in front of a
+    model. Which numbers they are is not checked here — they are a world's,
+    and :meth:`over` is how a block of this arm's own is made.
     """
 
     asked: ChatHypothesist
@@ -238,10 +315,10 @@ class SummaryHypothesist:
         # lists them: a numeric feature's, or the regime's.
         fields = stats_fields()
         shapes = (fields.numeric_keys, fields.regime_keys)
-        listed: list[object] = []
+        answers: list[dict[str, object]] = []
         for line in self.block[len(opening) :].split("\n"):
             try:
-                answer = json.loads(line)
+                answer = json.loads(line, parse_constant=_no_constant)
             except ValueError:
                 answer = None
             if not isinstance(answer, dict) or tuple(answer) not in shapes:
@@ -250,12 +327,20 @@ class SummaryHypothesist:
                     f"keys {list(shapes[0])}, or {list(shapes[1])} for the regime; build it "
                     f"with summary()"
                 )
-            listed.append(answer["feature"])
+            answers.append(answer)
+        listed = [answer["feature"] for answer in answers]
         if listed != names:
             raise ValueError(
                 f"the block lists {len(listed)} feature(s) and not the vocabulary's "
                 f"{len(names)}, each once and in its order; build it with summary()"
             )
+        for name, answer in zip(names, answers, strict=True):
+            if not _reads_as_figures(name, answer, fields):
+                raise ValueError(
+                    f"the block's line for {name} is not that feature's figures: counts of "
+                    f"bars, and finite numbers or the regime's counts by label, under the "
+                    f"keys its look-up answers with; build it with summary()"
+                )
 
     @classmethod
     def over(cls, asked: ChatHypothesist, view: TrainView) -> SummaryHypothesist:

@@ -17,7 +17,8 @@ read and tabled as the blind arm's is.
 from __future__ import annotations
 
 import json
-from dataclasses import replace
+from dataclasses import fields, replace
+from typing import get_args
 
 import pytest
 
@@ -26,7 +27,7 @@ from contrib.autoresearch.features import FeatureError
 from contrib.autoresearch.hypothesis import build_system_prompt
 from contrib.autoresearch.store import ResearchStore
 from contrib.autoresearch.vocabulary import feature_names
-from contrib.discovery import bench
+from contrib.discovery import bench, manifest as manifest_module
 from contrib.discovery.bench import (
     ARMS_DIRNAME,
     Arm,
@@ -43,24 +44,35 @@ from contrib.discovery.bench import (
 )
 from contrib.discovery.cli import main as cli_main
 from contrib.discovery.landing import MANIFEST_FILENAME, world_dir
-from contrib.discovery.manifest import LlmSummaryArm, LlmToolsArm, Manifest, TrainPickArm
+from contrib.discovery.manifest import (
+    Arms,
+    LlmArm,
+    LlmSummaryArm,
+    LlmToolsArm,
+    Manifest,
+    ModelArm,
+    TrainPickArm,
+)
 from contrib.discovery.modeluse import MODEL_USE_FILENAME, MeteredModel, ModelUse
 from contrib.discovery.scoring import report_table, score_world
 from contrib.discovery.summaryarm import SUMMARY_VERSION, SummaryHypothesist, summary
 from contrib.discovery.tooluse import TOOL_USE_FILENAME
 from contrib.discovery.verdict import Ended
 
-from .conftest import COIN, PLANTED, STEP_MS, bench_manifest, land_run
+from .conftest import COIN, PLANTED, STEP_MS, arm_store, bench_manifest, land_run
 from .test_bench import (
     _BLIND_LABEL,
     _BLIND_SPENT,
     _BLIND_TOKENS,
     _PRICES,
+    LANDED,
     LLM_ARM,
     _copy_records,
+    _listing,
     _records_of,
     _ReportingModel,
 )
+from .test_research_tools import _rewrite
 
 # The blind arm's run in ``test_bench.py`` over again with the block in
 # front of the model: the same model, two replicates, the same script. So
@@ -162,16 +174,27 @@ def test_the_model_is_sent_the_figures_of_its_own_training_window_after_the_syst
 ):
     run, verdicts, _lines, client, _built = summarised
     experiment = verdicts.results[2].snapshot.experiment
-    # The block over again, from the arm's own store: what the model was
-    # sent is this text, after the research package's system prompt.
-    block = summary(_train_view(store_path(run, Arm.LLM_SUMMARY, 0), experiment))
+    # The block over again, from each replicate's own store: what the model
+    # was sent is this text, after the research package's system prompt.
+    # (The two stores are copies of one artifact, so the two blocks are one
+    # text: that each replicate read ITS store is held where two stores
+    # that differ are opened, in the test of the order below.)
+    blocks = [
+        summary(
+            _train_view(
+                store_path(run, Arm.LLM_SUMMARY, k), verdicts.results[2 + k].snapshot.experiment
+            )
+        )
+        for k in (0, 1)
+    ]
+    block = blocks[0]
+    assert blocks[1] == block
     told = f"{build_system_prompt()}\n\n{block}"
     # Two rounds of the first replicate, and the one call the second's seam failed on.
     assert len(client.prompts) == 3
     for (system_role, system), (user_role, user) in client.prompts:
         assert (system_role, user_role) == ("system", "human")
-        # The same block every round, and for every replicate: each read
-        # it off its own copy of the one artifact.
+        # The same block every round.
         assert system == told
         # The user prompt is the loop's, untouched: it ends on the instruction.
         assert COIN in user and user.endswith(ASK)
@@ -200,7 +223,7 @@ def test_what_the_summary_arm_spent_is_recorded_read_and_tabled_as_the_blind_arm
     assert read_searched(run).model_use == written
     assert not any(line.startswith("model use:") for line in lines)
     assert metered_arm(read_manifest(run)) == (Arm.LLM_SUMMARY, SUMMARY_ARM)
-    # A row of its own on both tables, between a blind model's and a tool arm's.
+    # A row of its own on both tables, after the rows of its manifest's pool arms.
     rows = calibration_table([run])
     assert [row.arm for row in rows] == [Arm.RANDOM, Arm.GRID, Arm.LLM_SUMMARY]
     mine = rows[-1]
@@ -277,6 +300,13 @@ def test_the_record_is_held_to_the_summary_arm_s_own_searches_and_may_be_absent(
     (row,) = (row for row in report_table([old]) if row.arm is Arm.LLM_SUMMARY)
     assert (row.model_uses, row.model, row.unrecorded) == ((), None, 2)
     assert row.describe()[-1].startswith("  tokens not recorded for 2 search(es) of this row")
+    # The record is of an arm counted around its client, and is held to
+    # no other arm's searches, whatever is passed beside it.
+    use = read_searched(run).model_use
+    bench._hold_model_use("model_use.json", use, Arm.LLM_SUMMARY, SUMMARY_ARM, verdicts)
+    for arm in (Arm.LLM_TOOLS, Arm.RANDOM):
+        with pytest.raises(BenchError, match=rf"counted around its client, and {arm.value} is not"):
+            bench._hold_model_use("model_use.json", use, arm, SUMMARY_ARM, verdicts)
 
 
 def test_records_and_a_manifest_that_disagree_about_the_summary_arm_are_refused(
@@ -302,12 +332,22 @@ def test_records_and_a_manifest_that_disagree_about_the_summary_arm_are_refused(
 
 
 def test_a_summary_version_that_is_not_this_build_s_is_refused_before_anything_is_landed_or_searched(
-    monkeypatch, tmp_path, capsys
+    monkeypatch, tmp_path, capsys, landed_world
 ):
     client = _ReportingModel([])
     build, _built = _scripted(client)
     monkeypatch.setattr(bench.ChatHypothesist, "build", build)
     assert summary_arm(SUMMARY_ARM).label == LABEL
+    # Another version is an EARLIER one as much as a later one: a build
+    # whose wording has moved on does not run a manifest written for the
+    # wording before.
+    with monkeypatch.context() as later:
+        later.setattr(bench, "SUMMARY_VERSION", SUMMARY_VERSION + 1)
+        with pytest.raises(
+            BenchError,
+            match=rf"at version {SUMMARY_VERSION + 1}, the manifest asks for {SUMMARY_VERSION}",
+        ):
+            summary_arm(SUMMARY_ARM)
 
     # Another version: the manifest would describe a run told other words.
     other = _summary_manifest(replace(SUMMARY_ARM, summary_version=SUMMARY_VERSION + 1))
@@ -326,6 +366,15 @@ def test_a_summary_version_that_is_not_this_build_s_is_refused_before_anything_i
     root = tmp_path / "never"
     assert cli_main(["generate", "--manifest", str(written), "--root", str(root)]) == 1
     assert sentence in capsys.readouterr().err and not root.exists()
+    # A world landed under it all the same (by another build, say) is
+    # refused by ``search`` itself before any arm runs, and is left as
+    # landed: nothing searched, the claim given back, to be searched by a
+    # build that does speak that version.
+    artifact, _landing = landed_world
+    run = land_run(tmp_path / "landed", artifact, other)
+    with pytest.raises(BenchError, match=sentence):
+        run_world(run)
+    assert _listing(run) == LANDED
     assert client.prompts == []
 
     # A model that cannot be built is named under this arm's path.
@@ -349,8 +398,24 @@ def test_a_summary_version_that_is_not_this_build_s_is_refused_before_anything_i
         bench.model_hypothesist(TrainPickArm(search_seeds=(0,), backtests=1))
 
 
+def test_the_model_arms_a_manifest_can_name_are_the_ones_the_bench_runs_as_model_arms():
+    # Three lists say which arms are model arms: the keys a manifest may
+    # name one under, the arms this runner does not walk the pool with, and
+    # the records a model is built for. One going its own way would leave
+    # an arm outside the one-model-arm rule, or a key no arm answers to.
+    assert list(manifest_module._MODEL_ARMS) == [arm.value for arm in Arm if not arm.walks_pool]
+    assert dict(bench._MODEL_ARM_PATHS) == {
+        kind: f"arms.{key}"
+        for key, kind in zip(
+            manifest_module._MODEL_ARMS, (LlmArm, LlmSummaryArm, LlmToolsArm), strict=True
+        )
+    }
+    assert set(get_args(ModelArm)) == {kind for kind, _path in bench._MODEL_ARM_PATHS}
+    assert set(manifest_module._MODEL_ARMS) < {field.name for field in fields(Arms)}
+
+
 def test_the_summary_arm_runs_after_every_arm_that_asks_no_provider_each_replicate_counted_apart(
-    monkeypatch, opened_arm
+    monkeypatch, opened_arm, history, tmp_path
 ):
     client = _ReportingModel([])
     build, _built = _scripted(client)
@@ -367,18 +432,26 @@ def test_the_summary_arm_runs_after_every_arm_that_asks_no_provider_each_replica
         (Arm.LLM_SUMMARY, 0),
         (Arm.LLM_SUMMARY, 1),
     ]
-    # Opened for real, over the hand-written store: each replicate is
-    # handed the block of the store it is opened on, and a counter of its
-    # own around the one client.
+    # Opened for real, over two hand-written stores that DIFFER inside the
+    # training window (in a run they are copies of one artifact, and a
+    # block kept from the first replicate would pass for the second's):
+    # each replicate is handed the block of the store it is opened on, and
+    # a counter of its own around the one client.
     path, experiment = opened_arm
-    block = summary(_train_view(path, experiment))
+    other = tmp_path / "other.sqlite"
+    last_close = _train_view(path, experiment).frame.bundle.bars[-1].close_time
+    with arm_store(history, other) as store:
+        assert _rewrite(store, since_ms=last_close, series=("4h",)) > 0
+    stores = (path, other)
+    blocks = [summary(_train_view(store, experiment)) for store in stores]
+    assert blocks[0] != blocks[1]
+    summary_arms = [open_ for arm, _replicate, open_ in arms if arm is Arm.LLM_SUMMARY]
     opened = []
-    for arm, _replicate, open_ in arms:
-        if arm is Arm.LLM_SUMMARY:
-            with open_(path, experiment) as hypothesist:
-                opened.append(hypothesist)
+    for open_, store in zip(summary_arms, stores, strict=True):
+        with open_(store, experiment) as hypothesist:
+            opened.append(hypothesist)
     first, second = opened
-    for hypothesist in opened:
+    for hypothesist, block in zip(opened, blocks, strict=True):
         assert isinstance(hypothesist, SummaryHypothesist)
         assert (hypothesist.block, hypothesist.label) == (block, LABEL)
         assert isinstance(hypothesist.model, MeteredModel)

@@ -1081,17 +1081,20 @@ class LlmSummaryArm:
     """The model arm handed a fixed summary of the training window, and no tools (tools plan §3.7, T6).
 
     The model arm's five fields, read as that arm's are, and the version of
-    everything this arm's model reads beyond the research package's two
-    prompts (``summary_version``: the summary arm's ``SUMMARY_VERSION`` —
-    the paragraph that introduces the figures, which features are listed
-    and how a line is spelled). It is in the manifest's identity, so two
-    runs are one condition exactly when they agree on it.
+    what the summary arm's own module decides of what its model reads
+    beyond the research package's two prompts (``summary_version``: that
+    module's ``SUMMARY_VERSION`` — the paragraph that introduces the
+    figures, which features are listed, how a line is spelled; not how the
+    look-up makes a figure). It is in the manifest's identity, so two runs
+    that differ in it are two conditions; two that agree on it were told
+    the same words by one build, and that they were one build's is the
+    suite's pin to hold, since no record of a search carries the digest.
 
-    It is set between the other two model arms: against the blind one it
-    asks what the plain sight of the training window's figures is worth,
-    and against the one with tools what choosing the look-ups adds to
-    being handed them. Whether ``summary_version`` is THIS build's is not
-    asked here, as the tool arm's pack version is not: the bench asks
+    Against the blind model arm it asks what the plain sight of the
+    training window's figures is worth. The tool arm set against it
+    differs in more than the choice of what to look up (the summary arm's
+    module says in what). Whether ``summary_version`` is THIS build's is
+    not asked here, as the tool arm's pack version is not: the bench asks
     before it builds the arm.
     """
 
@@ -1120,10 +1123,10 @@ class LlmSummaryArm:
 # and the worlds it is run on.
 _MODEL_ARM_KEYS: Final = ("provider", "model", "temperature", "replicates", "world_subset")
 
-# The model arms, by the key each is written under in ``arms``, in the
-# order a table lists them: nothing of the training window, its figures
-# handed over, its figures looked up. A manifest names one at most
-# (:attr:`Arms.model_arm`), and this is the one list of them.
+# The model arms, by the key each is written under in ``arms``: nothing of
+# the training window, its figures handed over, its figures looked up. A
+# manifest names one at most (:attr:`Arms.model_arm`), and this is the one
+# list of them; the bench's suite holds it to the arms that runner knows.
 _MODEL_ARMS: Final = ("llm", "llm_summary", "llm_tools")
 ModelArm = LlmArm | LlmSummaryArm | LlmToolsArm
 

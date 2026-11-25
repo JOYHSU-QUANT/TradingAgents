@@ -1,0 +1,7 @@
+# What a CI job installs by name in a workflow step and no requirements file
+# or pyproject extra declares. compile.py resolves these with the rest, so the
+# step can install them under the same constraints file as everything else.
+
+# The dashboard suite's test client (ci.yml, the autoresearch job). The page
+# itself does not import it, so contrib/dashboard/requirements.txt has no pin.
+httpx>=0.27

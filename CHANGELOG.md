@@ -526,12 +526,14 @@ Breaking changes within the 0.x line are called out explicitly.
   `tests/test_ci_constraints.py` reads the workflow and the lists and fails
   on an install line added without `-c`, a source or an extra the lists
   were not resolved from, a declared dependency no list pins or pins
-  outside its range, a job renamed or added, and the edits that let a
-  required check pass without running (`if:`, `continue-on-error`, a
-  trigger filter, another runner). One list serves every job of its Python,
+  outside its range, a job renamed or added, and the known edits that let a
+  required check pass without running or stop reporting (`if:`,
+  `continue-on-error`, `needs:`, a trigger filter, another runner, another
+  action). One list serves every job of its Python,
   so a package one job needs can hold back another job's: `websockets` is
   at 15.0.1 everywhere because uniswap_v3's `web3<8` requires it, where the
-  root install alone resolves 17.4, and the clean-install job gets
+  root install alone resolves 17.4 (16.1.1 on Python 3.10), and the
+  clean-install job gets
   `python-dateutil` 2.9 where a bare install resolves 4.0 — that job now
   tests the bare install at the pinned versions, and nothing tests it at
   today's. Not constrained: `pip` itself, the mypy job's

@@ -68,11 +68,16 @@ drift = _load("drift")
 MATRIX = "${{ matrix.python-version }}"
 # Any way a step could put packages into the job's environment, not only the
 # spelling in use: a line this matches and UNCONSTRAINED does not list has to
-# carry the constraints flag. pip by what it is asked to do; the tools that
-# build an environment of their own, and read no -c, by being named at all.
-_INSTALLER = re.compile(
-    r"\bpip3?\b.*\b(?:install|sync|download|wheel)\b"
-    r"|\b(?:pipx|uvx?|poetry|conda|mamba|tox|nox|hatch|pdm|pre-commit)\b"
+# carry the constraints flag. pip by what it is asked to do. The tools that
+# build an environment of their own by being named as a command at all (a
+# file name such as ``uv.lock`` or ``.pre-commit-config.yaml`` is no
+# command), and those never count as constrained, whatever follows: -c is a
+# channel to conda and nothing to most of them.
+_PIP = re.compile(r"\bpip3?\b.*\b(?:install|sync|download|wheel)\b")
+_OWN_ENVIRONMENT = re.compile(
+    r"(?<![\w./-])"
+    r"(?:pipx|pipenv|uvx?|poetry|conda|mamba|micromamba|tox|nox|hatch|pdm|pre-commit)"
+    r"(?![\w.-])"
 )
 _ROOT_REQUIREMENTS_ON_STDIN = "grep -v '^\\.$' requirements.txt | "
 # The extras a declared requirement may carry: each was resolved by compile.py
@@ -94,7 +99,11 @@ ABOVE_THE_JOBS = [
     "  group: ci-${{ github.ref }}",
     "  cancel-in-progress: true",
 ]
-ACTIONS = ["- uses: actions/checkout@v4", "- uses: actions/setup-python@v5"]
+# The actions a job may use, whatever their version: neither installs a package.
+ACTIONS = ["uses: actions/checkout", "uses: actions/setup-python"]
+# Keys that let a job report without its steps deciding the result, or run
+# them somewhere the files were not resolved for.
+NOT_IN_A_JOB = ("continue-on-error:", "needs:", "container:")
 
 
 def _jobs() -> dict[str, list[str]]:
@@ -117,13 +126,24 @@ def _jobs() -> dict[str, list[str]]:
     return jobs
 
 
+def _keys(job: list[str]) -> list[str]:
+    """A job's lines with a step's leading dash removed: ``- if: x`` and ``if: x`` read alike."""
+    return [line.removeprefix("- ") for line in job]
+
+
 def _installs(job: list[str]) -> list[str]:
-    """The commands of a job that install packages, without a leading ``run:``."""
-    return [
-        line.removeprefix("run: ")
-        for line in job
-        if _INSTALLER.search(line) and not line.startswith("#")
-    ]
+    """The commands of a job that install packages: no ``run:``, no trailing comment.
+
+    A comment and a step's ``name:`` are no command, whatever they mention.
+    """
+    found = []
+    for line in _keys(job):
+        if line.startswith(("#", "name:")):
+            continue
+        command = re.sub(r"\s+#.*$", "", line).removeprefix("run: ")
+        if _PIP.search(command) or _OWN_ENVIRONMENT.search(command):
+            found.append(command)
+    return found
 
 
 def _sources(line: str) -> tuple[set[str], set[str], set[str]]:
@@ -149,7 +169,10 @@ def _sources(line: str) -> tuple[set[str], set[str], set[str]]:
         elif word.startswith("-"):
             # -rFILE, --requirement=FILE, --group and the like would name a
             # source this reading passes over.
-            assert word in ("-e", "-r", "-c"), f"an option this file does not read: {line}"
+            assert word in ("-e", "-r", "-c"), (
+                f"{word} is an option this file does not read (it reads -e, -r and -c, each "
+                f"apart from its value); teach _sources what it means first: {line}"
+            )
         elif word == "." or word.startswith(".["):
             extras.update(extra for extra in word[2:-1].split(",") if extra)
         else:
@@ -218,23 +241,30 @@ def test_the_required_jobs_keep_the_names_branch_protection_waits_on():
     assert latest.removeprefix("name: ") not in REQUIRED_NAMES.values()
 
 
-def test_no_job_can_pass_without_running_stop_reporting_or_install_another_way():
-    text = CI.read_text(encoding="utf-8")
-    lines = text.splitlines()
-    above = [line for line in lines[: lines.index("jobs:")] if line and not line.startswith("#")]
+def test_the_known_ways_a_check_passes_without_running_or_stops_reporting_are_refused():
+    lines = CI.read_text(encoding="utf-8").splitlines()
+    above = [
+        line.rstrip()
+        for line in lines[: lines.index("jobs:")]
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
     assert above == ABOVE_THE_JOBS
     # -c on a line is what the other tests read; the variable would constrain
     # (or, in the latest job, quietly pin) with no line saying so.
-    assert not [line for line in lines if "PIP_CONSTRAINT" in line and "#" not in line]
+    assert not [
+        line for line in lines if "PIP_CONSTRAINT" in line and not line.lstrip().startswith("#")
+    ]
     for name, job in _jobs().items():
+        keys = _keys(job)
         # The files are resolved for Linux: another runner installs packages they do not name.
-        assert "runs-on: ubuntu-latest" in job, name
+        assert "runs-on: ubuntu-latest" in keys, name
         # An action can install too; these two do not.
-        assert [line for line in job if line.startswith("- uses:")] == ACTIONS, name
+        used = [line.split("@")[0] for line in keys if line.startswith("uses:")]
+        assert used == ACTIONS, name
         # A job allowed to fail reports green whatever it did, and GitHub
         # reports a job its own ``if:`` skipped as passed.
-        assert not [line for line in job if line.startswith("continue-on-error")], name
-        conditions = [line for line in job if line.startswith("if:")]
+        assert not [line for line in keys if line.startswith(NOT_IN_A_JOB)], name
+        conditions = [line for line in keys if line.startswith("if:")]
         assert conditions == (["if: always()"] if name == LATEST else []), name
 
 
@@ -244,11 +274,14 @@ def test_every_install_line_of_a_required_job_names_its_python_s_constraints_fil
         if name == LATEST:
             continue
         for line in _installs(job):
-            if "-c " in line:
+            if "-c " in line and not _OWN_ENVIRONMENT.search(line):
                 assert line.endswith(_flag(job)), f"{name}: {line}"
             else:
                 unconstrained.add(line)
-    assert unconstrained == set(UNCONSTRAINED)
+    assert unconstrained == set(UNCONSTRAINED), (
+        "an install line of a required job with no constraints file (or run by a tool "
+        "this file does not take -c from) that UNCONSTRAINED does not list"
+    )
 
 
 def test_a_job_that_installs_nothing_from_the_index_would_not_pass_as_constrained():
@@ -463,7 +496,12 @@ def test_a_metadata_directory_with_no_name_or_no_version_is_passed(monkeypatch):
         def __init__(self, **metadata):
             self.metadata = metadata
 
-    found = [Found(), Found(Name="half-removed"), Found(Name="Some_Package", Version="1.0")]
+    found = [
+        Found(),
+        Found(Name="half-removed"),
+        Found(Version="1.0"),
+        Found(Name="Some_Package", Version="1.0"),
+    ]
     monkeypatch.setattr(drift.metadata, "distributions", lambda: found)
     assert drift.installed_versions() == {"some-package": "1.0"}
 

@@ -7,7 +7,18 @@ import json
 from collections.abc import Callable
 from typing import Any
 
-__all__ = ["json_bytes", "payload_digest"]
+__all__ = ["json_bytes", "json_text", "payload_digest"]
+
+
+def json_text(obj: Any, *, default: Callable[[Any], Any] | None = None) -> str:
+    """:func:`json_bytes` before it is encoded, for a writer that has to read the text first.
+
+    One does today: a sidecar's text can hold a character UTF-8 cannot carry
+    (a lone surrogate in what a model wrote), which its writer replaces
+    before encoding. Whoever writes or hashes the artifact itself wants
+    :func:`json_bytes`.
+    """
+    return json.dumps(obj, ensure_ascii=False, indent=2, default=default)
 
 
 def json_bytes(obj: Any, *, default: Callable[[Any], Any] | None = None) -> bytes:
@@ -22,7 +33,7 @@ def json_bytes(obj: Any, *, default: Callable[[Any], Any] | None = None) -> byte
     digest-neutral, since it is never consulted for input that already
     serialises.
     """
-    return json.dumps(obj, ensure_ascii=False, indent=2, default=default).encode("utf-8")
+    return json_text(obj, default=default).encode("utf-8")
 
 
 def payload_digest(raw: bytes) -> str:

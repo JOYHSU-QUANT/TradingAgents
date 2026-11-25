@@ -1,7 +1,11 @@
+import logging
+import re
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Collection
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # Kwargs every provider client forwards from user config to its chat class: the
 # cross-provider knobs (``temperature``, ``max_tokens``) plus the two
@@ -32,6 +36,113 @@ def normalize_content(response):
         ]
         response.content = "\n".join(t for t in texts if t)
     return response
+
+
+# A code point from U+D800 to U+DFFF standing in a ``str`` is half of a UTF-16
+# pair with no partner. Every one in a ``str`` is such a half: a well-formed
+# pair is a single code point above U+FFFF. Built from ``chr`` so that no
+# editor or tool rewrites the escapes into the characters themselves.
+_LONE_SURROGATE = re.compile(f"[{chr(0xD800)}-{chr(0xDFFF)}]")
+_REPLACEMENT_CHARACTER = chr(0xFFFD)
+
+
+def _without_lone_surrogates(value, found):
+    """``value`` with each lone surrogate in any text it holds as U+FFFD.
+
+    ``found`` is a one-item list that grows by how many were replaced. What
+    holds none comes back as the same object, containers and messages
+    included, so a clean input is passed on untouched. Read through: text,
+    lists, tuples, dicts (keys too: a tool call's argument names are a
+    model's words), and anything pydantic — a message, with its content,
+    its tool calls, its other declared fields and the extra ones a provider
+    put on it, or a prompt value with its messages. Told apart by shape and
+    not by class, so this module imports no chat library. Every field is
+    read, the ones a client sends and the ones it does not (a reply's
+    metadata, its id): the count is of the input a request is built from,
+    not of the request's bytes, and where such a field holds one it is more
+    than what was sent.
+
+    Not read: what is none of those (a dataclass, a set). A container is
+    followed as far as it goes: one that holds itself is a
+    ``RecursionError``, with or without such a character in it; a chat
+    input is a tree. And these hold only for something that had to change,
+    which a chat input is not known to run into: a subclass of ``list``,
+    ``tuple`` or ``dict`` comes back as the plain type, with nothing else of
+    the container carried over; and two texts that differed only in such
+    characters are the same text afterwards — two keys of one dict become
+    one key, the later value kept, and two tool calls' ids one id.
+    """
+    if isinstance(value, str):
+        replaced, count = _LONE_SURROGATE.subn(_REPLACEMENT_CHARACTER, value)
+        found[0] += count
+        return replaced if count else value
+    if isinstance(value, dict):
+        pairs = [
+            (_without_lone_surrogates(key, found), _without_lone_surrogates(item, found))
+            for key, item in value.items()
+        ]
+        same = all(
+            new_key is key and new_item is item
+            for (new_key, new_item), (key, item) in zip(pairs, value.items(), strict=True)
+        )
+        return value if same else dict(pairs)
+    if isinstance(value, (list, tuple)):
+        items = [_without_lone_surrogates(item, found) for item in value]
+        if all(new is old for new, old in zip(items, value, strict=True)):
+            return value
+        return items if isinstance(value, list) else tuple(items)
+    fields = getattr(type(value), "model_fields", None)
+    if fields is not None and hasattr(value, "model_copy"):
+        update = {}
+        # Declared fields, then what the model allows beside them: a message
+        # keeps a provider's additions there, and a client may send those too.
+        for name in (*fields, *(getattr(value, "model_extra", None) or ())):
+            old = getattr(value, name, None)
+            new = _without_lone_surrogates(old, found)
+            if new is not old:
+                update[name] = new
+        return value.model_copy(update=update) if update else value
+    return value
+
+
+def sendable(input):
+    """What a chat model is about to be asked, with nothing in it that cannot be sent.
+
+    A model's reply can hold a lone surrogate (its provider's JSON carried
+    half of an escaped pair and the client decoded it), and so can a tool's
+    result or a vendor's text. A graph puts each into a later node's prompt,
+    and a request is UTF-8, which has no encoding for one: with the
+    OpenAI-compatible client, the one this was measured on, building the
+    request raises ``UnicodeEncodeError`` before anything is sent, so the
+    node fails on text it was only passing on, and whoever drives the graph
+    retries or gives up (#441). Each such character becomes U+FFFD, one for
+    one, in what is sent. The graph's own state is not touched, so what this
+    repository's writers store from it still goes through the replacement
+    they make, and their counts still count (upstream's own state log
+    writes escapes, and keeps the character). A warning says how many,
+    since U+FFFD in a prompt does not say whether its author or this
+    function put it there. An input holding none is returned as the same
+    object.
+
+    Every client's ``invoke`` passes its input through here, beside
+    :func:`normalize_content` on the way back: the two ends of the call
+    every node of this repository makes, whichever way the node wraps the
+    model (bound tools, structured output). ``invoke`` only: ``stream``,
+    ``ainvoke`` and ``astream`` on these chat classes send their input as it
+    is, and no caller here uses them. The count is of this request: a
+    character a graph keeps in its state is counted again by each later
+    request that quotes it.
+    """
+    found = [0]
+    cleaned = _without_lone_surrogates(input, found)
+    if found[0]:
+        logger.warning(
+            "%d lone surrogate(s) in a model request were replaced with U+FFFD before "
+            "sending: none can be written as UTF-8 "
+            "(text a graph keeps is counted by each request quoting it)",
+            found[0],
+        )
+    return cleaned
 
 
 class BaseLLMClient(ABC):

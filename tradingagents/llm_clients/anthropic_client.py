@@ -3,7 +3,7 @@ from typing import Any
 
 from langchain_anthropic import ChatAnthropic
 
-from .base_client import _COMMON_PASSTHROUGH_KWARGS, BaseLLMClient, normalize_content
+from .base_client import _COMMON_PASSTHROUGH_KWARGS, BaseLLMClient, normalize_content, sendable
 from .capabilities import get_capabilities
 from .validators import validate_model
 
@@ -51,7 +51,7 @@ class NormalizedChatAnthropic(ChatAnthropic):
     """
 
     def invoke(self, input, config=None, **kwargs):
-        return normalize_content(super().invoke(input, config, **kwargs))
+        return normalize_content(super().invoke(sendable(input), config, **kwargs))
 
     def with_structured_output(self, schema, *, method="function_calling", **kwargs):
         caps = get_capabilities(self.model)

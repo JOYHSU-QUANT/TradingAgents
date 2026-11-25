@@ -2,7 +2,7 @@ from typing import Any
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-from .base_client import _COMMON_PASSTHROUGH_KWARGS, BaseLLMClient, normalize_content
+from .base_client import _COMMON_PASSTHROUGH_KWARGS, BaseLLMClient, normalize_content, sendable
 from .validators import validate_model
 
 
@@ -14,7 +14,7 @@ class NormalizedChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
     """
 
     def invoke(self, input, config=None, **kwargs):
-        return normalize_content(super().invoke(input, config, **kwargs))
+        return normalize_content(super().invoke(sendable(input), config, **kwargs))
 
 
 class GoogleClient(BaseLLMClient):

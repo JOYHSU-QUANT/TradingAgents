@@ -578,11 +578,13 @@ class Reply:
     everything in it — its text, each call's id, name and arguments as
     they came — is something every client can encode a request from. A
     reply holding a ``NaN`` is not, for a client that refuses to write
-    one; a reply with half a surrogate pair in it is not: sent back, the
-    provider's
-    client fails to encode the request (measured 2026-11-19), and a
-    mistake of the model's would end the search as a model that did not
-    answer.
+    one; a reply with half a surrogate pair in it is not: sent back as it
+    is, the provider's client fails to encode the request (measured
+    2026-11-19), and a mistake of the model's would end the search as a
+    model that did not answer. (Since issue #441 the engine's clients
+    replace such a character in what they send, so a request holding one
+    would go out with U+FFFD in its place; this arm's rule is unchanged,
+    and it still does not put such a reply back.)
     """
 
     message: object
@@ -667,7 +669,7 @@ def _read_call(item: object, label: str, *, parsed: bool) -> ToolCall:
     are there so that neither the wire nor a trace line is handed whatever
     a model writes. (Not sending a call is half of it, and for two of
     these not the half a model meets: a reply with a ``NaN`` or with
-    half a surrogate pair in it cannot be sent back to the model either,
+    half a surrogate pair in it is not sent back to the model either,
     which is :attr:`Reply.replayable`'s to say.)
     """
     if not isinstance(item, Mapping):

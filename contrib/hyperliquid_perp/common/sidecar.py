@@ -40,7 +40,8 @@ from pathlib import Path
 from typing import Any
 
 from contrib.core.atomic_io import atomic_write_bytes
-from contrib.core.digest import json_bytes
+from contrib.core.digest import json_text
+from contrib.core.surrogates import replace_lone_surrogates
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +75,19 @@ def write_sidecar(
     format. A VALUE JSON cannot carry is stored as its ``str`` at that leaf,
     with one WARNING per type per write, so one odd value cannot sink the
     record or turn its container into a repr string, and the degradation is
-    not silent. A dict KEY JSON cannot carry is the one exception:
+    not silent. A CHARACTER UTF-8 cannot carry — a lone surrogate in what an
+    agent wrote: it reached the reports record already when the final
+    decision held one, and every report can bring one since a later node
+    can be sent such text (issue #441) — is written as U+FFFD, one for one,
+    with a WARNING naming the file and saying how many: the replacement the
+    store makes for the decision's own text (issue #427), for the same
+    reason, and said here because the store's seam says nothing. Counted
+    where it stands in the written text, so a key and a
+    value each count; a record holding none is written byte for byte as
+    before. (The handoff sidecar records the digest of the coordinator's file
+    beside what was parsed from it: after a replacement the two no longer
+    describe the same bytes, and that WARNING is what says so.) A dict KEY
+    JSON cannot carry is the one exception:
     ``json.dumps`` never consults ``default`` for keys, so that record is lost
     whole — logged as a failed write, no file. Both builders' own keys are
     ``str``; the reports record's nested debate dicts are upstream's.
@@ -86,9 +99,17 @@ def write_sidecar(
         if "schema" in built:
             raise ValueError(f"{what} sidecar builder returned its own 'schema' key")
         record = {"schema": SIDECAR_SCHEMA, **built}
-        atomic_write_bytes(
-            sidecar_path(payload_path, suffix), json_bytes(record, default=_stringify_for(what))
-        )
+        path = sidecar_path(payload_path, suffix)
+        text, replaced = replace_lone_surrogates(json_text(record, default=_stringify_for(what)))
+        if replaced:
+            logger.warning(
+                "%s sidecar: %d lone surrogate(s) in %s cannot be written as UTF-8; each is "
+                "written as U+FFFD",
+                what,
+                replaced,
+                path.name,
+            )
+        atomic_write_bytes(path, text.encode("utf-8"))
     except Exception:  # noqa: BLE001 — recording must never fail the cycle
         logger.exception("%s sidecar could not be written; the decision is unaffected", what)
 

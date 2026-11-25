@@ -9,9 +9,10 @@ A decline in such words ended in a traceback where it should have been
 "try again later".
 
 These tests hand the visit such an answer through a scripted judge. With
-the real graph, of the reports only the final decision gets this far: any
-other report is read by a later node first, whose request cannot be built
-with such a character in it (issue #441).
+the real graph every report can get this far since issue #441: a later
+node that reads one is sent it with the character replaced, and the report
+itself arrives here as it was written (``test_surrogate_request.py`` runs
+that with the real graph).
 
 Every such character here is built with ``chr``: a source file cannot hold
 one, and an escape for one is easy to get wrong without noticing.

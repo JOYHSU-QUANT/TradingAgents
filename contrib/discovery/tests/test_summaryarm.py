@@ -370,8 +370,8 @@ def test_a_block_that_is_not_this_build_s_cannot_be_put_in_front_of_a_model(bloc
         (regime, {**labelled, "counts": {**labelled["counts"], "buy everything now": 1}}),
         (regime, {**labelled, "counts": {}}),
         (regime, {**labelled, "counts": dict(reversed(labelled["counts"].items()))}),
-        # A whole number too long to be a float is refused like any other
-        # line, and not by an error of another kind.
+        # A count below zero is none, at any length (a whole number is not
+        # asked a float's question, which one this long would raise at).
         (0, {**close, "bars": -(10**400)}),
     ):
         with pytest.raises(
@@ -416,9 +416,13 @@ def test_a_block_that_is_not_this_build_s_cannot_be_put_in_front_of_a_model(bloc
     # the writing that is refused.
     assert json.loads(lines[0].replace(", ", ",  ")) == close
     assert json.loads(lines[0].replace('"close"', '"\\u0063lose"')) == close
-    # The same lines with CRLF between them are another block.
-    with pytest.raises(ValueError):
+    # The same lines with CRLF between them are another block: refused at
+    # the paragraph where every line ending is one, and at the first line
+    # where only the figure lines' are.
+    with pytest.raises(ValueError, match="does not open with this build's paragraph"):
         SummaryHypothesist(asked=asked, block=block.replace("\n", "\r\n"))
+    with pytest.raises(ValueError, match="is not a feature's figures . a JSON object"):
+        SummaryHypothesist(asked=asked, block=preamble() + "\n" + "\r\n".join(lines))
     # A line is written with no such token in the first place.
     with pytest.raises(ValueError):
         summaryarm._line({"feature": "close", "min": float("nan")})

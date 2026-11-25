@@ -1867,8 +1867,9 @@ def _hold_model_use(
     by_replicate = {r.replicate: r for r in verdicts.results if r.arm is arm}
     unfiled = [replicate for replicate in replicates if replicate not in by_replicate]
     if unfiled:
-        # ``arm`` and ``llm`` were not one arm's (or the verdicts are not
-        # this manifest's): said, where a look-up below would only raise.
+        # The verdicts file no search under ``arm`` for a replicate ``llm``
+        # names — the two were not one arm's, or these are not this
+        # manifest's verdicts: said, where a look-up below would only raise.
         raise BenchError(
             f"{where}: {VERDICTS_FILENAME} beside it files no {arm.value} search for "
             f"replicate(s) {unfiled}"

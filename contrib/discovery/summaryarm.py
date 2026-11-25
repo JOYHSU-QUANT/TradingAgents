@@ -252,7 +252,12 @@ def wording_digest() -> str:
 
 
 def _no_constant(token: str) -> object:
-    """Refuse ``NaN`` and the infinities where a line is read back: a line is written with none of them."""
+    """Refuse ``NaN`` and the infinities where a line is read back: a line is written with none of them.
+
+    (:func:`_written_as` would refuse such a line too — writing one of
+    them back raises — so this states the refusal where the token is met
+    and changes no outcome.)
+    """
     raise ValueError(f"{token} is not a figure")
 
 
@@ -277,7 +282,11 @@ def _written_as(line: str, answer: object) -> bool:
     of a key written twice, and takes any spacing and any escape, so a
     line can parse to a faultless answer and still put other characters in
     front of a model — the first value of the doubled key above all. What
-    is sent is the line, so the line is what is held.
+    is sent is the line, so the line is what is held: to what it reads
+    back as, written again. That holds its SPELLING — each key once, the
+    look-up's spacing, no escape it would not write — and not its figures:
+    one written to more digits than the look-up rounds to reads back and
+    is written again the same.
     """
     try:
         return _line(answer) == line
@@ -334,18 +343,20 @@ class SummaryHypothesist:
     paragraph, then one line for each feature of the vocabulary in its
     order, each a JSON object carrying exactly the keys ``feature_stats``
     answers THAT feature with, under each a value of its kind (a count, a
-    finite number, the regime's counts by label) — and each WRITTEN as the
-    look-up's answer is, character for character, since what a model is
-    sent is the line and not what the line reads back as. So a hypothesist
-    built by hand cannot put another paragraph, a feature more or fewer, a
-    line with anything but those fields, or words where a figure goes in
-    front of a model.
+    finite number, the regime's counts by label) — and each SPELLED as the
+    look-up writes an answer (each key once, its spacing, no escape of
+    another's), since what a model is sent is the line and not what the
+    line reads back as. So a hypothesist built by hand cannot put another
+    paragraph, a feature more or fewer, a line with anything but those
+    fields, or words where a figure goes in front of a model.
 
-    What is NOT checked is which numbers they are, nor how they stand to
-    one another (that the values with a count do not outnumber the bars,
-    that the cuts ascend, that every line counts the same bars): those are
-    a world's, the look-up's own records hold them where it answers, and
-    :meth:`over` is how a block of this arm's own is made.
+    What is NOT checked is which numbers they are — how many digits a
+    figure is written to among that — nor how they stand to one another
+    (that the values with a count do not outnumber the bars, that the cuts
+    ascend, that every line counts the same bars). Those are a world's:
+    where the look-up answers, its own records hold the first two and one
+    view gives every line its bars, and :meth:`over` is how a block of this
+    arm's own is made.
     """
 
     asked: ChatHypothesist
@@ -393,9 +404,10 @@ class SummaryHypothesist:
         for name, answer in zip(names, answers, strict=True):
             if not _reads_as_figures(name, answer, fields):
                 raise ValueError(
-                    f"the block's line for {name} is not that feature's figures: counts of "
-                    f"bars, and finite numbers or the regime's counts by label, under the "
-                    f"keys its look-up answers with; build it with summary()"
+                    f"the block's line for {name} is not that feature's figures: whole counts "
+                    f"of bars, and finite numbers written with a decimal point or the regime's "
+                    f"counts by label, under the keys its look-up answers with; build it with "
+                    f"summary()"
                 )
 
     @classmethod

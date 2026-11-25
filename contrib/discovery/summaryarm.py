@@ -7,7 +7,8 @@ second out. Before every answer the model is shown the same block of
 figures — where each feature's values lie on the training bars — and
 answers once, as the blind arm does: no tool, no server, no second
 message. Set beside the blind arm it says what the plain sight of those
-figures is worth. Set beside the tool arm it says less cleanly what that
+figures is worth, at this length and in this place (the last section
+below). Set beside the tool arm it says less cleanly what that
 arm's choosing adds, because the two differ in more than the choosing (the
 last section below).
 
@@ -260,15 +261,30 @@ def _count(value: object) -> bool:
 
 
 def _figure(value: object) -> bool:
-    """A finite number, and no ``bool`` (which is an ``int`` to ``isinstance``).
+    """A finite ``float``: what the look-up writes every figure as.
 
-    An ``int`` is finite as it stands, and is not handed to ``isfinite``:
-    one of several hundred digits is no ``float``, and the question would
-    raise where a refusal is what is wanted.
+    Its figures are rounded through ``float`` whatever they came from, so a
+    whole number spelled without its ``.0`` — a ``bool`` among them, an
+    ``int`` to ``isinstance`` — is no figure of its.
     """
-    if isinstance(value, bool):
+    return type(value) is float and math.isfinite(value)
+
+
+def _written_as(line: str, answer: object) -> bool:
+    """Whether ``line`` is ``answer`` as :func:`_line` writes it, character for character.
+
+    Reading a line back is not enough to hold it: a reader keeps the LAST
+    of a key written twice, and takes any spacing and any escape, so a
+    line can parse to a faultless answer and still put other characters in
+    front of a model — the first value of the doubled key above all. What
+    is sent is the line, so the line is what is held.
+    """
+    try:
+        return _line(answer) == line
+    except ValueError:
+        # A number the reader made that JSON has no token for (``1e999``
+        # reads as an infinity): no line of a look-up's.
         return False
-    return isinstance(value, int) or (isinstance(value, float) and math.isfinite(value))
 
 
 def _reads_as_figures(name: str, answer: dict[str, object], fields: StatsFields) -> bool:
@@ -277,7 +293,7 @@ def _reads_as_figures(name: str, answer: dict[str, object], fields: StatsFields)
     The regime's keys for the regime and a number's for every other
     feature — a line in the other's shape describes nothing the look-up
     would say of that feature. Counts are whole and not negative, a figure
-    is a finite number, and the regime's counts are a whole number for
+    is a finite ``float``, and the regime's counts are a whole number for
     every label of the vocabulary, in its order, and for nothing else — as
     the look-up lists them, so no word of a caller's own can stand where a
     label does. The values themselves are a world's and are not judged.
@@ -318,11 +334,18 @@ class SummaryHypothesist:
     paragraph, then one line for each feature of the vocabulary in its
     order, each a JSON object carrying exactly the keys ``feature_stats``
     answers THAT feature with, under each a value of its kind (a count, a
-    finite number, the regime's counts by label). So a hypothesist built by
-    hand cannot put another paragraph, a feature more or fewer, a line with
-    anything but those fields, or words where a figure goes in front of a
-    model. Which numbers they are is not checked here — they are a world's,
-    and :meth:`over` is how a block of this arm's own is made.
+    finite number, the regime's counts by label) — and each WRITTEN as the
+    look-up's answer is, character for character, since what a model is
+    sent is the line and not what the line reads back as. So a hypothesist
+    built by hand cannot put another paragraph, a feature more or fewer, a
+    line with anything but those fields, or words where a figure goes in
+    front of a model.
+
+    What is NOT checked is which numbers they are, nor how they stand to
+    one another (that the values with a count do not outnumber the bars,
+    that the cuts ascend, that every line counts the same bars): those are
+    a world's, the look-up's own records hold them where it answers, and
+    :meth:`over` is how a block of this arm's own is made.
     """
 
     asked: ChatHypothesist
@@ -349,11 +372,16 @@ class SummaryHypothesist:
                 answer = json.loads(line, parse_constant=_no_constant)
             except ValueError:
                 answer = None
-            if not isinstance(answer, dict) or tuple(answer) not in shapes:
+            if (
+                not isinstance(answer, dict)
+                or tuple(answer) not in shapes
+                or not _written_as(line, answer)
+            ):
                 raise ValueError(
                     f"a line of the block is not a feature's figures — a JSON object with the "
-                    f"keys {list(shapes[0])}, or {list(shapes[1])} for the regime; build it "
-                    f"with summary()"
+                    f"keys {list(shapes[0])}, or {list(shapes[1])} for the regime, each key "
+                    f"once and the whole written as the look-up's answer is; build it with "
+                    f"summary()"
                 )
             answers.append(answer)
         listed = [answer["feature"] for answer in answers]

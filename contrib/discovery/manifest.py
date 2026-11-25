@@ -994,7 +994,7 @@ class RandomArm:
 
 @dataclass(frozen=True)
 class LlmArm:
-    """The model arm, and the subset of worlds the three arms are compared on (plan §8 #5).
+    """The blind model arm, and the subset of worlds it is compared with Random and Grid on (plan §8 #5).
 
     ``world_subset`` is fixed BEFORE a test seed set is used: Random and
     Grid run every world, the model runs these, and the side-by-side table

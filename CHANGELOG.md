@@ -34,8 +34,8 @@ Breaking changes within the 0.x line are called out explicitly.
   own module decides of what its model reads beyond the two prompts — the
   paragraph, the features listed, how a line is written, what stands
   before the block — with a digest of that pinned in the suite; how the
-  look-up makes a figure is not under it. A manifest of another version is
-  refused by `generate` and by `search`. Unlike the tool arm's pack, that
+  look-up makes a figure is not under it. A manifest naming another
+  summary version is refused by `generate` and by `search`. Unlike the tool arm's pack, that
   digest is written to no record — the arm keeps no trace, and a block is
   recomputed from the arm's store. The field sentences are the look-ups'
   server's, which are frozen only after the tool arm's first trial: if

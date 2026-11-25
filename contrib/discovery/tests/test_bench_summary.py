@@ -307,6 +307,13 @@ def test_the_record_is_held_to_the_summary_arm_s_own_searches_and_may_be_absent(
     for arm in (Arm.LLM_TOOLS, Arm.RANDOM):
         with pytest.raises(BenchError, match=rf"counted around its client, and {arm.value} is not"):
             bench._hold_model_use("model_use.json", use, arm, SUMMARY_ARM, verdicts)
+    # ... nor to the other counted arm's: these verdicts file no blind-arm
+    # search, and that is said, where a look-up by replicate would only raise.
+    with pytest.raises(
+        BenchError,
+        match=r"verdicts\.json beside it files no llm search for replicate\(s\) \[0, 1\]",
+    ):
+        bench._hold_model_use("model_use.json", use, Arm.LLM, BLIND, verdicts)
 
 
 def test_records_and_a_manifest_that_disagree_about_the_summary_arm_are_refused(

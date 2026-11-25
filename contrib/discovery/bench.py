@@ -1865,6 +1865,14 @@ def _hold_model_use(
             f"{llm.replicates}, numbered from 0"
         )
     by_replicate = {r.replicate: r for r in verdicts.results if r.arm is arm}
+    unfiled = [replicate for replicate in replicates if replicate not in by_replicate]
+    if unfiled:
+        # ``arm`` and ``llm`` were not one arm's (or the verdicts are not
+        # this manifest's): said, where a look-up below would only raise.
+        raise BenchError(
+            f"{where}: {VERDICTS_FILENAME} beside it files no {arm.value} search for "
+            f"replicate(s) {unfiled}"
+        )
     for spent in use.searches:
         result = by_replicate[spent.replicate]
         snapshot = result.snapshot

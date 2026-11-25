@@ -276,7 +276,7 @@ def model_use_lines(
     *,
     model: str | None = None,
 ) -> list[str]:
-    """What a blind model arm's row spent, as the lines a table prints under the row.
+    """What the row of a model arm with no tools spent (the blind arm's, or the summary arm's), as the lines a table prints under the row.
 
     The tokens line is the tool arm's own sentence
     (:func:`~.tooluse.tokens_line`), over every search that has a record,

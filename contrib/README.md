@@ -140,4 +140,4 @@ funding 歷史 → 一條規則（z-score 進出場）→ 日線邊界前寫交�
 | 看部署狀態與告警 | [dashboard README](./dashboard/README.md) |
 | 加一個現貨策略 | [uniswap_v3 README「加一個策略」](./uniswap_v3/README.md#加一個策略) |
 | 改套件之間的邊 | [tests/test_package_graph.py](./tests/test_package_graph.py) 的 `ALLOWED`、`_PERP_REACH` 與註解 |
-| 考研究迴圈找不找得到埋的規律 | [discovery README](./discovery/README.md)：scope statement、manifest 格式（v3）、最終判定、generator v1 的定義與 `generate` 指令、Random／Grid 臂與 oracle 判定的 `search`／`oracle`／`calibrate` 指令、評分的三項指標與 `score`／`report` 指令、LLM 臂與「一世界兩目錄」的做法 |
+| 考研究迴圈找不找得到埋的規律 | [discovery README](./discovery/README.md)：scope statement、manifest 格式、最終判定、generator v1 的定義與 `generate` 指令、Random／Grid 臂與 oracle 判定的 `search`／`oracle`／`calibrate` 指令、評分的三項指標與 `score`／`report` 指令、LLM 臂與「一世界兩目錄」的做法 |

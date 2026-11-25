@@ -253,9 +253,11 @@ def test_the_server_lists_the_three_look_ups_and_answers_as_the_pure_functions_d
 def test_a_line_of_the_summary_arm_s_block_is_the_text_this_server_answers_with(view, listed):
     # The summary arm (tools plan T6) hands its model the ``feature_stats``
     # answer for every feature without a server in between. What it prints
-    # is the text a model of the tool arm reads when it asks this server the
-    # same — every feature, character for character — so the two arms differ
-    # in who chose the look-up and not in the figures.
+    # for a feature is the text a model of the tool arm reads when it asks
+    # this server about that feature — every feature, character for
+    # character — so for any one feature the two arms read one text. (How
+    # MANY of them each reads is another matter: all of them every round
+    # there, as many as its limit allows here.)
     names = feature_names()
     _info, _tools, answers = _ask(
         build_server(view), [("feature_stats", {"feature": name}) for name in names]

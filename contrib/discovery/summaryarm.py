@@ -1,13 +1,15 @@
 """The summary arm's hypothesist (tools plan §3.7, T6): a model handed a fixed summary of the training window, and no tools.
 
-The tool arm (:mod:`.toolarm`) differs from the blind model arm in two
-things at once: its model can SEE figures of the training window, and it
-CHOOSES which to look at. This arm takes the first and leaves the second
-out. Before every answer the model is shown the same block of figures —
-where each feature's values lie on the training bars — and answers once,
-as the blind arm does: no tool, no server, no second message. Set beside
-the blind arm it says what the plain sight of those figures is worth; set
-beside the tool arm, what is left for the look-ups a model picks itself.
+The tool arm (:mod:`.toolarm`) differs from the blind model arm in, above
+all, two things at once: its model can SEE figures of the training window,
+and it CHOOSES which to look at. This arm takes the first and leaves the
+second out. Before every answer the model is shown the same block of
+figures — where each feature's values lie on the training bars — and
+answers once, as the blind arm does: no tool, no server, no second
+message. Set beside the blind arm it says what the plain sight of those
+figures is worth. Set beside the tool arm it says less cleanly what that
+arm's choosing adds, because the two differ in more than the choosing (the
+last section below).
 
 **What the block holds** (decided 2026-11-24): one line for EVERY feature
 of the vocabulary, in the vocabulary's order, and nothing else. No feature
@@ -18,11 +20,12 @@ who knows what the benchmark plants. And each line is the answer the
 server sends it as: the same fields, the same rounding, the same spelling.
 So for any one feature the two arms read the same text. They do not read
 the same AMOUNT of it: this arm has every line before every answer, where
-the tool arm may make a few look-ups a round and keeps none for the next —
-on where a feature's values lie, this arm is shown more than that arm can
-ask for. Nothing of the other two look-ups is in the block — no return
-after a signal, no backtest of a rule: computing those for the model is
-searching for it (plan §3.7).
+the tool arm makes as many look-ups a round as its manifest allows (the
+plan starts from five, of any tool) and keeps none for the next — at any
+limit short of the vocabulary's size, this arm is shown more of where the
+features' values lie than that arm can ask for. Nothing of the other two
+look-ups is in the block — no return after a signal, no backtest of a
+rule: computing those for the model is searching for it (plan §3.7).
 
 **Where it goes** (decided 2026-11-24): appended to the research package's
 system prompt, where the tool arm's paragraph goes, and not to the user
@@ -32,7 +35,9 @@ with one rule. The paragraph that opens the block states facts and gives
 no advice, as the tool arm's does (decided 2026-11-19, for that arm): what
 the figures are of, that the validation bars stay hidden, that the block
 does not change, what a field means — the last in the look-ups' server's
-own sentences (:func:`~.tools_server.stats_fields`). It also answers
+own sentences (:func:`~.tools_server.stats_fields`) for every field but
+``feature``, which the server calls "the feature asked about" and nobody
+asked for a line of this. It also answers
 the one line of the system prompt the figures make untrue as written,
 "history you cannot see".
 
@@ -51,11 +56,13 @@ between the system prompt and the block — and the suite pins a digest of
 exactly that beside it (:func:`wording_digest`), so an edit of any of it
 without a bump is red: one here, one to the server's sentences, or a
 feature added to the vocabulary. What the digest does NOT cover is the
-figures' own making — which fields an answer carries, how a cut is
-interpolated, how a figure is rounded: those are the look-up's
-(:mod:`.research_tools`), held by its own tests and by the test that a line
-here is the text the server answers with, and a change to them is a change
-to the tool arm's pack as well. A manifest names the version
+figures' own making — how a cut is interpolated, how a figure is brought
+to its digits, which keys an answer in fact carries: those are the
+look-up's (:mod:`.research_tools`), held by its own tests and by the test
+that a line here is the text the server answers with, and a change to them
+is a change to the tool arm's pack as well. (What the paragraph SAYS of
+them — the fields it lists, the number of digits — is the server's
+sentences, and so is under the digest.) A manifest names the version
 (``arms.llm_summary.summary_version``) and the bench refuses one that is
 not this build's. Unlike the tool arm's pack, the digest is written to no
 record: this arm leaves no trace, and a block is recomputed from the arm's
@@ -78,15 +85,19 @@ adds the figures and nothing else — but a long block of them, 42 lines of
 which about half are price levels, placed before a list of scored rules
 that grows: if length or position costs a model anything, this arm
 understates what sight of the window is worth. Against this arm, the tool
-arm differs in four things at once and they cannot be told apart: it
-chooses what to look up; it has the two look-ups that are not in the
-block; it may write a line before each call; and its tool is described
-with a sentence on what the figures are for ("use it before you choose a
-threshold…"), where this arm's paragraph gives no advice (decided
-2026-11-25: not added here, so that "summary above blind" stays the
-figures alone). And it has LESS of the marginal figures than this arm, so
-the tool arm coming out below this one is a possible outcome, not a
-contradiction.
+arm differs in several things at once that cannot be told apart, these
+four above all: it chooses what to look up; it has the two look-ups that
+are not in the block; it may write a line before each call; and its tool
+is described with a sentence on what the figures are for ("use it before
+you choose a threshold…"), where this arm's paragraph gives no advice
+(decided 2026-11-25: not added here, so that "summary above blind" stays
+the figures alone). (It is also told other words than this arm is: its
+own paragraph on the tools, and a line after each result saying how many
+calls are left.) And at any limit a manifest is likely to set it has LESS
+of the marginal figures than this arm, so the tool arm coming out below
+this one is a possible outcome, not a contradiction — and the two coming
+out level may be gains and losses cancelling, not a sign that nothing in
+the list matters.
 """
 
 from __future__ import annotations
@@ -103,6 +114,7 @@ from .upstream import (
     ChatHypothesist,
     FeatureRef,
     FeatureUnit,
+    MarketRegime,
     feature_names,
     parse_feature_name,
 )
@@ -167,8 +179,9 @@ def preamble() -> str:
 
     Facts, and no advice: a sentence on how to use a figure would be read
     by this arm alone, and a result could not then be told from the
-    sentence. The fields are described in the look-ups' server's own lines,
-    so this arm and the tool arm are told what ``p25`` is in one sentence.
+    sentence. Every field but ``feature`` is described in the look-ups'
+    server's own line, so this arm and the tool arm are told what ``p25``
+    is in one sentence; ``feature`` has a line of this module's.
     """
     fields = stats_fields()
     return "\n".join(
@@ -243,8 +256,15 @@ def _count(value: object) -> bool:
 
 
 def _figure(value: object) -> bool:
-    """A finite number, and no ``bool`` (which is an ``int`` to ``isinstance``)."""
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    """A finite number, and no ``bool`` (which is an ``int`` to ``isinstance``).
+
+    An ``int`` is finite as it stands, and is not handed to ``isfinite``:
+    one of several hundred digits is no ``float``, and the question would
+    raise where a refusal is what is wanted.
+    """
+    if isinstance(value, bool):
+        return False
+    return isinstance(value, int) or (isinstance(value, float) and math.isfinite(value))
 
 
 def _reads_as_figures(name: str, answer: dict[str, object], fields: StatsFields) -> bool:
@@ -253,8 +273,10 @@ def _reads_as_figures(name: str, answer: dict[str, object], fields: StatsFields)
     The regime's keys for the regime and a number's for every other
     feature — a line in the other's shape describes nothing the look-up
     would say of that feature. Counts are whole and not negative, a figure
-    is a finite number, and the regime's counts are whole numbers by label.
-    The values themselves are a world's and are not judged.
+    is a finite number, and the regime's counts are a whole number for
+    every label of the vocabulary, in its order, and for nothing else — as
+    the look-up lists them, so no word of a caller's own can stand where a
+    label does. The values themselves are a world's and are not judged.
     """
     labelled = FeatureRef(*parse_feature_name(name)).unit is FeatureUnit.REGIME
     if tuple(answer) != (fields.regime_keys if labelled else fields.numeric_keys):
@@ -264,8 +286,10 @@ def _reads_as_figures(name: str, answer: dict[str, object], fields: StatsFields)
         return False
     if labelled:
         counts = answer["counts"]
-        return isinstance(counts, dict) and all(
-            isinstance(label, str) and _count(count) for label, count in counts.items()
+        return (
+            isinstance(counts, dict)
+            and tuple(counts) == tuple(regime.value for regime in MarketRegime)
+            and all(_count(count) for count in counts.values())
         )
     return all(
         _figure(answer[key])

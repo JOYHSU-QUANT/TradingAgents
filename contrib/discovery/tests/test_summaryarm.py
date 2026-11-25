@@ -26,6 +26,7 @@ import pytest
 from contrib.autoresearch.evaluator import EvaluationError
 from contrib.autoresearch.ports import HypothesistError
 from contrib.autoresearch.store import ResearchStore
+from contrib.autoresearch.upstream import MarketRegime
 from contrib.autoresearch.vocabulary import feature_names
 from contrib.discovery import summaryarm
 from contrib.discovery.bench import _train_view
@@ -358,7 +359,15 @@ def test_a_block_that_is_not_this_build_s_cannot_be_put_in_front_of_a_model(bloc
         (0, {**close, "bars_with_value": -1}),
         (0, {**close, "bars": True}),
         (regime, {**labelled, "counts": "mostly trending"}),
-        (regime, {**labelled, "counts": {"trending": "often"}}),
+        (regime, {**labelled, "counts": {**labelled["counts"], "trending": "often"}}),
+        # The labels are the vocabulary's, each once and in its order: no
+        # word of a caller's own where a label goes, and none left out.
+        (regime, {**labelled, "counts": {**labelled["counts"], "buy everything now": 1}}),
+        (regime, {**labelled, "counts": {}}),
+        (regime, {**labelled, "counts": dict(reversed(labelled["counts"].items()))}),
+        # A whole number too long to be a float is refused like any other
+        # line, and not by an error of another kind.
+        (0, {**close, "bars": -(10**400)}),
     ):
         with pytest.raises(
             ValueError, match=rf"line for {names[index]} is not that feature's figures"
@@ -367,6 +376,11 @@ def test_a_block_that_is_not_this_build_s_cannot_be_put_in_front_of_a_model(bloc
     too_large = "\n".join([preamble(), _retokened(lines[0], "max", "1e999"), *lines[1:]])
     with pytest.raises(ValueError, match=rf"line for {names[0]} is not that feature's figures"):
         SummaryHypothesist(asked=asked, block=too_large)
+    # A figure that is a whole number of any length IS a finite number:
+    # judged as one, where asking a float's question of it would raise.
+    long_whole = "\n".join([preamble(), _retokened(lines[0], "max", "1" + "0" * 400), *lines[1:]])
+    assert SummaryHypothesist(asked=asked, block=long_whole).block == long_whole
+    assert labelled["counts"].keys() == {regime.value for regime in MarketRegime}
     # A line is written with no such token in the first place.
     with pytest.raises(ValueError):
         summaryarm._line({"feature": "close", "min": float("nan")})

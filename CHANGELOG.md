@@ -12,8 +12,8 @@ Breaking changes within the 0.x line are called out explicitly.
 
 - **Discovery Lab: a model arm handed a fixed summary of the training
   window and no tools** (tools plan T6). The tool-using model arm differs
-  from the blind one in two things at once — its model can see figures of
-  the training window, and it chooses which to look at. This arm has the
+  from the blind one in, above all, two things at once — its model can see
+  figures of the training window, and it chooses which to look at. This arm has the
   first and not the second: named by a manifest's new `arms.llm_summary`
   (the model arm's five fields and `summary_version`), it is searched last,
   as a model arm is, and asks its model once a round with a block of
@@ -49,13 +49,16 @@ Breaking changes within the 0.x line are called out explicitly.
   arm is run at all is decided after the tool arm's first trial. Against
   the blind arm it would read as what the sight of the figures is worth —
   understated, if a block that makes the system prompt about three times
-  as long costs a model anything. The tool arm against it differs in four
-  things that cannot be told apart: it chooses what to look up, it has the
-  two look-ups the block leaves out, it may write a line before each call,
-  and its tool is described with a sentence on what the figures are for,
-  which this arm's paragraph leaves out. It also sees fewer of the marginal
-  figures than this arm, which has every line every round, so the tool arm
-  coming out below it is a possible outcome.
+  as long costs a model anything. The tool arm against it differs in
+  several things that cannot be told apart, four above all: it chooses
+  what to look up, it has the two look-ups the block leaves out, it may
+  write a line before each call, and its tool is described with a sentence
+  on what the figures are for, which this arm's paragraph leaves out. At
+  any per-round limit short of the vocabulary's size (the plan starts from
+  five look-ups) it also sees fewer of the marginal figures than this arm,
+  which has every line every round — so the tool arm coming out below it
+  is a possible outcome, and the two coming out level may be gains and
+  losses cancelling.
   **Manifest version 6.** `arms` gains the `llm_summary` key, so the
   version is raised; versions 3, 4 and 5 are still read, each by its own
   key set and written back as it was read (tests pin the digests of all

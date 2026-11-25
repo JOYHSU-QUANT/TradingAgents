@@ -272,8 +272,9 @@ class Arm(VocabEnum, noun="arm"):
     looked up.
 
     The order listed here is the order of the rows of ONE set of
-    conditions (:func:`in_row_order` sorts by the conditions' digest before
-    the arm): a manifest's model arm comes after its pool arms. It is not
+    conditions (:func:`in_row_order` sorts by the kind of world, the null
+    definition, the seed set and the conditions' digest, in that order,
+    before the arm): a manifest's model arm comes after its pool arms. It is not
     an order among the three model arms' rows — a manifest names one of
     them, so they are never under one digest, and their rows fall where
     their digests do.

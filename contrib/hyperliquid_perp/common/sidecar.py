@@ -79,9 +79,10 @@ def write_sidecar(
     agent wrote: it reached the reports record already when the final
     decision held one, and every report can bring one since a later node
     can be sent such text (issue #441) — is written as U+FFFD, one for one,
-    with a WARNING naming the file and saying how many: the same thing the
-    store does with the decision's own text (issue #427), and for the same
-    reason. Counted where it stands in the written text, so a key and a
+    with a WARNING naming the file and saying how many: the replacement the
+    store makes for the decision's own text (issue #427), for the same
+    reason, and said here because the store's seam says nothing. Counted
+    where it stands in the written text, so a key and a
     value each count; a record holding none is written byte for byte as
     before. (The handoff sidecar records the digest of the coordinator's file
     beside what was parsed from it: after a replacement the two no longer

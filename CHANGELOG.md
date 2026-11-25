@@ -575,8 +575,8 @@ Breaking changes within the 0.x line are called out explicitly.
   puts that text into its prompt, and the request for it could not be
   built: the OpenAI SDK raised `UnicodeEncodeError` before anything was
   sent. Measured with the repository's own client over a fake transport:
-  `backtest --ask` retried the question three times, asking and paying for
-  the earlier node again each time, and stopped with exit 1, again on every
+  `backtest --ask` tried the question three times, asking and paying for
+  the earlier node each time, and stopped with exit 1, again on every
   resume; a `uniswap_v3` `verdict` visit failed "for good" with no verdict
   for that token and bar, and the next visit paid for the same analysts
   again; a perp paper cycle ran its three tries to `api_failed` and
@@ -602,9 +602,10 @@ Breaking changes within the 0.x line are called out explicitly.
   the perp sidecars. The reports sidecar (`<payload>.reports.json`) was
   already left unwritten when a final decision held the character (logged,
   the decision unaffected), and any report can bring one now that such a
-  cycle completes; `write_sidecar` replaces at the write and warns, naming
-  the file, as the store does.
-  Only the OpenAI-compatible client was driven end to end, which is the
+  cycle completes; `write_sidecar` replaces at the write, as the store
+  does, and warns, naming the file (`contrib/core/digest.py` gained
+  `json_text`, the text `json_bytes` encodes, for it to read first). Only
+  the OpenAI-compatible client was driven end to end, which is the
   one the three callers above use; for the Anthropic, Google, Azure and
   Bedrock clients what is pinned is that their input goes through
   `sendable`, not that their SDKs raised before. Not covered, and left as

@@ -54,6 +54,7 @@ def _warnings(caplog) -> list[str]:
     [
         "a prompt",
         "an emoji that is a whole pair: " + chr(0x1F600),
+        "the code points on either side of the range: " + chr(0xD7FF) + chr(0xE000),
         [SystemMessage("system"), HumanMessage("human"), AIMessage("ai")],
         [("system", "system"), ("human", "human")],
         [{"role": "user", "content": "hello"}],
@@ -74,6 +75,11 @@ def test_each_one_in_a_text_becomes_one_replacement_character_and_the_count_is_s
     with caplog.at_level(logging.WARNING, logger=base_client.logger.name):
         assert sendable(text) == f"a{REPLACED}b{REPLACED}{REPLACED}c"
     assert _warnings(caplog) == [SAID.format(3)]
+
+
+@pytest.mark.parametrize("code", [0xD800, 0xDBFF, 0xDC00, 0xDFFF])
+def test_the_first_and_the_last_of_each_half_of_the_range_are_replaced(code):
+    assert sendable(f"a{chr(code)}b") == f"a{REPLACED}b"
 
 
 def test_every_place_a_message_carries_text_is_read_and_the_rest_is_left_as_it_was(caplog):
@@ -221,6 +227,25 @@ def test_a_reply_holding_one_can_be_put_into_the_next_request(form, caplog):
     assert sent["messages"][-1]["content"] == (
         f"The earlier node said:\nMomentum {REPLACED} holds.\nNow answer."
     )
+    assert _warnings(caplog) == [SAID.format(1)]
+
+
+def test_a_model_bound_to_tools_sends_through_the_same_replacement(caplog):
+    # A node that binds tools asks through a binding around the model, not
+    # the model itself: the binding's call has to reach ``invoke`` too.
+    llm, received = _over_a_wire("answered", "raw")
+
+    def get_price(ticker: str) -> str:
+        """Look a price up."""
+        return ticker
+
+    with caplog.at_level(logging.WARNING, logger=base_client.logger.name):
+        llm.bind_tools([get_price]).invoke(f"Price of {LONE}?")
+
+    (body,) = received
+    sent = json.loads(body.decode("utf-8"))  # strict: the body is UTF-8
+    assert sent["messages"][-1]["content"] == f"Price of {REPLACED}?"
+    assert [tool["function"]["name"] for tool in sent["tools"]] == ["get_price"]
     assert _warnings(caplog) == [SAID.format(1)]
 
 

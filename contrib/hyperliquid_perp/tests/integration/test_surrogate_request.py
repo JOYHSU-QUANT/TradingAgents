@@ -353,6 +353,10 @@ def offline(monkeypatch, tmp_path) -> SimpleNamespace:
         "data_cache_dir": str(tmp_path / "engine-cache"),
         "max_debate_rounds": 1,
         "max_risk_discuss_rounds": 1,
+        # Off, whatever the environment says: a retry that resumed from a
+        # checkpoint would not ask the earlier nodes again, and the control
+        # at the end of this file is about a cycle that does.
+        "checkpoint_enabled": False,
     }.items():
         monkeypatch.setitem(engine_defaults.DEFAULT_CONFIG, key, value)
     for method, vendors in interface.VENDOR_METHODS.items():
@@ -628,10 +632,11 @@ def test_vendor_text_holding_one_is_sent_on_as_u_fffd_and_the_cycle_decides(
 def test_without_the_replacement_the_same_cycle_pays_three_times_and_decides_nothing(
     tmp_path, monkeypatch, offline
 ):
-    # Why the fix exists, and a tripwire: with the replacement taken out of
-    # the client, the cycle above is the failure issue #441 measured. Should
-    # the SDK ever send such text instead of raising, this is the test that
-    # says so.
+    # Why the fix exists: with the replacement taken out of the client, the
+    # cycle above is the failure issue #441 measured. Where the installed
+    # SDK sends such text itself there is nothing to reproduce, and this is
+    # skipped and says so: the controls CI runs (the root suite's, replay's
+    # and uniswap_v3's) are the ones that fail then.
     import tradingagents.llm_clients.openai_client as openai_client
 
     if not _sdk_refuses_such_text():
@@ -645,7 +650,9 @@ def test_without_the_replacement_the_same_cycle_pays_three_times_and_decides_not
         CycleEvent.RETRY_SCHEDULED,
         CycleEvent.API_FAILED,
     ]
-    assert cycle.attempts == [("api_failed", 3, "server_error")]
+    # Three tries and no answer. How the failure is classed is not asserted:
+    # that is read off the exception's name and words, which are the SDK's.
+    assert [(status, tries) for status, tries, _kind in cycle.attempts] == [("api_failed", 3)]
     assert cycle.plan is None
     assert cycle.rows == {"ai_inputs": 3, "ai_outputs": 0, "execution_plans": 0, "orders": 0}
     # Each try ran the three analysts again, and paid for them; the first

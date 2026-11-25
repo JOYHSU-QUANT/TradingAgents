@@ -104,9 +104,16 @@ def test_a_record_holding_none_is_the_bytes_json_bytes_writes_and_nothing_is_sai
     payload = tmp_path / f"{_STEM}.json"
     with caplog.at_level(logging.WARNING, logger=_LOGGER):
         write_sidecar(str(payload), suffix=".x.json", what="x", build=lambda: built)
-    assert (tmp_path / f"{_STEM}.x.json").read_bytes() == json_bytes(
-        {"schema": SIDECAR_SCHEMA, **built}
-    )
+    # Spelled out, and also what ``json_bytes`` gives: the two share their
+    # text, so comparing with it alone would follow a change to both.
+    spelled = (
+        '{\n'
+        f'  "schema": {SIDECAR_SCHEMA},\n'
+        '  "text": "an emoji that is a whole pair: ' + chr(0x1F600) + '",\n'
+        '  "n": [\n    1,\n    2.5,\n    null\n  ]\n}'
+    ).encode("utf-8")
+    written = (tmp_path / f"{_STEM}.x.json").read_bytes()
+    assert written == spelled == json_bytes({"schema": SIDECAR_SCHEMA, **built})
     assert [r for r in caplog.records if r.name == _LOGGER] == []
 
 

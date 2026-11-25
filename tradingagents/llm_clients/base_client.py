@@ -115,14 +115,14 @@ def sendable(input):
     OpenAI-compatible client, the one this was measured on, building the
     request raises ``UnicodeEncodeError`` before anything is sent, so the
     node fails on text it was only passing on, and whoever drives the graph
-    retries or gives up (#441). Each such
-    character becomes U+FFFD, one for one, in what is sent — the graph's own
-    state is not touched, so what this repository's writers store from it
-    still goes through the replacement they make, and their counts
-    (upstream's own state log writes escapes, and keeps the character) —
-    and a warning says how many, since U+FFFD in a prompt does not say
-    whether its author or this function put it there. An input holding none
-    is returned as the same object.
+    retries or gives up (#441). Each such character becomes U+FFFD, one for
+    one, in what is sent. The graph's own state is not touched, so what this
+    repository's writers store from it still goes through the replacement
+    they make, and their counts still count (upstream's own state log
+    writes escapes, and keeps the character). A warning says how many,
+    since U+FFFD in a prompt does not say whether its author or this
+    function put it there. An input holding none is returned as the same
+    object.
 
     Every client's ``invoke`` passes its input through here, beside
     :func:`normalize_content` on the way back: the two ends of the call

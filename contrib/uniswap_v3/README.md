@@ -169,7 +169,7 @@ sidecar `verdicts/<source>/<代幣>-<bar 時間>.json`，放在 store 檔的同�
 store 與 sidecar 要一起搬）。同一（source、代幣、bar）問過就不再問；`--fake-rating` 寫的列 `model=fake`、沒有 sidecar。
 judge 的文字（最終決策、任何一份報告、news 缺席的那一行）若帶「落單的 surrogate」（UTF-16 的半個字元，沒有 UTF-8 編碼，digest 與檔案都寫不出來），
 在算 digest 與寫 sidecar **之前**一次換成 U+FFFD（`agent/record.storable_answer`），所以 sidecar 的 `decision`、`decision_digest` 與列裡的 digest 是同一份文字；
-`verdict` 會寫一筆 WARNING 說換了幾個（同一個字元在決策與每份重複它的報告各算一次：真的 graph 一個字元會報 3）。judge 沒回應時記下的原因（`judge_declines.reason`）同樣在寫入時換掉。以前前一種情況讓那次 visit 以 traceback 結束、
+`verdict` 會寫一筆 WARNING 說換了幾個（同一個字元在決策與每份重複它的報告各算一次：字元在最終決策裡時，真的 graph 一個字元會報 3；在其他報告裡的，照它在那份報告出現的次數算）。judge 沒回應時記下的原因（`judge_declines.reason`）同樣在寫入時換掉。以前前一種情況讓那次 visit 以 traceback 結束、
 那個代幣沒存、下次再問一次；後一種讓本來該是「晚點再試」（exit 3）的 visit 變成 traceback（#429）。換字函式在 `domain/text.py`，是這個套件自己的一份（它不 import 其他 contrib 套件；2026-11-22 拍板）；
 今天寫得出來的 sidecar 位元組不變。
 **真的 graph 的每一份報告現在都走得到這裡**：其他報告會先被後面的節點讀到，以前帶這種字元時那個節點的 request 組不出來、visit 失敗（#441）。現在 engine 的 client 在送出前把這種字元換成 U+FFFD（`tradingagents/llm_clients/base_client.py` 的 `sendable`，每個 request 寫一行 WARNING 記個數），後面的節點照常回答、visit 照常完成；graph 裡留著的報告還是原字，寫進 sidecar 時由這裡換字（`tests/test_surrogate_request.py` 用真的 graph 跑這一段）。

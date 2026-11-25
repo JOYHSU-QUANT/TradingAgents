@@ -99,7 +99,8 @@ _NODES = [
     "Neutral Analyst",
     _MANAGER,
 ]
-_ODD_REPORT = f"{_ANALYST} says: momentum {HIGH} holds."
+# Two of them: a replacement that stopped at the first would leave one in the request.
+_ODD_REPORT = f"{_ANALYST} says: momentum {HIGH} holds, then {HIGH} fades."
 _SENT_REPORT = _ODD_REPORT.replace(HIGH, FFFD)
 # The one structured call the graph makes: the sentiment analyst binds its
 # report's schema as a tool and is answered with a call of it.
@@ -140,6 +141,32 @@ def _http() -> Any:
     import openai
 
     return importlib.import_module(openai.DefaultHttpxClient.__mro__[1].__module__.split(".")[0])
+
+
+def _sdk_refuses_such_text() -> bool:
+    """Whether the installed provider SDK fails to build a request holding a lone surrogate.
+
+    It does at every version this was written against, and that failure is
+    what the control at the end of this file reproduces. CI does not run
+    this suite: it runs where the trader is deployed, on whatever SDK is
+    installed there, and a control failing there would stop a deploy over
+    a failure that had gone away.
+    """
+    import openai
+
+    http = _http()
+    client = openai.OpenAI(
+        api_key=_KEY,
+        http_client=http.Client(transport=http.MockTransport(lambda request: http.Response(500))),
+        max_retries=0,
+    )
+    try:
+        client.chat.completions.create(model="m", messages=[{"role": "user", "content": HIGH}])
+    except UnicodeEncodeError:
+        return True
+    except Exception:  # noqa: BLE001 - any other outcome: the request was built
+        return False
+    return False
 
 
 def _response_bytes(payload: dict, form: str) -> bytes:
@@ -515,12 +542,23 @@ def test_an_analysts_report_holding_one_is_sent_on_as_u_fffd_and_the_cycle_decid
     # Decided on the first try: no retry was scheduled and nothing failed.
     _assert_decided_on_the_first_try(cycle, plain)
     # What the agents wrote is recorded beside the payload, as for the clean
-    # cycle: before the fix no cycle got far enough to write it, and the
-    # report's character would have sunk the file. It is UTF-8 (read
-    # strictly here) and holds U+FFFD where the character stood.
+    # cycle. Written as it stands in the graph's state, the report would
+    # sink the file (as a final decision holding such a character already
+    # did); the write replaces, and says how many. The file is UTF-8, read
+    # strictly here.
     (recorded,) = (tmp_path / "odd" / "payloads").glob("*.reports.json")
     assert len(list((tmp_path / "twin" / "payloads").glob("*.reports.json"))) == 1
-    assert FFFD in recorded.read_bytes().decode("utf-8")
+    kept = recorded.read_bytes().decode("utf-8")
+    assert json.loads(kept)["market_report"] == _SENT_REPORT
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "contrib.hyperliquid_perp.common.sidecar"
+        and record.levelno == logging.WARNING
+    ] == [
+        f"decision reports sidecar: {kept.count(FFFD)} lone surrogate(s) in {recorded.name} "
+        "cannot be written as UTF-8; each is written as U+FFFD"
+    ]
     # Not one request more than the clean cycle made: the graph's eleven nodes, once each.
     assert _asked(odd) == _asked(clean) == _NODES
     # Every node that quotes the analyst's report comes after the analysts,
@@ -589,6 +627,8 @@ def test_without_the_replacement_the_same_cycle_pays_three_times_and_decides_not
     # says so.
     import tradingagents.llm_clients.openai_client as openai_client
 
+    if not _sdk_refuses_such_text():
+        pytest.skip("the installed SDK sends a lone surrogate itself: no failure to reproduce")
     monkeypatch.setattr(openai_client, "sendable", lambda input: input)
     wire = _provider("escape")
     cycle = _run_cycle(tmp_path / "odd", monkeypatch, wire)

@@ -85,12 +85,13 @@ def test_every_place_a_message_carries_text_is_read_and_the_rest_is_left_as_it_w
         tool_calls=[{"name": "tool", "args": {f"key {LONE}": [f"value {LONE}", 3]}, "id": "1"}],
     )
     result = ToolMessage(f"result {LONE}", tool_call_id="1")
-    given = [untouched, human, blocks, called, result, ("human", f"pair {LONE}")]
+    system = SystemMessage(f"system {LONE}")
+    given = [untouched, human, blocks, called, result, ("human", f"pair {LONE}"), system]
 
     with caplog.at_level(logging.WARNING, logger=base_client.logger.name):
         sent = sendable(given)
 
-    assert _warnings(caplog) == [SAID.format(7)]
+    assert _warnings(caplog) == [SAID.format(8)]
     assert sent is not given
     assert [type(message) for message in sent] == [type(message) for message in given]
     # A message holding none is the same object: only what had to change did.
@@ -109,6 +110,7 @@ def test_every_place_a_message_carries_text_is_read_and_the_rest_is_left_as_it_w
     assert sent[4].content == f"result {REPLACED}"
     assert sent[4].tool_call_id == "1"
     assert sent[5] == ("human", f"pair {REPLACED}")
+    assert sent[6].content == f"system {REPLACED}"
     # What the graph holds is not what was changed: its state still says what was written.
     assert human.content == f"human {LONE}"
     assert called.tool_calls[0]["args"] == {f"key {LONE}": [f"value {LONE}", 3]}

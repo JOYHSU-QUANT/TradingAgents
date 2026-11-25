@@ -76,12 +76,17 @@ def write_sidecar(
     with one WARNING per type per write, so one odd value cannot sink the
     record or turn its container into a repr string, and the degradation is
     not silent. A CHARACTER UTF-8 cannot carry — a lone surrogate in what an
-    agent wrote, which reaches the reports record now that a later node can
-    be sent such text (issue #441) — is written as U+FFFD, one for one, with
-    a WARNING saying how many: the same thing the store does with the
-    decision's own text (issue #427), and for the same reason. A record
-    holding none is written byte for byte as before. A dict KEY JSON cannot
-    carry is the one exception:
+    agent wrote: it reached the reports record already when the final
+    decision held one, and every report can bring one since a later node
+    can be sent such text (issue #441) — is written as U+FFFD, one for one,
+    with a WARNING naming the file and saying how many: the same thing the
+    store does with the decision's own text (issue #427), and for the same
+    reason. Counted where it stands in the written text, so a key and a
+    value each count; a record holding none is written byte for byte as
+    before. (The handoff sidecar records the digest of an operator's file
+    beside what was parsed from it: after a replacement the two no longer
+    describe the same bytes, and that WARNING is what says so.) A dict KEY
+    JSON cannot carry is the one exception:
     ``json.dumps`` never consults ``default`` for keys, so that record is lost
     whole — logged as a failed write, no file. Both builders' own keys are
     ``str``; the reports record's nested debate dicts are upstream's.
@@ -93,15 +98,17 @@ def write_sidecar(
         if "schema" in built:
             raise ValueError(f"{what} sidecar builder returned its own 'schema' key")
         record = {"schema": SIDECAR_SCHEMA, **built}
+        path = sidecar_path(payload_path, suffix)
         text, replaced = replace_lone_surrogates(json_text(record, default=_stringify_for(what)))
         if replaced:
             logger.warning(
-                "%s sidecar: %d lone surrogate(s) in it cannot be written as UTF-8; each is "
+                "%s sidecar: %d lone surrogate(s) in %s cannot be written as UTF-8; each is "
                 "written as U+FFFD",
                 what,
                 replaced,
+                path.name,
             )
-        atomic_write_bytes(sidecar_path(payload_path, suffix), text.encode("utf-8"))
+        atomic_write_bytes(path, text.encode("utf-8"))
     except Exception:  # noqa: BLE001 — recording must never fail the cycle
         logger.exception("%s sidecar could not be written; the decision is unaffected", what)
 

@@ -587,15 +587,23 @@ Breaking changes within the 0.x line are called out explicitly.
   (`tradingagents/llm_clients/base_client.py`): each such character becomes
   U+FFFD, one for one, in the request only — in a message's text, a tool
   call's arguments, a tool's result, a prompt value — and one WARNING says
-  how many. A request holding none is passed on as the same object, so no
-  clean prompt changes by a byte: this is no prompt segmentation point, and
+  how many. The count is of the input a request is built from, the fields
+  of a message a client does not send included, and each request that
+  quotes a text the graph keeps counts it again; the line names no node,
+  and of the three callers only the perp daemon configures logging, so the
+  other two print it bare (both RUNBOOKs' tables of log lines have it). A
+  request holding none is passed on as the same object, so no clean prompt
+  changes by a byte: this is no prompt segmentation point, and
   `PROMPT_VERSION` and the schema are unchanged. The graph's state is not
   touched, so what is stored still goes through the write-time replacement
-  of #427 to #429, and their counts still count. One writer those did not
-  cover is reached now that such a cycle completes: the perp reports
-  sidecar (`<payload>.reports.json`), which a report holding the character
-  would have left unwritten (logged, the decision unaffected);
-  `write_sidecar` now replaces at the write and warns, as the store does.
+  of #427 to #429, and their counts still count; upstream's own state log
+  (`full_states_log_<date>.json`) is written with escapes and so keeps the
+  character, the one stored copy that does. One writer those did not cover:
+  the perp sidecars. The reports sidecar (`<payload>.reports.json`) was
+  already left unwritten when a final decision held the character (logged,
+  the decision unaffected), and any report can bring one now that such a
+  cycle completes; `write_sidecar` replaces at the write and warns, naming
+  the file, as the store does.
   Only the OpenAI-compatible client was driven end to end, which is the
   one the three callers above use; for the Anthropic, Google, Azure and
   Bedrock clients what is pinned is that their input goes through
@@ -603,7 +611,10 @@ Breaking changes within the 0.x line are called out explicitly.
   they were: `stream`, `ainvoke` and `astream` on these chat classes, which
   no caller here uses; a tool run with an argument a model wrote such a
   character into, which is handed the argument as written (not shown to
-  happen, nor what the tool then does); and two writers of upstream's that
+  happen, nor what the tool then does); the perp payload file, which is
+  written before any model is asked, so context text holding such a
+  character still fails that cycle with no request made (not shown that a
+  vendor's text can bring one there); and two writers of upstream's that
   none of this fork's three callers reaches, which still raise on such
   text — the interactive CLI's message log and report files (`cli/main.py`)
   and the engine memory log (`TradingMemoryLog.store_decision`: off in the

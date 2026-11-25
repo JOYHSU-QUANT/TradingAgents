@@ -56,14 +56,21 @@ def _without_lone_surrogates(value, found):
     model's words), and anything pydantic — a message, with its content,
     its tool calls, its other declared fields and the extra ones a provider
     put on it, or a prompt value with its messages. Told apart by shape and
-    not by class, so this module imports no chat library.
+    not by class, so this module imports no chat library. Every field is
+    read, the ones a client sends and the ones it does not (a reply's
+    metadata, its id, the raw copy of its tool calls a provider leaves
+    beside the parsed one): the count is of the input a request is built
+    from, not of the request's bytes, and it can be more than what was sent.
 
-    Not read: what is none of those (a dataclass, a set). And three things
-    hold only for a container that had to change, which a chat input is not
-    known to run into: a subclass of ``list``, ``tuple`` or ``dict`` comes
-    back as the plain type; two keys of one dict that differed only in such
-    characters become one key, the later value kept; and nothing else about
-    the container is carried over.
+    Not read: what is none of those (a dataclass, a set). A container is
+    followed as far as it goes: one that holds itself is a
+    ``RecursionError``, with or without such a character in it; a chat
+    input is a tree. And these hold only for something that had to change,
+    which a chat input is not known to run into: a subclass of ``list``,
+    ``tuple`` or ``dict`` comes back as the plain type, with nothing else of
+    the container carried over; and two texts that differed only in such
+    characters are the same text afterwards — two keys of one dict become
+    one key, the later value kept, and two tool calls' ids one id.
     """
     if isinstance(value, str):
         replaced, count = _LONE_SURROGATE.subn(_REPLACEMENT_CHARACTER, value)
@@ -110,8 +117,9 @@ def sendable(input):
     node fails on text it was only passing on, and whoever drives the graph
     retries or gives up (#441). Each such
     character becomes U+FFFD, one for one, in what is sent — the graph's own
-    state is not touched, so what is stored still says what was written —
-    and a warning says how many, since U+FFFD in a prompt does not say
+    state is not touched, so what is stored from it still goes through the
+    replacement its own writers make, and their counts — and a warning says
+    how many, since U+FFFD in a prompt does not say
     whether its author or this function put it there. An input holding none
     is returned as the same object.
 

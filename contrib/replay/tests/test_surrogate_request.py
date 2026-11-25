@@ -13,7 +13,9 @@ Everything here is the command's own: ``cli.main``, the real
 provider's SDK and its HTTP library, the real stores. The one fake is the
 transport under that library, which answers each request with a canned
 completion and keeps the bytes it was sent; no socket is opened, and the
-key is a dummy.
+key is a dummy. Beside it the command's pause between tries is recorded
+rather than waited for, and the client is handed the dummy key and a
+callback that notes which node is asking.
 
 The character reaches the reply in the two ways a provider can deliver it:
 the response body carries the lone surrogate itself, or the body is ASCII
@@ -57,7 +59,8 @@ _TRADER = "Trader"
 _NEXT = "Aggressive Analyst"  # the first node that reads the Trader's plan
 _MANAGER = "Portfolio Manager"
 _NODES = [_TRADER, _NEXT, "Conservative Analyst", "Neutral Analyst", _MANAGER]
-_ODD_PLAN = f"{_TRADER} says: momentum {HIGH} holds."
+# Two of them: a replacement that stopped at the first would leave one in the request.
+_ODD_PLAN = f"{_TRADER} says: momentum {HIGH} holds, then {HIGH} fades."
 _SENT_PLAN = _ODD_PLAN.replace(HIGH, FFFD)
 
 
@@ -362,7 +365,7 @@ def test_a_traders_reply_holding_one_is_sent_on_as_u_fffd_and_the_walk_goes_on(
     assert TARGET_ID in [row["input_id"] for row in _rows(work, "answers")]
     assert _rows(work, "failures") == []
     for table in ("answers", "graph_books"):
-        assert _rows(work, table) == _rows(twin, table)
+        assert _rows(work, table) and _rows(work, table) == _rows(twin, table)
     assert offline == []
 
 

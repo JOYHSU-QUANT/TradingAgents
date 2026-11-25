@@ -78,7 +78,8 @@ _NODES = [
     "Neutral Analyst",
     _MANAGER,
 ]
-_ODD_REPORT = f"{_ANALYST} says: momentum {HIGH} holds."
+# Two of them: a replacement that stopped at the first would leave one in the request.
+_ODD_REPORT = f"{_ANALYST} says: momentum {HIGH} holds, then {HIGH} fades."
 _SENT_REPORT = _ODD_REPORT.replace(HIGH, FFFD)
 # The one structured call the graph makes: the sentiment analyst binds its
 # report's schema as a tool and is answered with a call of it.
@@ -235,7 +236,15 @@ def offline(monkeypatch) -> list[str]:
     import tradingagents.agents.analysts.sentiment_analyst as sentiment
     import tradingagents.dataflows.config as engine_config
     import tradingagents.dataflows.interface as interface
+    import tradingagents.default_config as engine_defaults
     import tradingagents.graph.trading_graph as trading_graph
+
+    # The judge takes its two round counts from the engine's defaults, which
+    # the environment (or a .env found from the working directory) can set:
+    # one round each here, whatever is set there, so the graph has the
+    # eleven nodes ``_NODES`` lists.
+    for key in ("max_debate_rounds", "max_risk_discuss_rounds"):
+        monkeypatch.setitem(engine_defaults.DEFAULT_CONFIG, key, 1)
 
     refused: list[str] = []
     connect, lookup = socket.socket.connect, socket.getaddrinfo
@@ -408,11 +417,20 @@ def test_an_analysts_report_holding_one_is_sent_on_as_u_fffd_and_the_token_is_ra
     assert replaced and _client_warnings(caplog) == [_note(count) for count in replaced]
     # Both tokens are rated at the bar, as on the clean visit, and nothing declined.
     assert _stored(site) == _stored(twin) == ([("WBTC", "Hold"), ("WETH", "Hold")], 0)
-    # The graph's own state was not changed: the report reached the sidecar
-    # as the analyst wrote it, and the write put U+FFFD in it (issue #429).
+    # The report is in the sidecar with U+FFFD in it, and it was the write
+    # that put it there (issue #429): the graph's own state was not changed,
+    # so the answer arrived holding the characters, and the writer said so.
     sidecar = site[1].parent / "verdicts" / _SOURCE / "WETH-20240103T000000Z.json"
     kept = json.loads(sidecar.read_bytes().decode("utf-8"))
     assert kept["reports"]["market_report"] == _SENT_REPORT
+    (said,) = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "contrib.uniswap_v3.agent.verdicts" and record.levelno == logging.WARNING
+    ]
+    assert said.startswith(
+        f"{_ODD_REPORT.count(HIGH)} lone surrogate(s) in the judge's words on WETH at "
+    )
     assert offline == []
 
 

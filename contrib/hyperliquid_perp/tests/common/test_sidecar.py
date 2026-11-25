@@ -92,7 +92,8 @@ def test_a_character_utf8_cannot_carry_is_written_as_u_fffd_and_counted(tmp_path
         f"key {replaced}": [replaced, "clean"],
     }
     assert [r.getMessage() for r in caplog.records if r.name == _LOGGER] == [
-        "x sidecar: 3 lone surrogate(s) in it cannot be written as UTF-8; each is written as U+FFFD"
+        f"x sidecar: 3 lone surrogate(s) in {_STEM}.x.json cannot be written as UTF-8; "
+        "each is written as U+FFFD"
     ]
 
 

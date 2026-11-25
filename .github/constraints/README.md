@@ -10,7 +10,7 @@ CI 必過的 job 不再每次都裝「當下最新版」的相依套件，而是
 |---|---|
 | `py3.10.txt`、`py3.11.txt`、`py3.12.txt`、`py3.13.txt` | 每個 Python 版本一份釘版清單（`套件==版本`），由 `compile.py` 產生，**不要手改** |
 | `compile.py` | 重新產生四份清單 |
-| `ci.in` | 只在 workflow 步驟裡指名安裝的套件：`httpx`（沒有寫在別的地方），以及 `mypy==2.3.1`（mypy job 要用的確切版本） |
+| `ci.in` | workflow 步驟指名安裝、而且別處沒有宣告（`httpx`）或 CI 要另外固定版本（`mypy`，mypy job 用的確切版本）的套件 |
 | `drift.py` | 列出「已安裝的版本」跟某一份清單不同的套件；「最新版」job 用它 |
 
 每份清單是所有 job 帶 `-c` 安裝的東西的聯集：專案本身加上 `dev` 與 `discovery-tools` 兩個 extra、根目錄的 `requirements.txt`、`contrib/uniswap_v3/requirements.txt`、`ci.in`。同一個 Python 版本的 job 共用一份（2026-11-25 的決定；issue #442 原本寫的是分開考慮）。
@@ -35,7 +35,7 @@ CI 必過的 job 不再每次都裝「當下最新版」的相依套件，而是
 - dashboard 頁面的相依：`contrib/dashboard/requirements.txt` 自己逐一釘版本與 hash，用 `--require-hashes` 安裝。
 - GitHub runner 的映像檔、Python 的修訂版號、建置專案時 pip 在隔離環境裡裝的 setuptools（清單裡釘的 `setuptools` 是執行期那一個）。
 
-mypy 的版本是刻意固定的（新版 mypy 會讓 `warn_unused_ignores` 把既有的 `# type: ignore` 判成多餘、job 變紅）。它寫在 `ci.in` 的 `mypy==2.3.1`，所以四份清單都釘這一版，`--upgrade` 也不會動它；`tests` 那幾個 job 經 `dev` extra 裝到的 mypy 因此也是這一版。要升 mypy：改 `ci.in` 那一行、不帶參數跑 `compile.py`、在同一張 PR 修掉新版報的問題。
+mypy 的版本是刻意固定的（新版 mypy 會讓 `warn_unused_ignores` 把既有的 `# type: ignore` 判成多餘、job 變紅）。它寫在 `ci.in` 的 `mypy==` 那一行，所以四份清單都釘那一版，`--upgrade` 與 `--upgrade-package mypy` 都不會動它；所有裝 `dev` extra 的 job 裝到的 mypy 因此也是那一版，而「最新版」job 的差異清單每次都會列出 `mypy`（它裝到的是最新版）。要升 mypy：改 `ci.in` 那一行、不帶參數跑 `compile.py`、在同一張 PR 修掉新版報的問題。
 
 ## 「最新版」job 紅了怎麼辦
 
@@ -45,7 +45,7 @@ mypy 的版本是刻意固定的（新版 mypy 會讓 `warn_unused_ignores` 把�
 
 它們跟其他 job 一樣在每張 PR、以及 push 到 `main`／`develop` 時跑，沒有另外排程：排程的 workflow 只會從預設分支（`main`）的檔案觸發，而且 GitHub 會停掉 fork 上不活躍的排程。
 
-1. 打開那個 job 的「List what was installed at another version than the constraints file pins」步驟（排在測試後面，測試失敗也會跑）：它列出跟清單不同的套件與兩邊的版本。`websockets` 每次都會在裡面（見「已知的限制」），不是上游剛變的。如果這一步說專案沒有安裝，代表安裝步驟本身就失敗了，要看安裝步驟的輸出。
+1. 打開那個 job 的「List what was installed at another version than the constraints file pins」步驟（排在測試後面，測試失敗也會跑）：它列出跟清單不同的套件與兩邊的版本。`websockets` 與 `mypy` 每次都會在裡面（前者見「已知的限制」，後者是 `ci.in` 刻意固定的），都不是上游剛變的。如果這一步說專案沒有安裝，代表安裝步驟本身就失敗了，要看安裝步驟的輸出。
 2. 對照失敗的測試，找出是哪個套件。
 3. 修法二選一：改程式或測試讓新舊版都過（PR #436 是這樣修的）；或在 `pyproject.toml` 給那個套件加上限。
 4. 修好後照下一節重新產生清單，一起進同一張 PR。
@@ -64,9 +64,9 @@ mypy 的版本是刻意固定的（新版 mypy 會讓 `warn_unused_ignores` 把�
 | `python .github/constraints/compile.py --upgrade-package 套件名` | 只把指名的套件升到範圍內最新（可以給多次）；它的相依需要跟著動的也會動 |
 | `python .github/constraints/compile.py --upgrade` | 整份重解，每個套件都升到範圍內最新 |
 
-預設不升級是 2026-11-25 的決定：加一個相依的 PR 不應該順便吃進上游當天所有的新版。因此檔頭記錄的那條指令不是清單的全部來歷，要看 git 歷史。要壓住某個套件不讓它升，只能在宣告相依的地方加上限：`pyproject.toml`，或那兩個 requirements 檔（那會連帶影響 CI 以外的安裝）；`httpx` 是在 `ci.in` 宣告的，壓它只影響 CI。
+預設不升級是 2026-11-25 的決定：加一個相依的 PR 不應該順便吃進上游當天所有的新版。因此檔頭記錄的那條指令不是清單的全部來歷，要看 git 歷史。要壓住某個套件不讓它升，要在宣告相依的地方加上限：`pyproject.toml`，或那兩個 requirements 檔（那會連帶影響 CI 以外的安裝）。workflow 步驟指名安裝的套件（目前是 `httpx`、`mypy`、`ruff`）另外可以在 `ci.in` 加一行，那只影響 CI；`mypy` 就是這樣固定的。
 
-`--upgrade-package` 的套件名打錯時 uv 不會報錯，清單也不會變：跑完 `git diff` 是空的，代表名稱不對，或那個套件已經是範圍內最新——包括被別的套件壓住的（例如 `websockets`，見「已知的限制」）。
+`--upgrade-package` 的套件名打錯時 uv 不會報錯，清單也不會變：跑完 `git diff` 是空的，代表名稱不對，或那個套件已經是範圍內最新——包括被別的套件壓住的（例如 `websockets`，見「已知的限制」）與被 `ci.in` 固定的（`mypy`）。
 
 `--upgrade` 也會動到 `ruff`：新版多一條規則時，那張 PR 的 lint job 會變紅，在那張 PR 裡修。本機的 ruff 版本不受這些清單管。
 
@@ -81,7 +81,7 @@ mypy 的版本是刻意固定的（新版 mypy 會讓 `warn_unused_ignores` 把�
 什麼時候要跑：
 
 - 「最新版」job 紅了、修好之後（上一節）：修法是改程式的話，用 `--upgrade-package 套件名`（或 `--upgrade`）把清單帶到新版；修法是加上限的話，不帶參數（釘的版本本來就在上限之內，清單多半不會變）。
-- **加了或改了相依**（`pyproject.toml`、`requirements.txt`、`contrib/uniswap_v3/requirements.txt`、`ci.in`）：不帶參數。沒跑的話，本機跑 `tests/test_ci_constraints.py` 會指出哪一份清單缺哪個套件，或哪個釘的版本落在新宣告的範圍之外。在 CI 上，後一種情況會先在安裝步驟看到 pip 的 `ResolutionImpossible`（宣告的範圍跟清單釘的版本衝突），測試還沒開始跑。**替既有的相依加 extra**（例如 `redis` 改成 `redis[hiredis]`）也算：extra 帶進來的套件不在清單裡就會照舊裝最新版，測試會要求重新產生後把那個 extra 登記進測試檔的 `EXTRAS_RESOLVED`。
+- **加了或改了相依**（`pyproject.toml`、`requirements.txt`、`contrib/uniswap_v3/requirements.txt`、`ci.in`）：不帶參數。沒跑的話，本機跑 `tests/test_ci_constraints.py` 會指出哪一份清單缺哪個套件，或哪個釘的版本落在新宣告的範圍之外。在 CI 上，`pyproject.toml` 與兩個 requirements 檔的後一種情況會先在安裝步驟看到 pip 的 `ResolutionImpossible`（宣告的範圍跟清單釘的版本衝突），測試還沒開始跑。`ci.in` 的不會，因為 pip 不讀它：job 照舊裝清單的版本、是綠的，紅的是 `tests` job 裡的這個測試。**替既有的相依加 extra**（例如 `redis` 改成 `redis[hiredis]`）也算：extra 帶進來的套件不在清單裡就會照舊裝最新版，測試會要求重新產生後把那個 extra 登記進測試檔的 `EXTRAS_RESOLVED`。
 - 上游同步改了 `pyproject.toml` 的相依範圍之後：不帶參數。
 - 想讓 CI 跟上上游的新版本時：`--upgrade`。沒有排程，由人決定（2026-11-25 的決定）。
 
@@ -110,8 +110,8 @@ mypy 的版本是刻意固定的（新版 mypy 會讓 `warn_unused_ignores` 把�
   | `python-dateutil` | 2.9.0.post0（連帶多裝 `six`、不裝 `tzdata`） | `dev` extra 的 `langchain-aws` 帶進來的 `botocore`（它要求 `<3`） | smoke | 4.0.0 |
   | `eth-account`、`eth-keyfile`、`eth-utils` | 0.13.7／0.8.1／5.3.1 | perp 的 `hyperliquid-python-sdk`（它要求 `eth-account<0.14`） | uniswap | 0.14.0／0.10.0／6.0.0（另外多裝 `py_ecc`） |
 
-  後果有兩個。第一，「最新版」job 的差異清單每次都會列出 `websockets`。第二，`clean-install smoke` 測的是「照清單的版本做 bare install」，不是「今天 `pip install .` 會拿到的版本」；後者現在沒有任何 job 在測（「最新版」job 裝的是 `.[dev]`）。專案直接 import `dateutil` 卻沒有在 `pyproject.toml` 宣告它，目前靠 pandas 帶進來。
+  後果有兩個。第一，「最新版」job 的差異清單每次都會列出 `websockets`（另外還有 `mypy`，那是 `ci.in` 固定的，不是被壓住）。第二，`clean-install smoke` 測的是「照清單的版本做 bare install」，不是「今天 `pip install .` 會拿到的版本」；後者現在沒有任何 job 在測（「最新版」job 裝的是 `.[dev]`）。專案直接 import `dateutil` 卻沒有在 `pyproject.toml` 宣告它，目前靠 pandas 帶進來。
 - 清單是替 Linux x86_64 解的。只有 Windows 才會裝的套件（`colorama`、`pywin32`）不在裡面。
 - uv 是替每個 Python 版本的 `.0` 修訂版解的，runner 上是比較新的修訂版。相依的條件寫到修訂版號時兩邊會不同，目前看得到兩處，都在 `py3.11.txt`：多釘了一個 runner 不會裝的 `async-timeout`（無害）；`soupsieve` 釘在 2.10，因為 4.x 要求 Python 3.11.5 以上，而 runner 的 3.11 其實裝得了 4.1.3（沒有測試用到它；「最新版」job 不跑 3.11，所以差異清單看不到這一個）。反過來，如果有套件只在較新的修訂版才需要某個相依，那個相依會不在清單裡、照舊裝最新版，而且沒有東西會報。
 - 只釘版本、不釘 hash（2026-11-25 的決定）：這些檔的目的是讓 CI 不被上游發新版弄紅，不是供應鏈防護。
-- 手改清單裡的某一行不會被測試發現（測試只核對檔頭記錄的指令、每行都是 `套件==版本`、宣告的相依都在）。手改出互相衝突的版本時，要等 CI 的 `pip` 或 `pip check` 才會報。
+- 手改清單裡的某一行不會被測試發現（測試只核對檔頭記錄的指令、每行都是 `套件==版本`、宣告的相依都在而且釘在宣告的範圍內）。手改出互相衝突的版本時，要等 CI 的 `pip` 或 `pip check` 才會報。

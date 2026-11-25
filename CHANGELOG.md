@@ -518,8 +518,8 @@ Breaking changes within the 0.x line are called out explicitly.
   packages it requires, which that job used to take at the newest: its
   exact version moved from the workflow line to `.github/constraints/ci.in`.
   The lists are regenerated on demand, by running
-  `python .github/constraints/compile.py`; nothing is scheduled. With no option a version a list already holds is
-  kept wherever it still fits, so a run after a dependency was added writes
+  `python .github/constraints/compile.py`; nothing is scheduled. With no
+  option a version a list already holds is kept wherever it still fits, so a run after a dependency was added writes
   that and nothing else; `--upgrade-package NAME` moves one package and
   `--upgrade` all of them. A new job, `tests, latest deps` on Python 3.10
   and 3.13, installs without a list as before, runs the root suite, and
@@ -533,8 +533,8 @@ Breaking changes within the 0.x line are called out explicitly.
   required check pass without running or stop reporting (`if:`,
   `continue-on-error`, `needs:`, a trigger filter, another runner, another
   action, among others; the README lists them). One list serves every job
-  of its Python,
-  so a package one job needs can hold back another job's: `websockets` is
+  of its Python, so a package one job needs can hold back another job's:
+  `websockets` is
   at 15.0.1 everywhere because uniswap_v3's `web3<8` requires it, where the
   root install alone resolves 17.4 (16.1.1 on Python 3.10), and the
   clean-install job gets
@@ -542,7 +542,8 @@ Breaking changes within the 0.x line are called out explicitly.
   tests the bare install at the pinned versions, and nothing tests it at
   today's. Not constrained: `pip` itself (its own upgrade line) and the
   dashboard's hash-checked pins, which are the two lines without `-c`, and
-  the runner image and the build's setuptools. Versions only, no hashes. Used by CI alone: no
+  the runner image and the build's setuptools. Versions only, no hashes.
+  Used by CI alone: no
   local or server install reads these files, and no dependency range in
   `pyproject.toml` changed. `.github/constraints/README.md` has the table of
   which job uses which list and what to do when the new job is red.

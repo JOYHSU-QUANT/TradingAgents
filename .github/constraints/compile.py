@@ -8,7 +8,8 @@ One file per Python version of the test matrix in ``ci.yml``, each the set of
 versions ``uv pip compile`` resolves on that Python, for Linux, from every
 requirement a CI job installs under ``-c``: the project's own with the
 ``dev`` and ``discovery-tools`` extras, the root and the uniswap_v3
-requirements files, and ``ci.in`` (what only a workflow step names). The
+requirements files, and ``ci.in`` (what a workflow step installs by name:
+declared nowhere else, or held for CI at a version of its own). The
 dashboard's requirements are not among them: that file pins itself, by
 hash. A job then installs with
 ``-c .github/constraints/py<version>.txt``, so what it runs on changes when
@@ -125,7 +126,10 @@ def main(argv: list[str]) -> int:
                 [*command(version), *moved], cwd=ROOT, check=False, stdout=subprocess.DEVNULL
             )
         except FileNotFoundError:
-            print("uv is not on PATH (pip install uv); nothing was written")
+            print(
+                "uv is not on PATH (the README beside this file names the version to "
+                "pip install); nothing was written"
+            )
             return 1
         if done.returncode:
             # The files are one set: half of them moved is a set no run wrote.

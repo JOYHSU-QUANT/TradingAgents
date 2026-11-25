@@ -8,7 +8,8 @@ when that job's suite is red and the required one's is green. Most of it is
 what an index has published since the file was written. Not all: the file is
 resolved for every job's requirements together, and a package another job
 needs can hold one back that this job alone resolves newer (the README names
-them; for this job that is ``websockets``, listed on every run).
+them; for this job that is ``websockets``), and ``ci.in`` holds ``mypy`` at
+the type-check job's version. Those two are listed on every run.
 A report and never a verdict: it exits 0 whatever it lists. It exits 2 where
 there is no comparison to report — a file it cannot read (none, or a line
 that is no pin), or an environment the project is not installed in (the

@@ -6,7 +6,8 @@ the wiring a later edit could quietly undo — an install line added without
 ``-c``, a dependency declared and never resolved into the files, a job
 renamed away from the name branch protection waits on. A version changed by
 hand inside a file is not among them: nothing here resolves anything, so a
-file is checked for its header and its shape, not for its versions.
+file is checked for its header and its shape, and for its versions only as
+far as a declared requirement's range.
 """
 
 from __future__ import annotations
@@ -349,6 +350,18 @@ def test_the_project_is_named_as_the_two_scripts_name_it():
     assert project["name"] == compile_files.PROJECT == drift.PROJECT
 
 
+def test_the_type_check_job_s_mypy_is_held_at_one_version_by_ci_in():
+    # The dev extra asks for a range. Without this line, or with it loosened,
+    # the files would still pin a mypy and every other test here would pass:
+    # the next upgrade would then move the version the ignores were written for.
+    ci_in = (CONSTRAINTS / "ci.in").read_text(encoding="utf-8").splitlines()
+    (mypy,) = [found for found in _requirements(ci_in) if found.name == "mypy"]
+    assert [specifier.operator for specifier in mypy.specifier] == ["=="]
+    (held,) = [specifier.version for specifier in mypy.specifier]
+    for version, text in _files().items():
+        assert drift.pins(text)["mypy"] == held, f"py{version}.txt: run compile.py"
+
+
 def test_every_declared_requirement_is_pinned_in_every_file_inside_its_range():
     declared = _declared()
     names = {drift.normalized(requirement.name) for requirement in declared}
@@ -457,13 +470,18 @@ def test_compile_stops_at_a_refusal_and_says_which_files_it_had_rewritten(monkey
 
 
 def test_compile_without_uv_says_so_and_stops_at_the_first_file(monkeypatch, capsys):
+    calls = []
+
     def run(command, *, cwd, check, stdout):
+        calls.append(command)
         raise FileNotFoundError(command[0])
 
     monkeypatch.setattr(compile_files.subprocess, "run", run)
     assert compile_files.main([]) == 1
+    assert len(calls) == 1
     assert capsys.readouterr().out.splitlines()[-1] == (
-        "uv is not on PATH (pip install uv); nothing was written"
+        "uv is not on PATH (the README beside this file names the version to "
+        "pip install); nothing was written"
     )
 
 
@@ -500,6 +518,13 @@ def test_drift_lists_what_moved_and_what_is_not_pinned_and_passes_the_rest():
     assert drift.drift(pinned, installed, project="tradingagents") == [
         "moved: installed 1.1, pinned 1.0",
         "new-dependency: installed 0.1, not pinned",
+    ]
+    # pip and wheel are passed for being there before anything is installed,
+    # and only while no file pins them: a pin is a version to compare with.
+    assert drift.drift({**pinned, "wheel": "0.44"}, installed, project="tradingagents") == [
+        "moved: installed 1.1, pinned 1.0",
+        "new-dependency: installed 0.1, not pinned",
+        "wheel: installed 0.45, pinned 0.44",
     ]
 
 

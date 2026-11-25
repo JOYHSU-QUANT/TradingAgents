@@ -568,6 +568,48 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **A lone surrogate in text a graph passes on no longer stops the next
+  model call** (#441). A model's reply can hold half of a UTF-16 pair (its
+  provider's JSON carried half an escaped pair and the client decoded it),
+  and so can a tool's result or text fetched from a vendor. A later node
+  puts that text into its prompt, and the request for it could not be
+  built: the OpenAI SDK raised `UnicodeEncodeError` before anything was
+  sent. Measured with the repository's own client over a fake transport:
+  `backtest --ask` retried the question three times, asking and paying for
+  the earlier node again each time, and stopped with exit 1, again on every
+  resume; a `uniswap_v3` `verdict` visit failed "for good" with no verdict
+  for that token and bar, and the next visit paid for the same analysts
+  again; a perp paper cycle ran its three tries to `api_failed` and
+  registered no plan. A retry could succeed when the model, asked again,
+  wrote clean text; not when the character came from a tool or a vendor,
+  whose text is the same on every try. Every client's `invoke` now passes
+  what it is about to send through `sendable`
+  (`tradingagents/llm_clients/base_client.py`): each such character becomes
+  U+FFFD, one for one, in the request only — in a message's text, a tool
+  call's arguments, a tool's result, a prompt value — and one WARNING says
+  how many. A request holding none is passed on as the same object, so no
+  clean prompt changes by a byte: this is no prompt segmentation point, and
+  `PROMPT_VERSION` and the schema are unchanged. The graph's state is not
+  touched, so what is stored still goes through the write-time replacement
+  of #427 to #429, and their counts still count. One writer those did not
+  cover is reached now that such a cycle completes: the perp reports
+  sidecar (`<payload>.reports.json`), which a report holding the character
+  would have left unwritten (logged, the decision unaffected);
+  `write_sidecar` now replaces at the write and warns, as the store does.
+  Only the OpenAI-compatible client was driven end to end, which is the
+  one the three callers above use; for the Anthropic, Google, Azure and
+  Bedrock clients what is pinned is that their input goes through
+  `sendable`, not that their SDKs raised before. Not covered, and left as
+  they were: `stream`, `ainvoke` and `astream` on these chat classes, which
+  no caller here uses; a tool run with an argument a model wrote such a
+  character into, which is handed the argument as written (not shown to
+  happen, nor what the tool then does); and two writers of upstream's that
+  none of this fork's three callers reaches, which still raise on such
+  text — the interactive CLI's message log and report files (`cli/main.py`)
+  and the engine memory log (`TradingMemoryLog.store_decision`: off in the
+  perp bridge and in the uniswap judge, not used by replay). The files under
+  `tradingagents/llm_clients/` are upstream's: the next upstream sync has
+  six more to merge. Not deployed.
 - **A judge's words that cannot be written as UTF-8 no longer end a
   `uniswap_v3` verdict visit** (#429). A lone surrogate (half of a UTF-16
   pair; a provider's JSON carrying half an escaped pair is enough) in the
@@ -586,9 +628,10 @@ Breaking changes within the 0.x line are called out explicitly.
   could be written before is byte for byte what it was — which is why the
   text is replaced rather than dumped with `ensure_ascii=True`, which
   would also not have got past the digest. With the real graph this
-  reaches the final decision only: every other report is read by a later
-  node first, and a lone surrogate there stops that node's request from
-  being built, which still fails the visit (#441). The decline and the
+  reached the final decision only when it was written: every other report
+  is read by a later node first, and a lone surrogate there stopped that
+  node's request from being built, which failed the visit (#441, the entry
+  above: every report can get this far now). The decline and the
   news line were reproduced with a scripted judge; whether a real
   provider's or vendor's words can carry one that far was not shown. Not
   deployed.

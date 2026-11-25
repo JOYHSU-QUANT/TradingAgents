@@ -6,6 +6,7 @@ import json
 import logging
 
 from contrib.core import atomic_io
+from contrib.core.digest import json_bytes
 from contrib.hyperliquid_perp.common import sidecar
 from contrib.hyperliquid_perp.common.sidecar import SIDECAR_SCHEMA, sidecar_path, write_sidecar
 
@@ -69,6 +70,43 @@ def test_a_value_json_cannot_carry_is_stored_as_its_str_at_the_leaf_and_warned(t
         "x sidecar: a _Message value JSON cannot carry was stored as its str",
         "x sidecar: a object value JSON cannot carry was stored as its str",
     ]
+
+
+def test_a_character_utf8_cannot_carry_is_written_as_u_fffd_and_counted(tmp_path, caplog):
+    # A lone surrogate: half of a UTF-16 pair, in a report an agent wrote (#441).
+    # Built with chr, never written out, so no tool can turn this file into one.
+    lone, replaced = chr(0xD83D), chr(0xFFFD)
+    payload = tmp_path / f"{_STEM}.json"
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        write_sidecar(
+            str(payload),
+            suffix=".x.json",
+            what="x",
+            build=lambda: {"report": f"momentum {lone} holds", f"key {lone}": [lone, "clean"]},
+        )
+
+    written = (tmp_path / f"{_STEM}.x.json").read_bytes()
+    assert json.loads(written.decode("utf-8")) == {
+        "schema": SIDECAR_SCHEMA,
+        "report": f"momentum {replaced} holds",
+        f"key {replaced}": [replaced, "clean"],
+    }
+    assert [r.getMessage() for r in caplog.records if r.name == _LOGGER] == [
+        "x sidecar: 3 lone surrogate(s) in it cannot be written as UTF-8; each is written as U+FFFD"
+    ]
+
+
+def test_a_record_holding_none_is_the_bytes_json_bytes_writes_and_nothing_is_said(
+    tmp_path, caplog
+):
+    built = {"text": "an emoji that is a whole pair: " + chr(0x1F600), "n": [1, 2.5, None]}
+    payload = tmp_path / f"{_STEM}.json"
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        write_sidecar(str(payload), suffix=".x.json", what="x", build=lambda: built)
+    assert (tmp_path / f"{_STEM}.x.json").read_bytes() == json_bytes(
+        {"schema": SIDECAR_SCHEMA, **built}
+    )
+    assert [r for r in caplog.records if r.name == _LOGGER] == []
 
 
 def test_no_payload_path_writes_nothing_and_does_not_build(monkeypatch):

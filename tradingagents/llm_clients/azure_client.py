@@ -3,14 +3,14 @@ from typing import Any
 
 from langchain_openai import AzureChatOpenAI
 
-from .base_client import _COMMON_PASSTHROUGH_KWARGS, BaseLLMClient, normalize_content
+from .base_client import _COMMON_PASSTHROUGH_KWARGS, BaseLLMClient, normalize_content, sendable
 
 
 class NormalizedAzureChatOpenAI(AzureChatOpenAI):
     """AzureChatOpenAI with normalized content output."""
 
     def invoke(self, input, config=None, **kwargs):
-        return normalize_content(super().invoke(input, config, **kwargs))
+        return normalize_content(super().invoke(sendable(input), config, **kwargs))
 
 
 class AzureOpenAIClient(BaseLLMClient):

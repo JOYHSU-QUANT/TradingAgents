@@ -1,7 +1,7 @@
 import os
 from typing import Any
 
-from .base_client import _COMMON_PASSTHROUGH_KWARGS, BaseLLMClient, normalize_content
+from .base_client import _COMMON_PASSTHROUGH_KWARGS, BaseLLMClient, normalize_content, sendable
 from .capabilities import get_capabilities
 from .validators import validate_model
 
@@ -33,7 +33,7 @@ def _bedrock_class():
         """ChatBedrockConverse with normalized (string) content output."""
 
         def invoke(self, input, config=None, **kwargs):
-            return normalize_content(super().invoke(input, config, **kwargs))
+            return normalize_content(super().invoke(sendable(input), config, **kwargs))
 
     _BEDROCK_CLASS = NormalizedChatBedrockConverse
     return _BEDROCK_CLASS

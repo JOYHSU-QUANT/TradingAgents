@@ -17,6 +17,7 @@ from contrib.discovery.manifest import (
     POOL_SIZING,
     Arms,
     Candidate,
+    LlmSummaryArm,
     Manifest,
     ManifestError,
     SeedSet,
@@ -162,10 +163,39 @@ def test_a_tool_arm_the_benchmark_cannot_run_is_refused_naming_the_path(changes,
 
 
 def test_a_manifest_names_one_model_arm_at_most():
+    blind = example_manifest().to_dict()["arms"]["llm"]
     record = _with_tools()
-    record["arms"]["llm"] = example_manifest().to_dict()["arms"]["llm"]
-    with pytest.raises(ManifestError, match="names one model arm, llm or llm_tools"):
+    record["arms"]["llm"] = blind
+    with pytest.raises(
+        ManifestError,
+        match=r"names one model arm . llm, llm_summary or llm_tools . and this one names llm "
+        r"and llm_tools;",
+    ):
         Manifest.from_dict(record)
+    # The same of the summary arm beside either of the other two, and of all three.
+    for arms, named in (
+        ({"arms.llm_summary": SUMMARY}, "llm and llm_summary"),
+        (
+            {"arms.llm": None, "arms.llm_tools": TOOLS, "arms.llm_summary": SUMMARY},
+            "llm_summary and llm_tools",
+        ),
+        (
+            {"arms.llm_tools": TOOLS, "arms.llm_summary": SUMMARY},
+            "llm and llm_summary and llm_tools",
+        ),
+    ):
+        with pytest.raises(ManifestError, match=rf"and this one names {named};"):
+            Manifest.from_dict(_edited(**arms))
+    # The one a manifest does name is had with its key, whichever it is;
+    # the pick by training score is no model arm.
+    blind_arms = example_manifest().arms
+    assert blind_arms.model_arm == ("llm", blind_arms.llm)
+    tool_arms = Manifest.from_dict(_with_tools()).arms
+    assert tool_arms.model_arm == ("llm_tools", tool_arms.llm_tools)
+    summary_arms = Manifest.from_dict(_with_summary()).arms
+    assert summary_arms.model_arm == ("llm_summary", summary_arms.llm_summary)
+    alone = Manifest.from_dict(_edited(**{"arms.llm": None, "arms.train_pick": PICK})).arms
+    assert alone.train_pick is not None and alone.model_arm is None
 
 
 def test_the_arms_hold_each_arm_to_its_own_record_and_write_no_arm_a_shape_has_no_place_for():
@@ -194,6 +224,97 @@ def test_the_arms_hold_each_arm_to_its_own_record_and_write_no_arm_a_shape_has_n
     assert sorted(arms.to_dict(version=4)) == ["llm", "llm_tools", "random"]
     with pytest.raises(ManifestError, match="arms.train_pick: expected a TrainPickArm or None"):
         replace(arms, train_pick=arms.random)
+    # And of the arm version 6 added, at every version before it. Its
+    # record is not the model arm's either, though it has its five fields.
+    summarised = replace(arms, llm=None, llm_summary=LlmSummaryArm(**_SUMMARY_FIELDS))
+    assert sorted(summarised.to_dict(version=6)) == [
+        "llm",
+        "llm_summary",
+        "llm_tools",
+        "random",
+        "train_pick",
+    ]
+    for version in (3, 4, 5):
+        with pytest.raises(
+            ManifestError, match="arms.llm_summary: .* before version 6 have no summary arm"
+        ):
+            summarised.to_dict(version=version)
+    assert sorted(arms.to_dict(version=5)) == ["llm", "llm_tools", "random", "train_pick"]
+    with pytest.raises(ManifestError, match="arms.llm_summary: expected an LlmSummaryArm or None"):
+        replace(arms, llm=None, llm_summary=arms.llm)
+    with pytest.raises(ManifestError, match="arms.llm: expected an LlmArm or None"):
+        replace(arms, llm=summarised.llm_summary)
+
+
+# -- the summary arm (tools plan T6) ----------------------------------------------------------------
+
+SUMMARY = {
+    "provider": "openai",
+    "model": "gpt",
+    "temperature": 0.0,
+    "replicates": 2,
+    "world_subset": ["SYN-EB3BC030"],
+    "summary_version": 1,
+}
+_SUMMARY_FIELDS = {**SUMMARY, "world_subset": tuple(SUMMARY["world_subset"])}
+
+
+def _with_summary(**changes):
+    """The example manifest's record naming the summary arm in the model arm's place."""
+    return _edited(**{"arms.llm": None, "arms.llm_summary": {**SUMMARY, **changes}})
+
+
+def test_a_manifest_may_name_the_summary_arm_in_the_model_arm_s_place():
+    manifest = Manifest.from_dict(_with_summary())
+    summary = manifest.arms.llm_summary
+    assert (manifest.arms.llm, manifest.arms.llm_tools) == (None, None)
+    assert summary == LlmSummaryArm(**_SUMMARY_FIELDS)
+    assert (summary.replicates, summary.summary_version) == (2, 1)
+    assert summary.world_subset == ("SYN-EB3BC030",)
+    assert Manifest.loads(manifest.dumps()) == manifest
+    assert manifest.to_dict()["arms"]["llm_summary"] == SUMMARY
+    # What the model is told is a condition of the run: another version of
+    # it is another directory, and another row of a table. So is the arm
+    # itself, against the same model asked blind.
+    other = Manifest.from_dict(_with_summary(summary_version=2))
+    assert other.identity() != manifest.identity()
+    assert other.conditions() != manifest.conditions()
+    blind = Manifest.from_dict(
+        _edited(**{"arms.llm": {k: v for k, v in SUMMARY.items() if k != "summary_version"}})
+    )
+    assert blind.arms.llm is not None and blind.arms.llm_summary is None
+    assert blind.identity() != manifest.identity()
+    assert blind.conditions() != manifest.conditions()
+    # It asks no look-up of anything, so the pick by training score beside
+    # it is held to no number of its.
+    beside = _with_summary()
+    beside["arms"]["train_pick"] = {**PICK, "backtests": 3}
+    assert Manifest.from_dict(beside).arms.train_pick.backtests == 3
+
+
+@pytest.mark.parametrize(
+    ("changes", "fragment"),
+    [
+        ({"summary_version": 0}, "arms.llm_summary.summary_version"),
+        ({"summary_version": "1"}, "arms.llm_summary.summary_version"),
+        ({"summary_version": True}, "arms.llm_summary.summary_version"),
+        ({"summary_version": 1.0}, "arms.llm_summary.summary_version"),
+        ({"replicates": 0}, "arms.llm_summary.replicates"),
+        ({"provider": ""}, "arms.llm_summary.provider"),
+        ({"model": ""}, "arms.llm_summary.model"),
+        ({"temperature": -1}, "arms.llm_summary.temperature"),
+        ({"world_subset": ["BTC"]}, "arms.llm_summary.world_subset"),
+        (
+            {"world_subset": ["SYN-00000000"]},
+            "arms.llm_summary.world_subset: SYN-EB3BC030 is not in it",
+        ),
+        ({"extra": 1}, "arms.llm_summary: expected exactly the keys"),
+        ({"lookups": 5}, "arms.llm_summary: expected exactly the keys"),
+    ],
+)
+def test_a_summary_arm_the_benchmark_cannot_run_is_refused_naming_the_path(changes, fragment):
+    with pytest.raises(ManifestError, match=fragment):
+        Manifest.from_dict(_with_summary(**changes))
 
 
 # -- the pick by training score (tools plan T5) -----------------------------------------------------
@@ -295,6 +416,8 @@ def test_every_arm_a_manifest_names_has_a_key_at_this_build_s_version():
     assert set(_arm_keys(MANIFEST_VERSION)) == {field.name for field in fields(Arms)}
     assert _arm_keys(3) == ("random", "llm")
     assert _arm_keys(4) == ("random", "llm", "llm_tools")
+    assert _arm_keys(5) == ("random", "llm", "llm_tools", "train_pick")
+    assert _arm_keys(6) == ("random", "llm", "llm_tools", "train_pick", "llm_summary")
 
 
 # -- the versions before an arm was added, still read -----------------------------------------------
@@ -310,9 +433,17 @@ def _version_3(manifest: Manifest) -> dict:
 
 def _version_4(manifest: Manifest) -> dict:
     """``manifest``'s record as a version-4 build wrote it: that version, and no ``train_pick`` key."""
-    record = manifest.to_dict()
+    record = _version_5(manifest)
     record["manifest_version"] = 4
     del record["arms"]["train_pick"]
+    return record
+
+
+def _version_5(manifest: Manifest) -> dict:
+    """``manifest``'s record as a version-5 build wrote it: that version, and no ``llm_summary`` key."""
+    record = manifest.to_dict()
+    record["manifest_version"] = 5
+    del record["arms"]["llm_summary"]
     return record
 
 
@@ -336,8 +467,8 @@ def test_a_version_3_manifest_is_read_and_written_back_as_version_3():
     # And a version with no tool arm cannot be made to name one.
     with pytest.raises(ManifestError, match="a version-3 manifest names no tool arm"):
         replace(Manifest.from_dict(_with_tools()), manifest_version=3)
-    for version in (2, 6, True, 4.0):
-        with pytest.raises(ManifestError, match="this build reads versions 3, 4, 5, got"):
+    for version in (2, 7, True, 4.0):
+        with pytest.raises(ManifestError, match="this build reads versions 3, 4, 5, 6, got"):
             replace(current, manifest_version=version)
 
 
@@ -363,6 +494,55 @@ def test_a_version_4_manifest_is_read_and_written_back_as_version_4():
             ManifestError, match=f"a version-{version} manifest names no train-pick arm"
         ):
             replace(Manifest.from_dict(_with_pick()), manifest_version=version)
+
+
+def test_a_version_5_manifest_is_read_and_written_back_as_version_5():
+    # Version 5 as the two above, one arm later: it has the pick's key and
+    # not the summary arm's, and names a pick and no summary arm.
+    current = Manifest.from_dict(_with_pick())
+    record = _version_5(current)
+    old = Manifest.from_dict(record)
+    assert (old.manifest_version, old.arms.llm_summary) == (5, None)
+    assert old.arms.train_pick == current.arms.train_pick
+    assert old.to_dict() == record
+    assert Manifest.loads(old.dumps()) == old and old.dumps() == Manifest.loads(old.dumps()).dumps()
+    assert old != current and replace(old, manifest_version=MANIFEST_VERSION) == current
+    assert old.identity() != current.identity()
+    assert old.conditions() != current.conditions()
+    # Each version by its own key set: a version-5 record with the later
+    # key, and a version-4 one called version 5.
+    with pytest.raises(ManifestError, match="arms: expected exactly the keys"):
+        Manifest.from_dict({**record, "arms": {**record["arms"], "llm_summary": None}})
+    with pytest.raises(ManifestError, match="arms: expected exactly the keys"):
+        Manifest.from_dict(_version_4(example_manifest()) | {"manifest_version": 5})
+    # And no version before 6 can be made to name the summary arm.
+    for version in (3, 4, 5):
+        with pytest.raises(
+            ManifestError, match=f"a version-{version} manifest names no summary arm"
+        ):
+            replace(Manifest.from_dict(_with_summary()), manifest_version=version)
+
+
+@pytest.mark.parametrize(
+    ("record", "identity", "conditions"),
+    [
+        (lambda: example_manifest().to_dict(), "4500085c", "217292d3"),
+        (lambda: example_manifest(kind=WorldKind.NULL_V1).to_dict(), "9505c783", "0e43acf2"),
+        (lambda: _with_tools(), "f4a9b642", "20438fdb"),
+        (lambda: _with_pick(), "235930db", "ebbb1df9"),
+    ],
+    ids=["conditional-v1", "null-v1", "tool arm", "pick"],
+)
+def test_a_version_5_manifest_names_the_directory_it_named_before_the_summary_arm(
+    record, identity, conditions
+):
+    # The digests the build BEFORE the summary arm gave the example
+    # manifest, the one naming the tool arm and the one naming the pick
+    # (develop at ea67eac8, measured 2026-11-24, where version 5 was the
+    # build's own). As for the versions below: they move if the example
+    # manifest is edited, and for no other reason.
+    old = Manifest.from_dict(_version_5(Manifest.from_dict(record())))
+    assert (manifest_digest(old), conditions_digest(old)) == (identity, conditions)
 
 
 @pytest.mark.parametrize(
@@ -469,10 +649,11 @@ def test_a_version_3_manifest_names_the_directory_it_named_before_the_tool_arm(
         ),
         ({"manifest_version": True}, "manifest_version"),
         ({"manifest_version": 1.0}, "manifest_version"),
-        ({"manifest_version": 6, "later": 1}, "this build reads versions 3, 4, 5, got 6"),
-        ({"manifest_version": 2}, "this build reads versions 3, 4, 5, got 2"),
+        ({"manifest_version": 7, "later": 1}, "this build reads versions 3, 4, 5, 6, got 7"),
+        ({"manifest_version": 2}, "this build reads versions 3, 4, 5, 6, got 2"),
         ({"arms.llm_tools": _DROP}, "arms: expected exactly the keys"),
         ({"arms.train_pick": _DROP}, "arms: expected exactly the keys"),
+        ({"arms.llm_summary": _DROP}, "arms: expected exactly the keys"),
         ({"artifact_sha256": "abc"}, "artifact_sha256: a SHA-256 is 64"),
         ({"artifact_sha256": "A" * 64}, "artifact_sha256: a SHA-256 is 64"),
         ({"artifact_sha256": 7}, "artifact_sha256: a SHA-256 is 64"),

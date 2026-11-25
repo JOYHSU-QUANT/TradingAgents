@@ -51,8 +51,18 @@ tools, tokens — is read off each trace once and written to a record of its
 own, ``tool_use.json`` (:mod:`.tooluse`), which a run with no tool arm
 does not have.
 
-**What the blind model arm spent** (issue #433) is counted by the same rule
-and kept in a record of its own, ``model_use.json`` (:mod:`.modeluse`): a
+**The summary arm** (tools plan §3.7, T6) is a model arm handed a fixed
+summary of the training window and no tools (:mod:`.summaryarm`): a
+manifest names it in the model arm's place, and it is searched last, as
+that arm is. Its hypothesist too is opened for each search — the summary
+is computed from that search's own copy of the artifact, read no further
+than the training window, as the pick by training score's view is — and
+then asks its model once a round, as the blind arm does. It starts no
+server and keeps no trace.
+
+**What a model arm with no tools spent** (issue #433) — the blind arm's
+searches, and the summary arm's — is counted by the tool arm's rule and
+kept in a record of its own, ``model_use.json`` (:mod:`.modeluse`): a
 counter is put around its client for each search, and the sums are written
 with the verdicts. Unlike the tool arm's, that record may be absent: a
 directory searched before it existed has none, nor has one whose counts did
@@ -149,11 +159,20 @@ from .landing import (
     verify,
     world_dir,
 )
-from .manifest import LlmArm, LlmToolsArm, Manifest, SeedSet, WorldKind
+from .manifest import (
+    LlmArm,
+    LlmSummaryArm,
+    LlmToolsArm,
+    Manifest,
+    ModelArm,
+    SeedSet,
+    WorldKind,
+)
 from .modeluse import MODEL_USE_FILENAME, MeteredModel, ModelUse
 from .oracle import Oracle, PlantedFigures, frame_for, planted_figures, pool_reference
 from .records import Reader, RecordError, dumps
 from .research_tools import TrainView
+from .summaryarm import SUMMARY_VERSION, SummaryHypothesist
 from .toolarm import (
     PACK_VERSION,
     Limits,
@@ -167,7 +186,9 @@ from .tools_server import LaunchError, ServerParams, load_view, tool_specs
 from .tooluse import TOOL_USE_FILENAME, SearchUse, ToolUse, TracePack, read_trace, trace_use
 from .upstream import (
     ChatHypothesist,
+    EvaluationError,
     Experiment,
+    FeatureError,
     Ledger,
     ResearchStore,
     SegmentMetrics,
@@ -197,6 +218,7 @@ __all__ = [
     "hold_scored",
     "in_row_order",
     "iter_searched",
+    "metered_arm",
     "model_hypothesist",
     "own_manifest",
     "preview_oracle",
@@ -212,6 +234,7 @@ __all__ = [
     "seam_note",
     "server_log_of",
     "store_path",
+    "summary_arm",
     "tool_arm",
     "tools_experiment",
     "trace_of",
@@ -241,20 +264,43 @@ class Arm(VocabEnum, noun="arm"):
     Random and Grid walk the pool a rule a round. The pick by training
     score, where a manifest names it, draws a few a round and proposes the
     one that scored best on the training window (tools plan T5). The model
-    arm answers from the two prompts alone; the tool arm is the same model
-    with the training-window look-ups at hand (tools plan T4).
+    arm answers from the two prompts alone; the summary arm is the same
+    model handed a fixed summary of the training window (tools plan T6);
+    the tool arm is the same model with the training-window look-ups at
+    hand (tools plan T4). The three model arms are listed in that order:
+    nothing of the training window, its figures handed over, its figures
+    looked up.
+
+    The order listed here is the order of the rows of ONE set of
+    conditions (:func:`in_row_order` sorts by the kind of world, the null
+    definition, the seed set and the conditions' digest, in that order,
+    before the arm): a manifest's model arm comes after its pool arms. It is not
+    an order among the three model arms' rows — a manifest names one of
+    them, so they are never under one digest, and their rows fall where
+    their digests do.
     """
 
     RANDOM = "random"
     GRID = "grid"
     TRAIN_PICK = "train_pick"
     LLM = "llm"
+    LLM_SUMMARY = "llm_summary"
     LLM_TOOLS = "llm_tools"
 
     @property
     def walks_pool(self) -> bool:
         """Whether this arm proposes from the candidate pool; a model may answer outside it."""
         return self in (Arm.RANDOM, Arm.GRID, Arm.TRAIN_PICK)
+
+    @property
+    def metered(self) -> bool:
+        """Whether this arm asks a model once a round through a counted client, so that what it spent is in ``model_use.json``.
+
+        The blind model arm and the summary arm. The tool arm's spending is
+        read off its trace into a record of its own, and a pool arm asks no
+        model.
+        """
+        return self in (Arm.LLM, Arm.LLM_SUMMARY)
 
     @property
     def one_rule_an_answer(self) -> bool:
@@ -777,8 +823,9 @@ def _model_use(
     counted: Sequence[tuple[int, bool, MeteredModel]],
     say: Callable[[str], None],
 ) -> ModelUse | None:
-    """The blind model arm's record for a world just searched, or ``None``: no such arm, or counts that make no record.
+    """The record of what a model arm with no tools spent on a world just searched, or ``None``: no such arm, or counts that make no record.
 
+    The blind model arm's, or the summary arm's (:func:`metered_arm`).
     ``counted`` is each search's replicate, whether it ended on a failed
     seam, and its counter. The record is built from them HERE, and held to
     the verdicts as a reader will hold it (:func:`_hold_model_use`), so
@@ -792,22 +839,23 @@ def _model_use(
     record is left unwritten, the operator is told why, and the world then
     reads as any world with no record does.
     """
-    llm = manifest.arms.llm
-    if llm is None:
+    named = metered_arm(manifest)
+    if named is None:
         return None
+    arm, asked = named
     try:
         use = ModelUse(
             world_id=verdicts.world_id,
             manifest_digest=verdicts.manifest_digest,
-            model=f"{llm.provider}/{llm.model}",
+            model=f"{asked.provider}/{asked.model}",
             searches=tuple(
                 meter.spent(replicate, seam_failed=seam_failed)
                 for replicate, seam_failed, meter in counted
             ),
         )
-        _hold_model_use(MODEL_USE_FILENAME, use, llm, verdicts)
+        _hold_model_use(MODEL_USE_FILENAME, use, arm, asked, verdicts)
     except RecordError as exc:
-        logger.warning("what arms.llm spent is not recorded: %s", exc)
+        logger.warning("what arms.%s spent is not recorded: %s", arm.value, exc)
         say(f"model use: not recorded — {exc}")
         return None
     return use
@@ -973,7 +1021,32 @@ def tools_experiment(run_dir: Path) -> Experiment:
 _MODEL_RETRIES = 6
 
 
-def model_hypothesist(llm: LlmArm | LlmToolsArm) -> ChatHypothesist:
+def metered_arm(manifest: Manifest) -> tuple[Arm, ModelArm] | None:
+    """The model arm of ``manifest`` whose spending is counted around its client, with which arm it is; ``None`` if it names none.
+
+    The manifest's model arm (:attr:`~contrib.discovery.manifest.Arms.model_arm`,
+    whose key is the arm's own name) where that arm is one counted this
+    way (:attr:`Arm.metered`): the blind model arm or the summary arm.
+    What such an arm spent is what ``model_use.json`` holds, so whoever
+    writes, reads or tallies that record asks here whose it is.
+    """
+    named = manifest.arms.model_arm
+    if named is None:
+        return None
+    key, record = named
+    arm = Arm(key)
+    return (arm, record) if arm.metered else None
+
+
+# Where a refusal says each kind of model arm is written in a manifest.
+_MODEL_ARM_PATHS = (
+    (LlmArm, "arms.llm"),
+    (LlmSummaryArm, "arms.llm_summary"),
+    (LlmToolsArm, "arms.llm_tools"),
+)
+
+
+def model_hypothesist(llm: ModelArm) -> ChatHypothesist:
     """The model a model arm of the manifest names, built the way the research package builds it, or a named refusal.
 
     Nothing is asked of the model here, so this is also the check that a
@@ -987,7 +1060,11 @@ def model_hypothesist(llm: LlmArm | LlmToolsArm) -> ChatHypothesist:
     default because a replicate is not resumed: a transient failure at
     round 28 would throw away the 27 calls before it.
     """
-    path = "arms.llm_tools" if isinstance(llm, LlmToolsArm) else "arms.llm"
+    path = next((path for kind, path in _MODEL_ARM_PATHS if isinstance(llm, kind)), None)
+    if path is None:
+        raise BenchError(
+            f"a model is built for one of a manifest's model arms, got {type(llm).__name__}"
+        )
     try:
         hypothesist = ChatHypothesist.build(
             llm.provider, llm.model, temperature=llm.temperature, max_retries=_MODEL_RETRIES
@@ -1041,10 +1118,27 @@ def tool_arm(tools: LlmToolsArm) -> tuple[ChatHypothesist, Limits]:
     return model, limits
 
 
+def summary_arm(summary: LlmSummaryArm) -> ChatHypothesist:
+    """The summary arm's model, or a named refusal, before anything is started for it.
+
+    What can be known to be wrong before a world is landed or searched: a
+    summary version that is not this build's — the manifest would describe
+    a run told other words than it was — and the model
+    (:func:`model_hypothesist`). Asked where a world is landed and again
+    where it is searched, as the other model arms' checks are.
+    """
+    if summary.summary_version != SUMMARY_VERSION:
+        raise BenchError(
+            f"arms.llm_summary.summary_version: this build hands a model its summary at "
+            f"version {SUMMARY_VERSION}, the manifest asks for {summary.summary_version}"
+        )
+    return model_hypothesist(summary)
+
+
 # How an arm's hypothesist is had for one search: handed the arm's own copy
 # of the artifact and the experiment stored in it, it gives the hypothesist
 # for as long as the search lasts.
-_Asked = PoolHypothesist | ChatHypothesist | ToolHypothesist
+_Asked = PoolHypothesist | ChatHypothesist | SummaryHypothesist | ToolHypothesist
 _Opened = Callable[[Path, Experiment], AbstractContextManager[_Asked]]
 
 
@@ -1070,16 +1164,43 @@ def _train_view(path: Path, experiment: Experiment) -> TrainView:
         raise BenchError(f"{experiment.experiment_id}: {exc}") from exc
 
 
+def _counted(asked: ChatHypothesist) -> ChatHypothesist:
+    """``asked`` for one search: the same adapter over the same client, with a counter of this search's own around it.
+
+    What a search spent is state of that search (:mod:`.modeluse`), so each
+    is asked through a copy; the client under every counter is the one.
+    """
+    return replace(asked, model=MeteredModel(asked.model))
+
+
+def _summarised(asked: ChatHypothesist, path: Path, experiment: Experiment) -> SummaryHypothesist:
+    """The summary arm's hypothesist for one search: ``asked``, with the figures of the training window of the store at ``path``.
+
+    The window is read as the pick by training score's and the look-ups'
+    server's is (:func:`_train_view`), and every feature of the vocabulary
+    is computed over it before the model is asked anything — so a store
+    that cannot answer one is a named refusal here, with nothing spent,
+    and not a search that failed at its first round. A landed world that
+    passed its check holds all three series and answers every feature.
+    """
+    try:
+        return SummaryHypothesist.over(asked, _train_view(path, experiment))
+    except (EvaluationError, FeatureError) as exc:
+        raise BenchError(
+            f"{experiment.experiment_id}: the training window cannot be summarised — {exc}"
+        ) from exc
+
+
 def _arms(manifest: Manifest) -> list[tuple[Arm, int, _Opened]]:
     """The arms to run, in order: the Random replicates as listed, Grid, the pick by training score's, then a model arm's.
 
     Each as the way its hypothesist is OPENED for its search, not as a
     hypothesist: the tool arm's is opened over a server that reads the
     arm's own copy of the artifact under the experiment stored in it
-    (tools plan §1 #8), the pick by training score's over the training
-    window of its own copy, read the same way, and neither exists until
-    the loop makes it. The other arms' hypothesists hold nothing of a
-    store and are built here.
+    (tools plan §1 #8), the pick by training score's and the summary arm's
+    over the training window of their own copies, read the same way, and
+    none of the three exists until the loop makes it. The other arms'
+    hypothesists hold nothing of a store and are built here.
 
     A model arm last: it is the only arm that costs money, so a world
     whose pool arms cannot run has spent nothing.
@@ -1123,9 +1244,20 @@ def _arms(manifest: Manifest) -> list[tuple[Arm, int, _Opened]]:
         blind = model_hypothesist(llm)
 
         def metered(path: Path, experiment: Experiment) -> AbstractContextManager[_Asked]:
-            return nullcontext(replace(blind, model=MeteredModel(blind.model)))
+            return nullcontext(_counted(blind))
 
         arms += [(Arm.LLM, k, metered) for k in range(llm.replicates)]
+    summary = manifest.arms.llm_summary
+    if summary is not None:
+        told = summary_arm(summary)
+
+        def with_summary(path: Path, experiment: Experiment) -> AbstractContextManager[_Asked]:
+            # The block is this search's own — the figures of the training
+            # window of ITS copy of the artifact — and the client under it
+            # is counted as the blind arm's is.
+            return nullcontext(_summarised(_counted(told), path, experiment))
+
+        arms += [(Arm.LLM_SUMMARY, k, with_summary) for k in range(summary.replicates)]
     tools = manifest.arms.llm_tools
     if tools is not None:
         model, limits = tool_arm(tools)
@@ -1317,7 +1449,7 @@ def run_world(
                     told, use = _spent(trace_of(path), result, told, tools)
                     uses.append(use)
                 meter = getattr(hypothesist, "model", None)
-                if arm is Arm.LLM and isinstance(meter, MeteredModel):
+                if arm.metered and isinstance(meter, MeteredModel):
                     # This search's counter, kept to be read when the
                     # world's record is made (``_model_use``) — not here,
                     # where counts that are no search's would end the run.
@@ -1514,9 +1646,10 @@ class Searched:
 
     ``tool_use`` is what the tool arm's searches spent (:mod:`.tooluse`):
     present exactly when the manifest names that arm. ``model_use`` is what
-    the blind model arm's did (:mod:`.modeluse`): never present without
-    that arm, and absent with it where the search left none — it was made
-    before that record existed, or its counts did not make one.
+    a model arm with no tools spent — the blind arm's searches, or the
+    summary arm's (:mod:`.modeluse`): never present without such an arm,
+    and absent with one where the search left none — it was made before
+    that record existed, or its counts did not make one.
     """
 
     manifest: Manifest
@@ -1573,10 +1706,12 @@ def read_searched(run_dir: Path) -> Searched | None:
     expected.add((Arm.GRID, 0))
     if manifest.arms.train_pick is not None:
         expected |= {(Arm.TRAIN_PICK, seed) for seed in manifest.arms.train_pick.search_seeds}
-    if manifest.arms.llm is not None:
-        expected |= {(Arm.LLM, k) for k in range(manifest.arms.llm.replicates)}
-    if manifest.arms.llm_tools is not None:
-        expected |= {(Arm.LLM_TOOLS, k) for k in range(manifest.arms.llm_tools.replicates)}
+    model_arm = manifest.arms.model_arm
+    if model_arm is not None:
+        # Whichever model arm it names: the key it is written under is
+        # the arm's name, and its replicates are numbered from 0.
+        key, record = model_arm
+        expected |= {(Arm(key), k) for k in range(record.replicates)}
     held = {(result.arm, result.replicate) for result in verdicts.results}
     if held != expected:
         raise BenchError(
@@ -1663,32 +1798,39 @@ def _read_tool_use(run_dir: Path, manifest: Manifest, verdicts: Verdicts) -> Too
 def _read_model_use(run_dir: Path, manifest: Manifest, verdicts: Verdicts) -> ModelUse | None:
     """``model_use.json`` of a searched directory, held to the manifest and the verdicts beside it.
 
-    Written by a search whose manifest names the blind model arm, so one
-    present where no such arm is named is a directory this build's search
-    did not leave. One ABSENT where the arm is named is not refused: the
-    worlds searched before this record existed have none (issue #433), nor
-    has one whose search could not make it, and ``None`` is how a table is
-    told.
+    Written by a search whose manifest names a model arm with no tools —
+    the blind arm or the summary arm (:func:`metered_arm`) — so one
+    present where neither is named is a directory this build's search
+    did not leave. One ABSENT where such an arm is named is not refused:
+    the worlds searched before this record existed have none (issue #433),
+    nor has one whose search could not make it, and ``None`` is how a table
+    is told.
     """
     path = run_dir / MODEL_USE_FILENAME
-    llm = manifest.arms.llm
-    if llm is None:
+    named = metered_arm(manifest)
+    if named is None:
         if path.exists():
             raise BenchError(
-                f"{path}: the manifest beside it names no blind model arm to have written it"
+                f"{path}: the manifest beside it names no model arm that writes one (the blind "
+                f"model arm or the summary arm)"
             )
         return None
     if not path.exists():
         return None
     use = read_record(path, ModelUse.loads)
-    _hold_model_use(path, use, llm, verdicts)
+    _hold_model_use(path, use, *named, verdicts)
     return use
 
 
-def _hold_model_use(where: Path | str, use: ModelUse, llm: LlmArm, verdicts: Verdicts) -> None:
-    """Refuse a model-use record that is not of the blind model arm a manifest names, as its verdicts ran it.
+def _hold_model_use(
+    where: Path | str, use: ModelUse, arm: Arm, llm: ModelArm, verdicts: Verdicts
+) -> None:
+    """Refuse a model-use record that is not of the model arm a manifest names, as its verdicts ran it.
 
-    The world and the manifest the verdicts were written under; the model,
+    ``arm`` and ``llm`` are the pair :func:`metered_arm` gives — the blind
+    model arm or the summary arm, and what the manifest writes of it — and
+    the searches the record is held to are the ones the verdicts file
+    under that arm. The world and the manifest the verdicts were written under; the model,
     by the label the research package builds one under and files its
     answers by (``provider/model``); the replicates the arm has, each once;
     and for each search what its verdict says of it — a call that was
@@ -1696,6 +1838,14 @@ def _hold_model_use(where: Path | str, use: ModelUse, llm: LlmArm, verdicts: Ver
     reply that is text is a round spent), and the search ended on a failed
     seam in the one exactly when it did in the other.
     """
+    if not arm.metered:
+        # Not a pair ``metered_arm`` gives: the record is of an arm counted
+        # around its client, and holding it to another arm's searches would
+        # refuse (or pass) it for what those did.
+        raise BenchError(
+            f"{where}: a model-use record is of an arm whose model calls are counted around "
+            f"its client, and {arm.value} is not one"
+        )
     if (use.world_id, use.manifest_digest) != (verdicts.world_id, verdicts.manifest_digest):
         raise BenchError(
             f"{where} is for {use.world_id} under manifest {use.manifest_digest}; "
@@ -1714,7 +1864,16 @@ def _hold_model_use(where: Path | str, use: ModelUse, llm: LlmArm, verdicts: Ver
             f"{where} holds the model arm's replicate(s) {replicates}; the manifest names "
             f"{llm.replicates}, numbered from 0"
         )
-    by_replicate = {r.replicate: r for r in verdicts.results if r.arm is Arm.LLM}
+    by_replicate = {r.replicate: r for r in verdicts.results if r.arm is arm}
+    unfiled = [replicate for replicate in replicates if replicate not in by_replicate]
+    if unfiled:
+        # The verdicts file no search under ``arm`` for a replicate ``llm``
+        # names — the two were not one arm's, or these are not this
+        # manifest's verdicts: said, where a look-up below would only raise.
+        raise BenchError(
+            f"{where}: {VERDICTS_FILENAME} beside it files no {arm.value} search for "
+            f"replicate(s) {unfiled}"
+        )
     for spent in use.searches:
         result = by_replicate[spent.replicate]
         snapshot = result.snapshot

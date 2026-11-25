@@ -73,6 +73,7 @@ from .bench import (
     hold_scored,
     in_row_order,
     iter_searched,
+    metered_arm,
     read_record,
     read_searched,
     row_head,
@@ -908,11 +909,12 @@ class ReportRow:
     tools is in the row's rates like any other (decided 2026-11-19) and is
     counted on the lines these give.
 
-    ``model_uses`` is the same for the blind model arm's row
-    (:mod:`.modeluse`): what each of its searches that has a record spent,
-    under the ``model`` they asked; and ``unrecorded`` is how many of its
-    searches have no record beside their verdicts. Every search of that
-    row is one or the other, and no other arm's row holds either.
+    ``model_uses`` is the same for the row of a model arm with no tools —
+    the blind arm's, and the summary arm's (:mod:`.modeluse`): what each of
+    its searches that has a record spent, under the ``model`` they asked;
+    and ``unrecorded`` is how many of its searches have no record beside
+    their verdicts. Every search of such a row is one or the other, and no
+    other arm's row holds either.
 
     ``scored_a_round`` is the pick by training score's row's: how many
     rules each of its answers was picked among on the training window
@@ -995,10 +997,10 @@ class ReportRow:
                 f"{self.arm.value} row of {len(entries)} finished search(es) and {self.failed} "
                 f"failed seam(s)"
             )
-        # The blind model arm's the same way: every search of its row has a
-        # record or is counted as having none, and no other arm's row holds
-        # either.
-        due = len(entries) + self.failed if self.arm is Arm.LLM else 0
+        # A model arm with no tools the same way (the blind arm, the
+        # summary arm): every search of its row has a record or is counted
+        # as having none, and no other arm's row holds either.
+        due = len(entries) + self.failed if self.arm.metered else 0
         if len(model_uses) + self.unrecorded != due:
             raise ScoreError(
                 f"row.model_uses: {len(model_uses)} search(es)' model use and {self.unrecorded} "
@@ -1176,9 +1178,10 @@ def report_table(run_dirs: Iterable[Path]) -> list[ReportRow]:
                     f"that differs under one pack version is another build's wording"
                 )
             uses.setdefault(tools_key, []).extend(searched.tool_use.searches)
-        llm = searched.manifest.arms.llm
-        if llm is not None:
-            llm_key = row_key(searched.manifest, Arm.LLM)
+        metered = metered_arm(searched.manifest)
+        if metered is not None:
+            arm, llm = metered
+            llm_key = row_key(searched.manifest, arm)
             if searched.model_use is None:
                 # No record beside the verdicts — searched before it
                 # existed, or by a search that could not make one: said on

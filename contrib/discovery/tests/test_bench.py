@@ -755,7 +755,10 @@ def test_a_world_with_no_blind_model_arm_has_no_such_record(searched, tmp_path):
         searches=_BLIND_SPENT[:1],
     )
     (stray / MODEL_USE_FILENAME).write_text(use.dumps(), encoding="utf-8")
-    with pytest.raises(BenchError, match="names no blind model arm to have written it"):
+    with pytest.raises(
+        BenchError,
+        match=r"names no model arm that writes one \(the blind model arm or the summary arm\)",
+    ):
         bench.read_searched(stray)
 
 

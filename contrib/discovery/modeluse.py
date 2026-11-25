@@ -14,8 +14,14 @@ changed, and is not asked anything it was not asked before — and when a
 world's searches are over it keeps the sums in a record of its own,
 ``model_use.json``, beside ``verdicts.json``.
 
+The summary arm (``arms.llm_summary``, tools plan T6) is asked the same way
+— once a round through that adapter, the training window's figures
+appended to its system prompt — and is counted the same way, into the same
+record: a manifest names one model arm, so a directory's ``model_use.json``
+is the one arm's. "The arm" below is either.
+
 ``verdicts.json`` is not touched: what the arm FOUND is read there, as for
-every arm, and what it SPENT is read here. A run with no blind model arm
+every arm, and what it SPENT is read here. A run with neither arm
 writes no such file. Neither did a search made before this record existed,
 and a directory of one is read as it always was: the record is taken where
 it is, and its absence means "not recorded" (decided 2026-11-22: the
@@ -133,7 +139,7 @@ class ModelSearch:
 
 @dataclass(frozen=True)
 class ModelUse:
-    """``model_use.json``: every blind-model-arm search of one world, and the model they asked.
+    """``model_use.json``: every search of one world's model arm with no tools (the blind arm, or the summary arm), and the model they asked.
 
     ``model`` is the label the research package builds a model under and
     files its answers by (``provider/model``): one manifest names one such
@@ -270,7 +276,7 @@ def model_use_lines(
     *,
     model: str | None = None,
 ) -> list[str]:
-    """What a blind model arm's row spent, as the lines a table prints under the row.
+    """What the row of a model arm with no tools spent (the blind arm's, or the summary arm's), as the lines a table prints under the row.
 
     The tokens line is the tool arm's own sentence
     (:func:`~.tooluse.tokens_line`), over every search that has a record,

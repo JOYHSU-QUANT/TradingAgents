@@ -138,6 +138,7 @@ __all__ = [
     "main",
     "require_sdk",
     "serve",
+    "stats_fields",
     "tool_specs",
     "warm",
 ]
@@ -550,6 +551,50 @@ def _listed(fields: Sequence[_Field]) -> list[str]:
     return [f"- {field.name}: {field.meaning}." for field in fields]
 
 
+# What the description says before the one field a regime's answer carries
+# in place of a number's figures (the minimum, the cuts, the maximum).
+_REGIME_INTRO: Final = (
+    f"For regime, which is a label and not a number, the {len(QUANTILES) + 2} figures are "
+    f"replaced by:"
+)
+
+
+class StatsFields(NamedTuple):
+    """A ``feature_stats`` answer as the tool's own description puts it: the fields, and the sentences about them."""
+
+    numeric_keys: tuple[str, ...]  # a numeric feature's answer, in the order it carries them
+    regime_keys: tuple[str, ...]  # the regime's
+    numeric: tuple[str, ...]  # a line for each numeric field but ``feature``
+    regime_intro: str  # what is said before the fields the regime's answer alone carries
+    regime: tuple[str, ...]  # a line for each of those
+    rounding: str  # the sentence on rounding
+
+
+def stats_fields() -> StatsFields:
+    """What a ``feature_stats`` answer carries and what its fields mean, from the table the tool's description is written from.
+
+    For whoever shows a model those answers some other way — the summary
+    arm (:mod:`.summaryarm`, tools plan T6) prints one for every feature —
+    so that the two arms are told what a field means in one sentence and
+    not two, and the keys a line is held to are the ones described. The
+    lines leave out ``feature``, whose meaning here ("the feature asked
+    about") is the tool's alone: nobody asked for a line of a summary.
+    The fields are picked by NAME — every numeric field but that one, and
+    the fields a regime's answer has that a number's has not — so the
+    lines do not depend on where the table puts them.
+    """
+    numeric, labelled = _stats_fields()
+    shared = {field.name for field in numeric}
+    return StatsFields(
+        numeric_keys=tuple(field.name for field in numeric),
+        regime_keys=tuple(field.name for field in labelled),
+        numeric=tuple(_listed([field for field in numeric if field.name != "feature"])),
+        regime_intro=_REGIME_INTRO,
+        regime=tuple(_listed([field for field in labelled if field.name not in shared])),
+        rounding=_ROUNDING,
+    )
+
+
 def _object_schema(fields: Sequence[_Field], **overrides: dict[str, Any]) -> dict[str, Any]:
     """A closed object carrying exactly ``fields``; ``overrides`` replaces a named field's schema."""
     names = [field.name for field in fields]
@@ -646,8 +691,7 @@ def _feature_stats_spec() -> ToolSpec:
             f"Call: {json.dumps(_STATS_EXAMPLE)}",
             "Returns, for a numeric feature:",
             *_listed(numeric),
-            f"For regime, which is a label and not a number, the {len(QUANTILES) + 2} figures "
-            f"are replaced by:",
+            _REGIME_INTRO,
             *_listed(labelled[-1:]),
             _ROUNDING,
         ]

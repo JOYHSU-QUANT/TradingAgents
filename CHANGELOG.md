@@ -10,6 +10,61 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **Discovery Lab: a model arm handed a fixed summary of the training
+  window and no tools** (tools plan T6). The tool-using model arm differs
+  from the blind one in, above all, two things at once — its model can see
+  figures of the training window, and it chooses which to look at. This arm has the
+  first and not the second: named by a manifest's new `arms.llm_summary`
+  (the model arm's five fields and `summary_version`), it is searched last,
+  as a model arm is, and asks its model once a round with a block of
+  figures appended to the research package's system prompt
+  (`contrib/discovery/summaryarm.py`; neither prompt function of the
+  research package is changed). The block was fixed before any tool-arm
+  result was read (2026-11-24): one line for every feature of the
+  vocabulary, in its order, each the `feature_stats` look-up's answer in
+  the text the look-ups' server sends it as, and nothing of the other two
+  look-ups — no feature is picked or dropped, and no return or backtest is
+  computed for the model. The paragraph that opens it states facts and
+  gives no advice, and describes every field but `feature` in the server's
+  own sentence. The figures are read from the arm's own copy of the
+  artifact, no further than the last training bar, by the function the
+  tool arm's server and the pick by training score read it with; a feature
+  the store cannot answer is a named refusal before the model is asked
+  anything, not a line left out. `SUMMARY_VERSION` versions what the arm's
+  own module decides of what its model reads beyond the two prompts — the
+  paragraph, the features listed, how a line is written, what stands
+  before the block — with a digest of that pinned in the suite; how the
+  look-up makes a figure is not under it. A manifest naming another
+  summary version is refused by `generate` and by `search`. Unlike the tool arm's pack, that
+  digest is written to no record — the arm keeps no trace, and a block is
+  recomputed from the arm's store. The field sentences are the look-ups'
+  server's, which are frozen only after the tool arm's first trial: if
+  that freeze edits one, this arm's version is raised with it, and that is
+  the only edit of its wording allowed once a tool-arm result has been
+  seen. What the arm spent is counted and recorded as the blind arm's is
+  (`model_use.json`), and it has a row of its own in `calibrate` and
+  `report`, after the rows of its manifest's pool arms (the three model
+  arms are never in one manifest, so their rows have no fixed order among
+  themselves). **Nothing has been run with a real model:** whether this
+  arm is run at all is decided after the tool arm's first trial. Against
+  the blind arm it would read as what the sight of the figures is worth —
+  understated, if a block that makes the system prompt about three times
+  as long costs a model anything. The tool arm against it differs in
+  several things that cannot be told apart, four above all: it chooses
+  what to look up, it has the two look-ups the block leaves out, it may
+  write a line before each call, and its tool is described with a sentence
+  on what the figures are for, which this arm's paragraph leaves out. At
+  any per-round limit short of the vocabulary's size (the plan starts from
+  five look-ups) it also sees fewer of the marginal figures than this arm,
+  which has every line every round — so the tool arm coming out below it
+  is a possible outcome, and the two coming out level may be gains and
+  losses cancelling.
+  **Manifest version 6.** `arms` gains the `llm_summary` key, so the
+  version is raised; versions 3, 4 and 5 are still read, each by its own
+  key set and written back as it was read (tests pin the digests of all
+  three). A manifest names at most one of `llm`, `llm_tools` and
+  `llm_summary`, and the refusal now says which it named.
+
 - **Discovery Lab: an arm that picks by training score with no model, the
   tool arm's control** (tools plan T5). If the tool-using model arm beats
   the blind one, that could be the model reasoning or merely the sight of

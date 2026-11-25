@@ -58,9 +58,9 @@ def _without_lone_surrogates(value, found):
     put on it, or a prompt value with its messages. Told apart by shape and
     not by class, so this module imports no chat library. Every field is
     read, the ones a client sends and the ones it does not (a reply's
-    metadata, its id, the raw copy of its tool calls a provider leaves
-    beside the parsed one): the count is of the input a request is built
-    from, not of the request's bytes, and it can be more than what was sent.
+    metadata, its id): the count is of the input a request is built from,
+    not of the request's bytes, and where such a field holds one it is more
+    than what was sent.
 
     Not read: what is none of those (a dataclass, a set). A container is
     followed as far as it goes: one that holds itself is a
@@ -117,9 +117,10 @@ def sendable(input):
     node fails on text it was only passing on, and whoever drives the graph
     retries or gives up (#441). Each such
     character becomes U+FFFD, one for one, in what is sent — the graph's own
-    state is not touched, so what is stored from it still goes through the
-    replacement its own writers make, and their counts — and a warning says
-    how many, since U+FFFD in a prompt does not say
+    state is not touched, so what this repository's writers store from it
+    still goes through the replacement they make, and their counts
+    (upstream's own state log writes escapes, and keeps the character) —
+    and a warning says how many, since U+FFFD in a prompt does not say
     whether its author or this function put it there. An input holding none
     is returned as the same object.
 

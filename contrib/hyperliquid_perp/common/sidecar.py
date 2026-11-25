@@ -83,7 +83,7 @@ def write_sidecar(
     store does with the decision's own text (issue #427), and for the same
     reason. Counted where it stands in the written text, so a key and a
     value each count; a record holding none is written byte for byte as
-    before. (The handoff sidecar records the digest of an operator's file
+    before. (The handoff sidecar records the digest of the coordinator's file
     beside what was parsed from it: after a replacement the two no longer
     describe the same bytes, and that WARNING is what says so.) A dict KEY
     JSON cannot carry is the one exception:

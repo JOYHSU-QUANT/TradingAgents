@@ -31,6 +31,7 @@ one, and an escape for one is easy to get wrong without noticing.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import dataclasses
 import importlib
@@ -144,29 +145,34 @@ def _http() -> Any:
 
 
 def _sdk_refuses_such_text() -> bool:
-    """Whether the installed provider SDK fails to build a request holding a lone surrogate.
+    """Whether the installed provider SDK sends nothing for text holding a lone surrogate.
 
-    It does at every version this was written against, and that failure is
-    what the control at the end of this file reproduces. CI does not run
-    this suite: it runs where the trader is deployed, on whatever SDK is
-    installed there, and a control failing there would stop a deploy over
-    a failure that had gone away.
+    It sends nothing at every version this was written against (it raises
+    while it builds the request), and that failure is what the control at
+    the end of this file reproduces. CI does not run this suite: it runs
+    where the trader is deployed, on whatever SDK is installed there, and a
+    control failing there would stop a deploy over a failure that had gone
+    away. Read off the transport and not off the exception's type: an SDK
+    that fails another way before sending still has the failure.
     """
     import openai
 
     http = _http()
+    reached: list[Any] = []
+
+    def answer(request: Any) -> Any:
+        reached.append(request)
+        return http.Response(500)
+
     client = openai.OpenAI(
         api_key=_KEY,
-        http_client=http.Client(transport=http.MockTransport(lambda request: http.Response(500))),
+        http_client=http.Client(transport=http.MockTransport(answer)),
         max_retries=0,
     )
-    try:
+    # Whatever it raises, or not: only whether a request went out is asked.
+    with contextlib.suppress(Exception):
         client.chat.completions.create(model="m", messages=[{"role": "user", "content": HIGH}])
-    except UnicodeEncodeError:
-        return True
-    except Exception:  # noqa: BLE001 - any other outcome: the request was built
-        return False
-    return False
+    return not reached
 
 
 def _response_bytes(payload: dict, form: str) -> bytes:
@@ -556,7 +562,8 @@ def test_an_analysts_report_holding_one_is_sent_on_as_u_fffd_and_the_cycle_decid
         if record.name == "contrib.hyperliquid_perp.common.sidecar"
         and record.levelno == logging.WARNING
     ] == [
-        f"decision reports sidecar: {kept.count(FFFD)} lone surrogate(s) in {recorded.name} "
+        f"decision reports sidecar: {_ODD_REPORT.count(HIGH)} lone surrogate(s) in "
+        f"{recorded.name} "
         "cannot be written as UTF-8; each is written as U+FFFD"
     ]
     # Not one request more than the clean cycle made: the graph's eleven nodes, once each.

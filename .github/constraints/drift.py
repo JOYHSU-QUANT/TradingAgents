@@ -33,8 +33,9 @@ except ModuleNotFoundError:  # not the standard library's; the job's pytest brin
 _PIN = re.compile(r"(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)==(?P<version>[^\s#]+)\s*(#.*)?")
 # The distribution CI is testing, installed from the checkout: no file pins it.
 PROJECT = "tradingagents"
-# What an environment holds before anything is asked for; no constraints file
-# written by ``uv pip compile`` for a set of requirements names them.
+# What an environment holds before anything is asked for. None of today's
+# files names either (uv would write one in if a requirement asked for it),
+# so each is passed only while the file has no pin to compare it with.
 _PRESENT_ANYWAY = frozenset({"pip", "wheel"})
 
 
@@ -88,7 +89,7 @@ def drift(pinned: dict[str, str], installed: dict[str, str], *, project: str) ->
     """
     lines = []
     for name in sorted(installed):
-        if name == project or name in _PRESENT_ANYWAY:
+        if name == project or (name in _PRESENT_ANYWAY and name not in pinned):
             continue
         version = installed[name]
         if name not in pinned:

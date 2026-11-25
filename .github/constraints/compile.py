@@ -6,9 +6,11 @@
 
 One file per Python version of the test matrix in ``ci.yml``, each the set of
 versions ``uv pip compile`` resolves on that Python, for Linux, from every
-requirement a CI job installs: the project's own with the ``dev`` and
-``discovery-tools`` extras, the two requirements files beside it, and
-``ci.in`` (what only a workflow step names). A job then installs with
+requirement a CI job installs under ``-c``: the project's own with the
+``dev`` and ``discovery-tools`` extras, the root and the uniswap_v3
+requirements files, and ``ci.in`` (what only a workflow step names). The
+dashboard's requirements are not among them: that file pins itself, by
+hash. A job then installs with
 ``-c .github/constraints/py<version>.txt``, so what it runs on changes when
 one of these files changes and not when an index publishes a release.
 

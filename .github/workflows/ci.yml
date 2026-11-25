@@ -9,15 +9,16 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# Every job but ``test-latest`` installs at versions a commit chose (issue
-# #442), so a release an index publishes changes nothing here until a commit
-# moves a pin. For all but three install lines that is -c with a constraints
-# file of .github/constraints (its README says how the files are written and
-# moved). The three: pip's own upgrade, which nothing pins; mypy, pinned on
-# its line at another version than the files hold; the dashboard's pins,
-# each by hash. -c and not the PIP_CONSTRAINT variable, which would bind
-# those pins too. tests/test_ci_constraints.py reads this file and fails on
-# an install line added without -c that is not one of the three.
+# Every job but ``test-latest`` installs its packages at versions a commit
+# chose (issue #442), so a release an index publishes changes none of them
+# until a commit moves a pin. For all but two install lines that is -c with a
+# constraints file of .github/constraints (its README says how the files are
+# written and moved, and what they do not hold: pip itself, the runner, the
+# build's own setuptools). The two: pip's own upgrade, which nothing pins,
+# and the dashboard's pins, each by hash. -c and not the PIP_CONSTRAINT
+# variable, which would bind those pins too. tests/test_ci_constraints.py
+# reads this file and fails on an install line added without -c that is not
+# one of the two.
 jobs:
   test:
     name: tests (py${{ matrix.python-version }})
@@ -120,8 +121,11 @@ jobs:
         # is listed as overrides in pyproject [tool.mypy], each read as ``Any``
         # here. Pinned exactly because ``warn_unused_ignores`` turns a newer
         # mypy's better narrowing into a red job; bump it on purpose, with the
-        # pins.
-        run: pip install "mypy==2.3.1"
+        # ``# type: ignore`` pins. The version is the one line of
+        # .github/constraints/ci.in that is an exact pin, so the constraints
+        # file holds it and, with it, the five packages mypy requires: to
+        # move it, edit that line and run compile.py.
+        run: pip install mypy -c .github/constraints/py3.12.txt
       - name: Type-check the files pyproject [tool.mypy] lists
         run: mypy
 

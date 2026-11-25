@@ -3,8 +3,10 @@
 The workflow is read as text and the constraints files as the lists they
 are: nothing here installs anything or reaches an index. What is pinned is
 the wiring a later edit could quietly undo — an install line added without
-``-c``, a dependency declared and never resolved into the files, a file
-edited by hand, a job renamed away from the name branch protection waits on.
+``-c``, a dependency declared and never resolved into the files, a job
+renamed away from the name branch protection waits on. A version changed by
+hand inside a file is not among them: nothing here resolves anything, so a
+file is checked for its header and its shape, not for its versions.
 """
 
 from __future__ import annotations
@@ -44,7 +46,6 @@ REQUIRED_NAMES = {
 # The install lines of a required job that take no constraints file, and why.
 UNCONSTRAINED = {
     "python -m pip install --upgrade pip": "pip itself, which no file pins",
-    'pip install "mypy==2.3.1"': "pinned where it is installed, to another version than dev's",
     "pip install --require-hashes --force-reinstall -r contrib/dashboard/requirements.txt": (
         "the dashboard's own pins, every one by hash"
     ),
@@ -66,17 +67,19 @@ drift = _load("drift")
 
 
 MATRIX = "${{ matrix.python-version }}"
-# Any way a step could put packages into the job's environment, not only the
-# spelling in use: a line this matches and UNCONSTRAINED does not list has to
-# carry the constraints flag. pip by what it is asked to do. The tools that
-# build an environment of their own by being named as a command at all (a
-# file name such as ``uv.lock`` or ``.pre-commit-config.yaml`` is no
-# command), and those never count as constrained, whatever follows: -c is a
-# channel to conda and nothing to most of them.
+# The ways known here that a step could put packages into the job's
+# environment, not only the spelling in use: a line one of these matches and
+# UNCONSTRAINED does not list has to carry the constraints flag. pip by what
+# it is asked to do. The tools that build an environment of their own by
+# their name standing as a word anywhere on the command line, as the command
+# or as an argument (``uv.lock`` and ``.pre-commit-config.yaml`` are not that
+# word), and a line naming one never counts as constrained, whatever
+# follows: -c is a channel to conda and nothing to most of them.
 _PIP = re.compile(r"\bpip3?\b.*\b(?:install|sync|download|wheel)\b")
 _OWN_ENVIRONMENT = re.compile(
-    # At the start of a word, or called by its path (``~/.local/bin/pipx``);
-    # not a directory or a file of that name (``~/.cache/uv``, ``uv.lock``).
+    # At the start of a word, or called from a ``bin`` directory
+    # (``~/.local/bin/pipx``); not another directory or a file of that name
+    # (``~/.cache/uv``, ``uv.lock``).
     r"(?:(?<![\w./-])|(?<=/bin/))"
     r"(?:pipx|pipenv|uvx?|poetry|conda|mamba|micromamba|tox|nox|hatch|pdm|pre[-_]commit)"
     r"(?![\w.-])"
@@ -247,7 +250,7 @@ def test_there_is_one_file_for_each_python_of_the_test_matrix_and_no_other():
     assert sorted(_files()) == sorted(matrix)
 
 
-def test_the_required_jobs_keep_the_names_branch_protection_waits_on():
+def test_the_jobs_are_the_ones_listed_here_under_the_names_branch_protection_waits_on():
     jobs = _jobs()
     assert set(jobs) == {*REQUIRED_NAMES, LATEST}
     for job, name in REQUIRED_NAMES.items():
@@ -298,11 +301,12 @@ def test_every_install_line_of_a_required_job_names_its_python_s_constraints_fil
                 unconstrained.add(line)
     assert unconstrained == set(UNCONSTRAINED), (
         "an install line of a required job with no constraints file (or run by a tool "
-        "this file does not take -c from) that UNCONSTRAINED does not list"
+        "this file does not take -c from) that UNCONSTRAINED does not list, or a line "
+        "UNCONSTRAINED lists that no job has any more"
     )
 
 
-def test_a_job_that_installs_nothing_from_the_index_would_not_pass_as_constrained():
+def test_every_job_has_an_install_line_this_file_reads():
     for name, job in _jobs().items():
         assert _installs(job), f"{name} installs nothing: this file would read it as constrained"
 
@@ -319,7 +323,7 @@ def test_the_latest_job_installs_without_a_constraints_file_and_lists_what_moved
 
 
 @pytest.mark.parametrize("version", compile_files.PYTHON_VERSIONS)
-def test_a_file_is_what_compile_writes_and_holds_only_pins(version):
+def test_a_file_carries_the_command_compile_runs_and_holds_only_pins(version):
     text = _files()[version]
     header = text.splitlines()[1]
     assert header == "#    " + " ".join(compile_files.command(version))
@@ -410,7 +414,7 @@ def test_a_required_job_installs_only_from_what_compile_resolved_and_from_all_of
         ),
     ],
 )
-def test_compile_keeps_what_the_files_hold_unless_asked_to_move_it(monkeypatch, argv, moved):
+def test_compile_hands_uv_an_upgrade_option_only_when_asked_for_one(monkeypatch, argv, moved):
     calls = []
 
     def run(command, *, cwd, check, stdout):
@@ -452,7 +456,7 @@ def test_compile_stops_at_a_refusal_and_says_which_files_it_had_rewritten(monkey
     )
 
 
-def test_compile_without_uv_says_so_and_writes_nothing(monkeypatch, capsys):
+def test_compile_without_uv_says_so_and_stops_at_the_first_file(monkeypatch, capsys):
     def run(command, *, cwd, check, stdout):
         raise FileNotFoundError(command[0])
 

@@ -5,3 +5,10 @@
 # The dashboard suite's test client (ci.yml, the autoresearch job). The page
 # itself does not import it, so contrib/dashboard/requirements.txt has no pin.
 httpx>=0.27
+
+# The type-check job's mypy, at the one version its ``# type: ignore`` pins
+# were written against (ci.yml says why it is exact). pyproject's dev extra
+# asks for ``mypy>=2.0``; this line is what holds every file at this version,
+# whatever compile.py is asked to upgrade. To move mypy: edit this line, run
+# compile.py, and fix what the new version reports in the same pull request.
+mypy==2.3.1

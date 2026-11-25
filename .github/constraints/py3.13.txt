@@ -79,7 +79,7 @@ mcp-types==2.3.0          # via mcp
 mdurl==0.1.2              # via markdown-it-py
 msgpack==1.2.4            # via hyperliquid-python-sdk
 multidict==7.2.1          # via aiohttp, yarl
-mypy==2.4.1               # via tradingagents (pyproject.toml)
+mypy==2.3.1               # via -r .github/constraints/ci.in, tradingagents (pyproject.toml)
 mypy-extensions==1.2.0    # via librt, mypy
 numpy==2.5.5              # via langchain-aws, langchain-community, pandas, stockstats, yfinance
 openai==3.59.0            # via langchain-openai

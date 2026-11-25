@@ -504,6 +504,49 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **CI's required jobs install under committed constraints files** (#442).
+  Each job used to install whatever its index offered that day inside
+  `pyproject.toml`'s ranges, so a release upstream could turn every open pull
+  request red at once, on a commit that had changed nothing (2026-11-20:
+  `langchain-openai` 1.8.3 to 1.8.5 on Python 3.11 to 3.13, while 3.10
+  resolved 1.7.4 and stayed green). `.github/constraints/` now holds one list
+  of pinned versions per Python of the test matrix, resolved for Linux by
+  `uv pip compile` from everything a job installs under them, and every
+  `pip install` line of a required job but two (below) takes its Python's
+  list with `-c`. `ruff` in the lint job is installed at the pinned version
+  too; it was `>=0.15`. So is the type-check job's mypy, with the five
+  packages it requires, which that job used to take at the newest: its
+  exact version moved from the workflow line to `.github/constraints/ci.in`.
+  The lists are regenerated on demand, by running
+  `python .github/constraints/compile.py`; nothing is scheduled. With no
+  option a version a list already holds is kept wherever it still fits, so a run after a dependency was added writes
+  that and nothing else; `--upgrade-package NAME` moves one package and
+  `--upgrade` all of them. A new job, `tests, latest deps` on Python 3.10
+  and 3.13, installs without a list as before, runs the root suite, and
+  then prints which packages it got at another version
+  (`.github/constraints/drift.py`): it is not a required check, so red
+  there says upstream moved and blocks no merge.
+  `tests/test_ci_constraints.py` reads the workflow and the lists and fails
+  on an install line added without `-c`, a source or an extra the lists
+  were not resolved from, a declared dependency no list pins or pins
+  outside its range, a job renamed or added, and the known edits that let a
+  required check pass without running or stop reporting (`if:`,
+  `continue-on-error`, `needs:`, a trigger filter, another runner, another
+  action, among others; the README lists them). One list serves every job
+  of its Python, so a package one job needs can hold back another job's:
+  `websockets` is
+  at 15.0.1 everywhere because uniswap_v3's `web3<8` requires it, where the
+  root install alone resolves 17.4 (16.1.1 on Python 3.10), and the
+  clean-install job gets
+  `python-dateutil` 2.9 where a bare install resolves 4.0 — that job now
+  tests the bare install at the pinned versions, and nothing tests it at
+  today's. Not constrained: `pip` itself (its own upgrade line) and the
+  dashboard's hash-checked pins, which are the two lines without `-c`, and
+  the runner image and the build's setuptools. Versions only, no hashes.
+  Used by CI alone: no
+  local or server install reads these files, and no dependency range in
+  `pyproject.toml` changed. `.github/constraints/README.md` has the table of
+  which job uses which list and what to do when the new job is red.
 - **Breaking: autoresearch's default promote threshold is now
   `2.0 + 0.5·ln(n)`, up from `1.0 + 0.25·ln(n)`.** On Discovery Lab's
   synthetic noise worlds, the old default promoted a rule in 60% of

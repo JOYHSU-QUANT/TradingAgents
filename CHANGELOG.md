@@ -34,10 +34,11 @@ Breaking changes within the 0.x line are called out explicitly.
   time with those worlds counted against the arm that failed. For this
   batch that replaces rerunning until it succeeds. A key, quota or account
   error pauses the batch and is not such a failure. The summary arm runs
-  only if the three arms' projected cost, measured on the pilot world, fits
-  the month's cap. What a change after the start costs is written down too:
-  one that touches what a model reads or how it is scored reruns every
-  model arm, and the first run is published beside the second.
+  only if the three arms' projected cost, measured on the pilot world after
+  the freeze, fits the month's cap. What a change after the start costs is
+  written down too: one that touches what a model reads, how it is scored
+  or any manifest key reruns every model arm, and the first run is
+  published beside the second.
   Documentation only: no code, test or manifest changes.
 - **Discovery Lab: a model arm handed a fixed summary of the training
   window and no tools** (tools plan T6). The tool-using model arm differs

@@ -10,6 +10,38 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **Discovery Lab: the judging rules of the December development batch,
+  written before it runs** (`contrib/discovery/README.md`, the section
+  「判定規則（2026-12 開發批次）」). Fixed on 2026-11-26, when neither the
+  tool arm nor the summary arm had been run with a real model on any world.
+  What is run: dev seeds 0 to 9, each as a `null-v1` world and as a tight
+  and an easy `conditional-v2` world; the three model arms on one model and
+  one `world_subset`; Random and the model-free control on five seeds each,
+  with Grid, from manifests that name no model arm. The `beta` and
+  `price.drift` of the `conditional-v2` worlds, calibrated on 40 dev seeds
+  on 2026-11-12, are recorded there. Before the first of those worlds is
+  searched by a model arm, the tool arm may be piloted on one world outside
+  the batch, repeatedly, and anything about it changed; the result is
+  frozen as one commit. One primary comparison — tool arm against blind
+  arm, paired by world over the planted worlds the oracle has room on, an
+  exact one-sided sign test at 0.05 — and one secondary, the summary arm
+  against the blind arm by the same test, both reported uncorrected. Tool
+  arm against summary arm, and against the control, are described and not
+  judged. On the ten noise worlds there is no verdict, only a line at three
+  worlds with a false positive. A world a model-side failure ended is rerun
+  once; if the rerun ends the same way, the world is left out of every
+  paired comparison that arm is in, and each verdict is worked out a second
+  time with those worlds counted against the arm that failed. For this
+  batch that replaces rerunning until it succeeds. A key, quota or account
+  error pauses the batch and is not such a failure. The summary arm runs
+  only if the three arms' projected cost, measured on the pilot world after
+  the freeze, fits the month's cap. What a change after the start costs is
+  written down too: one that touches what a model reads, how it is scored
+  or any manifest key reruns every model arm and the manifests that name
+  none, and only the first run counts as the result these rules were
+  written for. Analyses the section does not list may be reported, marked
+  as after the fact, and not in a conclusion.
+  Documentation only: no code, test or manifest changes.
 - **Discovery Lab: a model arm handed a fixed summary of the training
   window and no tools** (tools plan T6). The tool-using model arm differs
   from the blind one in, above all, two things at once — its model can see

@@ -16,12 +16,20 @@ Breaking changes within the 0.x line are called out explicitly.
   development batch: the blind arm only, on the same 30 worlds, with Claude
   Opus 5.5, Gemini 4 Argon and Qwen4 Max beside the December batch's own
   Sonnet 5.5 column. Each model runs at its provider's defaults, and the
-  section says what those were found to be on 2026-11-26: the Claude
-  endpoints on OpenRouter do not take `temperature`, the other two do and
-  reason before they answer. So the batch is described and not judged — no
-  test, no winner, no ranking, one sentence it may be reported in, and a
-  table of what each outcome must not be read as. Which models run is
-  decided by cost in a fixed order. Documentation only.
+  section says what those were found to be on 2026-11-26, each on one short
+  call: the two Claude endpoints on OpenRouter did not take `temperature`
+  and returned no reasoning tokens; Qwen4 Max took it and returned
+  reasoning tokens; Gemini 4 Argon itself was not called — its model
+  listing names both parameters, and a sibling, `gemini-4-neon`, took
+  `temperature` and returned reasoning tokens. So the batch is described
+  and not judged — no test, no winner, no ranking, at no time; one sentence
+  it may be reported in, which carries each model's false calls on the
+  noise worlds beside its recoveries; and a table of what each outcome must
+  not be read as. Which models run is decided by cost against a cap and an
+  order fixed before the first pilot; a model that does not fit is passed
+  over. Only a world's first finished search counts. The batch does not
+  start until the December batch's first run is written up. Documentation
+  only.
 - **Discovery Lab: a dated correction to the December batch's judging
   rules — `temperature` has no effect on `anthropic/claude-sonnet-5.5`
   through OpenRouter.** Measured on 2026-11-26, before any model arm ran on
@@ -32,7 +40,10 @@ Breaking changes within the 0.x line are called out explicitly.
   client dropped. The manifests keep `temperature: 0`, which now describes
   the request and not the sampling; each world's single replicate is one
   draw. No rule changes: the three arms share the model, and the sign test
-  already treats a world as one random outcome. The blind arm's batch of
+  already treats a world as one random outcome. One reading is tightened —
+  an interrupted search is always run again, not at the operator's choice —
+  and the measurement is repeated before the batch starts and after its
+  last world, without deciding anything. The blind arm's batch of
   2026-11-10 named the same model and the same temperature; whether the
   parameter was dropped then was not recorded.
 - **Discovery Lab: the judging rules of the December development batch,

@@ -16,8 +16,8 @@ Breaking changes within the 0.x line are called out explicitly.
   development batch: the blind arm only, on the same 30 worlds, with Claude
   Opus 5.5, Gemini 4 Argon and Qwen4 Max beside the December batch's own
   Sonnet 5.5 column. Each model runs at its provider's defaults, and the
-  section says what those were found to be on 2026-11-26, each on one short
-  call: the two Claude endpoints on OpenRouter did not take `temperature`
+  section says what those were found to be on 2026-11-26, each with one
+  short message: the two Claude endpoints on OpenRouter did not take `temperature`
   and returned no reasoning tokens; Qwen4 Max took it and returned
   reasoning tokens; Gemini 4 Argon itself was not called — its model
   listing names both parameters, and a sibling, `gemini-4-neon`, took
@@ -27,7 +27,8 @@ Breaking changes within the 0.x line are called out explicitly.
   noise worlds beside its recoveries; and a table of what each outcome must
   not be read as. Which models run is decided by cost against a cap and an
   order fixed before the first pilot; a model that does not fit is passed
-  over. Only a world's first finished search counts. The batch does not
+  over, and a batch that reaches its cap ends there. Only a world's first
+  finished search counts. The batch does not
   start until the December batch's first run is written up. Documentation
   only.
 - **Discovery Lab: a dated correction to the December batch's judging

@@ -37,8 +37,10 @@ Breaking changes within the 0.x line are called out explicitly.
   only if the three arms' projected cost, measured on the pilot world after
   the freeze, fits the month's cap. What a change after the start costs is
   written down too: one that touches what a model reads, how it is scored
-  or any manifest key reruns every model arm, and the first run is
-  published beside the second.
+  or any manifest key reruns every model arm and the manifests that name
+  none, and only the first run counts as the result these rules were
+  written for. Analyses the section does not list may be reported, marked
+  as after the fact, and not in a conclusion.
   Documentation only: no code, test or manifest changes.
 - **Discovery Lab: a model arm handed a fixed summary of the training
   window and no tools** (tools plan T6). The tool-using model arm differs
